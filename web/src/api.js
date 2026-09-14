@@ -1,0 +1,161 @@
+const TOKEN_KEY = "helix_iam_token";
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token) {
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+
+export async function api(path, { method = "GET", body } = {}) {
+  const headers = { Accept: "application/json" };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    const err = new Error(data?.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    err.details = data?.details;
+    throw err;
+  }
+  return data;
+}
+
+export const iam = {
+  login: (username, password, provider) =>
+    api("/api/authentication/login", { method: "POST", body: { username, password, provider } }),
+  me: () => api("/api/auth/me"),
+  logout: () => api("/api/authentication/logout", { method: "POST" }),
+  authProviders: () => api("/api/authentication/providers"),
+  authProvidersAdmin: () => api("/api/authentication/providers/admin"),
+  createAuthProvider: (body) => api("/api/authentication/providers", { method: "POST", body }),
+  updateAuthProvider: (id, body) => api(`/api/authentication/providers/${id}`, { method: "PUT", body }),
+  authSettings: () => api("/api/authentication/settings"),
+  updateAuthSettings: (body) => api("/api/authentication/settings", { method: "PUT", body }),
+  requestPasswordReset: (body) => api("/api/authentication/password-reset/request", { method: "POST", body }),
+  completePasswordReset: (body) => api("/api/authentication/password-reset/complete", { method: "POST", body }),
+  mySessions: () => api("/api/sessions"),
+  revokeSession: (id) => api(`/api/sessions/${id}`, { method: "DELETE" }),
+  revokeAllSessions: () => api("/api/sessions/revoke-all", { method: "POST" }),
+  adminSessions: (qs) => api(`/api/sessions/admin${qs || ""}`),
+  adminRevokeSession: (id) => api(`/api/sessions/admin/${id}`, { method: "DELETE" }),
+  mfaStatus: () => api("/api/mfa/status"),
+  mfaEnroll: () => api("/api/mfa/totp/enroll", { method: "POST" }),
+  mfaVerifyEnroll: (code) => api("/api/mfa/totp/verify", { method: "POST", body: { code } }),
+  mfaDisable: (body) => api("/api/mfa/totp/disable", { method: "POST", body }),
+  mfaRecovery: (code) => api("/api/mfa/recovery/regenerate", { method: "POST", body: { code } }),
+  mfaChallenge: (body) => api("/api/mfa/challenge/verify", { method: "POST", body }),
+  adminResetMfa: (userId) => api(`/api/mfa/admin/${userId}/reset`, { method: "POST" }),
+  ssoProviders: () => api("/api/sso/providers"),
+  ssoStart: (code, body) => api(`/api/sso/${code}/start`, { method: "POST", body }),
+  ssoCallback: (code, body) => api(`/api/sso/${code}/callback`, { method: "POST", body }),
+  users: (qs) => api(`/api/users${qs || ""}`),
+  user: (id) => api(`/api/users/${id}`),
+  createUser: (body) => api("/api/users", { method: "POST", body }),
+  updateUser: (id, body) => api(`/api/users/${id}`, { method: "PUT", body }),
+  activate: (id) => api(`/api/users/${id}/activate`, { method: "POST" }),
+  deactivate: (id) => api(`/api/users/${id}/deactivate`, { method: "POST" }),
+  lock: (id) => api(`/api/users/${id}/lock`, { method: "POST" }),
+  unlock: (id) => api(`/api/users/${id}/unlock`, { method: "POST" }),
+  resetPassword: (id, password) =>
+    api(`/api/users/${id}/reset-password`, { method: "POST", body: { password } }),
+  assignUserRole: (id, roleId, organizationId) =>
+    api(`/api/users/${id}/roles`, { method: "POST", body: { roleId, organizationId } }),
+  unassignUserRole: (id, roleId, organizationId) =>
+    api(`/api/users/${id}/roles/${roleId}?organizationId=${organizationId ?? 0}`, { method: "DELETE" }),
+  addUserGroup: (id, groupId) => api(`/api/users/${id}/groups`, { method: "POST", body: { groupId } }),
+  removeUserGroup: (id, groupId) => api(`/api/users/${id}/groups/${groupId}`, { method: "DELETE" }),
+  groups: (qs) => api(`/api/groups${qs || ""}`),
+  group: (id) => api(`/api/groups/${id}`),
+  createGroup: (body) => api("/api/groups", { method: "POST", body }),
+  updateGroup: (id, body) => api(`/api/groups/${id}`, { method: "PUT", body }),
+  deleteGroup: (id) => api(`/api/groups/${id}`, { method: "DELETE" }),
+  addMember: (id, userId) => api(`/api/groups/${id}/members`, { method: "POST", body: { userId } }),
+  removeMember: (id, userId) => api(`/api/groups/${id}/members/${userId}`, { method: "DELETE" }),
+  assignGroupRole: (id, roleId, organizationId) =>
+    api(`/api/groups/${id}/roles`, { method: "POST", body: { roleId, organizationId } }),
+  unassignGroupRole: (id, roleId, organizationId) =>
+    api(`/api/groups/${id}/roles/${roleId}?organizationId=${organizationId ?? 0}`, { method: "DELETE" }),
+  roles: (qs) => api(`/api/roles${qs || ""}`),
+  role: (id) => api(`/api/roles/${id}`),
+  createRole: (body) => api("/api/roles", { method: "POST", body }),
+  updateRole: (id, body) => api(`/api/roles/${id}`, { method: "PUT", body }),
+  deleteRole: (id) => api(`/api/roles/${id}`, { method: "DELETE" }),
+  orgs: (qs) => api(`/api/organizations${qs || ""}`),
+  organization: (id) => api(`/api/organizations/${id}`),
+  createOrganization: (body) => api("/api/organizations", { method: "POST", body }),
+  updateOrganization: (id, body) => api(`/api/organizations/${id}`, { method: "PUT", body }),
+  deleteOrganization: (id) => api(`/api/organizations/${id}`, { method: "DELETE" }),
+  activateOrganization: (id) => api(`/api/organizations/${id}/activate`, { method: "POST" }),
+  deactivateOrganization: (id) => api(`/api/organizations/${id}/deactivate`, { method: "POST" }),
+  orgTree: (qs) => api(`/api/organizations/tree${qs || ""}`),
+  orgSites: (id) => api(`/api/organizations/${id}/sites`),
+  createSite: (id, body) => api(`/api/organizations/${id}/sites`, { method: "POST", body }),
+  moveOrganization: (id, parent_id) =>
+    api(`/api/organizations/${id}/move`, { method: "POST", body: { parent_id } }),
+  orgMembers: (id) => api(`/api/organizations/${id}/members`),
+  addOrgMember: (id, body) => api(`/api/organizations/${id}/members`, { method: "POST", body }),
+  removeOrgMember: (id, userId) => api(`/api/organizations/${id}/members/${userId}`, { method: "DELETE" }),
+  orgContext: (id) => api(`/api/organizations/${id}/context`),
+  companies: (qs) => api(`/api/companies${qs || ""}`),
+  businessUnits: (qs) => api(`/api/business-units${qs || ""}`),
+  plants: (qs) => api(`/api/plants${qs || ""}`),
+  sites: (qs) => api(`/api/sites${qs || ""}`),
+  departments: (qs) => api(`/api/departments${qs || ""}`),
+  userOrganizations: (id) => api(`/api/users/${id}/organizations`),
+  addUserOrganization: (id, body) => api(`/api/users/${id}/organizations`, { method: "POST", body }),
+  removeUserOrganization: (id, orgId) => api(`/api/users/${id}/organizations/${orgId}`, { method: "DELETE" }),
+  hierarchy: () => api("/api/hierarchy"),
+  platformHierarchy: () => api("/api/platform/hierarchy"),
+  updatePlatformHierarchy: (body) => api("/api/platform/hierarchy", { method: "PUT", body }),
+  platformSettings: () => api("/api/platform/settings"),
+  updatePlatformSettings: (body) => api("/api/platform/settings", { method: "PUT", body }),
+  policy: () => api("/api/password-policy"),
+  updatePolicy: (body) => api("/api/password-policy", { method: "PUT", body }),
+  audit: (qs) => api(`/api/audit-logs${qs || ""}`),
+  access: (userId) => api(`/api/iam/principals/${userId}/access`),
+  applications: () => api("/api/applications"),
+  createApplication: (body) => api("/api/applications", { method: "POST", body }),
+  resources: (qs) => api(`/api/resources${qs || ""}`),
+  createResource: (body) => api("/api/resources", { method: "POST", body }),
+  permissions: (qs) => api(`/api/permissions${qs || ""}`),
+  createPermission: (body) => api("/api/permissions", { method: "POST", body }),
+  deletePermission: (id) => api(`/api/permissions/${id}`, { method: "DELETE" }),
+  permissionMatrix: (qs) => api(`/api/permissions/matrix${qs || ""}`),
+  rolePermissions: (id) => api(`/api/roles/${id}/permissions`),
+  grantRolePermission: (id, body) => api(`/api/roles/${id}/permissions`, { method: "POST", body }),
+  revokeRolePermission: (id, permissionId, organizationId) =>
+    api(`/api/roles/${id}/permissions/${permissionId}?organizationId=${organizationId ?? 0}`, {
+      method: "DELETE",
+    }),
+  tenants: (qs) => api(`/api/tenants${qs || ""}`),
+  tenant: (id) => api(`/api/tenants/${id}`),
+  createTenant: (body) => api("/api/tenants", { method: "POST", body }),
+  updateTenant: (id, body) => api(`/api/tenants/${id}`, { method: "PUT", body }),
+  activateTenant: (id) => api(`/api/tenants/${id}/activate`, { method: "POST" }),
+  deactivateTenant: (id) => api(`/api/tenants/${id}/deactivate`, { method: "POST" }),
+  deleteTenant: (id) => api(`/api/tenants/${id}`, { method: "DELETE" }),
+  selectTenant: (id) => api(`/api/tenants/${id}/select`, { method: "POST" }),
+  tenantContext: (id) => api(`/api/tenants/${id}/context`),
+  tenantConfig: (id) => api(`/api/tenants/${id}/config`),
+  updateTenantConfig: (id, values) =>
+    api(`/api/tenants/${id}/config`, { method: "PUT", body: { values } }),
+  config: (qs) => api(`/api/config${qs || ""}`),
+  updateConfig: (body) => api("/api/config", { method: "PUT", body }),
+  checkPermission: (body) => api("/api/authorization/check", { method: "POST", body }),
+  effectivePermissions: (userId, qs) => api(`/api/authorization/effective/${userId}${qs || ""}`),
+};

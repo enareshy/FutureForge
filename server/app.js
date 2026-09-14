@@ -1,0 +1,1448 @@
+import express from "express";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { HttpError, pagination } from "./validation.js";
+import { queryOne } from "./db.js";
+import * as users from "./services/users.js";
+import * as groups from "./services/groups.js";
+import * as roles from "./services/roles.js";
+import * as orgs from "./services/orgs.js";
+import * as policy from "./services/policy.js";
+import * as audit from "./services/audit.js";
+import * as catalog from "./services/catalog.js";
+import * as grants from "./services/grants.js";
+import * as authorization from "./services/authorization.js";
+import * as hierarchy from "./services/hierarchy.js";
+import * as authentication from "./services/authentication.js";
+import * as sessions from "./services/sessions.js";
+import * as providers from "./services/providers.js";
+import * as mfa from "./services/mfa.js";
+import * as tenants from "./services/tenants.js";
+import * as config from "./services/config.js";
+import { writeAudit } from "./services/audit.js";
+import { effectiveAccess } from "./services/access.js";
+import { requirePermission } from "./middleware.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function clientIp(req) {
+  return req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() || req.ip;
+}
+
+function requestMeta(req) {
+  return { ip: clientIp(req), userAgent: req.headers["user-agent"] || "" };
+}
+
+function requireAuth(db) {
+  return (req, res, next) => {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : req.headers["x-session-token"];
+    if (!token) return next(new HttpError(401, "Authentication required"));
+    const session = sessions.getSessionByToken(db, token);
+    if (!session) return next(new HttpError(401, "Invalid session"));
+    const user = queryOne(
+      db,
+      `SELECT id, username, email, employee_id, display_name, status, organization_id, tenant_id
+       FROM users WHERE id = ?`,
+      [session.user_id]
+    );
+    if (!user || user.status !== "active") return next(new HttpError(403, "Account is not active"));
+    req.actor = user;
+    req.sessionToken = token;
+    req.sessionRow = session;
+    try {
+      req.tenantId = resolveRequestTenant(db, req);
+    } catch (err) {
+      return next(err);
+    }
+    next();
+  };
+}
+
+function resolveRequestTenant(db, req) {
+  const override = req.headers["x-tenant-id"] || req.query?.tenantId;
+  const sessionTenant = req.sessionRow?.tenant_id || req.actor?.tenant_id || null;
+  if (override !== undefined && override !== null && override !== "") {
+    if (!tenants.isPlatformAdmin(db, req.actor.id)) {
+      throw new HttpError(403, "Cannot override tenant context");
+    }
+    const tenant = tenants.getTenant(db, override);
+    if (Number(tenant.id) !== Number(sessionTenant)) {
+      writeAudit(db, {
+        actor: req.actor,
+        action: "tenant.context.switch",
+        resourceType: "tenant",
+        resourceId: tenant.id,
+        details: { code: tenant.code, via: "header", previous: sessionTenant },
+        ip: clientIp(req),
+      });
+    }
+    return tenant.id;
+  }
+  return sessionTenant || null;
+}
+
+function tenantFilter(req) {
+  return { tenantId: req.tenantId || -1 };
+}
+
+function scopedOrg(db, req, id) {
+  return orgs.getOrganization(db, id, tenantFilter(req));
+}
+
+function wrap(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+export function createApp(db) {
+  const app = express();
+  app.disable("x-powered-by");
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: false }));
+  providers.ensureDefaultProviders(db);
+  config.ensureDefinitions(db);
+  tenants.stampTenantIds(db);
+  app.use((req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    next();
+  });
+
+  app.get("/api/health", (_req, res) => {
+    res.json({ ok: true, service: "helix-iam" });
+  });
+
+  function handleLogin(req, res) {
+    res.json(authentication.login(db, req.body || {}, requestMeta(req)));
+  }
+
+  app.post("/api/auth/login", wrap(handleLogin));
+  app.post("/api/authentication/login", wrap(handleLogin));
+
+  const auth = requireAuth(db);
+  const can = (resource, action) => requirePermission(db, resource, action);
+
+  app.get(
+    "/api/auth/me",
+    auth,
+    wrap((req, res) => {
+      const currentTenant = req.tenantId ? tenants.publicTenant(tenants.getTenant(db, req.tenantId)) : null;
+      res.json({
+        user: req.actor,
+        access: effectiveAccess(db, req.actor.id),
+        session: sessions.publicSession(req.sessionRow),
+        mfa: mfa.mfaStatus(db, req.actor.id),
+        tenant: currentTenant,
+        tenants: tenants.switchableTenants(db, req.actor).map(tenants.publicTenant),
+      });
+    })
+  );
+
+  function handleLogout(req, res) {
+    res.json(sessions.logoutToken(db, req.sessionToken, req.actor, clientIp(req)));
+  }
+
+  app.post("/api/auth/logout", auth, wrap(handleLogout));
+  app.post("/api/authentication/logout", auth, wrap(handleLogout));
+
+  app.get(
+    "/api/authentication/providers",
+    wrap((req, res) => {
+      res.json({ items: providers.listProviders(db, { enabledOnly: true }) });
+    })
+  );
+
+  app.get(
+    "/api/authentication/providers/admin",
+    auth,
+    can("iam.authentication", "read"),
+    wrap((_req, res) => {
+      res.json({ items: providers.listProviders(db) });
+    })
+  );
+
+  app.get(
+    "/api/authentication/settings",
+    auth,
+    can("iam.authentication", "read"),
+    wrap((_req, res) => {
+      res.json(authentication.authSettings(db));
+    })
+  );
+
+  app.put(
+    "/api/authentication/settings",
+    auth,
+    can("iam.authentication", "update"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const values = body.values || {
+        "auth.mfa_required": body.mfaRequired,
+        "auth.jit_provision": body.jitProvision,
+        "auth.rate_limit_max": body.rateLimitMax,
+        "auth.rate_limit_window_seconds": body.rateLimitWindowSeconds,
+        "auth.reset_token_minutes": body.resetTokenMinutes,
+        "auth.revoke_sessions_on_reset": body.revokeSessionsOnReset,
+        "identity.session_hours": body.sessionHours,
+      };
+      const patch = {};
+      for (const [k, v] of Object.entries(values)) {
+        if (v !== undefined) patch[k] = v;
+      }
+      hierarchy.updateSettings(db, { values: patch }, req.actor, clientIp(req));
+      res.json(authentication.authSettings(db));
+    })
+  );
+
+  app.post(
+    "/api/authentication/providers",
+    auth,
+    can("iam.authentication", "create"),
+    wrap((req, res) => {
+      res.status(201).json(providers.createProvider(db, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.put(
+    "/api/authentication/providers/:id",
+    auth,
+    can("iam.authentication", "update"),
+    wrap((req, res) => {
+      res.json(providers.updateProvider(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/authentication/password-reset/request",
+    wrap((req, res) => {
+      authentication.requestPasswordReset(db, req.body || {}, requestMeta(req));
+      res.json({ ok: true });
+    })
+  );
+
+  app.post(
+    "/api/authentication/password-reset/complete",
+    wrap((req, res) => {
+      res.json(authentication.completePasswordReset(db, req.body || {}, requestMeta(req)));
+    })
+  );
+
+  app.get(
+    "/api/sessions",
+    auth,
+    wrap((req, res) => {
+      res.json({ items: sessions.listMySessions(db, req.actor.id) });
+    })
+  );
+
+  app.delete(
+    "/api/sessions/:id",
+    auth,
+    wrap((req, res) => {
+      res.json(sessions.revokeSession(db, req.params.id, req.actor, clientIp(req), { ownerId: req.actor.id }));
+    })
+  );
+
+  app.post(
+    "/api/sessions/revoke-all",
+    auth,
+    wrap((req, res) => {
+      res.json(
+        sessions.revokeAllSessions(db, req.actor.id, req.actor, clientIp(req), { exceptToken: req.sessionToken })
+      );
+    })
+  );
+
+  app.get(
+    "/api/sessions/admin",
+    auth,
+    can("iam.sessions", "read"),
+    wrap((req, res) => {
+      res.json(sessions.listSessions(db, req.query));
+    })
+  );
+
+  app.delete(
+    "/api/sessions/admin/:id",
+    auth,
+    can("iam.sessions", "delete"),
+    wrap((req, res) => {
+      res.json(sessions.revokeSession(db, req.params.id, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/mfa/status",
+    auth,
+    wrap((req, res) => {
+      res.json(mfa.mfaStatus(db, req.actor.id));
+    })
+  );
+
+  app.post(
+    "/api/mfa/totp/enroll",
+    auth,
+    wrap((req, res) => {
+      res.json(mfa.enrollTotp(db, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/mfa/totp/verify",
+    auth,
+    wrap((req, res) => {
+      res.json(mfa.verifyTotpEnrollment(db, req.actor, req.body?.code, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/mfa/totp/disable",
+    auth,
+    wrap((req, res) => {
+      res.json(mfa.disableTotp(db, req.actor, req.body || {}, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/mfa/recovery/regenerate",
+    auth,
+    wrap((req, res) => {
+      res.json(mfa.regenerateRecovery(db, req.actor, req.body?.code, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/mfa/challenge/verify",
+    wrap((req, res) => {
+      res.json(authentication.completeMfa(db, req.body || {}, requestMeta(req)));
+    })
+  );
+
+  app.post(
+    "/api/mfa/admin/:userId/reset",
+    auth,
+    can("iam.users", "execute"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.userId);
+      res.json(mfa.adminResetMfa(db, req.params.userId, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/sso/providers",
+    wrap((_req, res) => {
+      res.json({
+        items: providers.listProviders(db, { enabledOnly: true }).filter((p) => p.type !== "password"),
+      });
+    })
+  );
+
+  app.post(
+    "/api/sso/:code/start",
+    wrap((req, res) => {
+      res.json(authentication.startSso(db, req.params.code, req.body || {}, requestMeta(req)));
+    })
+  );
+
+  function handleSsoCallback(req, res) {
+    const body = { ...(req.query || {}), ...(req.body || {}) };
+    res.json(authentication.completeSso(db, req.params.code, body, requestMeta(req)));
+  }
+
+  app.post("/api/sso/:code/callback", wrap(handleSsoCallback));
+  app.get("/api/sso/:code/callback", wrap(handleSsoCallback));
+
+  app.get(
+    "/api/sso/:code/metadata",
+    wrap((req, res) => {
+      res.json(authentication.ssoMetadata(db, req.params.code));
+    })
+  );
+
+  app.get(
+    "/api/tenants",
+    auth,
+    can("iam.tenants", "read"),
+    wrap((req, res) => {
+      res.json(tenants.listTenants(db, req.query));
+    })
+  );
+
+  app.post(
+    "/api/tenants",
+    auth,
+    can("iam.tenants", "create"),
+    wrap((req, res) => {
+      res.status(201).json(tenants.createTenant(db, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/tenants/:id",
+    auth,
+    can("iam.tenants", "read"),
+    wrap((req, res) => {
+      res.json(tenants.getTenant(db, req.params.id));
+    })
+  );
+
+  app.put(
+    "/api/tenants/:id",
+    auth,
+    can("iam.tenants", "update"),
+    wrap((req, res) => {
+      res.json(tenants.updateTenant(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/tenants/:id/activate",
+    auth,
+    can("iam.tenants", "update"),
+    wrap((req, res) => {
+      res.json(tenants.setTenantStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/tenants/:id/deactivate",
+    auth,
+    can("iam.tenants", "update"),
+    wrap((req, res) => {
+      res.json(tenants.setTenantStatus(db, req.params.id, "inactive", req.actor, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/tenants/:id",
+    auth,
+    can("iam.tenants", "delete"),
+    wrap((req, res) => {
+      res.json(tenants.deleteTenant(db, req.params.id, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/tenants/:id/select",
+    auth,
+    wrap((req, res) => {
+      res.json(tenants.selectTenant(db, req.sessionToken, req.params.id, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/tenants/:id/context",
+    auth,
+    can("iam.tenants", "read"),
+    wrap((req, res) => {
+      res.json(tenants.tenantContext(db, req.params.id));
+    })
+  );
+
+  app.get(
+    "/api/tenants/:id/config",
+    auth,
+    can("iam.config", "read"),
+    wrap((req, res) => {
+      tenants.getTenant(db, req.params.id);
+      res.json({
+        scope: "tenant",
+        scope_id: Number(req.params.id),
+        items: config.listScopeValues(db, "tenant", req.params.id),
+        effective: config.resolveAll(db, { tenantId: req.params.id }),
+      });
+    })
+  );
+
+  app.put(
+    "/api/tenants/:id/config",
+    auth,
+    can("iam.config", "update"),
+    wrap((req, res) => {
+      tenants.getTenant(db, req.params.id);
+      res.json(
+        config.putValues(
+          db,
+          { scope: "tenant", scopeId: req.params.id, values: req.body?.values || req.body || {} },
+          req.actor,
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/config",
+    auth,
+    can("iam.config", "read"),
+    wrap((req, res) => {
+      const organizationId = req.query.organizationId;
+      if (organizationId) scopedOrg(db, req, organizationId);
+      res.json(
+        config.catalogAndEffective(db, {
+          tenantId: req.tenantId,
+          organizationId,
+        })
+      );
+    })
+  );
+
+  app.put(
+    "/api/config",
+    auth,
+    can("iam.config", "update"),
+    wrap((req, res) => {
+      const scope = req.body?.scope;
+      const scopeId = req.body?.scopeId ?? req.body?.scope_id;
+      if (scope === "tenant") tenants.getTenant(db, scopeId);
+      if (scope === "organization") scopedOrg(db, req, scopeId);
+      res.json(config.putValues(db, { scope, scopeId, values: req.body?.values || {} }, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/organizations",
+    auth,
+    can("iam.organizations", "read"),
+    wrap((req, res) => {
+      res.json(orgs.listOrganizations(db, { ...req.query, ...tenantFilter(req) }));
+    })
+  );
+
+  app.get(
+    "/api/organizations/tree",
+    auth,
+    can("iam.organizations", "read"),
+    wrap((req, res) => {
+      res.json(orgs.organizationTree(db, { ...req.query, ...tenantFilter(req) }));
+    })
+  );
+
+  app.post(
+    "/api/organizations",
+    auth,
+    can("iam.organizations", "create"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      if (body.parent_id) scopedOrg(db, req, body.parent_id);
+      const org = orgs.createOrganization(db, body, req.actor, clientIp(req));
+      res.status(201).json(org);
+    })
+  );
+
+  app.get(
+    "/api/organizations/:id",
+    auth,
+    can("iam.organizations", "read"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json(orgs.organizationDetail(db, req.params.id));
+    })
+  );
+
+  app.put(
+    "/api/organizations/:id",
+    auth,
+    can("iam.organizations", "update"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json(orgs.updateOrganization(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/organizations/:id",
+    auth,
+    can("iam.organizations", "delete"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json(orgs.deleteOrganization(db, req.params.id, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/organizations/:id/activate",
+    auth,
+    can("iam.organizations", "update"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json(orgs.setOrganizationStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/organizations/:id/deactivate",
+    auth,
+    can("iam.organizations", "update"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json(orgs.setOrganizationStatus(db, req.params.id, "inactive", req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/organizations/:id/sites",
+    auth,
+    can("iam.organizations", "read"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json({ items: orgs.listSites(db, req.params.id) });
+    })
+  );
+
+  app.get(
+    "/api/organizations/:id/config",
+    auth,
+    can("iam.config", "read"),
+    wrap((req, res) => {
+      const org = scopedOrg(db, req, req.params.id);
+      res.json({
+        scope: "organization",
+        scope_id: Number(req.params.id),
+        items: config.listScopeValues(db, "organization", req.params.id),
+        effective: config.resolveAll(db, { tenantId: org.tenant_id || req.tenantId, organizationId: req.params.id }),
+      });
+    })
+  );
+
+  app.put(
+    "/api/organizations/:id/config",
+    auth,
+    can("iam.config", "update"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json(
+        config.putValues(
+          db,
+          { scope: "organization", scopeId: req.params.id, values: req.body?.values || req.body || {} },
+          req.actor,
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  app.post(
+    "/api/organizations/:id/sites",
+    auth,
+    can("iam.organizations", "create"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      const site = orgs.createOrganization(
+        db,
+        { ...(req.body || {}), kind: "site", parent_id: Number(req.params.id) },
+        req.actor,
+        clientIp(req)
+      );
+      res.status(201).json(site);
+    })
+  );
+
+  app.post(
+    "/api/organizations/:id/move",
+    auth,
+    can("iam.organizations", "update"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      if (req.body?.parent_id) scopedOrg(db, req, req.body.parent_id);
+      res.json(orgs.moveOrganization(db, req.params.id, req.body?.parent_id, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/organizations/:id/members",
+    auth,
+    can("iam.organizations", "read"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json({ items: orgs.listMembers(db, req.params.id) });
+    })
+  );
+
+  app.post(
+    "/api/organizations/:id/members",
+    auth,
+    can("iam.organizations", "update"),
+    wrap((req, res) => {
+      const { userId, isPrimary } = req.body || {};
+      scopedOrg(db, req, req.params.id);
+      if (!userId) throw new HttpError(400, "userId is required");
+      users.getUser(db, userId, tenantFilter(req));
+      res.status(201).json({ items: orgs.addMember(db, req.params.id, userId, isPrimary, req.actor, clientIp(req)) });
+    })
+  );
+
+  app.delete(
+    "/api/organizations/:id/members/:userId",
+    auth,
+    can("iam.organizations", "update"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json({
+        items: orgs.removeMember(db, req.params.id, req.params.userId, req.actor, clientIp(req)),
+      });
+    })
+  );
+
+  app.get(
+    "/api/organizations/:id/context",
+    auth,
+    can("iam.organizations", "read"),
+    wrap((req, res) => {
+      scopedOrg(db, req, req.params.id);
+      res.json(orgs.organizationContext(db, req.params.id));
+    })
+  );
+
+  app.get(
+    "/api/hierarchy",
+    auth,
+    can("iam.organizations", "read"),
+    wrap((_req, res) => {
+      res.json(hierarchy.getHierarchy(db));
+    })
+  );
+
+  app.get(
+    "/api/platform/hierarchy",
+    auth,
+    can("iam.platform", "read"),
+    wrap((_req, res) => {
+      res.json(hierarchy.getHierarchy(db, { includeInactive: true }));
+    })
+  );
+
+  app.put(
+    "/api/platform/hierarchy",
+    auth,
+    can("iam.platform", "update"),
+    wrap((req, res) => {
+      res.json(hierarchy.replaceHierarchy(db, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/platform/settings",
+    auth,
+    can("iam.platform", "read"),
+    wrap((_req, res) => {
+      res.json(hierarchy.getSettings(db));
+    })
+  );
+
+  app.put(
+    "/api/platform/settings",
+    auth,
+    can("iam.platform", "update"),
+    wrap((req, res) => {
+      res.json(hierarchy.updateSettings(db, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  for (const [prefix, kind] of Object.entries(orgs.typedCollections(db))) {
+    app.get(
+      `/api/${prefix}`,
+      auth,
+      can("iam.organizations", "read"),
+      wrap((req, res) => {
+        res.json(orgs.listOrganizations(db, { ...req.query, kind, ...tenantFilter(req) }));
+      })
+    );
+    app.post(
+      `/api/${prefix}`,
+      auth,
+      can("iam.organizations", "create"),
+      wrap((req, res) => {
+        if (req.body?.parent_id) scopedOrg(db, req, req.body.parent_id);
+        const org = orgs.createOrganization(db, { ...(req.body || {}), kind }, req.actor, clientIp(req));
+        res.status(201).json(org);
+      })
+    );
+    app.get(
+      `/api/${prefix}/:id`,
+      auth,
+      can("iam.organizations", "read"),
+      wrap((req, res) => {
+        orgs.getOrganizationOfKind(db, req.params.id, kind);
+        scopedOrg(db, req, req.params.id);
+        res.json(orgs.organizationDetail(db, req.params.id));
+      })
+    );
+    app.put(
+      `/api/${prefix}/:id`,
+      auth,
+      can("iam.organizations", "update"),
+      wrap((req, res) => {
+        orgs.getOrganizationOfKind(db, req.params.id, kind);
+        scopedOrg(db, req, req.params.id);
+        res.json(
+          orgs.updateOrganization(db, req.params.id, { ...(req.body || {}), kind }, req.actor, clientIp(req))
+        );
+      })
+    );
+    app.delete(
+      `/api/${prefix}/:id`,
+      auth,
+      can("iam.organizations", "delete"),
+      wrap((req, res) => {
+        orgs.getOrganizationOfKind(db, req.params.id, kind);
+        scopedOrg(db, req, req.params.id);
+        res.json(orgs.deleteOrganization(db, req.params.id, req.actor, clientIp(req)));
+      })
+    );
+  }
+
+  app.get(
+    "/api/users",
+    auth,
+    can("iam.users", "read"),
+    wrap((req, res) => {
+      res.json(users.listUsers(db, { ...req.query, ...tenantFilter(req) }));
+    })
+  );
+
+  app.post(
+    "/api/users",
+    auth,
+    can("iam.users", "create"),
+    wrap((req, res) => {
+      const user = users.createUser(
+        db,
+        { ...(req.body || {}), contextTenantId: req.tenantId },
+        req.actor,
+        clientIp(req)
+      );
+      res.status(201).json(user);
+    })
+  );
+
+  app.get(
+    "/api/users/:id",
+    auth,
+    can("iam.users", "read"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      const { user, groups: memberships, roles: assigned, organizations } = users.userMemberships(
+        db,
+        req.params.id
+      );
+      res.json({
+        ...user,
+        groups: memberships,
+        roles: assigned,
+        organizations,
+        access: effectiveAccess(db, req.params.id),
+      });
+    })
+  );
+
+  app.put(
+    "/api/users/:id",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      res.json(users.updateUser(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/users/:id/activate",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      res.json(users.setUserStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/users/:id/deactivate",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      res.json(users.setUserStatus(db, req.params.id, "inactive", req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/users/:id/lock",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      res.json(users.setUserStatus(db, req.params.id, "locked", req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/users/:id/unlock",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      res.json(users.setUserStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/users/:id/reset-password",
+    auth,
+    can("iam.users", "execute"),
+    wrap((req, res) => {
+      const { password } = req.body || {};
+      users.getUser(db, req.params.id, tenantFilter(req));
+      if (!password) throw new HttpError(400, "password is required");
+      res.json(users.resetPassword(db, req.params.id, password, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/users/:id/groups",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      const { groupId } = req.body || {};
+      users.getUser(db, req.params.id, tenantFilter(req));
+      if (!groupId) throw new HttpError(400, "groupId is required");
+      groups.getGroup(db, groupId, tenantFilter(req));
+      res.json({ members: groups.addGroupMember(db, groupId, req.params.id, req.actor, clientIp(req)) });
+    })
+  );
+
+  app.delete(
+    "/api/users/:id/groups/:groupId",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      groups.getGroup(db, req.params.groupId, tenantFilter(req));
+      res.json({
+        members: groups.removeGroupMember(db, req.params.groupId, req.params.id, req.actor, clientIp(req)),
+      });
+    })
+  );
+
+  app.post(
+    "/api/users/:id/roles",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      const { roleId, organizationId } = req.body || {};
+      users.getUser(db, req.params.id, tenantFilter(req));
+      if (!roleId) throw new HttpError(400, "roleId is required");
+      if (organizationId) scopedOrg(db, req, organizationId);
+      res.json({
+        roles: roles.assignUserRole(db, req.params.id, roleId, organizationId, req.actor, clientIp(req)),
+      });
+    })
+  );
+
+  app.delete(
+    "/api/users/:id/roles/:roleId",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      res.json({
+        roles: roles.unassignUserRole(
+          db,
+          req.params.id,
+          req.params.roleId,
+          req.query.organizationId,
+          req.actor,
+          clientIp(req)
+        ),
+      });
+    })
+  );
+
+  app.get(
+    "/api/users/:id/organizations",
+    auth,
+    can("iam.users", "read"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      res.json({ items: orgs.listUserOrganizations(db, req.params.id) });
+    })
+  );
+
+  app.post(
+    "/api/users/:id/organizations",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      const { organizationId, isPrimary } = req.body || {};
+      if (!organizationId) throw new HttpError(400, "organizationId is required");
+      users.getUser(db, req.params.id, tenantFilter(req));
+      scopedOrg(db, req, organizationId);
+      orgs.addMember(db, organizationId, req.params.id, isPrimary, req.actor, clientIp(req));
+      res.status(201).json({ items: orgs.listUserOrganizations(db, req.params.id) });
+    })
+  );
+
+  app.delete(
+    "/api/users/:id/organizations/:orgId",
+    auth,
+    can("iam.users", "update"),
+    wrap((req, res) => {
+      users.getUser(db, req.params.id, tenantFilter(req));
+      scopedOrg(db, req, req.params.orgId);
+      orgs.removeMember(db, req.params.orgId, req.params.id, req.actor, clientIp(req));
+      res.json({ items: orgs.listUserOrganizations(db, req.params.id) });
+    })
+  );
+
+  app.get(
+    "/api/groups",
+    auth,
+    can("iam.groups", "read"),
+    wrap((req, res) => {
+      res.json(groups.listGroups(db, { ...req.query, ...tenantFilter(req) }));
+    })
+  );
+
+  app.post(
+    "/api/groups",
+    auth,
+    can("iam.groups", "create"),
+    wrap((req, res) => {
+      if (req.body?.organization_id) scopedOrg(db, req, req.body.organization_id);
+      const group = groups.createGroup(
+        db,
+        { ...(req.body || {}), tenant_id: req.tenantId },
+        req.actor,
+        clientIp(req)
+      );
+      res.status(201).json(group);
+    })
+  );
+
+  app.get(
+    "/api/groups/:id",
+    auth,
+    can("iam.groups", "read"),
+    wrap((req, res) => {
+      const group = groups.getGroup(db, req.params.id, tenantFilter(req));
+      res.json({
+        ...group,
+        members: groups.listGroupMembers(db, req.params.id),
+        roles: roles.listGroupRoles(db, req.params.id),
+        ancestors: groups.ancestorGroups(db, req.params.id).slice(1),
+      });
+    })
+  );
+
+  app.put(
+    "/api/groups/:id",
+    auth,
+    can("iam.groups", "update"),
+    wrap((req, res) => {
+      groups.getGroup(db, req.params.id, tenantFilter(req));
+      if (req.body?.organization_id) scopedOrg(db, req, req.body.organization_id);
+      res.json(groups.updateGroup(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/groups/:id",
+    auth,
+    can("iam.groups", "delete"),
+    wrap((req, res) => {
+      groups.getGroup(db, req.params.id, tenantFilter(req));
+      res.json(groups.deleteGroup(db, req.params.id, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/groups/:id/members",
+    auth,
+    can("iam.groups", "read"),
+    wrap((req, res) => {
+      groups.getGroup(db, req.params.id, tenantFilter(req));
+      res.json({ items: groups.listGroupMembers(db, req.params.id) });
+    })
+  );
+
+  app.post(
+    "/api/groups/:id/members",
+    auth,
+    can("iam.groups", "update"),
+    wrap((req, res) => {
+      const { userId } = req.body || {};
+      groups.getGroup(db, req.params.id, tenantFilter(req));
+      if (!userId) throw new HttpError(400, "userId is required");
+      users.getUser(db, userId, tenantFilter(req));
+      res.json({ items: groups.addGroupMember(db, req.params.id, userId, req.actor, clientIp(req)) });
+    })
+  );
+
+  app.delete(
+    "/api/groups/:id/members/:userId",
+    auth,
+    can("iam.groups", "update"),
+    wrap((req, res) => {
+      res.json({
+        items: groups.removeGroupMember(db, req.params.id, req.params.userId, req.actor, clientIp(req)),
+      });
+    })
+  );
+
+  app.post(
+    "/api/groups/:id/roles",
+    auth,
+    can("iam.groups", "update"),
+    wrap((req, res) => {
+      const { roleId, organizationId } = req.body || {};
+      if (!roleId) throw new HttpError(400, "roleId is required");
+      res.json({
+        roles: roles.assignGroupRole(db, req.params.id, roleId, organizationId, req.actor, clientIp(req)),
+      });
+    })
+  );
+
+  app.delete(
+    "/api/groups/:id/roles/:roleId",
+    auth,
+    can("iam.groups", "update"),
+    wrap((req, res) => {
+      res.json({
+        roles: roles.unassignGroupRole(
+          db,
+          req.params.id,
+          req.params.roleId,
+          req.query.organizationId,
+          req.actor,
+          clientIp(req)
+        ),
+      });
+    })
+  );
+
+  app.get(
+    "/api/roles",
+    auth,
+    can("iam.roles", "read"),
+    wrap((req, res) => {
+      res.json(roles.listRoles(db, req.query));
+    })
+  );
+
+  app.post(
+    "/api/roles",
+    auth,
+    can("iam.roles", "create"),
+    wrap((req, res) => {
+      const role = roles.createRole(db, req.body || {}, req.actor, clientIp(req));
+      res.status(201).json(role);
+    })
+  );
+
+  app.get(
+    "/api/roles/:id",
+    auth,
+    can("iam.roles", "read"),
+    wrap((req, res) => {
+      const role = roles.getRole(db, req.params.id);
+      res.json({
+        ...role,
+        ancestors: roles.ancestorRoles(db, req.params.id).slice(1),
+        assignments: roles.roleAssignments(db, req.params.id),
+        permissions: grants.listRolePermissions(db, req.params.id),
+      });
+    })
+  );
+
+  app.put(
+    "/api/roles/:id",
+    auth,
+    can("iam.roles", "update"),
+    wrap((req, res) => {
+      res.json(roles.updateRole(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/roles/:id",
+    auth,
+    can("iam.roles", "delete"),
+    wrap((req, res) => {
+      res.json(roles.deleteRole(db, req.params.id, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/roles/:id/users",
+    auth,
+    can("iam.roles", "update"),
+    wrap((req, res) => {
+      const { userId, organizationId } = req.body || {};
+      if (!userId) throw new HttpError(400, "userId is required");
+      res.json({
+        roles: roles.assignUserRole(db, userId, req.params.id, organizationId, req.actor, clientIp(req)),
+      });
+    })
+  );
+
+  app.post(
+    "/api/roles/:id/groups",
+    auth,
+    can("iam.roles", "update"),
+    wrap((req, res) => {
+      const { groupId, organizationId } = req.body || {};
+      if (!groupId) throw new HttpError(400, "groupId is required");
+      res.json({
+        roles: roles.assignGroupRole(db, groupId, req.params.id, organizationId, req.actor, clientIp(req)),
+      });
+    })
+  );
+
+  app.get(
+    "/api/password-policy",
+    auth,
+    can("iam.policy", "read"),
+    wrap((_req, res) => {
+      res.json(policy.getPolicy(db));
+    })
+  );
+
+  app.put(
+    "/api/password-policy",
+    auth,
+    can("iam.policy", "update"),
+    wrap((req, res) => {
+      const next = policy.updatePolicy(db, req.body || {});
+      audit.writeAudit(db, {
+        actor: req.actor,
+        action: "policy.update",
+        resourceType: "password_policy",
+        resourceId: 1,
+        details: next,
+        ip: clientIp(req),
+      });
+      res.json(next);
+    })
+  );
+
+  app.get(
+    "/api/audit-logs",
+    auth,
+    can("iam.audit", "read"),
+    wrap((req, res) => {
+      const page = pagination(req.query);
+      res.json(
+        audit.listAuditLogs(db, {
+          ...page,
+          action: req.query.action,
+          resourceType: req.query.resourceType,
+          q: req.query.q,
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/iam/principals/:userId/access",
+    auth,
+    can("iam.users", "read"),
+    wrap((req, res) => {
+      res.json(effectiveAccess(db, req.params.userId));
+    })
+  );
+
+  app.get(
+    "/api/applications",
+    auth,
+    can("iam.permissions", "read"),
+    wrap((_req, res) => {
+      res.json({ items: catalog.listApplications(db) });
+    })
+  );
+
+  app.post(
+    "/api/applications",
+    auth,
+    can("iam.permissions", "create"),
+    wrap((req, res) => {
+      const appItem = catalog.createApplication(db, req.body || {}, req.actor, clientIp(req));
+      res.status(201).json(appItem);
+    })
+  );
+
+  app.get(
+    "/api/resources",
+    auth,
+    can("iam.permissions", "read"),
+    wrap((req, res) => {
+      res.json({ items: catalog.listResources(db, req.query) });
+    })
+  );
+
+  app.post(
+    "/api/resources",
+    auth,
+    can("iam.permissions", "create"),
+    wrap((req, res) => {
+      const resource = catalog.createResource(db, req.body || {}, req.actor, clientIp(req));
+      res.status(201).json(resource);
+    })
+  );
+
+  app.put(
+    "/api/resources/:id",
+    auth,
+    can("iam.permissions", "update"),
+    wrap((req, res) => {
+      res.json(catalog.updateResource(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/permissions",
+    auth,
+    can("iam.permissions", "read"),
+    wrap((req, res) => {
+      res.json(catalog.listPermissions(db, req.query));
+    })
+  );
+
+  app.get(
+    "/api/permissions/matrix",
+    auth,
+    can("iam.permissions", "read"),
+    wrap((req, res) => {
+      res.json(authorization.permissionMatrix(db, req.query));
+    })
+  );
+
+  app.post(
+    "/api/permissions",
+    auth,
+    can("iam.permissions", "create"),
+    wrap((req, res) => {
+      const permission = catalog.createPermission(db, req.body || {}, req.actor, clientIp(req));
+      res.status(201).json(permission);
+    })
+  );
+
+  app.delete(
+    "/api/permissions/:id",
+    auth,
+    can("iam.permissions", "delete"),
+    wrap((req, res) => {
+      res.json(catalog.deletePermission(db, req.params.id, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/roles/:id/permissions",
+    auth,
+    can("iam.permissions", "read"),
+    wrap((req, res) => {
+      res.json({ items: grants.listRolePermissions(db, req.params.id) });
+    })
+  );
+
+  app.put(
+    "/api/roles/:id/permissions",
+    auth,
+    can("iam.permissions", "update"),
+    wrap((req, res) => {
+      const items = grants.replaceRolePermissionMatrix(
+        db,
+        req.params.id,
+        req.body?.grants || [],
+        req.actor,
+        clientIp(req)
+      );
+      res.json({ items });
+    })
+  );
+
+  app.post(
+    "/api/roles/:id/permissions",
+    auth,
+    can("iam.permissions", "update"),
+    wrap((req, res) => {
+      res.status(201).json({
+        items: grants.grantRolePermission(db, req.params.id, req.body || {}, req.actor, clientIp(req)),
+      });
+    })
+  );
+
+  app.delete(
+    "/api/roles/:id/permissions/:permissionId",
+    auth,
+    can("iam.permissions", "update"),
+    wrap((req, res) => {
+      res.json({
+        items: grants.revokeRolePermission(
+          db,
+          req.params.id,
+          req.params.permissionId,
+          req.query.organizationId,
+          req.actor,
+          clientIp(req)
+        ),
+      });
+    })
+  );
+
+  app.post(
+    "/api/authorization/check",
+    auth,
+    wrap((req, res) => {
+      const { userId, user, resource, action, context, organizationId } = req.body || {};
+      const subject = userId || user;
+      if (!subject || !resource || !action) {
+        throw new HttpError(400, "userId, resource and action are required");
+      }
+      const ctx = { ...(context || {}), organizationId: organizationId ?? context?.organizationId };
+      const result = authorization.checkPermissionAudited(
+        db,
+        subject,
+        resource,
+        action,
+        ctx,
+        req.actor,
+        clientIp(req)
+      );
+      res.json(result);
+    })
+  );
+
+  app.get(
+    "/api/authorization/effective/:userId",
+    auth,
+    wrap((req, res) => {
+      res.json(
+        authorization.effectivePermissions(db, req.params.userId, {
+          organizationId: req.query.organizationId,
+        })
+      );
+    })
+  );
+
+  const dist = join(__dirname, "..", "web", "dist");
+  if (existsSync(dist)) {
+    app.use(express.static(dist));
+    app.get("*", (req, res, next) => {
+      if (req.path.startsWith("/api/")) return next();
+      res.sendFile(join(dist, "index.html"));
+    });
+  }
+
+  app.use((err, _req, res, _next) => {
+    if (err instanceof HttpError) {
+      return res.status(err.status).json({ error: err.message, details: err.details });
+    }
+    if (err.type === "entity.parse.failed") {
+      return res.status(400).json({ error: "Invalid JSON" });
+    }
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  });
+
+  return app;
+}
