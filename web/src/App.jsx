@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { getToken, iam, setToken } from "./api.js";
 import UsersPage from "./pages/UsersPage.jsx";
 import UserDetailPage from "./pages/UserDetailPage.jsx";
@@ -17,6 +17,9 @@ import OrganizationDetailPage from "./pages/OrganizationDetailPage.jsx";
 import PlatformPage from "./pages/PlatformPage.jsx";
 import TenantsPage from "./pages/TenantsPage.jsx";
 import ConfigurationPage from "./pages/ConfigurationPage.jsx";
+import MetadataPage from "./pages/MetadataPage.jsx";
+import ExplorerPage from "./pages/ExplorerPage.jsx";
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import AuthenticationPage from "./pages/AuthenticationPage.jsx";
 import SessionsPage from "./pages/SessionsPage.jsx";
 import MfaPage from "./pages/MfaPage.jsx";
@@ -111,8 +114,98 @@ function Login({ onLogin }) {
   );
 }
 
+const NAV_SECTIONS = [
+  {
+    key: "overview",
+    label: "",
+    items: [
+      { to: "/", label: "Overview", end: true },
+      { to: "/explorer", label: "Data explorer" },
+    ],
+  },
+  {
+    key: "organization",
+    label: "Organization",
+    items: [
+      { to: "/organizations", label: "Org structure" },
+      { to: "/tenants", label: "Tenants", platform: true },
+    ],
+  },
+  {
+    key: "identity",
+    label: "Identity",
+    items: [
+      { to: "/users", label: "Users" },
+      { to: "/groups", label: "Groups" },
+    ],
+  },
+  {
+    key: "access",
+    label: "Access control",
+    items: [
+      { to: "/roles", label: "Roles" },
+      { to: "/permissions", label: "Permissions" },
+      { to: "/authorization", label: "Authorization" },
+    ],
+  },
+  {
+    key: "authentication",
+    label: "Authentication",
+    items: [
+      { to: "/authentication", label: "Providers" },
+      { to: "/policy", label: "Password policy" },
+      { to: "/sessions", label: "Sessions" },
+      { to: "/mfa", label: "MFA" },
+    ],
+  },
+  {
+    key: "configuration",
+    label: "Configuration",
+    items: [
+      { to: "/configuration", label: "Scoped config" },
+      { to: "/metadata", label: "Metadata", platformOrAdmin: true },
+      { to: "/platform", label: "Platform properties", platform: true },
+    ],
+  },
+  {
+    key: "audit",
+    label: "Compliance",
+    items: [{ to: "/audit", label: "Audit log" }],
+  },
+];
+
 function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
-  const canPlatform = (access?.roles || []).some((r) => r.code === "platform.admin");
+  const location = useLocation();
+  const roles = access?.roles || [];
+  const canPlatform = roles.some((r) => r.code === "platform.admin");
+  const canMetadata = canPlatform || roles.some((r) => r.code === "iam.admin");
+
+  const visible = (item) => {
+    if (item.platform && !canPlatform) return false;
+    if (item.platformOrAdmin && !canMetadata) return false;
+    return true;
+  };
+
+  const isActive = (item) =>
+    item.end ? location.pathname === item.to : location.pathname.startsWith(item.to);
+
+  const [open, setOpen] = useState(() => new Set(["overview"]));
+  useEffect(() => {
+    const activeSection = NAV_SECTIONS.find((section) =>
+      section.items.some((item) => visible(item) && isActive(item))
+    );
+    if (activeSection) setOpen((prev) => (prev.has(activeSection.key) ? prev : new Set([...prev, activeSection.key])));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname, canPlatform, canMetadata]);
+
+  const toggle = (key) =>
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
   return (
     <div className="shell">
       <aside className="nav">
@@ -125,21 +218,41 @@ function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
             </select>
           </label>
         ) : null}
-        <NavLink to="/" end>Overview</NavLink>
-        <NavLink to="/organizations">Org structure</NavLink>
-        <NavLink to="/users">Users</NavLink>
-        <NavLink to="/groups">Groups</NavLink>
-        <NavLink to="/roles">Roles</NavLink>
-        <NavLink to="/permissions">Permissions</NavLink>
-        <NavLink to="/authorization">Authorization</NavLink>
-        <NavLink to="/policy">Password policy</NavLink>
-        <NavLink to="/authentication">Authentication</NavLink>
-        <NavLink to="/sessions">Sessions</NavLink>
-        <NavLink to="/mfa">MFA</NavLink>
-        {canPlatform ? <NavLink to="/tenants">Tenants</NavLink> : null}
-        <NavLink to="/configuration">Configuration</NavLink>
-        {canPlatform ? <NavLink to="/platform">Platform properties</NavLink> : null}
-        <NavLink to="/audit">Audit log</NavLink>
+        <div className="nav-scroll">
+          {NAV_SECTIONS.map((section) => {
+            const items = section.items.filter(visible);
+            if (!items.length) return null;
+            if (!section.label) {
+              return (
+                <div className="nav-section plain" key={section.key}>
+                  {items.map((item) => (
+                    <NavLink key={item.to} to={item.to} end={item.end}>
+                      {item.label}
+                    </NavLink>
+                  ))}
+                </div>
+              );
+            }
+            const expanded = open.has(section.key);
+            return (
+              <div className={`nav-section ${expanded ? "open" : ""}`} key={section.key}>
+                <button type="button" className="nav-section-head" onClick={() => toggle(section.key)}>
+                  <span className="caret">{expanded ? "▾" : "▸"}</span>
+                  {section.label}
+                </button>
+                {expanded ? (
+                  <div className="nav-section-body">
+                    {items.map((item) => (
+                      <NavLink key={item.to} to={item.to} end={item.end}>
+                        {item.label}
+                      </NavLink>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
         <div className="spacer" />
         <div className="mono">{me.display_name}</div>
         <button className="btn ghost" onClick={onLogout}>Sign out</button>
@@ -208,8 +321,10 @@ export default function App() {
 
   return (
     <Shell me={me} access={access} tenant={tenant} tenants={tenants} onSwitch={switchTenant} onLogout={logout}>
+      <ErrorBoundary>
       <Routes>
         <Route path="/" element={<DashboardPage />} />
+        <Route path="/explorer" element={<ExplorerPage />} />
         <Route path="/organizations" element={<OrganizationsPage />} />
         <Route path="/organizations/:id" element={<OrganizationDetailPage />} />
         <Route path="/users" element={<UsersPage />} />
@@ -226,10 +341,12 @@ export default function App() {
         <Route path="/mfa" element={<MfaPage />} />
         <Route path="/tenants" element={<TenantsPage />} />
         <Route path="/configuration" element={<ConfigurationPage />} />
+        <Route path="/metadata" element={<MetadataPage />} />
         <Route path="/platform" element={<PlatformPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </ErrorBoundary>
     </Shell>
   );
 }

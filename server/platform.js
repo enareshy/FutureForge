@@ -20,3 +20,17 @@ export {
   resolveTenant,
   assertTenantScope,
 } from "./services/tenants.js";
+export {
+  resolveType,
+  effectiveAttributes,
+  attributeContract,
+  validateRecord,
+  assertValidRecord,
+  renderForm,
+  renderType,
+  resolveLov,
+  assertValueInLov,
+  evaluate as evaluateRule,
+  resolveArtifactConfig,
+  assertEnabled as assertMetadataEnabled,
+} from "./services/metadata.js";

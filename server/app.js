@@ -20,6 +20,8 @@ import * as providers from "./services/providers.js";
 import * as mfa from "./services/mfa.js";
 import * as tenants from "./services/tenants.js";
 import * as config from "./services/config.js";
+import * as metadata from "./services/metadata.js";
+import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
 import { effectiveAccess } from "./services/access.js";
 import { requirePermission } from "./middleware.js";
@@ -497,6 +499,595 @@ export function createApp(db) {
       if (scope === "tenant") tenants.getTenant(db, scopeId);
       if (scope === "organization") scopedOrg(db, req, scopeId);
       res.json(config.putValues(db, { scope, scopeId, values: req.body?.values || {} }, req.actor, clientIp(req)));
+    })
+  );
+
+  // -------------------------------------------------------------------------
+  // Configuration & Metadata Management
+  // Global (system) metadata is stored with tenant_id = NULL and requires the
+  // platform administrator; tenant metadata is isolated to the caller tenant.
+  // -------------------------------------------------------------------------
+
+  const canMeta = (action) => can("iam.metadata", action);
+  const metaRead = (req, source) => metaReadTenant(db, req.actor, source || req.query, req.tenantId);
+  const metaWrite = (req, body) => metaWriteTenant(db, req.actor, body ?? req.body, req.tenantId);
+
+  app.get(
+    "/api/metadata/types",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.listTypes(db, req.query, metaRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/metadata/types/tree",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json({ items: metadata.typeTree(db, metaRead(req)) });
+    })
+  );
+
+  app.post(
+    "/api/metadata/types",
+    auth,
+    canMeta("create"),
+    wrap((req, res) => {
+      const tenantId = metaWrite(req, req.body);
+      res.status(201).json(metadata.createType(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    })
+  );
+
+  app.get(
+    "/api/metadata/types/:id",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.getType(db, req.params.id, metaRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/metadata/types/:id",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      const tenantId = metaRead(req);
+      res.json(metadata.updateType(db, req.params.id, req.body || {}, req.actor, clientIp(req), tenantId));
+    })
+  );
+
+  app.delete(
+    "/api/metadata/types/:id",
+    auth,
+    canMeta("delete"),
+    wrap((req, res) => {
+      res.json(metadata.deleteType(db, req.params.id, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/metadata/types/:id/status",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(
+        metadata.setTypeStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), metaRead(req))
+      );
+    })
+  );
+
+  app.get(
+    "/api/metadata/types/:id/resolve",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.resolveType(db, req.params.id, metaRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/metadata/types/:id/contract",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json({ items: metadata.attributeContract(db, req.params.id, metaRead(req)) });
+    })
+  );
+
+  app.post(
+    "/api/metadata/types/:id/attributes",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.status(201).json(
+        metadata.addTypeAttribute(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req))
+      );
+    })
+  );
+
+  app.put(
+    "/api/metadata/types/:id/attributes/:attributeId",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(
+        metadata.updateTypeAttribute(
+          db,
+          req.params.id,
+          req.params.attributeId,
+          req.body || {},
+          req.actor,
+          clientIp(req),
+          metaRead(req)
+        )
+      );
+    })
+  );
+
+  app.delete(
+    "/api/metadata/types/:id/attributes/:attributeId",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(
+        metadata.removeTypeAttribute(
+          db,
+          req.params.id,
+          req.params.attributeId,
+          req.actor,
+          clientIp(req),
+          metaRead(req)
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/metadata/attributes",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.listAttributes(db, req.query, metaRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/metadata/attributes",
+    auth,
+    canMeta("create"),
+    wrap((req, res) => {
+      const tenantId = metaWrite(req, req.body);
+      res.status(201).json(metadata.createAttribute(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    })
+  );
+
+  app.get(
+    "/api/metadata/attributes/:id",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.getAttribute(db, req.params.id, metaRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/metadata/attributes/:id",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(
+        metadata.updateAttribute(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req))
+      );
+    })
+  );
+
+  app.delete(
+    "/api/metadata/attributes/:id",
+    auth,
+    canMeta("delete"),
+    wrap((req, res) => {
+      const attribute = metadata.getAttribute(db, req.params.id, metaRead(req));
+      // Attributes are retained when referenced so records keep their contract.
+      res.json(
+        metadata.setAttributeStatus(db, attribute.id, "inactive", req.actor, clientIp(req), metaRead(req))
+      );
+    })
+  );
+
+  app.post(
+    "/api/metadata/attributes/:id/status",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(
+        metadata.setAttributeStatus(
+          db,
+          req.params.id,
+          req.body?.status,
+          req.actor,
+          clientIp(req),
+          metaRead(req)
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/metadata/lovs",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.listLovs(db, req.query, metaRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/metadata/lovs",
+    auth,
+    canMeta("create"),
+    wrap((req, res) => {
+      const tenantId = metaWrite(req, req.body);
+      res.status(201).json(metadata.createLov(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    })
+  );
+
+  app.get(
+    "/api/metadata/lovs/:id",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.getLov(db, req.params.id, metaRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/metadata/lovs/:id",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(metadata.updateLov(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/metadata/lovs/:id",
+    auth,
+    canMeta("delete"),
+    wrap((req, res) => {
+      res.json(metadata.deleteLov(db, req.params.id, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/metadata/lovs/:id/status",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(metadata.setLovStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/metadata/lovs/:id/values",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      const lov = metadata.getLov(db, req.params.id, metaRead(req));
+      res.json({ items: metadata.listValues(db, lov.id) });
+    })
+  );
+
+  app.post(
+    "/api/metadata/lovs/:id/values",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res
+        .status(201)
+        .json(metadata.addValue(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/metadata/lovs/:id/values/:valueId",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(
+        metadata.updateValue(
+          db,
+          req.params.id,
+          req.params.valueId,
+          req.body || {},
+          req.actor,
+          clientIp(req),
+          metaRead(req)
+        )
+      );
+    })
+  );
+
+  app.delete(
+    "/api/metadata/lovs/:id/values/:valueId",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(
+        metadata.removeValue(
+          db,
+          req.params.id,
+          req.params.valueId,
+          req.actor,
+          clientIp(req),
+          metaRead(req)
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/metadata/lovs/:id/cascade",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json({
+        items: metadata.cascadeOptions(
+          db,
+          req.params.id,
+          req.query.parentValueId ?? req.query.parent_value_id,
+          metaRead(req)
+        ),
+      });
+    })
+  );
+
+  app.get(
+    "/api/metadata/lovs/:id/usage",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json({ items: metadata.listUsage(db, req.params.id) });
+    })
+  );
+
+  app.get(
+    "/api/metadata/forms",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.listForms(db, req.query, metaRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/metadata/forms",
+    auth,
+    canMeta("create"),
+    wrap((req, res) => {
+      const tenantId = metaWrite(req, req.body);
+      res.status(201).json(metadata.createForm(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    })
+  );
+
+  app.get(
+    "/api/metadata/forms/:id",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.getForm(db, req.params.id, metaRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/metadata/forms/:id",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(metadata.updateForm(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/metadata/forms/:id",
+    auth,
+    canMeta("delete"),
+    wrap((req, res) => {
+      res.json(metadata.deleteForm(db, req.params.id, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/metadata/forms/:id/status",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(metadata.setFormStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/metadata/forms/:id/layout",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(metadata.replaceLayout(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/metadata/forms/:id/versions",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json({ items: metadata.formVersions(db, req.params.id) });
+    })
+  );
+
+  app.get(
+    "/api/metadata/forms/:id/render",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.renderForm(db, req.params.id, metaRead(req), { mode: req.query.mode }));
+    })
+  );
+
+  app.post(
+    "/api/metadata/forms/:id/render",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      const tenantId = metaRead(req);
+      res.json(
+        metadata.renderForm(db, req.params.id, tenantId, {
+          mode: req.body?.mode,
+          values: req.body?.values || {},
+          context: req.body?.context || {},
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/metadata/rules",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.listRules(db, req.query, metaRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/metadata/rules",
+    auth,
+    canMeta("create"),
+    wrap((req, res) => {
+      const tenantId = metaWrite(req, req.body);
+      res.status(201).json(metadata.createRule(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    })
+  );
+
+  app.get(
+    "/api/metadata/rules/:id",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      res.json(metadata.getRule(db, req.params.id, metaRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/metadata/rules/:id",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(metadata.updateRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/metadata/rules/:id",
+    auth,
+    canMeta("delete"),
+    wrap((req, res) => {
+      res.json(metadata.deleteRule(db, req.params.id, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/metadata/rules/:id/status",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      res.json(metadata.setRuleStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), metaRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/metadata/rules/:id/test",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      const rule = metadata.getRule(db, req.params.id, metaRead(req));
+      res.json(metadata.testRule(db, rule, req.body?.context || {}));
+    })
+  );
+
+  app.post(
+    "/api/metadata/validate",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      const tenantId = metaRead(req, { ...req.query, ...(req.body || {}) });
+      res.json(metadata.validateRecord(db, req.body || {}, tenantId));
+    })
+  );
+
+  app.get(
+    "/api/metadata/configurations",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      const scope = req.query.scope || "system";
+      const scopeId = req.query.scopeId ?? req.query.scope_id;
+      if (scope === "organization" && scopeId) scopedOrg(db, req, scopeId);
+      res.json({
+        items: metadata.listConfigurations(db, { scope, scopeId, artifactType: req.query.artifactType }),
+      });
+    })
+  );
+
+  app.get(
+    "/api/metadata/configurations/effective",
+    auth,
+    canMeta("read"),
+    wrap((req, res) => {
+      const organizationId = req.query.organizationId;
+      if (organizationId) scopedOrg(db, req, organizationId);
+      res.json({
+        items: metadata.effectiveCatalog(db, {
+          artifactType: req.query.artifactType,
+          tenantId: req.tenantId,
+          organizationId,
+        }),
+      });
+    })
+  );
+
+  app.post(
+    "/api/metadata/configurations",
+    auth,
+    canMeta("update"),
+    wrap((req, res) => {
+      const scope = req.body?.scope || "system";
+      const scopeId = req.body?.scopeId ?? req.body?.scope_id;
+      if (scope === "tenant") tenants.getTenant(db, scopeId);
+      if (scope === "organization") scopedOrg(db, req, scopeId);
+      res.json(metadata.setConfiguration(db, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/metadata/configurations",
+    auth,
+    canMeta("delete"),
+    wrap((req, res) => {
+      res.json(
+        metadata.deleteConfiguration(
+          db,
+          {
+            scope: req.query.scope || "system",
+            scopeId: req.query.scopeId ?? req.query.scope_id,
+            artifactType: req.query.artifactType,
+            artifactId: req.query.artifactId,
+          },
+          req.actor,
+          clientIp(req)
+        )
+      );
     })
   );
 

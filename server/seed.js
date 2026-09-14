@@ -11,6 +11,7 @@ import * as hierarchy from "./services/hierarchy.js";
 import * as providers from "./services/providers.js";
 import * as tenants from "./services/tenants.js";
 import * as config from "./services/config.js";
+import * as metadata from "./services/metadata.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -351,6 +352,47 @@ function seedAuthz(db) {
     kind: "object",
     parent_id: iamRoot.id,
   });
+  const iamMetadata = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.metadata",
+    name: "Metadata & configuration",
+    kind: "module",
+  });
+  const iamMetaTypes = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.metadata.types",
+    name: "Metadata types",
+    kind: "object",
+    parent_id: iamMetadata.id,
+  });
+  const iamMetaAttributes = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.metadata.attributes",
+    name: "Metadata attributes",
+    kind: "object",
+    parent_id: iamMetadata.id,
+  });
+  const iamMetaLovs = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.metadata.lovs",
+    name: "Metadata LOVs",
+    kind: "object",
+    parent_id: iamMetadata.id,
+  });
+  const iamMetaForms = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.metadata.forms",
+    name: "Metadata forms",
+    kind: "object",
+    parent_id: iamMetadata.id,
+  });
+  const iamMetaRules = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.metadata.rules",
+    name: "Metadata rules",
+    kind: "object",
+    parent_id: iamMetadata.id,
+  });
   const financeRoot = catalog.createResource(db, {
     application_id: financeApp.id,
     code: "finance",
@@ -392,6 +434,12 @@ function seedAuthz(db) {
     iamSessions,
     iamTenants,
     iamConfig,
+    iamMetadata,
+    iamMetaTypes,
+    iamMetaAttributes,
+    iamMetaLovs,
+    iamMetaForms,
+    iamMetaRules,
     financeRoot,
     financeLedger,
     siteRoot,
@@ -414,11 +462,13 @@ function seedAuthz(db) {
   if (platform) {
     grantAll(db, platform.id, iamRoot);
     grantAll(db, platform.id, iamPlatform);
+    grantAll(db, platform.id, iamMetadata);
     grantAll(db, platform.id, financeRoot);
     grantAll(db, platform.id, siteRoot);
   }
   if (iamAdmin) {
     grantAll(db, iamAdmin.id, iamRoot);
+    grantAll(db, iamAdmin.id, iamMetadata);
   }
   if (auditor) {
     grantAll(db, auditor.id, iamRoot, ["read"], apac?.id || 0);
@@ -576,22 +626,41 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.sessions", name: "Sessions", parentCode: "iam" },
     { applicationCode: "iam", code: "iam.tenants", name: "Tenants", parentCode: "iam" },
     { applicationCode: "iam", code: "iam.config", name: "Configuration", parentCode: "iam" },
+    { applicationCode: "iam", code: "iam.metadata", name: "Metadata & configuration", kind: "module" },
+    { applicationCode: "iam", code: "iam.metadata.types", name: "Metadata types", parentCode: "iam.metadata" },
+    { applicationCode: "iam", code: "iam.metadata.attributes", name: "Metadata attributes", parentCode: "iam.metadata" },
+    { applicationCode: "iam", code: "iam.metadata.lovs", name: "Metadata LOVs", parentCode: "iam.metadata" },
+    { applicationCode: "iam", code: "iam.metadata.forms", name: "Metadata forms", parentCode: "iam.metadata" },
+    { applicationCode: "iam", code: "iam.metadata.rules", name: "Metadata rules", parentCode: "iam.metadata" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
   const platformRes = queryOne(db, "SELECT * FROM resources WHERE code = 'iam.platform'");
-  for (const code of ["iam.tenants", "iam.config"]) {
+  for (const code of ["iam.tenants", "iam.config", "iam.metadata"]) {
     const res = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (platform && res) {
+      const grantRes = code === "iam.metadata" ? res : res;
       const existingGrant = queryOne(
         db,
         `SELECT 1 AS x FROM role_permissions rp
          JOIN permissions p ON p.id = rp.permission_id
          WHERE rp.role_id = ? AND p.resource_id = ? AND p.action = 'read'`,
-        [platform.id, res.id]
+        [platform.id, grantRes.id]
       );
-      if (!existingGrant) grantAll(db, platform.id, res);
+      if (!existingGrant) grantAll(db, platform.id, grantRes);
     }
+  }
+  const iamAdmin = roleByCode(db, "iam.admin");
+  const metadataRes = queryOne(db, "SELECT * FROM resources WHERE code = 'iam.metadata'");
+  if (iamAdmin && metadataRes) {
+    const existing = queryOne(
+      db,
+      `SELECT 1 AS x FROM role_permissions rp
+       JOIN permissions p ON p.id = rp.permission_id
+       WHERE rp.role_id = ? AND p.resource_id = ? AND p.action = 'read'`,
+      [iamAdmin.id, metadataRes.id]
+    );
+    if (!existing) grantAll(db, iamAdmin.id, metadataRes);
   }
   if (platform && platformRes) {
     const existingGrant = queryOne(
@@ -618,6 +687,247 @@ function seedMissingCatalog(db) {
   return created;
 }
 
+function seedMetadata(db) {
+  const existing = db.prepare("SELECT COUNT(*) AS c FROM metadata_types").get();
+  if (existing.c > 0) return { metadataSeeded: false };
+  const helixes = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  if (!helixes) return { metadataSeeded: false };
+  const tenantId = helixes.id;
+  const admin = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin'");
+  const actor = admin ? { id: admin.id, username: admin.username } : null;
+  const ip = "seed";
+  const created = { types: [], attributes: [], lovs: [], forms: [], rules: [] };
+
+  const categoryLov = metadata.createLov(
+    db,
+    { code: "part-category", name: "Part category", selection_type: "single", tenant_id: tenantId },
+    actor,
+    ip,
+    tenantId
+  );
+  const statusLov = metadata.createLov(
+    db,
+    { code: "lifecycle-status", name: "Lifecycle status", selection_type: "single", tenant_id: tenantId },
+    actor,
+    ip,
+    tenantId
+  );
+  const docClassLov = metadata.createLov(
+    db,
+    { code: "document-class", name: "Document class", selection_type: "single", tenant_id: tenantId },
+    actor,
+    ip,
+    tenantId
+  );
+  created.lovs.push(categoryLov, statusLov, docClassLov);
+
+  const categoryValues = [
+    { code: "mechanical", label: "Mechanical" },
+    { code: "electrical", label: "Electrical" },
+    { code: "hydraulic", label: "Hydraulic" },
+    { code: "fastener", label: "Fastener" },
+  ];
+  const statusValues = [
+    { code: "draft", label: "Draft" },
+    { code: "review", label: "In review" },
+    { code: "released", label: "Released" },
+    { code: "obsolete", label: "Obsolete" },
+  ];
+  const docClassValues = [
+    { code: "spec", label: "Specification" },
+    { code: "drawing", label: "Drawing" },
+    { code: "certificate", label: "Certificate" },
+  ];
+  for (const value of categoryValues) metadata.addValue(db, categoryLov.id, value, actor, ip, tenantId);
+  for (const value of statusValues) metadata.addValue(db, statusLov.id, value, actor, ip, tenantId);
+  for (const value of docClassValues) metadata.addValue(db, docClassLov.id, value, actor, ip, tenantId);
+
+  const attributes = [
+    {
+      code: "part.number",
+      name: "Part number",
+      data_type: "string",
+      required: true,
+      max_length: 32,
+      validation: { pattern: "^[A-Z0-9-]+$", message: "Part number must be uppercase letters, digits or dashes" },
+    },
+    { code: "part.name", name: "Description", data_type: "string", required: true, max_length: 120 },
+    { code: "part.category", name: "Category", data_type: "string", required: true, lov_id: categoryLov.id },
+    { code: "part.status", name: "Status", data_type: "string", required: true, lov_id: statusLov.id, default_value: "draft" },
+    { code: "part.weight_kg", name: "Weight (kg)", data_type: "decimal", min_value: 0, max_value: 100000, validation: { scale: 3 } },
+    { code: "part.revision", name: "Revision", data_type: "integer", min_value: 1, max_value: 999, default_value: "1" },
+    { code: "part.is_critical", name: "Safety critical", data_type: "boolean", default_value: "false" },
+    { code: "part.effective_date", name: "Effective date", data_type: "date" },
+    { code: "part.released_at", name: "Released at", data_type: "datetime" },
+    { code: "part.supplier", name: "Preferred supplier", data_type: "reference", validation: { reference_type: "organization" } },
+    { code: "part.tags", name: "Tags", data_type: "multi_value", validation: { min_items: 0, max_items: 5 } },
+    { code: "part.notes", name: "Notes", data_type: "string", max_length: 2000, visible: true, editable: true },
+  ];
+  const attributeRows = {};
+  for (const attribute of attributes) {
+    attributeRows[attribute.code] = metadata.createAttribute(db, attribute, actor, ip, tenantId);
+  }
+  created.attributes.push(...Object.values(attributeRows));
+
+  const partType = metadata.createType(
+    db,
+    { code: "part", name: "Part", module: "plm", status: "active", tenant_id: tenantId },
+    actor,
+    ip,
+    tenantId
+  );
+  created.types.push(partType);
+  let sequence = 0;
+  for (const attribute of attributes) {
+    metadata.addTypeAttribute(
+      db,
+      partType.id,
+      {
+        attribute_id: attributeRows[attribute.code].id,
+        sequence: (sequence += 10),
+        required_override: attribute.required === undefined ? null : attribute.required ? 1 : 0,
+      },
+      actor,
+      ip,
+      tenantId
+    );
+  }
+
+  const qualityType = metadata.createType(
+    db,
+    { code: "quality-record", name: "Quality record", module: "qms", status: "active", tenant_id: tenantId },
+    actor,
+    ip,
+    tenantId
+  );
+  created.types.push(qualityType);
+  metadata.addTypeAttribute(db, qualityType.id, { attribute_id: attributeRows["part.number"].id, sequence: 10 }, actor, ip, tenantId);
+  metadata.addTypeAttribute(db, qualityType.id, { attribute_id: attributeRows["part.status"].id, sequence: 20 }, actor, ip, tenantId);
+  metadata.addTypeAttribute(db, qualityType.id, { attribute_id: attributeRows["part.notes"].id, sequence: 30 }, actor, ip, tenantId);
+
+  const inspectionType = metadata.createType(
+    db,
+    {
+      code: "inspection",
+      name: "Inspection",
+      module: "qms",
+      parent_type_id: qualityType.id,
+      status: "active",
+      tenant_id: tenantId,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+  created.types.push(inspectionType);
+  metadata.addTypeAttribute(db, inspectionType.id, { attribute_id: attributeRows["part.category"].id, sequence: 15 }, actor, ip, tenantId);
+  metadata.addTypeAttribute(db, inspectionType.id, { attribute_id: attributeRows["part.effective_date"].id, sequence: 40 }, actor, ip, tenantId);
+
+  const createForm = metadata.createForm(
+    db,
+    { code: "part.create", name: "Create part", type_id: partType.id, mode: "create", status: "active", tenant_id: tenantId },
+    actor,
+    ip,
+    tenantId
+  );
+  metadata.replaceLayout(
+    db,
+    createForm.id,
+    {
+      nodes: [
+        { code: "identity", kind: "section", label: "Identification", sequence: 10 },
+        { code: "classification", kind: "section", label: "Classification", sequence: 20 },
+        { code: "physical", kind: "section", label: "Physical", sequence: 30 },
+      ],
+      fields: [
+        { code: "part.number", node_code: "identity", sequence: 10 },
+        { code: "part.name", node_code: "identity", sequence: 20 },
+        { code: "part.category", node_code: "classification", sequence: 30 },
+        { code: "part.status", node_code: "classification", sequence: 40 },
+        { code: "part.revision", node_code: "classification", sequence: 50 },
+        { code: "part.weight_kg", node_code: "physical", sequence: 60 },
+        { code: "part.is_critical", node_code: "physical", sequence: 70 },
+        { code: "part.supplier", node_code: "physical", sequence: 80 },
+        { code: "part.tags", node_code: "physical", sequence: 90 },
+      ],
+    },
+    actor,
+    ip,
+    tenantId
+  );
+  const viewForm = metadata.createForm(
+    db,
+    { code: "part.view", name: "View part", type_id: partType.id, mode: "view", status: "active", tenant_id: tenantId },
+    actor,
+    ip,
+    tenantId
+  );
+  metadata.replaceLayout(
+    db,
+    viewForm.id,
+    {
+      nodes: [{ code: "summary", kind: "section", label: "Summary", sequence: 10 }],
+      fields: attributes.map((attribute, index) => ({ code: attribute.code, node_code: "summary", sequence: (index + 1) * 10 })),
+    },
+    actor,
+    ip,
+    tenantId
+  );
+  created.forms.push(createForm, viewForm);
+
+  const rules = [
+    {
+      code: "weight.positive",
+      name: "Weight must be positive",
+      category: "validation",
+      type_id: partType.id,
+      condition: {
+        op: "and",
+        args: [
+          { op: "is_not_empty", arg: { op: "value", path: "values.part.weight_kg" } },
+          { op: "lte", left: { op: "value", path: "values.part.weight_kg" }, right: 0 },
+        ],
+      },
+      actions: [{ type: "error", field: "part.weight_kg", message: "Weight must be greater than zero" }],
+    },
+    {
+      code: "critical.requires.notes",
+      name: "Critical parts need notes",
+      category: "dependency",
+      type_id: partType.id,
+      condition: { op: "eq", left: { op: "value", path: "values.part.is_critical" }, right: true },
+      actions: [{ type: "require", field: "part.notes" }],
+    },
+    {
+      code: "released.requires.date",
+      name: "Released parts need an effective date",
+      category: "dependency",
+      type_id: partType.id,
+      condition: {
+        op: "and",
+        args: [
+          { op: "eq", left: { op: "value", path: "values.part.status" }, right: "released" },
+          { op: "is_empty", arg: { op: "value", path: "values.part.effective_date" } },
+        ],
+      },
+      actions: [{ type: "error", field: "part.effective_date", message: "Released parts require an effective date" }],
+    },
+    {
+      code: "obsolete.readonly",
+      name: "Obsolete parts are read-only",
+      category: "editability",
+      type_id: partType.id,
+      condition: { op: "eq", left: { op: "value", path: "values.part.status" }, right: "obsolete" },
+      actions: [{ type: "set_editable", field: "part.revision", value: false }],
+    },
+  ];
+  for (const rule of rules) {
+    created.rules.push(metadata.createRule(db, { ...rule, tenant_id: tenantId }, actor, ip, tenantId));
+  }
+
+  return { metadataSeeded: true, metadata: created };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -627,6 +937,7 @@ export function seedDatabase(db) {
   seedMissingCatalog(db);
   seedMissingHierarchy(db);
   tenants.backfillTenants(db);
+  seedMetadata(db);
   return { ...identity, ...authz };
 }
 

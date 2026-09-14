@@ -342,3 +342,240 @@ CREATE TABLE IF NOT EXISTS config_values (
 );
 
 CREATE INDEX IF NOT EXISTS idx_config_values_scope ON config_values(scope, scope_id);
+
+-- ============================================================
+-- Metadata & Configuration Management engine
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS metadata_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  module TEXT NOT NULL DEFAULT 'platform',
+  parent_type_id INTEGER REFERENCES metadata_types(id),
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'inactive')),
+  version INTEGER NOT NULL DEFAULT 1,
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_types_code
+  ON metadata_types(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_metadata_types_parent ON metadata_types(parent_type_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_types_tenant ON metadata_types(tenant_id);
+
+CREATE TABLE IF NOT EXISTS metadata_lovs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  selection_type TEXT NOT NULL DEFAULT 'single' CHECK (selection_type IN ('single', 'multi')),
+  parent_lov_id INTEGER REFERENCES metadata_lovs(id),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_lovs_code
+  ON metadata_lovs(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_metadata_lovs_tenant ON metadata_lovs(tenant_id);
+
+CREATE TABLE IF NOT EXISTS metadata_lov_values (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lov_id INTEGER NOT NULL REFERENCES metadata_lovs(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  label TEXT NOT NULL,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  parent_value_id INTEGER REFERENCES metadata_lov_values(id),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (lov_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_lov_values_lov ON metadata_lov_values(lov_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_lov_values_parent ON metadata_lov_values(parent_value_id);
+
+CREATE TABLE IF NOT EXISTS metadata_lov_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lov_id INTEGER NOT NULL REFERENCES metadata_lovs(id) ON DELETE CASCADE,
+  value_id INTEGER REFERENCES metadata_lov_values(id) ON DELETE SET NULL,
+  ref_type TEXT NOT NULL DEFAULT 'record',
+  ref_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (lov_id, value_id, ref_type, ref_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_lov_usage_value ON metadata_lov_usage(value_id);
+
+CREATE TABLE IF NOT EXISTS metadata_attributes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  data_type TEXT NOT NULL DEFAULT 'string'
+    CHECK (data_type IN ('string', 'integer', 'decimal', 'boolean', 'date', 'datetime', 'reference', 'multi_value')),
+  required INTEGER NOT NULL DEFAULT 0 CHECK (required IN (0, 1)),
+  default_value TEXT DEFAULT '',
+  min_length INTEGER,
+  max_length INTEGER,
+  min_value REAL,
+  max_value REAL,
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  multi_value INTEGER NOT NULL DEFAULT 0 CHECK (multi_value IN (0, 1)),
+  visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
+  editable INTEGER NOT NULL DEFAULT 1 CHECK (editable IN (0, 1)),
+  parent_attribute_id INTEGER REFERENCES metadata_attributes(id),
+  lov_id INTEGER REFERENCES metadata_lovs(id),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_attributes_code
+  ON metadata_attributes(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_metadata_attributes_tenant ON metadata_attributes(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_attributes_parent ON metadata_attributes(parent_attribute_id);
+
+CREATE TABLE IF NOT EXISTS metadata_type_attributes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type_id INTEGER NOT NULL REFERENCES metadata_types(id) ON DELETE CASCADE,
+  attribute_id INTEGER NOT NULL REFERENCES metadata_attributes(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  required_override INTEGER CHECK (required_override IN (0, 1)),
+  default_override TEXT,
+  visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
+  editable INTEGER NOT NULL DEFAULT 1 CHECK (editable IN (0, 1)),
+  removed INTEGER NOT NULL DEFAULT 0 CHECK (removed IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (type_id, attribute_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_type_attributes_type ON metadata_type_attributes(type_id);
+
+CREATE TABLE IF NOT EXISTS metadata_forms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  type_id INTEGER NOT NULL REFERENCES metadata_types(id),
+  mode TEXT NOT NULL DEFAULT 'create' CHECK (mode IN ('create', 'edit', 'view')),
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'inactive')),
+  version INTEGER NOT NULL DEFAULT 1,
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_forms_code
+  ON metadata_forms(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_metadata_forms_type ON metadata_forms(type_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_forms_tenant ON metadata_forms(tenant_id);
+
+CREATE TABLE IF NOT EXISTS metadata_form_nodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  form_id INTEGER NOT NULL REFERENCES metadata_forms(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('tab', 'section', 'group')),
+  parent_id INTEGER REFERENCES metadata_form_nodes(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  label TEXT NOT NULL,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
+  conditions_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (form_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_form_nodes_form ON metadata_form_nodes(form_id);
+
+CREATE TABLE IF NOT EXISTS metadata_form_fields (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  form_id INTEGER NOT NULL REFERENCES metadata_forms(id) ON DELETE CASCADE,
+  attribute_id INTEGER NOT NULL REFERENCES metadata_attributes(id),
+  node_id INTEGER REFERENCES metadata_form_nodes(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  label_override TEXT DEFAULT '',
+  placeholder TEXT DEFAULT '',
+  help_text TEXT DEFAULT '',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  required_override INTEGER CHECK (required_override IN (0, 1)),
+  visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
+  editable INTEGER NOT NULL DEFAULT 1 CHECK (editable IN (0, 1)),
+  default_override TEXT,
+  col_span INTEGER NOT NULL DEFAULT 12,
+  conditions_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (form_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_form_fields_form ON metadata_form_fields(form_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_form_fields_node ON metadata_form_fields(node_id);
+
+CREATE TABLE IF NOT EXISTS metadata_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'validation'
+    CHECK (category IN ('validation', 'visibility', 'editability', 'default', 'dependency', 'condition')),
+  type_id INTEGER REFERENCES metadata_types(id),
+  form_id INTEGER REFERENCES metadata_forms(id),
+  target_field TEXT DEFAULT '',
+  condition_json TEXT NOT NULL DEFAULT '{}',
+  actions_json TEXT NOT NULL DEFAULT '[]',
+  priority INTEGER NOT NULL DEFAULT 100,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'inactive')),
+  version INTEGER NOT NULL DEFAULT 1,
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_rules_code
+  ON metadata_rules(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_metadata_rules_type ON metadata_rules(type_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_rules_form ON metadata_rules(form_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_rules_tenant ON metadata_rules(tenant_id);
+
+CREATE TABLE IF NOT EXISTS metadata_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  artifact_type TEXT NOT NULL CHECK (artifact_type IN ('type', 'attribute', 'lov', 'form', 'rule')),
+  artifact_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'archived')),
+  snapshot TEXT NOT NULL DEFAULT '{}',
+  notes TEXT DEFAULT '',
+  created_by TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (artifact_type, artifact_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_versions_artifact ON metadata_versions(artifact_type, artifact_id);
+
+CREATE TABLE IF NOT EXISTS metadata_configurations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL CHECK (scope IN ('system', 'tenant', 'organization')),
+  scope_id INTEGER NOT NULL DEFAULT 0,
+  artifact_type TEXT NOT NULL CHECK (artifact_type IN ('type', 'attribute', 'lov', 'form', 'rule')),
+  artifact_id INTEGER NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  pinned_version INTEGER,
+  settings_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (scope, scope_id, artifact_type, artifact_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_configurations_scope ON metadata_configurations(scope, scope_id);

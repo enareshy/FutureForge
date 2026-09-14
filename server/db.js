@@ -60,6 +60,9 @@ export function migrate(db) {
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("007_tenants_config");
   db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("008_metadata");
+  db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();
 }
