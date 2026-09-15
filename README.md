@@ -35,6 +35,12 @@ Default operator: `admin` / `HelixAdmin!42`
 - `/api/tenants` — tenant administration, context switch, tenant-scoped config
 - `/api/config` — effective configuration; System → Tenant → Organization precedence
 - `/api/metadata` — reusable configuration & metadata: types, attributes, LOVs, dynamic forms, rules, scoped artifact config
+- `/api/objects` — metadata-typed business objects: CRUD, search, `/summary`, `/bulk`, `/versions`, `/status`, `/checkout`, `/checkin`, `/locks`, `/restore`, `/tree`, `/graph`, `/relationships`, `/dependencies`, `/safe-delete`
+- `/api/object-types` — object types available to the current tenant
+- `/api/relationship-types` — typed, cardinality-aware relationship definitions
+- `/api/relationships` — object relationships: list, create, `/validate`, update, delete
+- `/api/references` — strong/weak/external references, plus `/orphans`
+- `/api/dependencies` — direct dependencies, `/impact` analysis and `/cycles` detection
 - `/api/hierarchy` — Super Admin–defined org levels (operators)
 - `/api/platform/hierarchy` `/api/platform/settings` — Super Admin feature properties
 - `/api/companies` `/api/business-units` `/api/plants` `/api/sites` `/api/departments` — typed collections
@@ -48,7 +54,7 @@ IAM APIs are fail-safe: session plus `checkPermission`. Unauthorized callers rec
 
 In-process (future modules): `import { checkPermission, organizationContext } from "./server/platform.js"`
 
-Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`
+Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`
 
 The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config). The reusable client renderer is `web/src/components/FormRenderer.jsx`.
 

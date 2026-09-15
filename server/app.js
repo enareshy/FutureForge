@@ -21,6 +21,7 @@ import * as mfa from "./services/mfa.js";
 import * as tenants from "./services/tenants.js";
 import * as config from "./services/config.js";
 import * as metadata from "./services/metadata.js";
+import * as objects from "./services/objects.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
 import { effectiveAccess } from "./services/access.js";
@@ -1088,6 +1089,430 @@ export function createApp(db) {
           clientIp(req)
         )
       );
+    })
+  );
+
+  // -------------------------------------------------------------------------
+  // Object & Relationship Framework
+  // Business objects are metadata-typed instances; relationships, references
+  // and dependencies are tenant-isolated. Object IAM sub-resources gate each
+  // concern independently.
+  // -------------------------------------------------------------------------
+
+  const canObjects = (action) => can("iam.objects", action);
+  const canRelationships = (action) => can("iam.objects.relationships", action);
+  const canReferences = (action) => can("iam.objects.references", action);
+  const canDependencies = (action) => can("iam.objects.dependencies", action);
+  const relTypeRead = (req, source) => metaReadTenant(db, req.actor, source || req.query, req.tenantId);
+
+  app.get(
+    "/api/object-types",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(objects.objectTypes(db, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/objects/summary",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(objects.objectSummary(db, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/objects",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(objects.listObjects(db, req.query, req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/objects",
+    auth,
+    canObjects("create"),
+    wrap((req, res) => {
+      res.status(201).json(objects.createObject(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/objects/bulk",
+    auth,
+    canObjects("create"),
+    wrap((req, res) => {
+      res.status(201).json(objects.bulkCreateObjects(db, req.body?.items || [], req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.patch(
+    "/api/objects/bulk",
+    auth,
+    canObjects("update"),
+    wrap((req, res) => {
+      res.json(objects.bulkMutateObjects(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(objects.getObject(db, req.params.id, req.tenantId));
+    })
+  );
+
+  app.put(
+    "/api/objects/:id",
+    auth,
+    canObjects("update"),
+    wrap((req, res) => {
+      res.json(objects.updateObject(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/objects/:id",
+    auth,
+    canObjects("delete"),
+    wrap((req, res) => {
+      const force = req.query.force === "true" || req.query.force === true;
+      res.json(
+        objects.softDeleteObject(db, req.params.id, { force, summary: req.query.summary }, req.actor, req.tenantId, clientIp(req))
+      );
+    })
+  );
+
+  app.post(
+    "/api/objects/:id/restore",
+    auth,
+    canObjects("update"),
+    wrap((req, res) => {
+      res.json(objects.restoreObject(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/objects/:id/status",
+    auth,
+    canObjects("update"),
+    wrap((req, res) => {
+      res.json(objects.setObjectStatus(db, req.params.id, req.body?.status, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/objects/:id/checkout",
+    auth,
+    canObjects("update"),
+    wrap((req, res) => {
+      res.json(objects.checkoutObject(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/objects/:id/checkin",
+    auth,
+    canObjects("update"),
+    wrap((req, res) => {
+      res.json(objects.checkinObject(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/locks",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(objects.objectLocks(db, req.params.id, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/versions",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(objects.listObjectVersions(db, req.params.id, req.tenantId, req.query));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/versions/:revision",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(objects.getObjectVersion(db, req.params.id, req.params.revision, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/relationships",
+    auth,
+    canRelationships("read"),
+    wrap((req, res) => {
+      res.json(objects.relationshipsForObject(db, req.params.id, req.tenantId, req.query));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/tree",
+    auth,
+    canRelationships("read"),
+    wrap((req, res) => {
+      res.json(objects.traverse(db, req.params.id, req.query, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/graph",
+    auth,
+    canRelationships("read"),
+    wrap((req, res) => {
+      res.json(objects.graph(db, req.params.id, req.tenantId, req.query));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/dependencies",
+    auth,
+    canDependencies("read"),
+    wrap((req, res) => {
+      res.json(objects.directDependencies(db, req.params.id, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/safe-delete",
+    auth,
+    canDependencies("read"),
+    wrap((req, res) => {
+      res.json(objects.safeDeleteReport(db, req.params.id, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/relationship-types",
+    auth,
+    canRelationships("read"),
+    wrap((req, res) => {
+      res.json(objects.listRelationshipTypes(db, req.query, relTypeRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/relationship-types",
+    auth,
+    canRelationships("create"),
+    wrap((req, res) => {
+      res
+        .status(201)
+        .json(objects.createRelationshipType(db, req.body || {}, req.actor, clientIp(req), req.tenantId, req.query));
+    })
+  );
+
+  app.get(
+    "/api/relationship-types/:id",
+    auth,
+    canRelationships("read"),
+    wrap((req, res) => {
+      res.json(objects.getRelationshipType(db, req.params.id, relTypeRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/relationship-types/:id",
+    auth,
+    canRelationships("update"),
+    wrap((req, res) => {
+      res.json(
+        objects.updateRelationshipType(db, req.params.id, req.body || {}, req.actor, clientIp(req), req.tenantId)
+      );
+    })
+  );
+
+  app.post(
+    "/api/relationship-types/:id/status",
+    auth,
+    canRelationships("update"),
+    wrap((req, res) => {
+      res.json(
+        objects.setRelationshipTypeStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), req.tenantId)
+      );
+    })
+  );
+
+  app.delete(
+    "/api/relationship-types/:id",
+    auth,
+    canRelationships("delete"),
+    wrap((req, res) => {
+      res.json(objects.deleteRelationshipType(db, req.params.id, req.actor, clientIp(req), req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/relationships",
+    auth,
+    canRelationships("read"),
+    wrap((req, res) => {
+      res.json(objects.listRelationships(db, req.query, req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/relationships/validate",
+    auth,
+    canRelationships("read"),
+    wrap((req, res) => {
+      res.json(objects.validateRelationship(db, req.body || {}, req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/relationships",
+    auth,
+    canRelationships("create"),
+    wrap((req, res) => {
+      res.status(201).json(objects.createRelationship(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/relationships/:id",
+    auth,
+    canRelationships("read"),
+    wrap((req, res) => {
+      res.json(objects.getRelationship(db, req.params.id, req.tenantId));
+    })
+  );
+
+  app.put(
+    "/api/relationships/:id",
+    auth,
+    canRelationships("update"),
+    wrap((req, res) => {
+      res.json(objects.updateRelationship(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/relationships/:id/validate",
+    auth,
+    canRelationships("read"),
+    wrap((req, res) => {
+      const existing = objects.getRelationship(db, req.params.id, req.tenantId);
+      res.json(
+        objects.validateRelationship(
+          db,
+          {
+            ...(req.body || {}),
+            type: existing.relationship_type_id,
+            source: existing.source.id,
+            target: existing.target.id,
+          },
+          req.tenantId
+        )
+      );
+    })
+  );
+
+  app.delete(
+    "/api/relationships/:id",
+    auth,
+    canRelationships("delete"),
+    wrap((req, res) => {
+      const force = req.query.force === "true" || req.query.force === true;
+      res.json(objects.deleteRelationship(db, req.params.id, { force }, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/references/orphans",
+    auth,
+    canReferences("read"),
+    wrap((req, res) => {
+      res.json(objects.orphanReferences(db, req.tenantId, req.query));
+    })
+  );
+
+  app.get(
+    "/api/references",
+    auth,
+    canReferences("read"),
+    wrap((req, res) => {
+      res.json(objects.listReferences(db, req.query, req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/references",
+    auth,
+    canReferences("create"),
+    wrap((req, res) => {
+      res.status(201).json(objects.createReference(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/references/:id",
+    auth,
+    canReferences("read"),
+    wrap((req, res) => {
+      res.json(objects.getReference(db, req.params.id, req.tenantId));
+    })
+  );
+
+  app.put(
+    "/api/references/:id",
+    auth,
+    canReferences("update"),
+    wrap((req, res) => {
+      res.json(objects.updateReference(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/references/:id",
+    auth,
+    canReferences("delete"),
+    wrap((req, res) => {
+      res.json(objects.deleteReference(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/dependencies/cycles",
+    auth,
+    canDependencies("read"),
+    wrap((req, res) => {
+      res.json(objects.detectCycles(db, req.tenantId, req.query));
+    })
+  );
+
+  app.get(
+    "/api/dependencies/impact",
+    auth,
+    canDependencies("read"),
+    wrap((req, res) => {
+      const objectId = req.query.objectId ?? req.query.object_id ?? req.query.id;
+      if (!objectId) throw new HttpError(400, "objectId is required");
+      res.json(objects.impactOf(db, objectId, req.tenantId, req.query));
+    })
+  );
+
+  app.get(
+    "/api/dependencies/:objectId",
+    auth,
+    canDependencies("read"),
+    wrap((req, res) => {
+      res.json(objects.directDependencies(db, req.params.objectId, req.tenantId));
     })
   );
 

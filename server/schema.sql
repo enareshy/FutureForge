@@ -579,3 +579,153 @@ CREATE TABLE IF NOT EXISTS metadata_configurations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_metadata_configurations_scope ON metadata_configurations(scope, scope_id);
+
+-- ============================================================
+-- Object & Relationship Framework
+-- Objects are metadata-typed business instances; relationship
+-- types define edges; references track strong/weak/external
+-- links and dependencies for integrity and impact analysis.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS relationship_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  module TEXT NOT NULL DEFAULT 'platform',
+  source_type_id INTEGER REFERENCES metadata_types(id),
+  target_type_id INTEGER REFERENCES metadata_types(id),
+  cardinality TEXT NOT NULL DEFAULT 'N:N' CHECK (cardinality IN ('1:1', '1:N', 'N:1', 'N:N')),
+  directed INTEGER NOT NULL DEFAULT 1 CHECK (directed IN (0, 1)),
+  bidirectional INTEGER NOT NULL DEFAULT 0 CHECK (bidirectional IN (0, 1)),
+  inverse_code TEXT DEFAULT '',
+  semantic TEXT NOT NULL DEFAULT 'association'
+    CHECK (semantic IN ('association', 'aggregation', 'composition')),
+  required INTEGER NOT NULL DEFAULT 0 CHECK (required IN (0, 1)),
+  min_occurrences INTEGER NOT NULL DEFAULT 0,
+  max_occurrences INTEGER,
+  allow_self INTEGER NOT NULL DEFAULT 0 CHECK (allow_self IN (0, 1)),
+  cascade_delete INTEGER NOT NULL DEFAULT 0 CHECK (cascade_delete IN (0, 1)),
+  attributes_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relationship_types_code
+  ON relationship_types(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_relationship_types_source ON relationship_types(source_type_id);
+CREATE INDEX IF NOT EXISTS idx_relationship_types_target ON relationship_types(target_type_id);
+CREATE INDEX IF NOT EXISTS idx_relationship_types_tenant ON relationship_types(tenant_id);
+
+CREATE TABLE IF NOT EXISTS objects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
+  object_type_id INTEGER NOT NULL REFERENCES metadata_types(id),
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'active', 'released', 'obsolete', 'archived')),
+  revision INTEGER NOT NULL DEFAULT 1,
+  data_json TEXT NOT NULL DEFAULT '{}',
+  owner_id INTEGER REFERENCES users(id),
+  owner_object_id INTEGER REFERENCES objects(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  external_ref TEXT DEFAULT '',
+  external_system TEXT DEFAULT '',
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  created_by INTEGER REFERENCES users(id),
+  updated_by INTEGER REFERENCES users(id),
+  deleted_at TEXT,
+  deleted_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_objects_code ON objects(tenant_id, code);
+CREATE INDEX IF NOT EXISTS idx_objects_type ON objects(object_type_id);
+CREATE INDEX IF NOT EXISTS idx_objects_tenant ON objects(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_objects_status ON objects(status);
+CREATE INDEX IF NOT EXISTS idx_objects_owner ON objects(owner_id);
+CREATE INDEX IF NOT EXISTS idx_objects_org ON objects(organization_id);
+CREATE INDEX IF NOT EXISTS idx_objects_deleted ON objects(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_objects_name ON objects(name);
+
+CREATE TABLE IF NOT EXISTS object_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  change_type TEXT NOT NULL DEFAULT 'update',
+  snapshot TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT DEFAULT '',
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (object_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_versions_object ON object_versions(object_id);
+
+CREATE TABLE IF NOT EXISTS object_checkouts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+  locked_by INTEGER NOT NULL REFERENCES users(id),
+  scope TEXT NOT NULL DEFAULT 'exclusive' CHECK (scope IN ('exclusive', 'shared')),
+  reason TEXT DEFAULT '',
+  expires_at TEXT,
+  released_at TEXT,
+  released_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_checkouts_object ON object_checkouts(object_id, released_at);
+
+CREATE TABLE IF NOT EXISTS object_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  relationship_type_id INTEGER NOT NULL REFERENCES relationship_types(id),
+  source_object_id INTEGER NOT NULL REFERENCES objects(id),
+  target_object_id INTEGER NOT NULL REFERENCES objects(id),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('draft', 'active', 'inactive', 'expired')),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  valid_from TEXT,
+  valid_to TEXT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  deleted_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (relationship_type_id, source_object_id, target_object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rel_source ON object_relationships(source_object_id, status);
+CREATE INDEX IF NOT EXISTS idx_rel_target ON object_relationships(target_object_id, status);
+CREATE INDEX IF NOT EXISTS idx_rel_type ON object_relationships(relationship_type_id);
+CREATE INDEX IF NOT EXISTS idx_rel_tenant ON object_relationships(tenant_id);
+
+CREATE TABLE IF NOT EXISTS object_references (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_object_id INTEGER NOT NULL REFERENCES objects(id),
+  target_object_id INTEGER REFERENCES objects(id),
+  reference_type TEXT NOT NULL DEFAULT 'weak'
+    CHECK (reference_type IN ('strong', 'weak', 'external')),
+  dependency INTEGER NOT NULL DEFAULT 0 CHECK (dependency IN (0, 1)),
+  context TEXT DEFAULT '',
+  external_ref TEXT DEFAULT '',
+  external_system TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  deleted_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ref_source ON object_references(source_object_id, status);
+CREATE INDEX IF NOT EXISTS idx_ref_target ON object_references(target_object_id, status);
+CREATE INDEX IF NOT EXISTS idx_ref_type ON object_references(reference_type);
+CREATE INDEX IF NOT EXISTS idx_ref_tenant ON object_references(tenant_id);

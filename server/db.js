@@ -63,8 +63,44 @@ export function migrate(db) {
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("008_metadata");
   db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("009_objects");
+  db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();
+}
+
+// Runs `fn` inside a SQLite transaction, committing on success and rolling back
+// on error. Nested calls reuse the outermost transaction so domain services can
+// compose freely without leaking partial writes.
+export function transaction(db, fn) {
+  if (db.__inTransaction) return fn();
+  db.exec("BEGIN");
+  db.__inTransaction = true;
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* rollback best effort; original error is more useful */
+    }
+    throw err;
+  } finally {
+    db.__inTransaction = false;
+  }
+}
+
+export function randomUuid() {
+  return globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID()
+    : `xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === "x" ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
 }
 
 function ensureColumn(db, table, column, ddl) {

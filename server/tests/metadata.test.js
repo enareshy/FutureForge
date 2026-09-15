@@ -55,10 +55,10 @@ describe("metadata types", () => {
   test("child types inherit attributes from ancestors", () => {
     const database = db();
     const tenantId = helixId(database);
-    const base = makeType(database, "document");
+    const base = makeType(database, "drawing");
     const attribute = metadata.createAttribute(
       database,
-      { code: "document.title", name: "Title", data_type: "string", required: true },
+      { code: "drawing.title", name: "Title", data_type: "string", required: true },
       ACTOR,
       IP,
       tenantId
@@ -81,7 +81,7 @@ describe("metadata types", () => {
     metadata.addTypeAttribute(database, child.id, { attribute_id: own.id }, ACTOR, IP, tenantId);
     const resolved = metadata.resolveType(database, "certificate", tenantId);
     const codes = resolved.attributes.map((a) => a.code);
-    assert.ok(codes.includes("document.title"), "inherited attribute is present");
+    assert.ok(codes.includes("drawing.title"), "inherited attribute is present");
     assert.ok(codes.includes("certificate.issuer"), "own attribute is present");
   });
 

@@ -12,6 +12,7 @@ import * as providers from "./services/providers.js";
 import * as tenants from "./services/tenants.js";
 import * as config from "./services/config.js";
 import * as metadata from "./services/metadata.js";
+import * as objects from "./services/objects.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -393,6 +394,40 @@ function seedAuthz(db) {
     kind: "object",
     parent_id: iamMetadata.id,
   });
+  const iamObjects = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.objects",
+    name: "Object & relationship framework",
+    kind: "module",
+  });
+  const iamObjectInstances = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.objects.instances",
+    name: "Business objects",
+    kind: "object",
+    parent_id: iamObjects.id,
+  });
+  const iamObjectRelationships = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.objects.relationships",
+    name: "Object relationships",
+    kind: "object",
+    parent_id: iamObjects.id,
+  });
+  const iamObjectReferences = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.objects.references",
+    name: "Object references",
+    kind: "object",
+    parent_id: iamObjects.id,
+  });
+  const iamObjectDependencies = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.objects.dependencies",
+    name: "Object dependencies",
+    kind: "object",
+    parent_id: iamObjects.id,
+  });
   const financeRoot = catalog.createResource(db, {
     application_id: financeApp.id,
     code: "finance",
@@ -440,6 +475,11 @@ function seedAuthz(db) {
     iamMetaLovs,
     iamMetaForms,
     iamMetaRules,
+    iamObjects,
+    iamObjectInstances,
+    iamObjectRelationships,
+    iamObjectReferences,
+    iamObjectDependencies,
     financeRoot,
     financeLedger,
     siteRoot,
@@ -463,12 +503,18 @@ function seedAuthz(db) {
     grantAll(db, platform.id, iamRoot);
     grantAll(db, platform.id, iamPlatform);
     grantAll(db, platform.id, iamMetadata);
+    for (const resource of [iamObjects, iamObjectInstances, iamObjectRelationships, iamObjectReferences, iamObjectDependencies]) {
+      grantAll(db, platform.id, resource);
+    }
     grantAll(db, platform.id, financeRoot);
     grantAll(db, platform.id, siteRoot);
   }
   if (iamAdmin) {
     grantAll(db, iamAdmin.id, iamRoot);
     grantAll(db, iamAdmin.id, iamMetadata);
+    for (const resource of [iamObjects, iamObjectInstances, iamObjectRelationships, iamObjectReferences, iamObjectDependencies]) {
+      grantAll(db, iamAdmin.id, resource);
+    }
   }
   if (auditor) {
     grantAll(db, auditor.id, iamRoot, ["read"], apac?.id || 0);
@@ -632,6 +678,11 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.metadata.lovs", name: "Metadata LOVs", parentCode: "iam.metadata" },
     { applicationCode: "iam", code: "iam.metadata.forms", name: "Metadata forms", parentCode: "iam.metadata" },
     { applicationCode: "iam", code: "iam.metadata.rules", name: "Metadata rules", parentCode: "iam.metadata" },
+    { applicationCode: "iam", code: "iam.objects", name: "Object & relationship framework", kind: "module" },
+    { applicationCode: "iam", code: "iam.objects.instances", name: "Business objects", parentCode: "iam.objects" },
+    { applicationCode: "iam", code: "iam.objects.relationships", name: "Object relationships", parentCode: "iam.objects" },
+    { applicationCode: "iam", code: "iam.objects.references", name: "Object references", parentCode: "iam.objects" },
+    { applicationCode: "iam", code: "iam.objects.dependencies", name: "Object dependencies", parentCode: "iam.objects" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -661,6 +712,28 @@ function seedMissingCatalog(db) {
       [iamAdmin.id, metadataRes.id]
     );
     if (!existing) grantAll(db, iamAdmin.id, metadataRes);
+  }
+  const objectResourceCodes = [
+    "iam.objects",
+    "iam.objects.instances",
+    "iam.objects.relationships",
+    "iam.objects.references",
+    "iam.objects.dependencies",
+  ];
+  for (const code of objectResourceCodes) {
+    const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
+    if (!resource) continue;
+    const owners = [platform, iamAdmin].filter(Boolean);
+    for (const role of owners) {
+      const existing = queryOne(
+        db,
+        `SELECT 1 AS x FROM role_permissions rp
+         JOIN permissions p ON p.id = rp.permission_id
+         WHERE rp.role_id = ? AND p.resource_id = ? AND p.action = 'read'`,
+        [role.id, resource.id]
+      );
+      if (!existing) grantAll(db, role.id, resource);
+    }
   }
   if (platform && platformRes) {
     const existingGrant = queryOne(
@@ -928,6 +1001,230 @@ function seedMetadata(db) {
   return { metadataSeeded: true, metadata: created };
 }
 
+// Demo data for the Object & Relationship Framework. Product, revision, BOM,
+// document and change-notice are created as ordinary metadata types, proving no
+// business object type is hard-coded in the framework itself.
+function seedObjects(db) {
+  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM relationship_types");
+  if (existing.c > 0) return { objectsSeeded: false };
+  const helix = orgByCode(db, "helix");
+  if (!helix) return { objectsSeeded: false };
+  const tenantId = helix.id;
+  const admin = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin'");
+  const actor = admin ? { id: admin.id, username: admin.username } : null;
+  const ip = "seed";
+
+  const ensureType = (body) => {
+    const found = queryOne(db, "SELECT * FROM metadata_types WHERE code = ? AND tenant_id = ?", [
+      body.code,
+      tenantId,
+    ]);
+    if (found) return found;
+    return metadata.createType(db, { ...body, status: body.status || "active" }, actor, ip, tenantId);
+  };
+  const attributeId = (code) =>
+    queryOne(
+      db,
+      `SELECT id FROM metadata_attributes WHERE code = ? AND (tenant_id IS NULL OR tenant_id = ?)
+       ORDER BY tenant_id IS NULL LIMIT 1`,
+      [code, tenantId]
+    )?.id;
+  const attach = (typeRow, codes) => {
+    let sequence = 0;
+    for (const code of codes) {
+      const id = attributeId(code);
+      if (id) {
+        metadata.addTypeAttribute(db, typeRow.id, { attribute_id: id, sequence: (sequence += 10) }, actor, ip, tenantId);
+      }
+    }
+  };
+
+  const productType = ensureType({ code: "product", name: "Product", module: "pim" });
+  const revisionType = ensureType({ code: "product-revision", name: "Product revision", module: "pim" });
+  const bomType = ensureType({ code: "bom", name: "Bill of materials", module: "pim" });
+  const documentType = ensureType({ code: "document", name: "Document", module: "dms" });
+  const changeType = ensureType({ code: "change-notice", name: "Change notice", module: "ecm" });
+  attach(productType, ["part.number", "part.name", "part.category", "part.status"]);
+  attach(revisionType, ["part.number", "part.name", "part.status", "part.revision"]);
+  attach(bomType, ["part.number", "part.name", "part.status"]);
+  attach(documentType, ["part.number", "part.name", "part.status"]);
+  attach(changeType, ["part.number", "part.name", "part.status"]);
+
+  const hasRevision = objects.createRelationshipType(
+    db,
+    {
+      code: "product.has-revision",
+      name: "Product has revision",
+      module: "pim",
+      source_type_id: productType.id,
+      target_type_id: revisionType.id,
+      cardinality: "1:N",
+      semantic: "composition",
+      cascade_delete: true,
+      status: "active",
+      attributes: [{ code: "sequence", name: "Sequence", data_type: "integer", min_value: 0 }],
+    },
+    actor,
+    ip,
+    tenantId
+  );
+  const containsBom = objects.createRelationshipType(
+    db,
+    {
+      code: "revision.contains-bom",
+      name: "Revision contains BOM",
+      module: "pim",
+      source_type_id: revisionType.id,
+      target_type_id: bomType.id,
+      cardinality: "1:1",
+      semantic: "aggregation",
+      status: "active",
+    },
+    actor,
+    ip,
+    tenantId
+  );
+  const affects = objects.createRelationshipType(
+    db,
+    {
+      code: "change-notice.affects",
+      name: "Change notice affects product",
+      module: "ecm",
+      source_type_id: changeType.id,
+      target_type_id: productType.id,
+      cardinality: "N:N",
+      semantic: "association",
+      status: "active",
+    },
+    actor,
+    ip,
+    tenantId
+  );
+  const documentRef = objects.createRelationshipType(
+    db,
+    {
+      code: "document.references-item",
+      name: "Document references item",
+      module: "dms",
+      source_type_id: documentType.id,
+      target_type_id: productType.id,
+      cardinality: "N:N",
+      semantic: "association",
+      status: "active",
+    },
+    actor,
+    ip,
+    tenantId
+  );
+
+  const make = (typeCode, code, name, data) =>
+    objects.createObject(db, { type: typeCode, code, name, data, status: "draft" }, actor, tenantId, ip);
+
+  const product = make("product", "PROD-1000", "Air Compressor", {
+    "part.number": "PROD-1000",
+    "part.name": "Air Compressor",
+    "part.category": "mechanical",
+    "part.status": "released",
+  });
+  const product2 = make("product", "PROD-2000", "Hydraulic Pump", {
+    "part.number": "PROD-2000",
+    "part.name": "Hydraulic Pump",
+    "part.category": "hydraulic",
+    "part.status": "draft",
+  });
+  const revisionA = make("product-revision", "PROD-1000-A", "Air Compressor Rev A", {
+    "part.number": "PROD-1000-A",
+    "part.name": "Air Compressor Rev A",
+    "part.status": "released",
+    "part.revision": 1,
+  });
+  const revisionB = make("product-revision", "PROD-1000-B", "Air Compressor Rev B", {
+    "part.number": "PROD-1000-B",
+    "part.name": "Air Compressor Rev B",
+    "part.status": "draft",
+    "part.revision": 2,
+  });
+  const bom = make("bom", "BOM-1000", "Air Compressor BOM", {
+    "part.number": "BOM-1000",
+    "part.name": "Air Compressor BOM",
+    "part.status": "released",
+  });
+  const document = make("document", "DOC-1000", "Air Compressor Specification", {
+    "part.number": "DOC-1000",
+    "part.name": "Air Compressor Specification",
+    "part.status": "released",
+  });
+  const change = make("change-notice", "ECN-1000", "Change oil seal supplier", {
+    "part.number": "ECN-1000",
+    "part.name": "Change oil seal supplier",
+    "part.status": "review",
+  });
+
+  objects.createRelationship(
+    db,
+    { type: hasRevision.id, source: product.id, target: revisionA.id, attributes: { sequence: 1 } },
+    actor,
+    tenantId,
+    ip
+  );
+  objects.createRelationship(
+    db,
+    { type: hasRevision.id, source: product.id, target: revisionB.id, attributes: { sequence: 2 } },
+    actor,
+    tenantId,
+    ip
+  );
+  objects.createRelationship(db, { type: containsBom.id, source: revisionA.id, target: bom.id }, actor, tenantId, ip);
+  objects.createRelationship(db, { type: affects.id, source: change.id, target: product.id }, actor, tenantId, ip);
+  objects.createRelationship(db, { type: documentRef.id, source: document.id, target: product.id }, actor, tenantId, ip);
+
+  objects.createReference(
+    db,
+    { source_object_id: document.id, target_object_id: product.id, reference_type: "weak", context: "describes" },
+    actor,
+    tenantId,
+    ip
+  );
+  objects.createReference(
+    db,
+    { source_object_id: bom.id, target_object_id: product.id, reference_type: "strong", context: "bom_of" },
+    actor,
+    tenantId,
+    ip
+  );
+  objects.createReference(
+    db,
+    {
+      source_object_id: revisionA.id,
+      target_object_id: product.id,
+      reference_type: "strong",
+      dependency: true,
+      context: "revision_of",
+    },
+    actor,
+    tenantId,
+    ip
+  );
+  objects.createReference(
+    db,
+    {
+      source_object_id: product2.id,
+      reference_type: "external",
+      external_system: "ERP",
+      external_ref: "ERP-PART-2000",
+    },
+    actor,
+    tenantId,
+    ip
+  );
+
+  return {
+    objectsSeeded: true,
+    relationshipTypes: [hasRevision.id, containsBom.id, affects.id, documentRef.id],
+    objects: [product.id, product2.id, revisionA.id, revisionB.id, bom.id, document.id, change.id],
+  };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -938,6 +1235,7 @@ export function seedDatabase(db) {
   seedMissingHierarchy(db);
   tenants.backfillTenants(db);
   seedMetadata(db);
+  seedObjects(db);
   return { ...identity, ...authz };
 }
 
