@@ -65,6 +65,14 @@ export function migrate(db) {
   db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("009_objects");
+  ensureColumn(db, "objects", "lifecycle_version_id", "lifecycle_version_id INTEGER REFERENCES lifecycle_versions(id)");
+  ensureColumn(db, "objects", "lifecycle_state_id", "lifecycle_state_id INTEGER REFERENCES lifecycle_states(id)");
+  ensureColumn(db, "objects", "lifecycle_status_id", "lifecycle_status_id INTEGER REFERENCES lifecycle_statuses(id)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_objects_lifecycle_version ON objects(lifecycle_version_id)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_objects_lifecycle_state ON objects(lifecycle_state_id)");
+  db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("010_lifecycle");
   db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();

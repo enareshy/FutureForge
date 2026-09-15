@@ -1,6 +1,6 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openDatabase, migrate, queryOne } from "./db.js";
+import { openDatabase, migrate, queryOne, queryAll } from "./db.js";
 import * as users from "./services/users.js";
 import * as groups from "./services/groups.js";
 import * as roles from "./services/roles.js";
@@ -13,6 +13,7 @@ import * as tenants from "./services/tenants.js";
 import * as config from "./services/config.js";
 import * as metadata from "./services/metadata.js";
 import * as objects from "./services/objects.js";
+import * as lifecycle from "./services/lifecycle.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -428,6 +429,47 @@ function seedAuthz(db) {
     kind: "object",
     parent_id: iamObjects.id,
   });
+  const iamLifecycle = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.lifecycle",
+    name: "Lifecycle management",
+    kind: "module",
+  });
+  const iamLifecycleStatuses = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.lifecycle.statuses",
+    name: "Lifecycle statuses",
+    kind: "object",
+    parent_id: iamLifecycle.id,
+  });
+  const iamLifecycleDefinitions = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.lifecycle.definitions",
+    name: "Lifecycle definitions",
+    kind: "object",
+    parent_id: iamLifecycle.id,
+  });
+  const iamLifecycleTransitions = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.lifecycle.transitions",
+    name: "Lifecycle states & transitions",
+    kind: "object",
+    parent_id: iamLifecycle.id,
+  });
+  const iamLifecycleReleaseRules = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.lifecycle.release-rules",
+    name: "Release rules",
+    kind: "object",
+    parent_id: iamLifecycle.id,
+  });
+  const iamLifecycleApprovals = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.lifecycle.approvals",
+    name: "Approvals",
+    kind: "object",
+    parent_id: iamLifecycle.id,
+  });
   const financeRoot = catalog.createResource(db, {
     application_id: financeApp.id,
     code: "finance",
@@ -480,6 +522,12 @@ function seedAuthz(db) {
     iamObjectRelationships,
     iamObjectReferences,
     iamObjectDependencies,
+    iamLifecycle,
+    iamLifecycleStatuses,
+    iamLifecycleDefinitions,
+    iamLifecycleTransitions,
+    iamLifecycleReleaseRules,
+    iamLifecycleApprovals,
     financeRoot,
     financeLedger,
     siteRoot,
@@ -506,6 +554,9 @@ function seedAuthz(db) {
     for (const resource of [iamObjects, iamObjectInstances, iamObjectRelationships, iamObjectReferences, iamObjectDependencies]) {
       grantAll(db, platform.id, resource);
     }
+    for (const resource of [iamLifecycle, iamLifecycleStatuses, iamLifecycleDefinitions, iamLifecycleTransitions, iamLifecycleReleaseRules, iamLifecycleApprovals]) {
+      grantAll(db, platform.id, resource);
+    }
     grantAll(db, platform.id, financeRoot);
     grantAll(db, platform.id, siteRoot);
   }
@@ -513,6 +564,9 @@ function seedAuthz(db) {
     grantAll(db, iamAdmin.id, iamRoot);
     grantAll(db, iamAdmin.id, iamMetadata);
     for (const resource of [iamObjects, iamObjectInstances, iamObjectRelationships, iamObjectReferences, iamObjectDependencies]) {
+      grantAll(db, iamAdmin.id, resource);
+    }
+    for (const resource of [iamLifecycle, iamLifecycleStatuses, iamLifecycleDefinitions, iamLifecycleTransitions, iamLifecycleReleaseRules, iamLifecycleApprovals]) {
       grantAll(db, iamAdmin.id, resource);
     }
   }
@@ -683,6 +737,12 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.objects.relationships", name: "Object relationships", parentCode: "iam.objects" },
     { applicationCode: "iam", code: "iam.objects.references", name: "Object references", parentCode: "iam.objects" },
     { applicationCode: "iam", code: "iam.objects.dependencies", name: "Object dependencies", parentCode: "iam.objects" },
+    { applicationCode: "iam", code: "iam.lifecycle", name: "Lifecycle management", kind: "module" },
+    { applicationCode: "iam", code: "iam.lifecycle.statuses", name: "Lifecycle statuses", parentCode: "iam.lifecycle" },
+    { applicationCode: "iam", code: "iam.lifecycle.definitions", name: "Lifecycle definitions", parentCode: "iam.lifecycle" },
+    { applicationCode: "iam", code: "iam.lifecycle.transitions", name: "Lifecycle states & transitions", parentCode: "iam.lifecycle" },
+    { applicationCode: "iam", code: "iam.lifecycle.release-rules", name: "Release rules", parentCode: "iam.lifecycle" },
+    { applicationCode: "iam", code: "iam.lifecycle.approvals", name: "Approvals", parentCode: "iam.lifecycle" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -719,6 +779,12 @@ function seedMissingCatalog(db) {
     "iam.objects.relationships",
     "iam.objects.references",
     "iam.objects.dependencies",
+    "iam.lifecycle",
+    "iam.lifecycle.statuses",
+    "iam.lifecycle.definitions",
+    "iam.lifecycle.transitions",
+    "iam.lifecycle.release-rules",
+    "iam.lifecycle.approvals",
   ];
   for (const code of objectResourceCodes) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -1225,6 +1291,127 @@ function seedObjects(db) {
   };
 }
 
+function seedLifecycle(db) {
+  const existing = db.prepare("SELECT COUNT(*) AS c FROM lifecycle_definitions").get();
+  if (existing.c > 0) return { lifecycleSeeded: false };
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const admin = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin'");
+  if (!helix || !admin) return { lifecycleSeeded: false };
+  const tenantId = helix.id;
+  const actor = { id: admin.id, username: admin.username };
+  const ip = "seed";
+
+  const statusDefs = [
+    { code: "draft", name: "Draft", category: "draft", legacy_status: "draft", display_order: 10, color: "#9ca3af", is_default: true },
+    { code: "in-review", name: "In Review", category: "in_review", legacy_status: "active", display_order: 20, color: "#f59e0b" },
+    { code: "approved", name: "Approved", category: "approved", legacy_status: "active", display_order: 30, color: "#3b82f6" },
+    { code: "released", name: "Released", category: "released", legacy_status: "released", display_order: 40, color: "#10b981" },
+    { code: "obsolete", name: "Obsolete", category: "obsolete", legacy_status: "obsolete", display_order: 50, color: "#6b7280" },
+    { code: "cancelled", name: "Cancelled", category: "cancelled", legacy_status: "obsolete", display_order: 60, color: "#ef4444" },
+  ];
+  const statusIds = {};
+  for (const def of statusDefs) {
+    const row = lifecycle.createStatus(db, { ...def, module: "pdm", tenant_id: tenantId }, actor, ip, tenantId);
+    statusIds[def.code] = row.id;
+  }
+
+  const created = lifecycle.createDefinition(
+    db,
+    {
+      code: "product-lifecycle",
+      name: "Product Lifecycle",
+      description: "Draft, review, approval, release and obsolescence for products",
+      module: "pdm",
+      tenant_id: tenantId,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+  const versionId = created.version.id;
+
+  const stateDefs = [
+    { code: "draft", name: "Draft", status_code: "draft", category: "draft", is_initial: true, display_order: 10, editable: true },
+    { code: "in-review", name: "In Review", status_code: "in-review", category: "in_review", display_order: 20 },
+    { code: "approved", name: "Approved", status_code: "approved", category: "approved", display_order: 30 },
+    { code: "released", name: "Released", status_code: "released", category: "released", display_order: 40 },
+    { code: "obsolete", name: "Obsolete", status_code: "obsolete", category: "obsolete", is_terminal: true, display_order: 50 },
+    { code: "cancelled", name: "Cancelled", status_code: "cancelled", category: "cancelled", is_terminal: true, display_order: 60 },
+  ];
+  for (const state of stateDefs) {
+    lifecycle.createState(db, { ...state, lifecycle_version_id: versionId, tenant_id: tenantId }, actor, ip, tenantId);
+  }
+
+  const transitionDefs = [
+    { code: "submit", name: "Submit for review", from_state: "draft", to_state: "in-review", display_order: 10 },
+    { code: "approve", name: "Approve", from_state: "in-review", to_state: "approved", requires_approval: true, display_order: 20 },
+    { code: "reject", name: "Reject", from_state: "in-review", to_state: "draft", display_order: 30 },
+    { code: "release", name: "Release", from_state: "approved", to_state: "released", required_permission: "iam.lifecycle.release-rules:execute", display_order: 40 },
+    { code: "obsolete", name: "Mark obsolete", from_state: "released", to_state: "obsolete", display_order: 50 },
+    { code: "cancel", name: "Cancel", from_state: "draft", to_state: "cancelled", display_order: 60 },
+  ];
+  for (const transition of transitionDefs) {
+    lifecycle.createTransition(db, { ...transition, lifecycle_version_id: versionId, tenant_id: tenantId }, actor, ip, tenantId);
+  }
+
+  const publishReport = lifecycle.publishDefinition(db, created.definition.id, {}, actor, ip, tenantId);
+
+  const draftState = lifecycle.stateByCode(db, versionId, "draft");
+  lifecycle.createRule(
+    db,
+    {
+      code: "product-approval",
+      name: "Product approval",
+      kind: "approval",
+      module: "pdm",
+      transition: "approve",
+      require_all: true,
+      min_approvals: 1,
+      mandatory_comment_on_reject: true,
+      auto_transition: true,
+      rollback_state_id: draftState?.id ?? null,
+      steps: [
+        { code: "engineering", name: "Engineering sign-off", approver_type: "role", approver_id: "iam.admin", approval_mode: "all" },
+      ],
+      tenant_id: tenantId,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+
+  const productType = metadata.findType(db, "product", tenantId);
+  let assigned = 0;
+  if (productType) {
+    lifecycle.createAssignment(
+      db,
+      { type: "product", lifecycle: "product-lifecycle", is_default: true, tenant_id: tenantId },
+      actor,
+      ip,
+      tenantId
+    );
+    const versionRow = queryOne(db, "SELECT * FROM lifecycle_versions WHERE id = ?", [versionId]);
+    const initial = lifecycle.initialStateForVersion(db, versionId);
+    const objectsWithoutLifecycle = queryAll(
+      db,
+      "SELECT * FROM objects WHERE object_type_id = ? AND lifecycle_version_id IS NULL AND deleted_at IS NULL",
+      [productType.id]
+    );
+    for (const obj of objectsWithoutLifecycle) {
+      lifecycle.assignLifecycle(db, obj, versionRow, initial, actor);
+      assigned += 1;
+    }
+  }
+
+  return {
+    lifecycleSeeded: true,
+    lifecycleDefinition: created.definition.id,
+    lifecycleVersion: publishReport?.version?.version ?? created.version.version,
+    lifecycleStatuses: Object.keys(statusIds).length,
+    lifecycleObjectsAssigned: assigned,
+  };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -1236,6 +1423,7 @@ export function seedDatabase(db) {
   tenants.backfillTenants(db);
   seedMetadata(db);
   seedObjects(db);
+  seedLifecycle(db);
   return { ...identity, ...authz };
 }
 

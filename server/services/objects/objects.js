@@ -13,6 +13,10 @@ import {
   listCheckoutRows,
 } from "./repository.js";
 import { safeDeleteReport } from "./references.js";
+import { snapshot, recordObjectVersion } from "./versions.js";
+import { applyInitialLifecycle } from "../lifecycle/engine.js";
+
+export { recordObjectVersion };
 
 // Object domain service: metadata-typed business instances with lifecycle,
 // revisioning, check-out locking, soft deletion, bulk operations and search.
@@ -47,28 +51,6 @@ function publicCheckout(row) {
   };
 }
 
-function snapshot(row) {
-  return {
-    id: row.id,
-    uuid: row.uuid,
-    code: row.code,
-    object_type_id: row.object_type_id,
-    name: row.name,
-    description: row.description,
-    status: row.status,
-    revision: row.revision,
-    data: safeParse(row.data_json, {}),
-    owner_id: row.owner_id,
-    owner_object_id: row.owner_object_id,
-    organization_id: row.organization_id,
-    tenant_id: row.tenant_id,
-    external_ref: row.external_ref,
-    external_system: row.external_system,
-    tags: safeParse(row.tags_json, []),
-    deleted_at: row.deleted_at,
-  };
-}
-
 function safeParse(raw, fallback) {
   if (!raw) return fallback;
   try {
@@ -76,15 +58,6 @@ function safeParse(raw, fallback) {
   } catch {
     return fallback;
   }
-}
-
-export function recordObjectVersion(db, row, changeType, summary, actorId) {
-  run(
-    db,
-    `INSERT INTO object_versions (object_id, revision, change_type, snapshot, change_summary, created_by)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [row.id, row.revision, changeType, JSON.stringify(snapshot(row)), summary || "", actorId ?? null]
-  );
 }
 
 function assertWritable(db, row, actor) {
@@ -222,7 +195,7 @@ export function createObject(db, body, actor, tenantId, ip) {
     }
     throw err;
   }
-  const row = getObjectRow(db, result.lastInsertRowid);
+  const row = applyInitialLifecycle(db, getObjectRow(db, result.lastInsertRowid), actor) || getObjectRow(db, result.lastInsertRowid);
   recordObjectVersion(db, row, "create", body.change_summary || "Object created", actor?.id);
   writeAudit(db, {
     actor,

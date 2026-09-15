@@ -41,6 +41,11 @@ Default operator: `admin` / `HelixAdmin!42`
 - `/api/relationships` — object relationships: list, create, `/validate`, update, delete
 - `/api/references` — strong/weak/external references, plus `/orphans`
 - `/api/dependencies` — direct dependencies, `/impact` analysis and `/cycles` detection
+- `/api/statuses` — configurable lifecycle statuses (categories, legacy mapping, type availability)
+- `/api/lifecycle-definitions` — versioned lifecycle state machines: `/versions`, `/validate`, `/publish`
+- `/api/lifecycle-states` `/api/lifecycle-transitions` `/api/lifecycle-assignments` — state machines and object-type bindings
+- `/api/release-rules` `/api/approval-rules` — approval rules with sequential/parallel steps and quorums
+- `/api/objects/:id/lifecycle` `/transitions` `/status-history` `/release` `/releases` `/approvals/:approvalId` — per-object transition engine and release/approval workflow
 - `/api/hierarchy` — Super Admin–defined org levels (operators)
 - `/api/platform/hierarchy` `/api/platform/settings` — Super Admin feature properties
 - `/api/companies` `/api/business-units` `/api/plants` `/api/sites` `/api/departments` — typed collections
@@ -54,9 +59,9 @@ IAM APIs are fail-safe: session plus `checkPermission`. Unauthorized callers rec
 
 In-process (future modules): `import { checkPermission, organizationContext } from "./server/platform.js"`
 
-Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`
+Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`, `docs/LIFECYCLE_DESIGN.md`
 
-The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config). The reusable client renderer is `web/src/components/FormRenderer.jsx`.
+The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config) and lifecycle configuration under `/lifecycles`. Object lifecycle state, transitions, approvals and status history appear on the object detail page. The reusable client renderer is `web/src/components/FormRenderer.jsx`.
 
 ## Tests
 

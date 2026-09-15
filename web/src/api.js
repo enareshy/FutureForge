@@ -255,4 +255,36 @@ export const objects = {
   deleteReference: (id) => api(`/api/references/${id}`, { method: "DELETE" }),
   impact: (objectId, qs) => api(`/api/dependencies/impact?objectId=${objectId}${qs ? `&${qs}` : ""}`),
   cycles: () => api("/api/dependencies/cycles"),
+  lifecycle: (id) => api(`/api/objects/${id}/lifecycle`),
+  transitions: (id) => api(`/api/objects/${id}/transitions`),
+  transition: (id, body) => api(`/api/objects/${id}/transitions`, { method: "POST", body }),
+  statusHistory: (id, qs) => api(`/api/objects/${id}/status-history${qs || ""}`),
+  releases: (id, qs) => api(`/api/objects/${id}/releases${qs || ""}`),
+  requestRelease: (id, body) => api(`/api/objects/${id}/release`, { method: "POST", body }),
+  decideApproval: (id, approvalId, body) =>
+    api(`/api/objects/${id}/approvals/${approvalId}`, { method: "POST", body }),
 };
+
+export const lifecycle = {
+  statuses: (qs) => api(`/api/statuses${qs || ""}`),
+  status: (id) => api(`/api/statuses/${id}`),
+  createStatus: (body) => api("/api/statuses", { method: "POST", body }),
+  updateStatus: (id, body) => api(`/api/statuses/${id}`, { method: "PUT", body }),
+  deleteStatus: (id) => api(`/api/statuses/${id}`, { method: "DELETE" }),
+  definitions: (qs) => api(`/api/lifecycle-definitions${qs || ""}`),
+  definition: (id) => api(`/api/lifecycle-definitions/${id}`),
+  createDefinition: (body) => api("/api/lifecycle-definitions", { method: "POST", body }),
+  updateDefinition: (id, body) => api(`/api/lifecycle-definitions/${id}`, { method: "PUT", body }),
+  versions: (id) => api(`/api/lifecycle-definitions/${id}/versions`),
+  validate: (id, qs) => api(`/api/lifecycle-definitions/${id}/validate${qs || ""}`),
+  publish: (id, body) => api(`/api/lifecycle-definitions/${id}/publish`, { method: "POST", body }),
+  states: (qs) => api(`/api/lifecycle-states${qs || ""}`),
+  createState: (body) => api("/api/lifecycle-states", { method: "POST", body }),
+  transitions: (qs) => api(`/api/lifecycle-transitions${qs || ""}`),
+  createTransition: (body) => api("/api/lifecycle-transitions", { method: "POST", body }),
+  assignments: (qs) => api(`/api/lifecycle-assignments${qs || ""}`),
+  createAssignment: (body) => api("/api/lifecycle-assignments", { method: "POST", body }),
+  releaseRules: (qs) => api(`/api/release-rules${qs || ""}`),
+  approvalRules: (qs) => api(`/api/approval-rules${qs || ""}`),
+};
+

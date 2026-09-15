@@ -21,6 +21,7 @@ import MetadataPage from "./pages/MetadataPage.jsx";
 import ObjectsPage from "./pages/ObjectsPage.jsx";
 import ObjectDetailPage from "./pages/ObjectDetailPage.jsx";
 import RelationshipTypesPage from "./pages/RelationshipTypesPage.jsx";
+import LifecyclePage from "./pages/LifecyclePage.jsx";
 import ExplorerPage from "./pages/ExplorerPage.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import AuthenticationPage from "./pages/AuthenticationPage.jsx";
@@ -167,16 +168,15 @@ const NAV_SECTIONS = [
     items: [
       { to: "/configuration", label: "Scoped config" },
       { to: "/metadata", label: "Metadata", platformOrAdmin: true },
+      { to: "/relationship-types", label: "Relationship types" },
+      { to: "/lifecycles", label: "Lifecycles" },
       { to: "/platform", label: "Platform properties", platform: true },
     ],
   },
   {
     key: "objects",
-    label: "Objects",
-    items: [
-      { to: "/objects", label: "Business objects" },
-      { to: "/relationship-types", label: "Relationship types" },
-    ],
+    label: "My Data",
+    items: [{ to: "/objects", label: "Business objects" }],
   },
   {
     key: "audit",
@@ -356,6 +356,7 @@ export default function App() {
         <Route path="/objects" element={<ObjectsPage />} />
         <Route path="/objects/:id" element={<ObjectDetailPage />} />
         <Route path="/relationship-types" element={<RelationshipTypesPage />} />
+        <Route path="/lifecycles" element={<LifecyclePage />} />
         <Route path="/platform" element={<PlatformPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

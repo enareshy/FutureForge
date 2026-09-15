@@ -22,6 +22,7 @@ import * as tenants from "./services/tenants.js";
 import * as config from "./services/config.js";
 import * as metadata from "./services/metadata.js";
 import * as objects from "./services/objects.js";
+import * as lifecycle from "./services/lifecycle.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
 import { effectiveAccess } from "./services/access.js";
@@ -1526,6 +1527,402 @@ export function createApp(db) {
     canDependencies("read"),
     wrap((req, res) => {
       res.json(objects.directDependencies(db, req.params.objectId, req.tenantId));
+    })
+  );
+
+  // -------------------------------------------------------------------------
+  // Lifecycle Management
+  // Configurable statuses, lifecycle state machines, transition rules and the
+  // release/approval engine. Configuration is global-or-tenant metadata gated by
+  // iam.lifecycle.* sub-resources; object transitions re-use the object IAM.
+  // -------------------------------------------------------------------------
+
+  const canLifecycle = (action) => can("iam.lifecycle", action);
+  const canLifecycleStatuses = (action) => can("iam.lifecycle.statuses", action);
+  const canLifecycleDefinitions = (action) => can("iam.lifecycle.definitions", action);
+  const canLifecycleTransitions = (action) => can("iam.lifecycle.transitions", action);
+  const canReleaseRules = (action) => can("iam.lifecycle.release-rules", action);
+  const canApprovals = (action) => can("iam.lifecycle.approvals", action);
+  const lifecycleRead = (req, source) => metaReadTenant(db, req.actor, source || req.query, req.tenantId);
+  const lifecycleWrite = (req, body) => metaWriteTenant(db, req.actor, body ?? req.body, req.tenantId);
+
+  app.get(
+    "/api/statuses",
+    auth,
+    canLifecycleStatuses("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.listStatuses(db, req.query, lifecycleRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/statuses",
+    auth,
+    canLifecycleStatuses("create"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      res.status(201).json(lifecycle.createStatus(db, body, req.actor, clientIp(req), lifecycleWrite(req, body)));
+    })
+  );
+
+  app.get(
+    "/api/statuses/:id",
+    auth,
+    canLifecycleStatuses("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.getStatus(db, req.params.id, lifecycleRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/statuses/:id",
+    auth,
+    canLifecycleStatuses("update"),
+    wrap((req, res) => {
+      res.json(lifecycle.updateStatus(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/statuses/:id/status",
+    auth,
+    canLifecycleStatuses("update"),
+    wrap((req, res) => {
+      res.json(lifecycle.setStatusStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/statuses/:id",
+    auth,
+    canLifecycleStatuses("delete"),
+    wrap((req, res) => {
+      res.json(lifecycle.deleteStatus(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/lifecycle-definitions",
+    auth,
+    canLifecycleDefinitions("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.listDefinitions(db, req.query, lifecycleRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/lifecycle-definitions",
+    auth,
+    canLifecycleDefinitions("create"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      res.status(201).json(lifecycle.createDefinition(db, body, req.actor, clientIp(req), lifecycleWrite(req, body)));
+    })
+  );
+
+  app.get(
+    "/api/lifecycle-definitions/:id",
+    auth,
+    canLifecycleDefinitions("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.getDefinition(db, req.params.id, lifecycleRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/lifecycle-definitions/:id",
+    auth,
+    canLifecycleDefinitions("update"),
+    wrap((req, res) => {
+      res.json(
+        lifecycle.updateDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req))
+      );
+    })
+  );
+
+  app.post(
+    "/api/lifecycle-definitions/:id/status",
+    auth,
+    canLifecycleDefinitions("update"),
+    wrap((req, res) => {
+      res.json(
+        lifecycle.setDefinitionStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), lifecycleRead(req))
+      );
+    })
+  );
+
+  app.delete(
+    "/api/lifecycle-definitions/:id",
+    auth,
+    canLifecycleDefinitions("delete"),
+    wrap((req, res) => {
+      res.json(lifecycle.deleteDefinition(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/lifecycle-definitions/:id/versions",
+    auth,
+    canLifecycleDefinitions("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.listVersions(db, req.params.id, lifecycleRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/lifecycle-definitions/:id/versions",
+    auth,
+    canLifecycleDefinitions("update"),
+    wrap((req, res) => {
+      res.status(201).json(
+        lifecycle.createVersion(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req))
+      );
+    })
+  );
+
+  app.get(
+    "/api/lifecycle-definitions/:id/validate",
+    auth,
+    canLifecycleDefinitions("read"),
+    wrap((req, res) => {
+      res.json(
+        lifecycle.validateDefinition(db, req.params.id, lifecycleRead(req), { version: req.query.version })
+      );
+    })
+  );
+
+  app.post(
+    "/api/lifecycle-definitions/:id/publish",
+    auth,
+    canLifecycleDefinitions("update"),
+    wrap((req, res) => {
+      res.json(
+        lifecycle.publishDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req))
+      );
+    })
+  );
+
+  app.get(
+    "/api/lifecycle-states",
+    auth,
+    canLifecycleTransitions("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.listStates(db, req.query, lifecycleRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/lifecycle-states",
+    auth,
+    canLifecycleTransitions("update"),
+    wrap((req, res) => {
+      res.status(201).json(lifecycle.createState(db, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/lifecycle-states/:id",
+    auth,
+    canLifecycleTransitions("update"),
+    wrap((req, res) => {
+      res.json(lifecycle.updateState(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/lifecycle-states/:id",
+    auth,
+    canLifecycleTransitions("delete"),
+    wrap((req, res) => {
+      res.json(lifecycle.deleteState(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/lifecycle-transitions",
+    auth,
+    canLifecycleTransitions("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.listTransitions(db, req.query, lifecycleRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/lifecycle-transitions",
+    auth,
+    canLifecycleTransitions("update"),
+    wrap((req, res) => {
+      res.status(201).json(lifecycle.createTransition(db, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  app.put(
+    "/api/lifecycle-transitions/:id",
+    auth,
+    canLifecycleTransitions("update"),
+    wrap((req, res) => {
+      res.json(
+        lifecycle.updateTransition(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req))
+      );
+    })
+  );
+
+  app.delete(
+    "/api/lifecycle-transitions/:id",
+    auth,
+    canLifecycleTransitions("delete"),
+    wrap((req, res) => {
+      res.json(lifecycle.deleteTransition(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/lifecycle-assignments",
+    auth,
+    canLifecycleDefinitions("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.listAssignments(db, req.query, lifecycleRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/lifecycle-assignments",
+    auth,
+    canLifecycleDefinitions("update"),
+    wrap((req, res) => {
+      res.status(201).json(lifecycle.createAssignment(db, req.body || {}, req.actor, clientIp(req), lifecycleWrite(req)));
+    })
+  );
+
+  app.delete(
+    "/api/lifecycle-assignments/:id",
+    auth,
+    canLifecycleDefinitions("delete"),
+    wrap((req, res) => {
+      res.json(lifecycle.deleteAssignment(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    })
+  );
+
+  const ruleRoutes = (base, kind, gate) => {
+    app.get(
+      base,
+      auth,
+      gate("read"),
+      wrap((req, res) => {
+        res.json(lifecycle.listRules(db, { ...req.query, kind }, lifecycleRead(req)));
+      })
+    );
+    app.get(
+      `${base}/:id`,
+      auth,
+      gate("read"),
+      wrap((req, res) => {
+        res.json(lifecycle.getRule(db, req.params.id, lifecycleRead(req)));
+      })
+    );
+    app.post(
+      base,
+      auth,
+      gate("create"),
+      wrap((req, res) => {
+        const body = { ...(req.body || {}), kind };
+        res.status(201).json(lifecycle.createRule(db, body, req.actor, clientIp(req), lifecycleWrite(req, body)));
+      })
+    );
+    app.put(
+      `${base}/:id`,
+      auth,
+      gate("update"),
+      wrap((req, res) => {
+        res.json(lifecycle.updateRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+      })
+    );
+    app.delete(
+      `${base}/:id`,
+      auth,
+      gate("delete"),
+      wrap((req, res) => {
+        res.json(lifecycle.deleteRule(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+      })
+    );
+  };
+  ruleRoutes("/api/release-rules", "release", canReleaseRules);
+  ruleRoutes("/api/approval-rules", "approval", canReleaseRules);
+
+  app.get(
+    "/api/objects/:id/lifecycle",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.objectLifecycle(db, req.params.id, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/transitions",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json({ items: lifecycle.objectLifecycle(db, req.params.id, req.tenantId).transitions });
+    })
+  );
+
+  app.post(
+    "/api/objects/:id/transitions",
+    auth,
+    canLifecycle("execute"),
+    wrap((req, res) => {
+      res.json(
+        lifecycle.transitionObject(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req))
+      );
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/status-history",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.statusHistory(db, req.params.id, req.tenantId, req.query));
+    })
+  );
+
+  app.post(
+    "/api/objects/:id/release",
+    auth,
+    canReleaseRules("execute"),
+    wrap((req, res) => {
+      res.status(201).json(
+        lifecycle.requestObjectRelease(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req))
+      );
+    })
+  );
+
+  app.get(
+    "/api/objects/:id/releases",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(lifecycle.objectReleases(db, req.params.id, req.tenantId, req.query));
+    })
+  );
+
+  app.post(
+    "/api/objects/:id/approvals/:approvalId",
+    auth,
+    canApprovals("execute"),
+    wrap((req, res) => {
+      res.json(
+        lifecycle.decideApproval(
+          db,
+          req.params.id,
+          req.params.approvalId,
+          req.body || {},
+          req.actor,
+          req.tenantId,
+          clientIp(req)
+        )
+      );
     })
   );
 

@@ -9,6 +9,7 @@ const TABS = [
   ["relationships", "Relationships"],
   ["references", "References"],
   ["versions", "Versions"],
+  ["lifecycle", "Lifecycle"],
   ["graph", "Graph"],
   ["dependencies", "Dependencies"],
 ];
@@ -42,6 +43,8 @@ export default function ObjectDetailPage() {
   const [safe, setSafe] = useState(null);
   const [tree, setTree] = useState(null);
   const [graph, setGraph] = useState(null);
+  const [lc, setLc] = useState(null);
+  const [history, setHistory] = useState([]);
   const [viewTree, setViewTree] = useState(null);
   const [editTree, setEditTree] = useState(null);
   const [editValues, setEditValues] = useState({});
@@ -67,16 +70,19 @@ export default function ObjectDetailPage() {
     const o = await objects.get(id);
     setObj(o);
     setStatusDraft(o.status);
-    const [lockRes, relTypeRes, relRes, versionRes, depRes, impactRes, safeRes, viewRes] = await Promise.all([
-      objects.locks(id),
-      objects.relationshipTypes("?pageSize=200"),
-      objects.relationships(id),
-      objects.versions(id, "?pageSize=200"),
-      objects.dependencies(id),
-      objects.impact(id),
-      objects.safeDelete(id),
-      objects.typeForm(o.type.id, "?mode=view"),
-    ]);
+    const [lockRes, relTypeRes, relRes, versionRes, depRes, impactRes, safeRes, viewRes, lcRes, historyRes] =
+      await Promise.all([
+        objects.locks(id),
+        objects.relationshipTypes("?pageSize=200"),
+        objects.relationships(id),
+        objects.versions(id, "?pageSize=200"),
+        objects.dependencies(id),
+        objects.impact(id),
+        objects.safeDelete(id),
+        objects.typeForm(o.type.id, "?mode=view"),
+        objects.lifecycle(id),
+        objects.statusHistory(id, "?pageSize=50"),
+      ]);
     const [sourceRefs, targetRefs] = await Promise.all([
       objects.references(`?source_object_id=${id}&pageSize=100`),
       objects.references(`?target_object_id=${id}&pageSize=100`),
@@ -89,6 +95,8 @@ export default function ObjectDetailPage() {
     setImpact(impactRes);
     setSafe(safeRes);
     setViewTree(viewRes);
+    setLc(lcRes);
+    setHistory(historyRes.items || []);
     setReferences([...(sourceRefs.items || []), ...(targetRefs.items || [])]);
     setGraph(null);
     setTree(null);
@@ -155,6 +163,18 @@ export default function ObjectDetailPage() {
     } catch (err) {
       setError(err.message);
     }
+  }
+
+  async function runTransition(code) {
+    await act(() => objects.transition(id, { transition: code }), "Lifecycle transition applied.");
+  }
+
+  async function decideApproval(approvalId, decision) {
+    let comment = "";
+    if (decision !== "approve") {
+      comment = window.prompt("Comment required for this decision:") || "";
+    }
+    await act(() => objects.decideApproval(id, approvalId, { decision, comment }), `Approval ${decision}.`);
   }
 
   async function addRelationship(e) {
@@ -588,6 +608,119 @@ export default function ObjectDetailPage() {
             )}
           </div>
         </div>
+      ) : null}
+
+      {tab === "lifecycle" ? (
+        <>
+          <div className="panel">
+            <div className="panel-head">
+              <h3>Lifecycle</h3>
+              {lc?.version ? (
+                <span className="mono">
+                  {lc.lifecycle?.code} · v{lc.version.version}
+                </span>
+              ) : null}
+            </div>
+            {lc?.lifecycle ? (
+              <>
+                <p className="mono">
+                  State: <span className="badge active">{lc.state?.code || lc.object.status}</span>
+                  {lc.status ? ` · ${lc.status.label} (${lc.status.category})` : ""}
+                </p>
+                <div className="row">
+                  {(lc.transitions || []).map((t) => (
+                    <button key={t.id} className="btn secondary" onClick={() => runTransition(t.code)}>
+                      {t.name}
+                      {t.requires_approval ? " (approval)" : ""}
+                    </button>
+                  ))}
+                  {!lc.transitions?.length ? <span className="mono">No transitions available.</span> : null}
+                </div>
+              </>
+            ) : (
+              <p className="mono">No lifecycle is assigned to this object type.</p>
+            )}
+          </div>
+
+          {lc?.pending_release ? (
+            <div className="panel">
+              <h3>Pending release</h3>
+              <p className="mono">
+                Rule {lc.pending_release.rule_code || lc.pending_release.rule_id} · status {lc.pending_release.status}
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Step</th>
+                    <th>Approver</th>
+                    <th>Status</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {lc.pending_release.approvals.map((a) => (
+                    <tr key={a.id}>
+                      <td className="mono">{a.step_code}</td>
+                      <td>{a.approver_username || a.approver_id}</td>
+                      <td>{a.status}</td>
+                      <td>
+                        {a.status === "pending" ? (
+                          <>
+                            <button className="btn ghost" onClick={() => decideApproval(a.id, "approve")}>
+                              Approve
+                            </button>
+                            <button className="btn ghost" onClick={() => decideApproval(a.id, "request_changes")}>
+                              Request changes
+                            </button>
+                            <button className="btn danger" onClick={() => decideApproval(a.id, "reject")}>
+                              Reject
+                            </button>
+                          </>
+                        ) : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          <div className="panel">
+            <h3>Status history</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>From</th>
+                  <th>To</th>
+                  <th>Source</th>
+                  <th>Actor</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((h) => (
+                  <tr key={h.id}>
+                    <td className="mono">{h.created_at}</td>
+                    <td>{h.from_status_code || h.from_status || "—"}</td>
+                    <td>{h.to_status_code || h.to_status || "—"}</td>
+                    <td>
+                      {h.source}
+                      {h.transition_code ? ` (${h.transition_code})` : ""}
+                    </td>
+                    <td>{h.actor_username || h.actor_id || "—"}</td>
+                  </tr>
+                ))}
+                {!history.length ? (
+                  <tr>
+                    <td colSpan={5} className="mono">
+                      No status changes recorded.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </>
       ) : null}
 
       {tab === "graph" ? (

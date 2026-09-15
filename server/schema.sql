@@ -729,3 +729,263 @@ CREATE INDEX IF NOT EXISTS idx_ref_source ON object_references(source_object_id,
 CREATE INDEX IF NOT EXISTS idx_ref_target ON object_references(target_object_id, status);
 CREATE INDEX IF NOT EXISTS idx_ref_type ON object_references(reference_type);
 CREATE INDEX IF NOT EXISTS idx_ref_tenant ON object_references(tenant_id);
+
+-- ============================================================
+-- Lifecycle Management
+-- Statuses, lifecycle templates and versions, state machines,
+-- release/approval rules and per-object lifecycle state, history
+-- and approval decisions. Configuration is metadata-style scoped:
+-- tenant_id NULL = global (platform-admin only), otherwise tenant.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS lifecycle_statuses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  label TEXT DEFAULT '',
+  description TEXT DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'draft'
+    CHECK (category IN ('draft', 'in_review', 'approved', 'released', 'obsolete', 'cancelled')),
+  module TEXT NOT NULL DEFAULT 'platform',
+  owner TEXT DEFAULT '',
+  legacy_status TEXT NOT NULL DEFAULT 'active'
+    CHECK (legacy_status IN ('draft', 'active', 'released', 'obsolete', 'archived')),
+  display_order INTEGER NOT NULL DEFAULT 0,
+  color TEXT DEFAULT '',
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lifecycle_statuses_code
+  ON lifecycle_statuses(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_lifecycle_statuses_tenant ON lifecycle_statuses(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_statuses_category ON lifecycle_statuses(category);
+
+CREATE TABLE IF NOT EXISTS status_type_availability (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  status_id INTEGER NOT NULL REFERENCES lifecycle_statuses(id) ON DELETE CASCADE,
+  type_id INTEGER NOT NULL REFERENCES metadata_types(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (status_id, type_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_status_type_availability_type ON status_type_availability(type_id);
+
+CREATE TABLE IF NOT EXISTS lifecycle_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  module TEXT NOT NULL DEFAULT 'platform',
+  current_version INTEGER NOT NULL DEFAULT 0,
+  published_version INTEGER,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'inactive', 'archived')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lifecycle_definitions_code
+  ON lifecycle_definitions(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_lifecycle_definitions_tenant ON lifecycle_definitions(tenant_id);
+
+CREATE TABLE IF NOT EXISTS lifecycle_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES lifecycle_definitions(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'archived')),
+  notes TEXT DEFAULT '',
+  snapshot TEXT NOT NULL DEFAULT '{}',
+  published_at TEXT,
+  published_by INTEGER REFERENCES users(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lifecycle_versions_definition ON lifecycle_versions(definition_id, status);
+
+CREATE TABLE IF NOT EXISTS lifecycle_states (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lifecycle_version_id INTEGER NOT NULL REFERENCES lifecycle_versions(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  status_id INTEGER REFERENCES lifecycle_statuses(id),
+  category TEXT NOT NULL DEFAULT 'draft'
+    CHECK (category IN ('draft', 'in_review', 'approved', 'released', 'obsolete', 'cancelled')),
+  is_initial INTEGER NOT NULL DEFAULT 0 CHECK (is_initial IN (0, 1)),
+  is_terminal INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0, 1)),
+  display_order INTEGER NOT NULL DEFAULT 0,
+  editable INTEGER NOT NULL DEFAULT 1 CHECK (editable IN (0, 1)),
+  visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
+  permissions_json TEXT NOT NULL DEFAULT '[]',
+  entry_conditions_json TEXT NOT NULL DEFAULT '{}',
+  exit_conditions_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (lifecycle_version_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lifecycle_states_version ON lifecycle_states(lifecycle_version_id);
+
+CREATE TABLE IF NOT EXISTS lifecycle_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lifecycle_version_id INTEGER NOT NULL REFERENCES lifecycle_versions(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  from_state_id INTEGER NOT NULL REFERENCES lifecycle_states(id),
+  to_state_id INTEGER NOT NULL REFERENCES lifecycle_states(id),
+  required_permission TEXT DEFAULT '',
+  required_role TEXT DEFAULT '',
+  requires_approval INTEGER NOT NULL DEFAULT 0 CHECK (requires_approval IN (0, 1)),
+  approval_rule_id INTEGER,
+  auto_approve INTEGER NOT NULL DEFAULT 0 CHECK (auto_approve IN (0, 1)),
+  conditions_json TEXT NOT NULL DEFAULT '{}',
+  display_order INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (lifecycle_version_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lifecycle_transitions_version ON lifecycle_transitions(lifecycle_version_id);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_transitions_from ON lifecycle_transitions(from_state_id);
+
+CREATE TABLE IF NOT EXISTS lifecycle_type_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type_id INTEGER NOT NULL REFERENCES metadata_types(id) ON DELETE CASCADE,
+  lifecycle_definition_id INTEGER NOT NULL REFERENCES lifecycle_definitions(id) ON DELETE CASCADE,
+  lifecycle_version_id INTEGER REFERENCES lifecycle_versions(id),
+  is_default INTEGER NOT NULL DEFAULT 1 CHECK (is_default IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lifecycle_type_assignments_type
+  ON lifecycle_type_assignments(type_id, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_lifecycle_type_assignments_def ON lifecycle_type_assignments(lifecycle_definition_id);
+
+CREATE TABLE IF NOT EXISTS approval_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'approval' CHECK (kind IN ('release', 'approval')),
+  module TEXT NOT NULL DEFAULT 'platform',
+  lifecycle_version_id INTEGER REFERENCES lifecycle_versions(id) ON DELETE CASCADE,
+  transition_id INTEGER REFERENCES lifecycle_transitions(id) ON DELETE CASCADE,
+  require_all INTEGER NOT NULL DEFAULT 0 CHECK (require_all IN (0, 1)),
+  min_approvals INTEGER NOT NULL DEFAULT 1,
+  sequential INTEGER NOT NULL DEFAULT 0 CHECK (sequential IN (0, 1)),
+  allow_self_approval INTEGER NOT NULL DEFAULT 0 CHECK (allow_self_approval IN (0, 1)),
+  mandatory_comment_on_reject INTEGER NOT NULL DEFAULT 1 CHECK (mandatory_comment_on_reject IN (0, 1)),
+  conditions_json TEXT NOT NULL DEFAULT '{}',
+  auto_transition INTEGER NOT NULL DEFAULT 1 CHECK (auto_transition IN (0, 1)),
+  rollback_state_id INTEGER REFERENCES lifecycle_states(id),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_rules_code
+  ON approval_rules(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_approval_rules_tenant ON approval_rules(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_approval_rules_version ON approval_rules(lifecycle_version_id);
+CREATE INDEX IF NOT EXISTS idx_approval_rules_transition ON approval_rules(transition_id);
+
+CREATE TABLE IF NOT EXISTS approval_rule_steps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_id INTEGER NOT NULL REFERENCES approval_rules(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  parallel INTEGER NOT NULL DEFAULT 0 CHECK (parallel IN (0, 1)),
+  approver_type TEXT NOT NULL DEFAULT 'role' CHECK (approver_type IN ('role', 'user', 'organization')),
+  approver_id INTEGER,
+  approval_mode TEXT NOT NULL DEFAULT 'all' CHECK (approval_mode IN ('any', 'all', 'min')),
+  min_approvals INTEGER NOT NULL DEFAULT 1,
+  conditions_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (rule_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_rule_steps_rule ON approval_rule_steps(rule_id);
+
+CREATE TABLE IF NOT EXISTS object_releases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+  lifecycle_version_id INTEGER REFERENCES lifecycle_versions(id),
+  transition_id INTEGER REFERENCES lifecycle_transitions(id),
+  rule_id INTEGER REFERENCES approval_rules(id),
+  from_state_id INTEGER REFERENCES lifecycle_states(id),
+  to_state_id INTEGER REFERENCES lifecycle_states(id),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'approved', 'rejected', 'changes_requested', 'cancelled')),
+  requested_by INTEGER REFERENCES users(id),
+  resolved_at TEXT,
+  comments TEXT DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_releases_object ON object_releases(object_id, status);
+CREATE INDEX IF NOT EXISTS idx_object_releases_tenant ON object_releases(tenant_id);
+
+CREATE TABLE IF NOT EXISTS object_approvals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  release_id INTEGER NOT NULL REFERENCES object_releases(id) ON DELETE CASCADE,
+  object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+  step_id INTEGER REFERENCES approval_rule_steps(id),
+  step_code TEXT DEFAULT '',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  parallel INTEGER NOT NULL DEFAULT 0 CHECK (parallel IN (0, 1)),
+  approver_type TEXT DEFAULT '',
+  approver_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'approved', 'rejected', 'changes_requested', 'cancelled', 'skipped')),
+  decided_by INTEGER REFERENCES users(id),
+  decided_at TEXT,
+  comment TEXT DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_approvals_release ON object_approvals(release_id);
+CREATE INDEX IF NOT EXISTS idx_object_approvals_object ON object_approvals(object_id, status);
+CREATE INDEX IF NOT EXISTS idx_object_approvals_approver ON object_approvals(approver_id);
+
+CREATE TABLE IF NOT EXISTS object_status_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+  lifecycle_version_id INTEGER,
+  transition_id INTEGER,
+  from_state_id INTEGER,
+  to_state_id INTEGER,
+  from_status_id INTEGER,
+  to_status_id INTEGER,
+  from_status TEXT,
+  to_status TEXT,
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'approval', 'system')),
+  reason TEXT DEFAULT '',
+  actor_id INTEGER REFERENCES users(id),
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_status_history_object ON object_status_history(object_id, id);
