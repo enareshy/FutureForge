@@ -23,6 +23,7 @@ import * as config from "./services/config.js";
 import * as metadata from "./services/metadata.js";
 import * as objects from "./services/objects.js";
 import * as lifecycle from "./services/lifecycle.js";
+import * as workflow from "./services/workflow.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
 import { effectiveAccess } from "./services/access.js";
@@ -1923,6 +1924,677 @@ export function createApp(db) {
           clientIp(req)
         )
       );
+    })
+  );
+
+  // Workflow & Process Engine: templates, designer, runtime instances, tasks,
+  // approvals and configuration (routing, escalation, notifications, bindings,
+  // delegations). Gated by iam.workflow.*; instances are tenant-scoped.
+  const canWorkflow = (action) => can("iam.workflow", action);
+  const canWorkflowTemplates = (action) => can("iam.workflow.templates", action);
+  const canWorkflowDesigner = (action) => can("iam.workflow.designer", action);
+  const canWorkflowInstances = (action) => can("iam.workflow.instances", action);
+  const canWorkflowTasks = (action) => can("iam.workflow.tasks", action);
+  const canWorkflowApprovals = (action) => can("iam.workflow.approvals", action);
+  const canWorkflowConfig = (action) => can("iam.workflow.config", action);
+  const wfRead = (req, source) => metaReadTenant(db, req.actor, source || req.query, req.tenantId);
+  const wfWrite = (req, body) => metaWriteTenant(db, req.actor, body ?? req.body, req.tenantId);
+
+  app.get(
+    "/api/workflow-templates",
+    auth,
+    canWorkflowTemplates("read"),
+    wrap((req, res) => {
+      res.json(workflow.listDefinitions(db, req.query, wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-templates",
+    auth,
+    canWorkflowTemplates("create"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      res.status(201).json(workflow.createDefinition(db, body, req.actor, clientIp(req), wfWrite(req, body)));
+    })
+  );
+
+  app.get(
+    "/api/workflow-templates/:id",
+    auth,
+    canWorkflowTemplates("read"),
+    wrap((req, res) => {
+      res.json(workflow.getDefinition(db, req.params.id, wfRead(req)));
+    })
+  );
+
+  const updateWorkflowTemplate = wrap((req, res) => {
+    res.json(workflow.updateDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+  });
+  app.put("/api/workflow-templates/:id", auth, canWorkflowTemplates("update"), updateWorkflowTemplate);
+  app.patch("/api/workflow-templates/:id", auth, canWorkflowTemplates("update"), updateWorkflowTemplate);
+
+  app.post(
+    "/api/workflow-templates/:id/status",
+    auth,
+    canWorkflowTemplates("update"),
+    wrap((req, res) => {
+      res.json(workflow.setDefinitionStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/workflow-templates/:id",
+    auth,
+    canWorkflowTemplates("delete"),
+    wrap((req, res) => {
+      res.json(workflow.deleteDefinition(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/workflow-templates/:id/versions",
+    auth,
+    canWorkflowTemplates("read"),
+    wrap((req, res) => {
+      res.json(workflow.listVersions(db, req.params.id, wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-templates/:id/versions",
+    auth,
+    canWorkflowTemplates("create"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.createVersion(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.get(
+    "/api/workflow-templates/:id/versions/:version",
+    auth,
+    canWorkflowTemplates("read"),
+    wrap((req, res) => {
+      res.json(workflow.getVersion(db, req.params.id, req.params.version, wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-templates/:id/validate",
+    auth,
+    canWorkflowTemplates("read"),
+    wrap((req, res) => {
+      res.json(workflow.validateDefinition(db, req.params.id, wfRead(req), { version: req.body?.version ?? req.query.version }));
+    })
+  );
+
+  app.post(
+    "/api/workflow-templates/:id/publish",
+    auth,
+    canWorkflowTemplates("update"),
+    wrap((req, res) => {
+      res.json(workflow.publishDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-templates/:id/clone",
+    auth,
+    canWorkflowTemplates("create"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.cloneDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  // --- Designer -----------------------------------------------------------
+  app.get(
+    "/api/workflow-templates/:id/designer",
+    auth,
+    canWorkflowDesigner("read"),
+    wrap((req, res) => {
+      res.json(workflow.designerContext(db, req.params.id, wfRead(req), req.query));
+    })
+  );
+
+  app.put(
+    "/api/workflow-templates/:id/designer",
+    auth,
+    canWorkflowDesigner("update"),
+    wrap((req, res) => {
+      res.json(workflow.saveDesignerGraph(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-templates/:id/designer/nodes",
+    auth,
+    canWorkflowDesigner("update"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.addNode(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.patch(
+    "/api/workflow-templates/:id/designer/nodes/:nodeId",
+    auth,
+    canWorkflowDesigner("update"),
+    wrap((req, res) => {
+      res.json(workflow.patchNode(db, req.params.id, req.params.nodeId, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/workflow-templates/:id/designer/nodes/:nodeId",
+    auth,
+    canWorkflowDesigner("update"),
+    wrap((req, res) => {
+      res.json(workflow.removeNode(db, req.params.id, req.params.nodeId, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-templates/:id/designer/transitions",
+    auth,
+    canWorkflowDesigner("update"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.addTransition(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.patch(
+    "/api/workflow-templates/:id/designer/transitions/:transitionId",
+    auth,
+    canWorkflowDesigner("update"),
+    wrap((req, res) => {
+      res.json(workflow.patchTransition(db, req.params.id, req.params.transitionId, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/workflow-templates/:id/designer/transitions/:transitionId",
+    auth,
+    canWorkflowDesigner("update"),
+    wrap((req, res) => {
+      res.json(workflow.removeTransition(db, req.params.id, req.params.transitionId, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-templates/:id/designer/auto-layout",
+    auth,
+    canWorkflowDesigner("update"),
+    wrap((req, res) => {
+      res.json(workflow.applyAutoLayout(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-templates/:id/designer/validate",
+    auth,
+    canWorkflowDesigner("read"),
+    wrap((req, res) => {
+      res.json(workflow.validateDesignerGraph(db, req.params.id, req.body || {}, wfRead(req)));
+    })
+  );
+
+  // --- Instances ----------------------------------------------------------
+  app.get(
+    "/api/workflow-instances",
+    auth,
+    canWorkflowInstances("read"),
+    wrap((req, res) => {
+      res.json(workflow.listInstances(db, req.query, req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/workflow-instances",
+    auth,
+    canWorkflowInstances("create"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.startInstance(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/workflow-instances/:id",
+    auth,
+    canWorkflowInstances("read"),
+    wrap((req, res) => {
+      res.json(workflow.getInstance(db, req.params.id, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/workflow-instances/:id/nodes",
+    auth,
+    canWorkflowInstances("read"),
+    wrap((req, res) => {
+      res.json({ items: workflow.instanceNodes(db, req.params.id, req.tenantId) });
+    })
+  );
+
+  app.get(
+    "/api/workflow-instances/:id/history",
+    auth,
+    canWorkflowInstances("read"),
+    wrap((req, res) => {
+      res.json(workflow.instanceHistory(db, req.params.id, req.tenantId, req.query));
+    })
+  );
+
+  app.post(
+    "/api/workflow-instances/:id/cancel",
+    auth,
+    canWorkflowInstances("execute"),
+    wrap((req, res) => {
+      res.json(
+        workflow.cancelInstance(db, req.params.id, {
+          reason: req.body?.reason || req.body?.comments || "",
+          actor: req.actor,
+          ip: clientIp(req),
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/workflow-instances/:id/pause",
+    auth,
+    canWorkflowInstances("execute"),
+    wrap((req, res) => {
+      res.json(workflow.pauseInstance(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-instances/:id/resume",
+    auth,
+    canWorkflowInstances("execute"),
+    wrap((req, res) => {
+      res.json(workflow.resumeInstance(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-instances/:id/retry",
+    auth,
+    canWorkflowInstances("execute"),
+    wrap((req, res) => {
+      res.json(workflow.retryInstance(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  // --- Tasks --------------------------------------------------------------
+  app.get(
+    "/api/tasks",
+    auth,
+    canWorkflowTasks("read"),
+    wrap((req, res) => {
+      res.json(workflow.listTasks(db, req.query, req.tenantId, req.actor, { scope: req.query.scope || "mine" }));
+    })
+  );
+
+  app.get(
+    "/api/tasks/:id",
+    auth,
+    canWorkflowTasks("read"),
+    wrap((req, res) => {
+      res.json(workflow.getTask(db, req.params.id, req.tenantId, req.actor));
+    })
+  );
+
+  app.post(
+    "/api/tasks/:id/complete",
+    auth,
+    canWorkflowTasks("execute"),
+    wrap((req, res) => {
+      res.json(workflow.completeTask(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/tasks/:id/assign",
+    auth,
+    canWorkflowTasks("update"),
+    wrap((req, res) => {
+      res.json(workflow.assignTask(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/tasks/:id/claim",
+    auth,
+    canWorkflowTasks("execute"),
+    wrap((req, res) => {
+      res.json(workflow.claimTask(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/tasks/:id/delegate",
+    auth,
+    canWorkflowTasks("execute"),
+    wrap((req, res) => {
+      res.json(workflow.delegateTask(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/tasks/:id/status",
+    auth,
+    canWorkflowTasks("update"),
+    wrap((req, res) => {
+      res.json(workflow.updateTaskStatus(db, req.params.id, req.body?.status, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/tasks/:id/comments",
+    auth,
+    canWorkflowTasks("read"),
+    wrap((req, res) => {
+      res.json({ items: workflow.listComments(db, req.params.id, req.tenantId) });
+    })
+  );
+
+  app.post(
+    "/api/tasks/:id/comments",
+    auth,
+    canWorkflowTasks("execute"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.addComment(db, req.params.id, req.body || {}, req.actor, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/tasks/:id/attachments",
+    auth,
+    canWorkflowTasks("read"),
+    wrap((req, res) => {
+      res.json({ items: workflow.listAttachments(db, req.params.id, req.tenantId) });
+    })
+  );
+
+  app.post(
+    "/api/tasks/:id/attachments",
+    auth,
+    canWorkflowTasks("execute"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.addAttachment(db, req.params.id, req.body || {}, req.actor, req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/tasks/:id/subtasks",
+    auth,
+    canWorkflowTasks("execute"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.addSubtask(db, req.params.id, req.body || {}, req.actor, req.tenantId));
+    })
+  );
+
+  app.patch(
+    "/api/tasks/:id/subtasks/:subtaskId",
+    auth,
+    canWorkflowTasks("execute"),
+    wrap((req, res) => {
+      res.json(workflow.updateSubtask(db, req.params.id, req.params.subtaskId, req.body || {}, req.actor, req.tenantId));
+    })
+  );
+
+  app.delete(
+    "/api/tasks/:id/subtasks/:subtaskId",
+    auth,
+    canWorkflowTasks("execute"),
+    wrap((req, res) => {
+      res.json(workflow.deleteSubtask(db, req.params.id, req.params.subtaskId, req.actor, req.tenantId));
+    })
+  );
+
+  // --- Approvals ----------------------------------------------------------
+  app.get(
+    "/api/workflow-approvals",
+    auth,
+    canWorkflowApprovals("read"),
+    wrap((req, res) => {
+      res.json(workflow.listApprovals(db, req.query, req.tenantId, req.actor, { scope: req.query.scope || "mine" }));
+    })
+  );
+
+  app.get(
+    "/api/workflow-approvals/:id",
+    auth,
+    canWorkflowApprovals("read"),
+    wrap((req, res) => {
+      res.json(workflow.getApproval(db, req.params.id, req.tenantId, req.actor));
+    })
+  );
+
+  app.post(
+    "/api/workflow-approvals/:id/decision",
+    auth,
+    canWorkflowApprovals("execute"),
+    wrap((req, res) => {
+      res.json(workflow.decideApproval(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  const approvalDecision = (decision) =>
+    wrap((req, res) => {
+      res.json(
+        workflow.decideApproval(db, req.params.id, { ...(req.body || {}), decision }, req.actor, req.tenantId, clientIp(req))
+      );
+    });
+  app.post("/api/workflow-approvals/:id/approve", auth, canWorkflowApprovals("execute"), approvalDecision("approve"));
+  app.post("/api/workflow-approvals/:id/reject", auth, canWorkflowApprovals("execute"), approvalDecision("reject"));
+  app.post(
+    "/api/workflow-approvals/:id/request-changes",
+    auth,
+    canWorkflowApprovals("execute"),
+    approvalDecision("request_changes")
+  );
+
+  // --- Routing rules ------------------------------------------------------
+  app.get(
+    "/api/workflow-routing-rules",
+    auth,
+    canWorkflowConfig("read"),
+    wrap((req, res) => {
+      res.json(workflow.listRoutingRules(db, req.query, wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-routing-rules",
+    auth,
+    canWorkflowConfig("create"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.createRoutingRule(db, req.body || {}, req.actor, clientIp(req), wfWrite(req)));
+    })
+  );
+
+  app.patch(
+    "/api/workflow-routing-rules/:id",
+    auth,
+    canWorkflowConfig("update"),
+    wrap((req, res) => {
+      res.json(workflow.updateRoutingRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/workflow-routing-rules/:id",
+    auth,
+    canWorkflowConfig("delete"),
+    wrap((req, res) => {
+      res.json(workflow.deleteRoutingRule(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  // --- Escalation ---------------------------------------------------------
+  app.get(
+    "/api/workflow-escalation-rules",
+    auth,
+    canWorkflowConfig("read"),
+    wrap((req, res) => {
+      res.json(workflow.listEscalationRules(db, req.query, wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-escalation-rules",
+    auth,
+    canWorkflowConfig("create"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.createEscalationRule(db, req.body || {}, req.actor, clientIp(req), wfWrite(req)));
+    })
+  );
+
+  app.patch(
+    "/api/workflow-escalation-rules/:id",
+    auth,
+    canWorkflowConfig("update"),
+    wrap((req, res) => {
+      res.json(workflow.updateEscalationRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/workflow-escalation-rules/:id",
+    auth,
+    canWorkflowConfig("delete"),
+    wrap((req, res) => {
+      res.json(workflow.deleteEscalationRule(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-escalations/sweep",
+    auth,
+    canWorkflowConfig("execute"),
+    wrap((req, res) => {
+      res.json(workflow.sweepEscalations(db, { tenantId: req.tenantId }));
+    })
+  );
+
+  // --- Notifications ------------------------------------------------------
+  app.get(
+    "/api/workflow-notifications",
+    auth,
+    canWorkflow("read"),
+    wrap((req, res) => {
+      res.json(workflow.listNotifications(db, req.query, req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/workflow-notifications/:id/read",
+    auth,
+    canWorkflow("execute"),
+    wrap((req, res) => {
+      res.json(workflow.markNotificationRead(db, req.params.id, req.tenantId, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/workflow-notification-templates",
+    auth,
+    canWorkflowConfig("read"),
+    wrap((req, res) => {
+      res.json(workflow.listTemplates(db, req.query, wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-notification-templates",
+    auth,
+    canWorkflowConfig("create"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.createTemplate(db, req.body || {}, req.actor, clientIp(req), wfWrite(req)));
+    })
+  );
+
+  app.patch(
+    "/api/workflow-notification-templates/:id",
+    auth,
+    canWorkflowConfig("update"),
+    wrap((req, res) => {
+      res.json(workflow.updateTemplate(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/workflow-notification-templates/:id",
+    auth,
+    canWorkflowConfig("delete"),
+    wrap((req, res) => {
+      res.json(workflow.deleteTemplate(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  // --- Bindings -----------------------------------------------------------
+  app.get(
+    "/api/workflow-bindings",
+    auth,
+    canWorkflowConfig("read"),
+    wrap((req, res) => {
+      res.json(workflow.listBindings(db, req.query, wfRead(req)));
+    })
+  );
+
+  app.post(
+    "/api/workflow-bindings",
+    auth,
+    canWorkflowConfig("create"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.createBinding(db, req.body || {}, req.actor, clientIp(req), wfWrite(req)));
+    })
+  );
+
+  app.patch(
+    "/api/workflow-bindings/:id",
+    auth,
+    canWorkflowConfig("update"),
+    wrap((req, res) => {
+      res.json(workflow.updateBinding(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  app.delete(
+    "/api/workflow-bindings/:id",
+    auth,
+    canWorkflowConfig("delete"),
+    wrap((req, res) => {
+      res.json(workflow.deleteBinding(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    })
+  );
+
+  // --- Delegations --------------------------------------------------------
+  app.get(
+    "/api/workflow-delegations",
+    auth,
+    canWorkflow("read"),
+    wrap((req, res) => {
+      res.json(workflow.listDelegations(db, req.query, req.tenantId, req.actor));
+    })
+  );
+
+  app.post(
+    "/api/workflow-delegations",
+    auth,
+    canWorkflow("execute"),
+    wrap((req, res) => {
+      res.status(201).json(workflow.createDelegation(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/workflow-delegations/:id",
+    auth,
+    canWorkflow("execute"),
+    wrap((req, res) => {
+      res.json(workflow.revokeDelegation(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
     })
   );
 

@@ -989,3 +989,380 @@ CREATE TABLE IF NOT EXISTS object_status_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_object_status_history_object ON object_status_history(object_id, id);
+
+-- 011_workflow ---------------------------------------------------------------
+-- Configuration-driven Workflow & Process Engine. Templates are versioned and
+-- published versions are immutable; runtime instances pin the version they were
+-- started with so authoring never mutates history.
+
+CREATE TABLE IF NOT EXISTS workflow_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'general',
+  module TEXT NOT NULL DEFAULT 'platform',
+  current_version INTEGER NOT NULL DEFAULT 0,
+  published_version INTEGER,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'inactive', 'archived')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_definitions_code
+  ON workflow_definitions(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_workflow_definitions_tenant ON workflow_definitions(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_definitions_module ON workflow_definitions(module);
+
+CREATE TABLE IF NOT EXISTS workflow_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES workflow_definitions(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'archived')),
+  notes TEXT DEFAULT '',
+  snapshot TEXT NOT NULL DEFAULT '{}',
+  published_at TEXT,
+  published_by INTEGER REFERENCES users(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_versions_definition ON workflow_versions(definition_id, status);
+
+CREATE TABLE IF NOT EXISTS workflow_nodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  version_id INTEGER NOT NULL REFERENCES workflow_versions(id) ON DELETE CASCADE,
+  node_key TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN (
+    'start', 'end', 'task', 'approval', 'decision', 'parallel', 'join',
+    'notification', 'timer', 'subprocess', 'service', 'terminate'
+  )),
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  position_x REAL NOT NULL DEFAULT 0,
+  position_y REAL NOT NULL DEFAULT 0,
+  display_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (version_id, node_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_nodes_version ON workflow_nodes(version_id);
+
+CREATE TABLE IF NOT EXISTS workflow_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  version_id INTEGER NOT NULL REFERENCES workflow_versions(id) ON DELETE CASCADE,
+  transition_key TEXT NOT NULL,
+  from_node_id INTEGER NOT NULL REFERENCES workflow_nodes(id) ON DELETE CASCADE,
+  to_node_id INTEGER NOT NULL REFERENCES workflow_nodes(id) ON DELETE CASCADE,
+  name TEXT DEFAULT '',
+  condition_json TEXT NOT NULL DEFAULT '{}',
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+  display_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (version_id, transition_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_transitions_version ON workflow_transitions(version_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_transitions_from ON workflow_transitions(from_node_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_transitions_to ON workflow_transitions(to_node_id);
+
+CREATE TABLE IF NOT EXISTS workflow_instances (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  definition_id INTEGER NOT NULL REFERENCES workflow_definitions(id),
+  version_id INTEGER NOT NULL REFERENCES workflow_versions(id),
+  object_id INTEGER REFERENCES objects(id),
+  parent_instance_id INTEGER REFERENCES workflow_instances(id),
+  parent_node_id INTEGER REFERENCES workflow_nodes(id),
+  title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'running'
+    CHECK (status IN ('pending', 'running', 'paused', 'completed', 'cancelled', 'failed')),
+  context_json TEXT NOT NULL DEFAULT '{}',
+  current_node_id INTEGER REFERENCES workflow_nodes(id),
+  started_by INTEGER REFERENCES users(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  ended_at TEXT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_instances_definition ON workflow_instances(definition_id, status);
+CREATE INDEX IF NOT EXISTS idx_workflow_instances_tenant ON workflow_instances(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_instances_object ON workflow_instances(object_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_instances_parent ON workflow_instances(parent_instance_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_instances_code ON workflow_instances(code);
+
+CREATE TABLE IF NOT EXISTS workflow_instance_nodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  instance_id INTEGER NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+  node_id INTEGER NOT NULL REFERENCES workflow_nodes(id),
+  node_key TEXT NOT NULL,
+  node_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'active', 'blocked', 'completed', 'skipped', 'failed', 'cancelled')),
+  outcome TEXT DEFAULT '',
+  data_json TEXT NOT NULL DEFAULT '{}',
+  entered_at TEXT,
+  completed_at TEXT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_instance_nodes_instance ON workflow_instance_nodes(instance_id, status);
+CREATE INDEX IF NOT EXISTS idx_workflow_instance_nodes_node ON workflow_instance_nodes(node_id);
+
+CREATE TABLE IF NOT EXISTS workflow_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  instance_id INTEGER NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+  instance_node_id INTEGER REFERENCES workflow_instance_nodes(id) ON DELETE CASCADE,
+  definition_id INTEGER REFERENCES workflow_definitions(id),
+  node_id INTEGER REFERENCES workflow_nodes(id),
+  parent_task_id INTEGER REFERENCES workflow_tasks(id),
+  code TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'unassigned'
+    CHECK (status IN ('unassigned', 'assigned', 'in_progress', 'blocked', 'awaiting_approval', 'completed', 'cancelled')),
+  priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  assignee_type TEXT NOT NULL DEFAULT 'unassigned'
+    CHECK (assignee_type IN ('unassigned', 'user', 'role', 'organization', 'group', 'queue')),
+  assignee_id INTEGER,
+  assignee_ref TEXT DEFAULT '',
+  claimed_by INTEGER REFERENCES users(id),
+  due_at TEXT,
+  escalation_at TEXT,
+  escalated INTEGER NOT NULL DEFAULT 0 CHECK (escalated IN (0, 1)),
+  outcome TEXT DEFAULT '',
+  form_json TEXT NOT NULL DEFAULT '{}',
+  data_json TEXT NOT NULL DEFAULT '{}',
+  object_id INTEGER REFERENCES objects(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  completed_by INTEGER REFERENCES users(id),
+  completed_at TEXT,
+  created_by INTEGER REFERENCES users(id),
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_tasks_instance ON workflow_tasks(instance_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_tasks_assignee ON workflow_tasks(assignee_type, assignee_id, status);
+CREATE INDEX IF NOT EXISTS idx_workflow_tasks_status ON workflow_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_workflow_tasks_tenant ON workflow_tasks(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_tasks_escalation ON workflow_tasks(escalation_at, escalated);
+
+CREATE TABLE IF NOT EXISTS workflow_task_subtasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES workflow_tasks(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo', 'done')),
+  display_order INTEGER NOT NULL DEFAULT 0,
+  completed_by INTEGER REFERENCES users(id),
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_task_subtasks_task ON workflow_task_subtasks(task_id);
+
+CREATE TABLE IF NOT EXISTS workflow_task_comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES workflow_tasks(id) ON DELETE CASCADE,
+  author_id INTEGER REFERENCES users(id),
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_task_comments_task ON workflow_task_comments(task_id);
+
+CREATE TABLE IF NOT EXISTS workflow_task_attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES workflow_tasks(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL,
+  url TEXT NOT NULL,
+  content_type TEXT DEFAULT '',
+  size INTEGER DEFAULT 0,
+  uploaded_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_task_attachments_task ON workflow_task_attachments(task_id);
+
+CREATE TABLE IF NOT EXISTS workflow_approvals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  instance_id INTEGER NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+  task_id INTEGER REFERENCES workflow_tasks(id) ON DELETE CASCADE,
+  node_id INTEGER REFERENCES workflow_nodes(id),
+  node_key TEXT NOT NULL,
+  approval_rule_id INTEGER REFERENCES approval_rules(id),
+  step_id INTEGER REFERENCES approval_rule_steps(id),
+  step_code TEXT DEFAULT '',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  parallel INTEGER NOT NULL DEFAULT 0 CHECK (parallel IN (0, 1)),
+  approver_type TEXT DEFAULT '',
+  approver_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'approved', 'rejected', 'changes_requested', 'cancelled', 'skipped')),
+  decided_by INTEGER REFERENCES users(id),
+  decided_at TEXT,
+  comment TEXT DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_approvals_instance ON workflow_approvals(instance_id, status);
+CREATE INDEX IF NOT EXISTS idx_workflow_approvals_approver ON workflow_approvals(approver_id, status);
+CREATE INDEX IF NOT EXISTS idx_workflow_approvals_tenant ON workflow_approvals(tenant_id);
+
+CREATE TABLE IF NOT EXISTS workflow_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  instance_id INTEGER NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+  task_id INTEGER REFERENCES workflow_tasks(id) ON DELETE SET NULL,
+  node_key TEXT DEFAULT '',
+  event_type TEXT NOT NULL,
+  actor_id INTEGER REFERENCES users(id),
+  message TEXT DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_events_instance ON workflow_events(instance_id, id);
+
+CREATE TABLE IF NOT EXISTS workflow_routing_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  definition_id INTEGER REFERENCES workflow_definitions(id) ON DELETE CASCADE,
+  node_type TEXT DEFAULT '',
+  priority INTEGER NOT NULL DEFAULT 100,
+  condition_json TEXT NOT NULL DEFAULT '{}',
+  strategy TEXT NOT NULL DEFAULT 'first_match'
+    CHECK (strategy IN ('first_match', 'round_robin', 'least_loaded')),
+  assignee_type TEXT NOT NULL DEFAULT 'role'
+    CHECK (assignee_type IN ('user', 'role', 'organization', 'group', 'queue')),
+  assignee_id INTEGER,
+  assignee_ref TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_routing_rules_code
+  ON workflow_routing_rules(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_workflow_routing_rules_definition ON workflow_routing_rules(definition_id, priority);
+
+CREATE TABLE IF NOT EXISTS workflow_escalation_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  definition_id INTEGER REFERENCES workflow_definitions(id) ON DELETE CASCADE,
+  node_key TEXT DEFAULT '',
+  after_minutes INTEGER NOT NULL DEFAULT 60,
+  action TEXT NOT NULL DEFAULT 'notify'
+    CHECK (action IN ('notify', 'reassign', 'raise_priority', 'escalate')),
+  target_assignee_type TEXT DEFAULT '',
+  target_assignee_id INTEGER,
+  target_assignee_ref TEXT DEFAULT '',
+  notify_user_id INTEGER REFERENCES users(id),
+  priority TEXT DEFAULT 'high' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_escalation_rules_code
+  ON workflow_escalation_rules(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_workflow_escalation_rules_definition ON workflow_escalation_rules(definition_id);
+
+CREATE TABLE IF NOT EXISTS workflow_delegations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  starts_at TEXT,
+  ends_at TEXT,
+  reason TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked', 'expired')),
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_delegations_to ON workflow_delegations(to_user_id, status);
+
+CREATE TABLE IF NOT EXISTS workflow_notification_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  channel TEXT NOT NULL DEFAULT 'in_app' CHECK (channel IN ('in_app', 'email', 'webhook')),
+  subject TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  locale TEXT NOT NULL DEFAULT 'en',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_notification_templates_code
+  ON workflow_notification_templates(code, COALESCE(tenant_id, 0));
+
+CREATE TABLE IF NOT EXISTS workflow_notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  instance_id INTEGER REFERENCES workflow_instances(id) ON DELETE CASCADE,
+  task_id INTEGER REFERENCES workflow_tasks(id) ON DELETE SET NULL,
+  template_code TEXT DEFAULT '',
+  channel TEXT NOT NULL DEFAULT 'in_app' CHECK (channel IN ('in_app', 'email', 'webhook')),
+  recipient_type TEXT NOT NULL DEFAULT 'user' CHECK (recipient_type IN ('user', 'role', 'organization', 'group', 'queue')),
+  recipient_id INTEGER,
+  recipient_ref TEXT DEFAULT '',
+  subject TEXT DEFAULT '',
+  body TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed', 'read')),
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  sent_at TEXT,
+  read_at TEXT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_notifications_recipient ON workflow_notifications(recipient_type, recipient_id, status);
+CREATE INDEX IF NOT EXISTS idx_workflow_notifications_instance ON workflow_notifications(instance_id);
+
+CREATE TABLE IF NOT EXISTS workflow_bindings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  event TEXT NOT NULL,
+  definition_id INTEGER NOT NULL REFERENCES workflow_definitions(id) ON DELETE CASCADE,
+  version_id INTEGER REFERENCES workflow_versions(id),
+  condition_json TEXT NOT NULL DEFAULT '{}',
+  context_map_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_bindings_code
+  ON workflow_bindings(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_workflow_bindings_event ON workflow_bindings(event, status);

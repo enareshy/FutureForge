@@ -46,6 +46,12 @@ Default operator: `admin` / `HelixAdmin!42`
 - `/api/lifecycle-states` `/api/lifecycle-transitions` `/api/lifecycle-assignments` — state machines and object-type bindings
 - `/api/release-rules` `/api/approval-rules` — approval rules with sequential/parallel steps and quorums
 - `/api/objects/:id/lifecycle` `/transitions` `/status-history` `/release` `/releases` `/approvals/:approvalId` — per-object transition engine and release/approval workflow
+- `/api/workflow-templates` — versioned, immutable workflow templates with `/versions`, `/validate`, `/publish`, `/clone` and a `/designer` graph editor (`/nodes`, `/transitions`, `/auto-layout`, `/validate`)
+- `/api/workflow-instances` — runtime engine: start, inspect `/nodes` and `/history`, `cancel`, `pause`, `resume`, `retry`
+- `/api/tasks` — task inbox: list by scope, `complete`, `assign`, `claim`, `delegate`, `status`, plus `/comments`, `/attachments`, `/subtasks`
+- `/api/workflow-approvals` — approval inbox and decisions (`/decision`, `/approve`, `/reject`, `/request-changes`)
+- `/api/workflow-routing-rules` `/api/workflow-escalation-rules` `/api/workflow-escalations/sweep` — assignment routing and escalation sweeps
+- `/api/workflow-notifications` `/api/workflow-notification-templates` `/api/workflow-bindings` `/api/workflow-delegations` — notifications, event bindings and out-of-office delegation
 - `/api/hierarchy` — Super Admin–defined org levels (operators)
 - `/api/platform/hierarchy` `/api/platform/settings` — Super Admin feature properties
 - `/api/companies` `/api/business-units` `/api/plants` `/api/sites` `/api/departments` — typed collections
@@ -59,9 +65,9 @@ IAM APIs are fail-safe: session plus `checkPermission`. Unauthorized callers rec
 
 In-process (future modules): `import { checkPermission, organizationContext } from "./server/platform.js"`
 
-Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`, `docs/LIFECYCLE_DESIGN.md`
+Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`, `docs/LIFECYCLE_DESIGN.md`, `docs/WORKFLOW_ENGINE_DESIGN.md`
 
-The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config) and lifecycle configuration under `/lifecycles`. Object lifecycle state, transitions, approvals and status history appear on the object detail page. The reusable client renderer is `web/src/components/FormRenderer.jsx`.
+The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config), lifecycle configuration under `/lifecycles`, and **Workflow Engine** under `/workflows/templates` (the Configuration section where admins create and design workflow templates). End users get **My tasks & approvals** under `/workflows` (My Tasks, Team Tasks, Approvals and the instance monitor). Object lifecycle state, transitions, approvals and status history appear on the object detail page. The reusable client renderer is `web/src/components/FormRenderer.jsx` and the visual workflow designer is `web/src/components/WorkflowDesigner.jsx`.
 
 ## Tests
 
