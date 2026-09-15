@@ -15,6 +15,7 @@ import * as metadata from "./services/metadata.js";
 import * as objects from "./services/objects.js";
 import * as lifecycle from "./services/lifecycle.js";
 import * as workflow from "./services/workflow.js";
+import * as audit from "./services/audit.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -781,7 +782,12 @@ function seedMissingCatalog(db) {
   const extra = [
     { applicationCode: "iam", code: "iam.organizations", name: "Organizations", parentCode: "iam" },
     { applicationCode: "iam", code: "iam.policy", name: "Password policy", parentCode: "iam" },
-    { applicationCode: "iam", code: "iam.audit", name: "Audit log", parentCode: "iam" },
+    { applicationCode: "iam", code: "iam.audit", name: "Audit & history", kind: "module" },
+    { applicationCode: "iam", code: "iam.audit.events", name: "Audit events", parentCode: "iam.audit" },
+    { applicationCode: "iam", code: "iam.audit.history", name: "Object history", parentCode: "iam.audit" },
+    { applicationCode: "iam", code: "iam.audit.policies", name: "Audit policies", parentCode: "iam.audit" },
+    { applicationCode: "iam", code: "iam.audit.export", name: "Audit export", parentCode: "iam.audit" },
+    { applicationCode: "iam", code: "iam.audit.retention", name: "Audit retention", parentCode: "iam.audit" },
     { applicationCode: "iam", code: "iam.platform", name: "Platform properties" },
     { applicationCode: "iam", code: "iam.authentication", name: "Authentication providers", parentCode: "iam" },
     { applicationCode: "iam", code: "iam.sessions", name: "Sessions", parentCode: "iam" },
@@ -860,6 +866,11 @@ function seedMissingCatalog(db) {
     "iam.workflow.tasks",
     "iam.workflow.approvals",
     "iam.workflow.config",
+    "iam.audit.events",
+    "iam.audit.history",
+    "iam.audit.policies",
+    "iam.audit.export",
+    "iam.audit.retention",
   ];
   for (const code of objectResourceCodes) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -904,6 +915,7 @@ function reconcileReaderGrants(db) {
     ["iam.workflow.instances", ["read", "create", "execute"]],
     ["iam.workflow.tasks", ["read", "execute", "update"]],
     ["iam.workflow.approvals", ["read", "execute"]],
+    ["iam.audit.history", ["read"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -1694,6 +1706,158 @@ function seedWorkflow(db) {
   };
 }
 
+// Audit & History Framework seed: a system policy, a tenant override that
+// demonstrates visibility/tracking/masking, and a small set of sample events so
+// the console has content on a fresh installation.
+function seedAudit(db) {
+  audit.ensureDefaultPolicies(db);
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const admin = queryOne(db, "SELECT id, username, display_name FROM users WHERE username = 'admin'");
+  const tenantId = helix?.id || null;
+  const actor = admin
+    ? { id: admin.id, username: admin.username, display_name: admin.display_name, tenant_id: tenantId }
+    : { username: "system", tenant_id: tenantId };
+
+  if (tenantId) {
+    const existing = queryOne(
+      db,
+      "SELECT id FROM audit_policies WHERE tenant_id = ? AND object_type = 'part'",
+      [tenantId]
+    );
+    if (!existing) {
+      audit.createPolicy(
+        db,
+        {
+          tenant_id: tenantId,
+          name: "Part history",
+          description: "Full part history visible to object users, with supplier masked.",
+          object_type: "part",
+          visibility: "user",
+          capture_views: true,
+          capture_downloads: true,
+          track_attributes: [
+            "part.name",
+            "part.category",
+            "part.status",
+            "part.revision",
+            "part.weight_kg",
+            "part.notes",
+          ],
+          masked_attributes: ["part.supplier"],
+          retention_days: 3650,
+        },
+        admin ? { id: admin.id } : null,
+        tenantId
+      );
+    }
+  }
+
+  const marker = queryOne(
+    db,
+    "SELECT 1 AS x FROM audit_logs WHERE resource_type = 'part' AND resource_id = 'PART-000001' LIMIT 1"
+  );
+  if (marker) return { auditSeeded: false };
+
+  const common = {
+    actor,
+    tenant_id: tenantId,
+    source: "ui",
+    ip: "10.20.30.40",
+    device: "Mozilla/5.0 (seed)",
+    correlation_id: "seed-correlation-1",
+  };
+
+  audit.capture(db, {
+    ...common,
+    action: "auth.session.create",
+    event_type: "LOGIN",
+    object_type: "session",
+    object_id: "seed-session",
+    status: "success",
+    details: { provider: "password" },
+  });
+  audit.capture(db, {
+    ...common,
+    action: "object.create",
+    object_type: "part",
+    object_id: "PART-000001",
+    object_name: "Hydraulic bracket",
+    before: null,
+    after: {
+      "part.number": "PART-000001",
+      "part.name": "Hydraulic bracket",
+      "part.category": "mechanical",
+      "part.status": "draft",
+      "part.revision": 1,
+      "part.weight_kg": 2.4,
+      "part.supplier": "Acme Metals",
+    },
+    reason: "Initial part release",
+  });
+  audit.capture(db, {
+    ...common,
+    action: "object.update",
+    object_type: "part",
+    object_id: "PART-000001",
+    object_name: "Hydraulic bracket",
+    before: { "part.weight_kg": 2.4, "part.notes": null, "part.supplier": "Acme Metals" },
+    after: { "part.weight_kg": 2.6, "part.notes": "Tolerance tightened", "part.supplier": "Acme Metals" },
+    reason: "Design change after review",
+    correlation_id: "seed-correlation-2",
+  });
+  audit.capture(db, {
+    ...common,
+    action: "object.status.released",
+    event_type: "STATE_CHANGE",
+    object_type: "part",
+    object_id: "PART-000001",
+    object_name: "Hydraulic bracket",
+    before: { status: "draft" },
+    after: { status: "released" },
+    reason: "Approved by engineering",
+  });
+  audit.capture(db, {
+    ...common,
+    action: "workflow.task.complete",
+    event_type: "WORKFLOW_ACTION",
+    object_type: "workflow_instance",
+    object_id: "1",
+    object_name: "Change request review",
+    details: { node: "assess", outcome: "done" },
+    source: "workflow",
+  });
+  audit.capture(db, {
+    ...common,
+    action: "relationship.create",
+    event_type: "RELATIONSHIP_CHANGE",
+    object_type: "part",
+    object_id: "PART-000001",
+    object_name: "Hydraulic bracket",
+    related: { relationship_type: "bom-parent", related_object_id: "ASM-000010" },
+  });
+  audit.capture(db, {
+    ...common,
+    action: "access.unauthenticated",
+    event_type: "ACCESS_DENIED",
+    object_type: "http_request",
+    object_id: "GET /api/audit/events",
+    status: "failure",
+    error_message: "Authentication required",
+    actor: { username: "anonymous", tenant_id: tenantId },
+    ip: "203.0.113.7",
+    source: "api",
+  });
+  audit.capture(db, {
+    ...common,
+    action: "audit.export",
+    event_type: "EXPORT",
+    object_type: "audit_event",
+    object_id: "csv",
+    details: { format: "csv", filters: { objectType: "part" } },
+  });
+  return { auditSeeded: true };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -1707,6 +1871,7 @@ export function seedDatabase(db) {
   seedObjects(db);
   seedLifecycle(db);
   seedWorkflow(db);
+  seedAudit(db);
   return { ...identity, ...authz };
 }
 

@@ -1366,3 +1366,126 @@ CREATE TABLE IF NOT EXISTS workflow_bindings (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_bindings_code
   ON workflow_bindings(code, COALESCE(tenant_id, 0));
 CREATE INDEX IF NOT EXISTS idx_workflow_bindings_event ON workflow_bindings(event, status);
+
+-- ── Audit & History Framework ──────────────────────────────────────────────
+-- The audit_logs table is the append-only event store. Rich columns are added
+-- by migration ensureColumn so that pre-existing databases are upgraded too.
+
+CREATE TABLE IF NOT EXISTS audit_event_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL REFERENCES audit_logs(id) ON DELETE CASCADE,
+  attribute TEXT NOT NULL,
+  old_value TEXT,
+  new_value TEXT,
+  value_type TEXT NOT NULL DEFAULT 'string',
+  masked INTEGER NOT NULL DEFAULT 0,
+  tenant_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_changes_event ON audit_event_changes(event_id);
+CREATE INDEX IF NOT EXISTS idx_audit_changes_attribute ON audit_event_changes(attribute);
+
+CREATE TABLE IF NOT EXISTS audit_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER,
+  object_type TEXT NOT NULL DEFAULT '*',
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  record_success INTEGER NOT NULL DEFAULT 1,
+  record_failure INTEGER NOT NULL DEFAULT 1,
+  capture_reads INTEGER NOT NULL DEFAULT 0,
+  capture_views INTEGER NOT NULL DEFAULT 0,
+  capture_downloads INTEGER NOT NULL DEFAULT 1,
+  actions_json TEXT NOT NULL DEFAULT '[]',
+  track_attributes_json TEXT NOT NULL DEFAULT '[]',
+  masked_attributes_json TEXT NOT NULL DEFAULT '[]',
+  ignored_attributes_json TEXT NOT NULL DEFAULT '[]',
+  retention_days INTEGER NOT NULL DEFAULT 2555,
+  visibility TEXT NOT NULL DEFAULT 'admin' CHECK (visibility IN ('user', 'manager', 'admin')),
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_policies_scope
+  ON audit_policies(COALESCE(tenant_id, 0), object_type);
+
+CREATE TABLE IF NOT EXISTS audit_retention_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER,
+  policy_id INTEGER,
+  cutoff TEXT NOT NULL,
+  archived INTEGER NOT NULL DEFAULT 0,
+  purged INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'success',
+  dry_run INTEGER NOT NULL DEFAULT 0,
+  actor_id INTEGER,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_retention_tenant ON audit_retention_runs(tenant_id, started_at);
+
+-- Archive store for retention/archival. Mirrors the audit event shape and is
+-- written only by the retention service.
+CREATE TABLE IF NOT EXISTS audit_logs_archive (
+  id INTEGER PRIMARY KEY,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  department_id INTEGER,
+  actor_id INTEGER,
+  actor_username TEXT,
+  user_display_name TEXT,
+  action TEXT NOT NULL,
+  event_type TEXT,
+  source TEXT,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT,
+  object_name TEXT,
+  details TEXT,
+  changed_fields TEXT,
+  before_values TEXT,
+  after_values TEXT,
+  related_json TEXT,
+  status TEXT,
+  error_message TEXT,
+  reason TEXT,
+  correlation_id TEXT,
+  request_id TEXT,
+  parent_event_id INTEGER,
+  ip TEXT,
+  device TEXT,
+  duration_ms INTEGER,
+  created_at TEXT NOT NULL,
+  archived_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_archive_object ON audit_logs_archive(resource_type, resource_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_archive_tenant ON audit_logs_archive(tenant_id, created_at);
+
+-- Immutability guard. Normal application code can only INSERT and SELECT audit
+-- events. Retention may remove rows only while the guard flag is set.
+CREATE TABLE IF NOT EXISTS audit_guard (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  allow_delete INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT OR IGNORE INTO audit_guard (id, allow_delete) VALUES (1, 0);
+
+CREATE TRIGGER IF NOT EXISTS audit_logs_no_update
+BEFORE UPDATE ON audit_logs
+BEGIN
+  SELECT RAISE(ABORT, 'Audit records are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_logs_no_delete
+BEFORE DELETE ON audit_logs
+WHEN (SELECT allow_delete FROM audit_guard WHERE id = 1) <> 1
+BEGIN
+  SELECT RAISE(ABORT, 'Audit records are immutable');
+END;

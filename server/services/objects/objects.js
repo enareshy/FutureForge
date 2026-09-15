@@ -1,6 +1,6 @@
 import { queryAll, queryOne, run, nowIso, randomUuid, transaction } from "../../db.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { recordObjectChange } from "../audit.js";
 import * as metadata from "../metadata.js";
 import * as tenants from "../tenants.js";
 import { OBJECT_STATUSES, normalizeTags, assertStatus } from "./validation.js";
@@ -58,6 +58,24 @@ function safeParse(raw, fallback) {
   } catch {
     return fallback;
   }
+}
+
+// Flattens a persisted object into the attribute map used for audit diffs, so
+// tracked attribute names (for example `part.weight_kg`) match policy config.
+function auditAttributes(row) {
+  const snap = snapshot(row);
+  return {
+    code: snap.code,
+    name: snap.name,
+    description: snap.description,
+    status: snap.status,
+    revision: snap.revision,
+    deleted_at: snap.deleted_at ?? null,
+    organization_id: snap.organization_id,
+    owner_id: snap.owner_id,
+    tags: snap.tags,
+    ...snap.data,
+  };
 }
 
 function assertWritable(db, row, actor) {
@@ -197,12 +215,17 @@ export function createObject(db, body, actor, tenantId, ip) {
   }
   const row = applyInitialLifecycle(db, getObjectRow(db, result.lastInsertRowid), actor) || getObjectRow(db, result.lastInsertRowid);
   recordObjectVersion(db, row, "create", body.change_summary || "Object created", actor?.id);
-  writeAudit(db, {
+  recordObjectChange(db, {
     actor,
+    tenantId,
+    organizationId: row.organization_id,
     action: "object.create",
-    resourceType: "object",
-    resourceId: row.id,
-    details: { code: row.code, type: typeRow.code, tenant_id: Number(tenantId) },
+    objectType: "object",
+    objectId: row.id,
+    objectName: row.name,
+    before: null,
+    after: auditAttributes(row),
+    details: { code: row.code, type: typeRow.code },
     ip,
   });
   return publicObject(row);
@@ -300,11 +323,17 @@ export function updateObject(db, reference, body, actor, tenantId, ip) {
   }
   const next = getObjectRow(db, row.id);
   recordObjectVersion(db, next, "update", body.change_summary || "Object updated", actor?.id);
-  writeAudit(db, {
+  recordObjectChange(db, {
     actor,
+    tenantId,
+    organizationId: next.organization_id,
     action: "object.update",
-    resourceType: "object",
-    resourceId: row.id,
+    objectType: "object",
+    objectId: row.id,
+    objectName: next.name,
+    before: auditAttributes(row),
+    after: auditAttributes(next),
+    reason: body.change_summary || body.reason,
     details: { code: next.code, revision: next.revision },
     ip,
   });
@@ -328,11 +357,16 @@ export function setObjectStatus(db, reference, status, actor, tenantId, ip) {
   ]);
   const next = getObjectRow(db, row.id);
   recordObjectVersion(db, next, "status", `Status set to ${status}`, actor?.id);
-  writeAudit(db, {
+  recordObjectChange(db, {
     actor,
+    tenantId,
+    organizationId: next.organization_id,
     action: `object.status.${status}`,
-    resourceType: "object",
-    resourceId: row.id,
+    objectType: "object",
+    objectId: row.id,
+    objectName: next.name,
+    before: { status: row.status },
+    after: { status: next.status },
     details: { code: next.code, status },
     ip,
   });
@@ -388,11 +422,14 @@ export function checkoutObject(db, reference, body, actor, tenantId, ip) {
      VALUES (?, ?, ?, ?, ?, ?)`,
     [row.id, actor?.id ?? null, scope, body?.reason || "", expiresAt, nowIso()]
   );
-  writeAudit(db, {
+  recordObjectChange(db, {
     actor,
+    tenantId,
+    organizationId: row.organization_id,
     action: "object.checkout",
-    resourceType: "object",
-    resourceId: row.id,
+    objectType: "object",
+    objectId: row.id,
+    objectName: row.name,
     details: { code: row.code, scope, expires_at: expiresAt },
     ip,
   });
@@ -420,11 +457,14 @@ export function checkinObject(db, reference, body, actor, tenantId, ip) {
     actor?.id ?? null,
     lock.id,
   ]);
-  writeAudit(db, {
+  recordObjectChange(db, {
     actor,
+    tenantId,
+    organizationId: row.organization_id,
     action: "object.checkin",
-    resourceType: "object",
-    resourceId: row.id,
+    objectType: "object",
+    objectId: row.id,
+    objectName: row.name,
     details: { code: row.code, forced: force },
     ip,
   });
@@ -534,11 +574,17 @@ export function softDeleteObject(db, reference, { force = false, summary } = {},
     ]);
     const next = getObjectRow(db, row.id);
     recordObjectVersion(db, next, force ? "force_delete" : "delete", summary || "Object deleted", actor?.id);
-    writeAudit(db, {
+    recordObjectChange(db, {
       actor,
+      tenantId,
+      organizationId: row.organization_id,
       action: force ? "object.force_delete" : "object.delete",
-      resourceType: "object",
-      resourceId: row.id,
+      objectType: "object",
+      objectId: row.id,
+      objectName: row.name,
+      before: auditAttributes(row),
+      after: { deleted_at: next.deleted_at },
+      reason: summary,
       details: { code: row.code, cascade: report.cascade.length, forced: force },
       ip,
     });
@@ -559,11 +605,16 @@ export function restoreObject(db, reference, actor, tenantId, ip) {
   );
   const next = getObjectRow(db, row.id);
   recordObjectVersion(db, next, "restore", "Object restored", actor?.id);
-  writeAudit(db, {
+  recordObjectChange(db, {
     actor,
+    tenantId,
+    organizationId: row.organization_id,
     action: "object.restore",
-    resourceType: "object",
-    resourceId: row.id,
+    objectType: "object",
+    objectId: row.id,
+    objectName: row.name,
+    before: { deleted_at: row.deleted_at },
+    after: { deleted_at: null },
     details: { code: row.code },
     ip,
   });
