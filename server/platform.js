@@ -185,3 +185,26 @@ export {
   listNotifications as listWorkflowNotifications,
   listTemplates as listWorkflowNotificationTemplates,
 } from "./services/workflow.js";
+
+// Audit & History Framework — reusable platform capability. Business modules
+// call `recordAuditEvent`/`recordObjectChange` for explicit events or attach
+// `auditRoute` to express routes for automatic capture.
+export {
+  capture as recordAuditEvent,
+  writeAudit,
+  recordObjectChange,
+  resolvePolicy as resolveAuditPolicy,
+  listEvents as listAuditEvents,
+  getEvent as getAuditEvent,
+  objectHistory as auditObjectHistory,
+  userActivity as auditUserActivity,
+  auditSummary,
+  eventFacets as auditEventFacets,
+  listPolicies as listAuditPolicies,
+  createPolicy as createAuditPolicy,
+  updatePolicy as updateAuditPolicy,
+  exportEvents as exportAuditEvents,
+  runRetention as runAuditRetention,
+  auditFromRequest,
+  auditRoute,
+} from "./services/audit.js";

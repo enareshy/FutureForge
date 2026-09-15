@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { objects } from "../api.js";
 import FormRenderer from "../components/FormRenderer.jsx";
 import ObjectGraphView from "../components/ObjectGraphView.jsx";
+import ObjectHistoryPanel from "../components/ObjectHistoryPanel.jsx";
 
 const OBJECT_STATUSES = ["draft", "active", "released", "obsolete", "archived"];
 const TABS = [
@@ -11,6 +12,7 @@ const TABS = [
   ["references", "References"],
   ["versions", "Versions"],
   ["lifecycle", "Lifecycle"],
+  ["history", "History"],
   ["graph", "Graph"],
   ["dependencies", "Dependencies"],
 ];
@@ -724,6 +726,12 @@ export default function ObjectDetailPage() {
             </table>
           </div>
         </>
+      ) : null}
+
+      {tab === "history" ? (
+        <div className="panel">
+          <ObjectHistoryPanel objectType="object" objectId={obj.id} />
+        </div>
       ) : null}
 
       {tab === "graph" ? (

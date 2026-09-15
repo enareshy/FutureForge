@@ -437,3 +437,112 @@ pre.json {
 .wf-graph-node-type { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.85; }
 .wf-graph-node-name { fill: var(--text); font-size: 12px; }
 .wf-graph-node-state { fill: var(--warn); font-size: 10px; }
+
+/* Audit & history */
+.muted { color: var(--muted); }
+.audit-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 18px 4px;
+  text-align: center;
+}
+.audit-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  position: relative;
+}
+.audit-timeline::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--line);
+}
+.audit-item {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 10px 8px 0;
+  color: inherit;
+  cursor: pointer;
+}
+.audit-item:hover { background: #1b2748; }
+.audit-item.active { background: #24345c; }
+.audit-dot {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 19px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  margin-left: 0;
+  border: 2px solid #0b1020;
+  background: var(--muted);
+}
+.audit-dot.create { background: var(--ok); }
+.audit-dot.update { background: var(--accent); }
+.audit-dot.delete, .audit-dot.alert { background: var(--danger); }
+.audit-dot.read { background: #8fa4c8; }
+.audit-dot.auth { background: var(--warn); }
+.audit-dot.export { background: #b58cff; }
+.audit-item-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.audit-item-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.audit-item-time { margin-left: auto; color: var(--muted); font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+.audit-item-sub { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+.audit-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 20, 0.55);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 40;
+}
+.audit-drawer {
+  width: min(560px, 100%);
+  height: 100%;
+  overflow: auto;
+  background: var(--bg-elev);
+  border-left: 1px solid var(--line);
+  padding: 22px;
+  box-shadow: var(--shadow);
+}
+.audit-drawer-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 16px; }
+.audit-drawer-head h2 { margin: 6px 0 2px; font-size: 20px; }
+.audit-drawer h3 { margin: 20px 0 8px; font-size: 14px; color: var(--accent-2); }
+.audit-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  background: #0f1730;
+}
+.audit-meta > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.audit-meta span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.audit-meta b { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.audit-meta i { font-size: 11px; color: var(--muted); font-style: normal; }
+.audit-note { margin-top: 14px; border-left: 2px solid var(--accent); padding: 4px 12px; }
+.audit-note span { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+.audit-note p { margin: 4px 0 0; font-size: 13px; }
+.audit-diff td { vertical-align: top; font-size: 13px; }
+.audit-diff .audit-before { color: var(--danger); overflow-wrap: anywhere; }
+.audit-diff .audit-after { color: var(--ok); overflow-wrap: anywhere; }
+.audit-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 120px;
+  padding-top: 8px;
+}
+.audit-bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 0; }
+.audit-bar span { width: 100%; min-height: 2px; background: linear-gradient(180deg, var(--accent), rgba(91, 140, 255, 0.25)); border-radius: 4px 4px 0 0; }
+.audit-bar i { font-size: 9px; color: var(--muted); font-style: normal; margin-top: 4px; white-space: nowrap; }
+.audit-history { display: flex; flex-direction: column; gap: 12px; }

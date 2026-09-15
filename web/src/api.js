@@ -35,6 +35,37 @@ export async function api(path, { method = "GET", body } = {}) {
   return data;
 }
 
+export async function apiDownload(path, { method = "GET", body } = {}) {
+  const headers = { Accept: "*/*" };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let message = `Request failed (${res.status})`;
+    try {
+      const data = await res.json();
+      message = data?.error || message;
+    } catch {
+      /* keep default message */
+    }
+    const err = new Error(message);
+    err.status = res.status;
+    throw err;
+  }
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const match = /filename="?([^";]+)"?/.exec(disposition);
+  return {
+    blob: await res.blob(),
+    filename: match ? match[1] : "audit-export",
+    count: Number(res.headers.get("X-Audit-Export-Count") || 0),
+  };
+}
+
 export const iam = {
   login: (username, password, provider) =>
     api("/api/authentication/login", { method: "POST", body: { username, password, provider } }),
@@ -326,8 +357,28 @@ export const workflow = {
   ] }),
 };
 
-export const lifecycle = {
-  statuses: (qs) => api(`/api/statuses${qs || ""}`),
+export const audit = {
+  events: (qs) => api(`/api/audit/events${qs || ""}`),
+  event: (id) => api(`/api/audit/events/${id}`),
+  summary: (qs) => api(`/api/audit/summary${qs || ""}`),
+  facets: (qs) => api(`/api/audit/facets${qs || ""}`),
+  record: (body) => api("/api/audit/events", { method: "POST", body }),
+  objectHistory: (objectType, objectId, qs) =>
+    api(
+      `/api/audit/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/history${qs || ""}`
+    ),
+  userActivity: (userId, qs) => api(`/api/audit/users/${userId}/activity${qs || ""}`),
+  exportEvents: (body) => apiDownload("/api/audit/export", { method: "POST", body }),
+  policies: (qs) => api(`/api/audit/policies${qs || ""}`),
+  policy: (id) => api(`/api/audit/policies/${id}`),
+  createPolicy: (body) => api("/api/audit/policies", { method: "POST", body }),
+  updatePolicy: (id, body) => api(`/api/audit/policies/${id}`, { method: "PUT", body }),
+  deletePolicy: (id) => api(`/api/audit/policies/${id}`, { method: "DELETE" }),
+  retentionRuns: (qs) => api(`/api/audit/retention/runs${qs || ""}`),
+  runRetention: (body) => api("/api/audit/retention/run", { method: "POST", body }),
+};
+
+export const lifecycle = {  statuses: (qs) => api(`/api/statuses${qs || ""}`),
   status: (id) => api(`/api/statuses/${id}`),
   createStatus: (body) => api("/api/statuses", { method: "POST", body }),
   updateStatus: (id, body) => api(`/api/statuses/${id}`, { method: "PUT", body }),

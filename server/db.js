@@ -76,6 +76,38 @@ export function migrate(db) {
   db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("011_workflow");
+  ensureColumn(db, "audit_logs", "tenant_id", "tenant_id INTEGER");
+  ensureColumn(db, "audit_logs", "organization_id", "organization_id INTEGER");
+  ensureColumn(db, "audit_logs", "plant_id", "plant_id INTEGER");
+  ensureColumn(db, "audit_logs", "site_id", "site_id INTEGER");
+  ensureColumn(db, "audit_logs", "department_id", "department_id INTEGER");
+  ensureColumn(db, "audit_logs", "object_name", "object_name TEXT");
+  ensureColumn(db, "audit_logs", "source", "source TEXT DEFAULT 'api'");
+  ensureColumn(db, "audit_logs", "user_display_name", "user_display_name TEXT");
+  ensureColumn(db, "audit_logs", "request_id", "request_id TEXT");
+  ensureColumn(db, "audit_logs", "correlation_id", "correlation_id TEXT");
+  ensureColumn(db, "audit_logs", "status", "status TEXT DEFAULT 'success'");
+  ensureColumn(db, "audit_logs", "error_message", "error_message TEXT");
+  ensureColumn(db, "audit_logs", "reason", "reason TEXT");
+  ensureColumn(db, "audit_logs", "parent_event_id", "parent_event_id INTEGER");
+  ensureColumn(db, "audit_logs", "event_type", "event_type TEXT");
+  ensureColumn(db, "audit_logs", "changed_fields", "changed_fields TEXT");
+  ensureColumn(db, "audit_logs", "before_values", "before_values TEXT");
+  ensureColumn(db, "audit_logs", "after_values", "after_values TEXT");
+  ensureColumn(db, "audit_logs", "related_json", "related_json TEXT");
+  ensureColumn(db, "audit_logs", "device", "device TEXT");
+  ensureColumn(db, "audit_logs", "duration_ms", "duration_ms INTEGER");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_tenant_created ON audit_logs(tenant_id, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_actor_created ON audit_logs(actor_id, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_action_created ON audit_logs(action, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_logs(event_type, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_status_created ON audit_logs(status, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_correlation ON audit_logs(correlation_id)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_object_time ON audit_logs(resource_type, resource_id, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_source_created ON audit_logs(source, created_at)");
+  db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("012_audit");
   db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();

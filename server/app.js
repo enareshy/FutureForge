@@ -113,6 +113,11 @@ export function createApp(db) {
     next();
   });
 
+  // Audit & History Framework: propagate a request/correlation id on every
+  // request and capture failed access attempts automatically.
+  app.use(audit.auditContext());
+  app.use(audit.captureApiFailures(db));
+
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, service: "helix-iam" });
   });
@@ -3335,6 +3340,297 @@ export function createApp(db) {
           action: req.query.action,
           resourceType: req.query.resourceType,
           q: req.query.q,
+          scope: auditScope(req),
+        })
+      );
+    })
+  );
+
+  // ── Audit & History Framework ────────────────────────────────────────────
+  function auditScope(req) {
+    return {
+      tenantId: req.tenantId || -1,
+      scopeAll: tenants.isPlatformAdmin(db, req.actor.id),
+    };
+  }
+
+  function eventFilters(req) {
+    return {
+      page: req.query.page,
+      pageSize: req.query.pageSize,
+      sort: req.query.sort,
+      order: req.query.order,
+      objectType: req.query.objectType || req.query.resourceType,
+      objectId: req.query.objectId,
+      actorId: req.query.actorId,
+      actorUsername: req.query.actorUsername,
+      action: req.query.action,
+      eventType: req.query.eventType,
+      source: req.query.source,
+      status: req.query.status,
+      organizationId: req.query.organizationId,
+      correlationId: req.query.correlationId,
+      parentEventId: req.query.parentEventId,
+      from: req.query.from,
+      to: req.query.to,
+      q: req.query.q,
+      tenantId: req.query.tenantId,
+    };
+  }
+
+  // Enforces per-object audit visibility from the effective policy before
+  // returning history. The route permission gates the feature; this gate
+  // decides whether this particular caller may read this object's history.
+  function assertHistoryVisible(req, objectType) {
+    if (tenants.isPlatformAdmin(db, req.actor.id)) return;
+    const { policy } = audit.resolvePolicy(db, req.tenantId, objectType);
+    if (policy.visibility === "admin") {
+      const check = authorization.checkPermission(db, req.actor.id, "iam.audit.events", "read");
+      if (!check.allowed) throw new HttpError(403, "Audit history for this object requires administrator access");
+      return;
+    }
+    if (policy.visibility === "manager") {
+      const check = authorization.checkPermission(db, req.actor.id, "iam.objects.instances", "read");
+      if (!check.allowed) throw new HttpError(403, "You do not have manager access to this object's history");
+      return;
+    }
+    // "user" visibility: any caller holding the object-history permission may
+    // read this object's timeline; rows remain tenant-scoped by the query.
+  }
+
+  app.get(
+    "/api/audit/events",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(audit.listEvents(db, eventFilters(req), auditScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/audit/summary",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(audit.auditSummary(db, eventFilters(req), auditScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/audit/facets",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(audit.eventFacets(db, eventFilters(req), auditScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/audit/events/:id",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(audit.getEvent(db, req.params.id, auditScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/audit/events",
+    auth,
+    can("iam.audit.events", "create"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const result = audit.capture(
+        db,
+        audit.auditFromRequest(req, {
+          action: body.action,
+          event_type: body.event_type,
+          object_type: body.objectType || body.object_type,
+          object_id: body.objectId || body.object_id,
+          object_name: body.objectName || body.object_name,
+          status: body.status,
+          source: body.source || "api",
+          reason: body.reason,
+          details: body.details,
+          before: body.before,
+          after: body.after,
+          related: body.related,
+          parent_event_id: body.parentEventId || body.parent_event_id,
+          correlation_id: body.correlationId || body.correlation_id,
+          organization_id: body.organizationId || body.organization_id,
+          error_message: body.errorMessage || body.error_message,
+        })
+      );
+      if (!result) throw new HttpError(400, "Audit event was rejected by policy or validation");
+      res.status(201).json(audit.getEvent(db, result.id, auditScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/audit/objects/:objectType/:objectId/history",
+    auth,
+    can("iam.audit.history", "read"),
+    wrap((req, res) => {
+      assertHistoryVisible(req, req.params.objectType);
+      res.json(
+        audit.objectHistory(
+          db,
+          { objectType: req.params.objectType, objectId: req.params.objectId },
+          eventFilters(req),
+          auditScope(req)
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/audit/users/:userId/activity",
+    auth,
+    can("iam.audit.history", "read"),
+    wrap((req, res) => {
+      res.json(audit.userActivity(db, req.params.userId, eventFilters(req), auditScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/audit/export",
+    auth,
+    can("iam.audit.export", "execute"),
+    audit.auditRoute(db, {
+      action: "audit.export",
+      objectType: "audit_event",
+      objectId: (req) => req.body?.format || "csv",
+      reasonFrom: (req) => (req.body?.reason ? String(req.body.reason) : null),
+    }),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const result = audit.exportEvents(db, {
+        filters: { ...eventFilters(req), ...(body.filters || {}), q: body.q ?? req.query.q },
+        scope: auditScope(req),
+        format: body.format || "csv",
+        limit: body.limit,
+      });
+      res.setHeader("Content-Type", result.content_type);
+      res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+      res.setHeader("X-Audit-Export-Count", String(result.count));
+      res.send(result.content);
+    })
+  );
+
+  app.get(
+    "/api/audit/policies",
+    auth,
+    can("iam.audit.policies", "read"),
+    wrap((req, res) => {
+      const includeSystem = req.query.includeSystem !== "false";
+      res.json(
+        audit.listPolicies(db, {
+          tenantId: tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true" ? null : req.tenantId,
+          objectType: req.query.objectType,
+          status: req.query.status,
+          includeSystem,
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/audit/policies/:id",
+    auth,
+    can("iam.audit.policies", "read"),
+    wrap((req, res) => {
+      res.json(audit.getPolicy(db, req.params.id, tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/audit/policies",
+    auth,
+    can("iam.audit.policies", "create"),
+    audit.auditRoute(db, {
+      action: "audit.policy.create",
+      objectType: "audit_policy",
+      objectId: (req) => req.body?.object_type,
+      objectName: (req) => req.body?.name,
+      reasonFrom: () => null,
+    }),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      const tenantId = isPlatform && (body.tenant_id === null || body.tenantId === null)
+        ? null
+        : body.tenant_id ?? body.tenantId ?? req.tenantId;
+      res.status(201).json(audit.createPolicy(db, { ...body, tenant_id: tenantId }, req.actor, tenantId));
+    })
+  );
+
+  app.put(
+    "/api/audit/policies/:id",
+    auth,
+    can("iam.audit.policies", "update"),
+    audit.auditRoute(db, {
+      action: "audit.policy.update",
+      objectType: "audit_policy",
+      objectId: (req) => req.params.id,
+      reasonFrom: () => null,
+    }),
+    wrap((req, res) => {
+      res.json(
+        audit.updatePolicy(
+          db,
+          req.params.id,
+          req.body || {},
+          tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId
+        )
+      );
+    })
+  );
+
+  app.delete(
+    "/api/audit/policies/:id",
+    auth,
+    can("iam.audit.policies", "delete"),
+    audit.auditRoute(db, {
+      action: "audit.policy.delete",
+      objectType: "audit_policy",
+      objectId: (req) => req.params.id,
+      reasonFrom: () => null,
+    }),
+    wrap((req, res) => {
+      res.json(
+        audit.deletePolicy(db, req.params.id, tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId)
+      );
+    })
+  );
+
+  app.get(
+    "/api/audit/retention/runs",
+    auth,
+    can("iam.audit.retention", "read"),
+    wrap((req, res) => {
+      const page = pagination(req.query);
+      res.json(audit.listRetentionRuns(db, { ...page, tenantId: req.tenantId }));
+    })
+  );
+
+  app.post(
+    "/api/audit/retention/run",
+    auth,
+    can("iam.audit.retention", "execute"),
+    audit.auditRoute(db, {
+      action: "audit.retention.run",
+      objectType: "audit_retention",
+      reasonFrom: () => null,
+    }),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      res.json(
+        audit.runRetention(db, {
+          tenantId: isPlatform && body.tenantId !== undefined ? body.tenantId : req.tenantId,
+          policyId: body.policyId,
+          actor: req.actor,
+          dryRun: !!body.dryRun,
         })
       );
     })

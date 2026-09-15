@@ -32,7 +32,7 @@ git clone https://github.com/enareshy/FutureForge.git
 # Enter the project
 cd FutureForge
 
-# Check out the branch with the workflow engine work
+# Check out the branch with the workflow engine and audit framework work
 git checkout 260915-feat-workflow-engine
 ```
 
@@ -149,6 +149,12 @@ The dev server binds to `0.0.0.0`, so other devices can reach it via your laptop
 - `/api/lifecycle-states` `/api/lifecycle-transitions` `/api/lifecycle-assignments` — state machines and object-type bindings
 - `/api/release-rules` `/api/approval-rules` — approval rules with sequential/parallel steps and quorums
 - `/api/objects/:id/lifecycle` `/transitions` `/status-history` `/release` `/releases` `/approvals/:approvalId` — per-object transition engine and release/approval workflow
+- `/api/audit/events` — immutable audit event stream: filtered list, manual capture, `/summary`, `/facets`, read-only single event with attribute changes
+- `/api/audit/objects/:objectType/:objectId/history` — per-object history timeline with before/after attribute diffs
+- `/api/audit/users/:userId/activity` — per-actor activity timeline
+- `/api/audit/export` — export the current filter to CSV or Excel (the export is itself audited)
+- `/api/audit/policies` — per tenant/object-type capture, masking, retention and visibility policies
+- `/api/audit/retention/runs` `/api/audit/retention/run` — archival/purge runs with dry-run support
 - `/api/workflow-templates` — versioned, immutable workflow templates with `/versions`, `/validate`, `/publish`, `/clone` and a `/designer` graph editor (`/nodes`, `/transitions`, `/auto-layout`, `/validate`)
 - `/api/workflow-instances` — runtime engine: start, inspect `/nodes` and `/history`, `cancel`, `pause`, `resume`, `retry`
 - `/api/tasks` — task inbox: list by scope, `complete`, `assign`, `claim`, `delegate`, `status`, plus `/comments`, `/attachments`, `/subtasks`
@@ -168,9 +174,9 @@ IAM APIs are fail-safe: session plus `checkPermission`. Unauthorized callers rec
 
 In-process (future modules): `import { checkPermission, organizationContext } from "./server/platform.js"`
 
-Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`, `docs/LIFECYCLE_DESIGN.md`, `docs/WORKFLOW_ENGINE_DESIGN.md`
+Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`, `docs/LIFECYCLE_DESIGN.md`, `docs/WORKFLOW_ENGINE_DESIGN.md`, `docs/AUDIT_DESIGN.md`
 
-The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config), lifecycle configuration under `/lifecycles`, and **Workflow Engine** under `/workflows/templates` (the Configuration section where admins create and design workflow templates). End users get **My tasks & approvals** under `/workflows` (My Tasks, Team Tasks, Approvals and the instance monitor). Object lifecycle state, transitions, approvals and status history appear on the object detail page. The reusable client renderer is `web/src/components/FormRenderer.jsx` and the visual workflow designer is `web/src/components/WorkflowDesigner.jsx`.
+The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config), lifecycle configuration under `/lifecycles`, **Workflow Engine** under `/workflows/templates` (the Configuration section where admins create and design workflow templates), and the **Audit & history** console under `/audit` (event stream, overview, policies, retention and export). End users get **My tasks & approvals** under `/workflows` (My Tasks, Team Tasks, Approvals and the instance monitor). Object lifecycle state, transitions, approvals, status history and a **History** tab appear on the object detail page. The reusable client renderer is `web/src/components/FormRenderer.jsx` and the visual workflow designer is `web/src/components/WorkflowDesigner.jsx`.
 
 ## Tests
 
