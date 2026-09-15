@@ -96,6 +96,12 @@ describe("object framework REST APIs", () => {
     assert.equal(types.status, 200);
     assert.ok(types.body.items.some((t) => t.code === "product"));
 
+    const product = types.body.items.find((t) => t.code === "product");
+    const form = await request(port, "GET", `/api/object-types/${product.id}/form?mode=create`, { token });
+    assert.equal(form.status, 200);
+    assert.equal(form.body.type.code, "product");
+    assert.ok((form.body.fields || []).some((f) => f.code === "part.number"));
+
     const list = await request(port, "GET", "/api/objects?pageSize=50", { token });
     assert.equal(list.status, 200);
     assert.equal(list.body.total, 7);

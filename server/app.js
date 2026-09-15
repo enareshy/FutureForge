@@ -1115,6 +1115,19 @@ export function createApp(db) {
   );
 
   app.get(
+    "/api/object-types/:id/form",
+    auth,
+    canObjects("read"),
+    wrap((req, res) => {
+      res.json(
+        metadata.renderType(db, req.params.id, req.tenantId, {
+          mode: req.query.mode || "create",
+        })
+      );
+    })
+  );
+
+  app.get(
     "/api/objects/summary",
     auth,
     canObjects("read"),
