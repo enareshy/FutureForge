@@ -163,4 +163,69 @@ describe("lifecycle REST APIs", () => {
     });
     assert.equal(res.status, 409);
   });
+
+  test("authors a lifecycle end to end through the configuration APIs", async () => {
+    const created = await request(port, "POST", "/api/lifecycle-definitions", {
+      token,
+      body: { code: "doc-lifecycle", name: "Document Lifecycle", module: "pdm" },
+    });
+    assert.equal(created.status, 201);
+    const definitionId = created.body.definition.id;
+    const versionId = created.body.version.id;
+
+    const stateOne = await request(port, "POST", "/api/lifecycle-states", {
+      token,
+      body: { code: "draft", name: "Draft", lifecycle_version_id: versionId, status_code: "draft", is_initial: true },
+    });
+    assert.equal(stateOne.status, 201);
+
+    const stateTwo = await request(port, "POST", "/api/lifecycle-states", {
+      token,
+      body: { code: "published", name: "Published", lifecycle_version_id: versionId, status_code: "released", is_terminal: true },
+    });
+    assert.equal(stateTwo.status, 201);
+
+    const transition = await request(port, "POST", "/api/lifecycle-transitions", {
+      token,
+      body: { code: "publish", name: "Publish", lifecycle_version_id: versionId, from_state: "draft", to_state: "published" },
+    });
+    assert.equal(transition.status, 201);
+
+    const validate = await request(port, "GET", `/api/lifecycle-definitions/${definitionId}/validate`, { token });
+    assert.equal(validate.body.valid, true);
+
+    const publish = await request(port, "POST", `/api/lifecycle-definitions/${definitionId}/publish`, {
+      token,
+      body: {},
+    });
+    assert.equal(publish.status, 200);
+    assert.equal(publish.body.version.version, 1);
+
+    const nextVersion = await request(port, "POST", `/api/lifecycle-definitions/${definitionId}/versions`, {
+      token,
+      body: {},
+    });
+    assert.equal(nextVersion.status, 201);
+    assert.equal(nextVersion.body.version.version, 2);
+
+    const rule = await request(port, "POST", "/api/approval-rules", {
+      token,
+      body: {
+        code: "doc-approval",
+        name: "Document approval",
+        kind: "approval",
+        transition: "publish",
+        steps: [{ code: "signoff", name: "Sign-off", approver_type: "role", approver_id: "iam.admin" }],
+      },
+    });
+    assert.equal(rule.status, 201);
+    assert.equal(rule.body.steps.length, 1);
+
+    const assignment = await request(port, "POST", "/api/lifecycle-assignments", {
+      token,
+      body: { type: "document", lifecycle: "doc-lifecycle" },
+    });
+    assert.equal(assignment.status, 201);
+    assert.equal(assignment.body.type_code, "document");
+  });
 });

@@ -273,6 +273,7 @@ export const lifecycle = {
   deleteStatus: (id) => api(`/api/statuses/${id}`, { method: "DELETE" }),
   definitions: (qs) => api(`/api/lifecycle-definitions${qs || ""}`),
   definition: (id) => api(`/api/lifecycle-definitions/${id}`),
+  get: (id) => api(`/api/lifecycle-definitions/${id}`),
   createDefinition: (body) => api("/api/lifecycle-definitions", { method: "POST", body }),
   updateDefinition: (id, body) => api(`/api/lifecycle-definitions/${id}`, { method: "PUT", body }),
   versions: (id) => api(`/api/lifecycle-definitions/${id}/versions`),
@@ -286,5 +287,7 @@ export const lifecycle = {
   createAssignment: (body) => api("/api/lifecycle-assignments", { method: "POST", body }),
   releaseRules: (qs) => api(`/api/release-rules${qs || ""}`),
   approvalRules: (qs) => api(`/api/approval-rules${qs || ""}`),
+  createApprovalRule: (body) => api("/api/approval-rules", { method: "POST", body }),
+  createReleaseRule: (body) => api("/api/release-rules", { method: "POST", body }),
 };
 

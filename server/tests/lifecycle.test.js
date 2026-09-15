@@ -110,6 +110,42 @@ describe("lifecycle management services", () => {
     assert.equal(history.items[0].to_state_code, "approved");
   });
 
+  test("publishing a new version never moves pinned objects", () => {
+    const before = lifecycle.objectLifecycle(db, "PROD-1000", tenantId);
+    assert.equal(before.version.version, 1);
+
+    const created = lifecycle.createVersion(db, "product-lifecycle", {}, actor, "test", tenantId);
+    assert.equal(created.version.version, 2);
+    assert.equal(created.version.status, "draft");
+    const draftId = created.version.id;
+
+    lifecycle.createState(
+      db,
+      { code: "archived", name: "Archived", lifecycle_version_id: draftId, status_code: "obsolete", category: "obsolete", is_terminal: true, tenant_id: tenantId },
+      actor,
+      "test",
+      tenantId
+    );
+    lifecycle.createTransition(
+      db,
+      { code: "archive", name: "Archive", lifecycle_version_id: draftId, from_state: "released", to_state: "archived", tenant_id: tenantId },
+      actor,
+      "test",
+      tenantId
+    );
+
+    const published = lifecycle.publishDefinition(db, "product-lifecycle", { version: 2 }, actor, "test", tenantId);
+    assert.equal(published.version.version, 2);
+
+    const after = lifecycle.objectLifecycle(db, "PROD-1000", tenantId);
+    assert.equal(after.version.version, 1);
+    assert.equal(after.version.id, before.version.id);
+
+    const definition = lifecycle.getDefinition(db, "product-lifecycle", tenantId);
+    assert.equal(definition.current_version, 2);
+    assert.equal(definition.published_version, 2);
+  });
+
   test("reject requires a comment when the rule mandates it", () => {
     lifecycle.transitionObject(db, "PROD-2000", { transition: "submit" }, actor, tenantId, "test");
     const gated = lifecycle.transitionObject(db, "PROD-2000", { transition: "approve" }, actor, tenantId, "test");
