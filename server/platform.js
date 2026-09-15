@@ -141,3 +141,47 @@ export {
   workflowExecutor,
   resolveApprovers,
 } from "./services/lifecycle.js";
+
+// Workflow & Process Engine
+export {
+  validateGraph as validateWorkflowGraph,
+  autoLayout as autoLayoutWorkflow,
+  startInstance as startWorkflowInstance,
+  advance as advanceWorkflow,
+  getInstance as getWorkflowInstance,
+  listInstances as listWorkflowInstances,
+  pauseInstance as pauseWorkflowInstance,
+  resumeInstance as resumeWorkflowInstance,
+  cancelInstance as cancelWorkflowInstance,
+  retryInstance as retryWorkflowInstance,
+  instanceHistory as workflowInstanceHistory,
+  triggerEvent as triggerWorkflowEvent,
+  completeTask as completeWorkflowTask,
+  decideApproval as decideWorkflowApproval,
+  sweepEscalations as sweepWorkflowEscalations,
+  registerServiceHandler as registerWorkflowServiceHandler,
+  resolveAssignee as resolveWorkflowAssignee,
+} from "./services/workflow.js";
+
+export {
+  getDefinition as getWorkflowDefinition,
+  findDefinition as findWorkflowDefinition,
+  listDefinitions as listWorkflowDefinitions,
+  createDefinition as createWorkflowDefinition,
+  updateDefinition as updateWorkflowDefinition,
+  setDefinitionStatus as setWorkflowDefinitionStatus,
+  deleteDefinition as deleteWorkflowDefinition,
+  listVersions as listWorkflowVersions,
+  createVersion as createWorkflowVersion,
+  validateDefinition as validateWorkflowDefinition,
+  publishDefinition as publishWorkflowDefinition,
+  cloneDefinition as cloneWorkflowDefinition,
+  designerContext as workflowDesignerContext,
+  listTasks as listWorkflowTasks,
+  listApprovals as listWorkflowApprovals,
+  listRoutingRules as listWorkflowRoutingRules,
+  listEscalationRules as listWorkflowEscalationRules,
+  listBindings as listWorkflowBindings,
+  listNotifications as listWorkflowNotifications,
+  listTemplates as listWorkflowNotificationTemplates,
+} from "./services/workflow.js";

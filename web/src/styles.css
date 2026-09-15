@@ -256,6 +256,184 @@ pre.json {
 @media (max-width: 980px) {
   .shell { grid-template-columns: 1fr; }
   .nav { flex-direction: row; overflow: auto; }
-  .grid, .split, .explorer, .type-manager { grid-template-columns: 1fr; }
+  .grid, .split, .explorer, .type-manager, .wf-designer-body { grid-template-columns: 1fr; }
   .nav-scroll { flex-direction: row; }
 }
+
+/* Workflow designer */
+.wf-designer { margin-bottom: 16px; }
+.wf-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.wf-designer-body {
+  display: grid;
+  grid-template-columns: 150px 1fr 260px;
+  gap: 12px;
+  align-items: stretch;
+}
+.wf-palette,
+.wf-inspector {
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+  max-height: 70vh;
+  overflow: auto;
+}
+.wf-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: #0d1428;
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+.wf-palette-item:hover { background: #1b2748; }
+.wf-palette-item:disabled { opacity: 0.5; cursor: not-allowed; }
+.wf-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
+.wf-viewport {
+  position: relative;
+  overflow: hidden;
+  background: #0d1428;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  height: 70vh;
+  cursor: grab;
+}
+.wf-viewport:active { cursor: grabbing; }
+.wf-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+.wf-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+.wf-edge {
+  fill: none;
+  stroke: #3a4a74;
+  stroke-width: 2;
+  pointer-events: stroke;
+}
+.wf-edge.selected { stroke: var(--accent); }
+.wf-edge.default { stroke-dasharray: 6 4; }
+.wf-edge.pending { stroke: var(--accent-2); stroke-dasharray: 4 4; }
+.wf-edge.approve { stroke: #3ee0c0; }
+.wf-edge.reject { stroke: #ff6b7a; }
+.wf-edge-dot { fill: #3a4a74; }
+.wf-edge-label { fill: var(--muted); font-size: 11px; pointer-events: all; cursor: pointer; }
+.wf-edge-label.approve { fill: #3ee0c0; }
+.wf-edge-label.reject { fill: #ff6b7a; }
+.wf-condition { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin: 4px 0; }
+.wf-condition input,
+.wf-condition select {
+  min-width: 0;
+  padding: 5px 6px;
+  font-size: 12px;
+}
+.wf-branch {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin: 6px 0;
+  background: rgba(10, 16, 34, 0.5);
+}
+.wf-path-group { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.wf-node {
+  position: absolute;
+  background: #161f38;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 10px;
+  cursor: move;
+  box-shadow: 0 6px 18px rgba(4, 8, 20, 0.4);
+  user-select: none;
+}
+.wf-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(91, 140, 255, 0.35); }
+.wf-node-head { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid transparent; padding-bottom: 4px; }
+.wf-node-type { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.wf-node-name { font-size: 13px; margin-top: 4px; }
+.wf-node-key { margin-top: 2px; }
+.wf-port {
+  position: absolute;
+  right: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  background: #0d1428;
+  cursor: crosshair;
+  padding: 0;
+}
+.wf-minimap {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 180px;
+  height: 120px;
+  background: rgba(11, 16, 32, 0.9);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.wf-mini-edge { stroke: #3a4a74; stroke-width: 2; }
+.wf-mini-node { opacity: 0.75; }
+.wf-chip-done { background: rgba(62, 224, 192, 0.15); color: var(--ok); }
+.wf-chip-active { background: rgba(91, 140, 255, 0.2); color: var(--accent); }
+
+/* Object relationship graph */
+.obj-graph { display: flex; flex-direction: column; gap: 10px; }
+.obj-graph-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.obj-graph-svg {
+  width: 100%;
+  background: #0d1428;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.obj-graph-svg:active { cursor: grabbing; }
+.obj-graph-edge { stroke: #3a4a74; stroke-width: 1.6; }
+.obj-graph-edge-label { fill: var(--muted); font-size: 10px; text-anchor: middle; pointer-events: none; }
+.obj-graph-node { cursor: pointer; }
+.obj-graph-node circle { stroke: #0b1020; stroke-width: 2; opacity: 0.92; }
+.obj-graph-node circle.root { stroke: var(--accent); stroke-width: 3; }
+.obj-graph-node:hover circle { opacity: 1; }
+.obj-graph-node-label { fill: var(--text); font-size: 11px; text-anchor: middle; pointer-events: none; }
+.obj-graph-tooltip { fill: rgba(11, 16, 32, 0.96); stroke: var(--line); }
+.obj-graph-tooltip-title { fill: var(--text); font-size: 12px; font-weight: 600; }
+.obj-graph-tooltip-sub { fill: var(--muted); font-size: 10px; }
+.obj-graph-legend { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.obj-graph-legend .chip { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Read-only workflow progress graph (task detail) */
+.wf-graph-view { display: flex; flex-direction: column; gap: 10px; }
+.wf-graph-scroll { overflow: auto; border-radius: 12px; }
+.wf-graph-legend { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.wf-legend-done { background: rgba(62, 224, 192, 0.18); color: var(--ok); border: 1px solid rgba(62, 224, 192, 0.5); }
+.wf-legend-current { background: rgba(245, 193, 90, 0.2); color: var(--warn); border: 1px solid rgba(245, 193, 90, 0.55); }
+.wf-legend-pending { background: rgba(143, 164, 200, 0.14); color: var(--muted); border: 1px solid var(--line); }
+.wf-graph-svg {
+  display: block;
+  background: #0d1428;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.wf-graph-edge { stroke: #3a4a74; stroke-width: 1.6; }
+.wf-graph-node { cursor: default; }
+.wf-graph-node-type { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.85; }
+.wf-graph-node-name { fill: var(--text); font-size: 12px; }
+.wf-graph-node-state { fill: var(--warn); font-size: 10px; }

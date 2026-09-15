@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { objects } from "../api.js";
 import FormRenderer from "../components/FormRenderer.jsx";
+import ObjectGraphView from "../components/ObjectGraphView.jsx";
 
 const OBJECT_STATUSES = ["draft", "active", "released", "obsolete", "archived"];
 const TABS = [
@@ -43,6 +44,8 @@ export default function ObjectDetailPage() {
   const [safe, setSafe] = useState(null);
   const [tree, setTree] = useState(null);
   const [graph, setGraph] = useState(null);
+  const [graphDepth, setGraphDepth] = useState(2);
+  const [showRawGraph, setShowRawGraph] = useState(false);
   const [lc, setLc] = useState(null);
   const [history, setHistory] = useState([]);
   const [viewTree, setViewTree] = useState(null);
@@ -155,9 +158,9 @@ export default function ObjectDetailPage() {
     }
   }
 
-  async function loadGraph() {
+  async function loadGraph(depth = graphDepth) {
     try {
-      const [t, g] = await Promise.all([objects.tree(id, "?depth=2"), objects.graph(id, "?depth=2")]);
+      const [t, g] = await Promise.all([objects.tree(id, `?depth=${depth}`), objects.graph(id, `?depth=${depth}`)]);
       setTree(t);
       setGraph(g);
     } catch (err) {
@@ -739,9 +742,38 @@ export default function ObjectDetailPage() {
               <b>{tree?.nodes?.length ?? "—"}</b>
             </div>
           </div>
+          <div className="panel">
+            <div className="panel-head">
+              <h3>Relationship graph</h3>
+              <div className="inline">
+                <label className="field" style={{ margin: 0 }}>
+                  <span>Depth</span>
+                  <select
+                    value={graphDepth}
+                    onChange={(e) => {
+                      const depth = Number(e.target.value);
+                      setGraphDepth(depth);
+                      loadGraph(depth);
+                    }}
+                  >
+                    {[1, 2, 3, 4].map((d) => (
+                      <option key={d} value={d}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button className="btn ghost" onClick={() => loadGraph()}>Refresh</button>
+                <button className="btn ghost" onClick={() => setShowRawGraph((v) => !v)}>
+                  {showRawGraph ? "Hide raw JSON" : "Raw JSON"}
+                </button>
+              </div>
+            </div>
+            <ObjectGraphView graph={graph} height={540} />
+          </div>
           <div className="split">
             <div className="panel">
-              <h3>Reachable nodes (depth 2)</h3>
+              <h3>Reachable nodes (depth {graphDepth})</h3>
               <ul className="detail-list">
                 {(tree?.nodes || []).map((node) => (
                   <li key={node.id}>
@@ -751,12 +783,15 @@ export default function ObjectDetailPage() {
                     {node.name}
                   </li>
                 ))}
+                {!(tree?.nodes || []).length ? <li className="mono">No reachable nodes.</li> : null}
               </ul>
             </div>
-            <div className="panel">
-              <h3>Graph projection</h3>
-              {graph ? <pre className="json">{pretty(graph)}</pre> : <p className="mono">Loading graph…</p>}
-            </div>
+            {showRawGraph ? (
+              <div className="panel">
+                <h3>Graph projection</h3>
+                {graph ? <pre className="json">{pretty(graph)}</pre> : <p className="mono">Loading graph…</p>}
+              </div>
+            ) : null}
           </div>
         </>
       ) : null}

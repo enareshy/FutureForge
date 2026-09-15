@@ -14,6 +14,7 @@ import * as config from "./services/config.js";
 import * as metadata from "./services/metadata.js";
 import * as objects from "./services/objects.js";
 import * as lifecycle from "./services/lifecycle.js";
+import * as workflow from "./services/workflow.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -247,7 +248,12 @@ function grantAll(db, roleId, resource, actions = ACTIONS, organizationId = 0) {
 
 function seedAuthz(db) {
   const existing = db.prepare("SELECT COUNT(*) AS c FROM applications").get();
-  if (existing.c > 0) return { authzSeeded: false };
+  if (existing.c > 0) {
+    // Authorization catalog already exists. Reconcile the idempotent end-user
+    // grants so upgraded databases pick up newly introduced permission sets.
+    reconcileReaderGrants(db);
+    return { authzSeeded: false };
+  }
 
   const iamApp = catalog.createApplication(db, {
     code: "iam",
@@ -470,6 +476,54 @@ function seedAuthz(db) {
     kind: "object",
     parent_id: iamLifecycle.id,
   });
+  const iamWorkflow = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.workflow",
+    name: "Workflow & process engine",
+    kind: "module",
+  });
+  const iamWorkflowTemplates = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.workflow.templates",
+    name: "Workflow templates",
+    kind: "object",
+    parent_id: iamWorkflow.id,
+  });
+  const iamWorkflowDesigner = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.workflow.designer",
+    name: "Workflow designer",
+    kind: "object",
+    parent_id: iamWorkflow.id,
+  });
+  const iamWorkflowInstances = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.workflow.instances",
+    name: "Workflow instances",
+    kind: "object",
+    parent_id: iamWorkflow.id,
+  });
+  const iamWorkflowTasks = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.workflow.tasks",
+    name: "Workflow tasks",
+    kind: "object",
+    parent_id: iamWorkflow.id,
+  });
+  const iamWorkflowApprovals = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.workflow.approvals",
+    name: "Workflow approvals",
+    kind: "object",
+    parent_id: iamWorkflow.id,
+  });
+  const iamWorkflowConfig = catalog.createResource(db, {
+    application_id: iamApp.id,
+    code: "iam.workflow.config",
+    name: "Workflow configuration",
+    kind: "object",
+    parent_id: iamWorkflow.id,
+  });
   const financeRoot = catalog.createResource(db, {
     application_id: financeApp.id,
     code: "finance",
@@ -528,6 +582,13 @@ function seedAuthz(db) {
     iamLifecycleTransitions,
     iamLifecycleReleaseRules,
     iamLifecycleApprovals,
+    iamWorkflow,
+    iamWorkflowTemplates,
+    iamWorkflowDesigner,
+    iamWorkflowInstances,
+    iamWorkflowTasks,
+    iamWorkflowApprovals,
+    iamWorkflowConfig,
     financeRoot,
     financeLedger,
     siteRoot,
@@ -554,7 +615,7 @@ function seedAuthz(db) {
     for (const resource of [iamObjects, iamObjectInstances, iamObjectRelationships, iamObjectReferences, iamObjectDependencies]) {
       grantAll(db, platform.id, resource);
     }
-    for (const resource of [iamLifecycle, iamLifecycleStatuses, iamLifecycleDefinitions, iamLifecycleTransitions, iamLifecycleReleaseRules, iamLifecycleApprovals]) {
+    for (const resource of [iamLifecycle, iamLifecycleStatuses, iamLifecycleDefinitions, iamLifecycleTransitions, iamLifecycleReleaseRules, iamLifecycleApprovals, iamWorkflow, iamWorkflowTemplates, iamWorkflowDesigner, iamWorkflowInstances, iamWorkflowTasks, iamWorkflowApprovals, iamWorkflowConfig]) {
       grantAll(db, platform.id, resource);
     }
     grantAll(db, platform.id, financeRoot);
@@ -566,7 +627,7 @@ function seedAuthz(db) {
     for (const resource of [iamObjects, iamObjectInstances, iamObjectRelationships, iamObjectReferences, iamObjectDependencies]) {
       grantAll(db, iamAdmin.id, resource);
     }
-    for (const resource of [iamLifecycle, iamLifecycleStatuses, iamLifecycleDefinitions, iamLifecycleTransitions, iamLifecycleReleaseRules, iamLifecycleApprovals]) {
+    for (const resource of [iamLifecycle, iamLifecycleStatuses, iamLifecycleDefinitions, iamLifecycleTransitions, iamLifecycleReleaseRules, iamLifecycleApprovals, iamWorkflow, iamWorkflowTemplates, iamWorkflowDesigner, iamWorkflowInstances, iamWorkflowTasks, iamWorkflowApprovals, iamWorkflowConfig]) {
       grantAll(db, iamAdmin.id, resource);
     }
   }
@@ -743,6 +804,13 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.lifecycle.transitions", name: "Lifecycle states & transitions", parentCode: "iam.lifecycle" },
     { applicationCode: "iam", code: "iam.lifecycle.release-rules", name: "Release rules", parentCode: "iam.lifecycle" },
     { applicationCode: "iam", code: "iam.lifecycle.approvals", name: "Approvals", parentCode: "iam.lifecycle" },
+    { applicationCode: "iam", code: "iam.workflow", name: "Workflow & process engine", kind: "module" },
+    { applicationCode: "iam", code: "iam.workflow.templates", name: "Workflow templates", parentCode: "iam.workflow" },
+    { applicationCode: "iam", code: "iam.workflow.designer", name: "Workflow designer", parentCode: "iam.workflow" },
+    { applicationCode: "iam", code: "iam.workflow.instances", name: "Workflow instances", parentCode: "iam.workflow" },
+    { applicationCode: "iam", code: "iam.workflow.tasks", name: "Workflow tasks", parentCode: "iam.workflow" },
+    { applicationCode: "iam", code: "iam.workflow.approvals", name: "Workflow approvals", parentCode: "iam.workflow" },
+    { applicationCode: "iam", code: "iam.workflow.config", name: "Workflow configuration", parentCode: "iam.workflow" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -785,6 +853,13 @@ function seedMissingCatalog(db) {
     "iam.lifecycle.transitions",
     "iam.lifecycle.release-rules",
     "iam.lifecycle.approvals",
+    "iam.workflow",
+    "iam.workflow.templates",
+    "iam.workflow.designer",
+    "iam.workflow.instances",
+    "iam.workflow.tasks",
+    "iam.workflow.approvals",
+    "iam.workflow.config",
   ];
   for (const code of objectResourceCodes) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -811,19 +886,39 @@ function seedMissingCatalog(db) {
     );
     if (!existingGrant) grantAll(db, platform.id, platformRes);
   }
-  const reader = roleByCode(db, "app.reader");
-  const orgsRes = queryOne(db, "SELECT * FROM resources WHERE code = 'iam.organizations'");
-  if (reader && orgsRes) {
-    const existing = queryOne(
-      db,
-      `SELECT 1 AS x FROM role_permissions rp
-       JOIN permissions p ON p.id = rp.permission_id
-       WHERE rp.role_id = ? AND p.resource_id = ? AND p.action = 'read'`,
-      [reader.id, orgsRes.id]
-    );
-    if (!existing) grantAll(db, reader.id, orgsRes, ["read"]);
-  }
+  reconcileReaderGrants(db);
   return created;
+}
+
+// Idempotent end-user grants. These are reconciled on every seed so that
+// existing databases also receive the permissions the "My tasks & approvals"
+// console needs. Administrator-only surfaces (templates authoring, designer,
+// configuration) are intentionally excluded, and module-level grants are
+// avoided because the authorization layer inherits them into child resources.
+function reconcileReaderGrants(db) {
+  const reader = roleByCode(db, "app.reader");
+  if (!reader) return;
+  const grants = [
+    ["iam.organizations", ["read"]],
+    ["iam.workflow.templates", ["read"]],
+    ["iam.workflow.instances", ["read", "create", "execute"]],
+    ["iam.workflow.tasks", ["read", "execute", "update"]],
+    ["iam.workflow.approvals", ["read", "execute"]],
+  ];
+  for (const [code, actions] of grants) {
+    const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
+    if (!resource) continue;
+    for (const action of actions) {
+      const existingAction = queryOne(
+        db,
+        `SELECT 1 AS x FROM role_permissions rp
+         JOIN permissions p ON p.id = rp.permission_id
+         WHERE rp.role_id = ? AND p.resource_id = ? AND p.action = ?`,
+        [reader.id, resource.id, action]
+      );
+      if (!existingAction) grantAll(db, reader.id, resource, [action]);
+    }
+  }
 }
 
 function seedMetadata(db) {
@@ -1412,6 +1507,193 @@ function seedLifecycle(db) {
   };
 }
 
+function seedWorkflow(db) {
+  const existing = db.prepare("SELECT COUNT(*) AS c FROM workflow_definitions").get();
+  if (existing.c > 0) return { workflowSeeded: false };
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const admin = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin'");
+  if (!helix || !admin) return { workflowSeeded: false };
+  const tenantId = helix.id;
+  const actor = { id: admin.id, username: admin.username };
+  const ip = "seed";
+
+  const approvalRule = lifecycle.createRule(
+    db,
+    {
+      code: "change-approval",
+      name: "Change request approval",
+      kind: "approval",
+      module: "workflow",
+      require_all: true,
+      min_approvals: 1,
+      mandatory_comment_on_reject: true,
+      steps: [{ code: "reviewer", name: "Reviewer sign-off", approver_type: "role", approver_id: "iam.admin", approval_mode: "all" }],
+      tenant_id: tenantId,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+
+  const graph = {
+    nodes: [
+      { node_key: "start", type: "start", name: "Start", position_x: 60, position_y: 180, display_order: 0 },
+      {
+        node_key: "assess",
+        type: "task",
+        name: "Assess change request",
+        description: "Review the change scope and impact",
+        position_x: 260,
+        position_y: 180,
+        display_order: 10,
+        config: { assignee_type: "role", assignee_ref: "iam.admin", priority: "high", due_minutes: 2880, escalation_minutes: 1440 },
+      },
+      {
+        node_key: "approve",
+        type: "approval",
+        name: "Approve change",
+        position_x: 500,
+        position_y: 180,
+        display_order: 20,
+        config: { approval_rule_id: approvalRule.id },
+      },
+      { node_key: "route", type: "decision", name: "High priority?", position_x: 740, position_y: 180, display_order: 30 },
+      {
+        node_key: "notify",
+        type: "notification",
+        name: "Notify stakeholders",
+        position_x: 960,
+        position_y: 80,
+        display_order: 40,
+        config: { subject: "High priority change approved", body: "Change {{instance_code}} was approved.", recipients: [] },
+      },
+      { node_key: "end", type: "end", name: "End", position_x: 1200, position_y: 180, display_order: 50 },
+    ],
+    transitions: [
+      { transition_key: "start-assess", from_node_key: "start", to_node_key: "assess", display_order: 0 },
+      { transition_key: "assess-approve", from_node_key: "assess", to_node_key: "approve", display_order: 1 },
+      { transition_key: "approve-route", from_node_key: "approve", to_node_key: "route", display_order: 2 },
+      {
+        transition_key: "route-notify",
+        from_node_key: "route",
+        to_node_key: "notify",
+        condition: { field: "priority", operator: "eq", value: "high" },
+        display_order: 3,
+      },
+      { transition_key: "route-end", from_node_key: "route", to_node_key: "end", is_default: true, display_order: 4 },
+      { transition_key: "notify-end", from_node_key: "notify", to_node_key: "end", display_order: 5 },
+    ],
+  };
+
+  const created = workflow.createDefinition(
+    db,
+    {
+      code: "change-request-review",
+      name: "Change Request Review",
+      description: "Assess, approve and route engineering change requests",
+      category: "quality",
+      module: "pdm",
+      tenant_id: tenantId,
+      graph,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+  workflow.publishDefinition(db, created.id, { notes: "Seeded demo workflow" }, actor, ip, tenantId);
+
+  workflow.createRoutingRule(
+    db,
+    {
+      code: "change-high-priority",
+      name: "Route high priority changes",
+      definition_id: created.id,
+      node_type: "task",
+      priority: 10,
+      condition: { field: "priority", operator: "eq", value: "high" },
+      assignee_type: "role",
+      assignee_ref: "iam.admin",
+      tenant_id: tenantId,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+
+  workflow.createEscalationRule(
+    db,
+    {
+      code: "change-overdue",
+      name: "Escalate overdue change tasks",
+      definition_id: created.id,
+      after_minutes: 1440,
+      action: "raise_priority",
+      priority: "urgent",
+      tenant_id: tenantId,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+
+  workflow.createTemplate(
+    db,
+    {
+      code: "task-assigned",
+      name: "Task assigned",
+      channel: "in_app",
+      subject: "New task: {{title}}",
+      body: "Task {{code}} is assigned to you.",
+      tenant_id: tenantId,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+
+  workflow.createBinding(
+    db,
+    {
+      code: "release-to-change-review",
+      name: "Start change review when a release is approved",
+      event: "lifecycle.release.approved",
+      definition_id: created.id,
+      context_map: { object_code: "object_code", release_id: "release_id" },
+      tenant_id: tenantId,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+
+  const changeObject = queryOne(db, "SELECT id FROM objects WHERE code = 'ECN-1000' AND deleted_at IS NULL");
+  let instanceId = null;
+  try {
+    const instance = workflow.startInstance(
+      db,
+      {
+        definition_id: created.id,
+        title: "ECN-1000 engineering change review",
+        object_id: changeObject?.id ?? null,
+        context: { priority: "high", source: "seed" },
+      },
+      actor,
+      tenantId,
+      ip
+    );
+    instanceId = instance.id;
+  } catch {
+    /* demo instance is best effort; the template is what matters */
+  }
+
+  return {
+    workflowSeeded: true,
+    workflowDefinition: created.id,
+    workflowApprovalRule: approvalRule.id,
+    workflowInstance: instanceId,
+  };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -1424,6 +1706,7 @@ export function seedDatabase(db) {
   seedMetadata(db);
   seedObjects(db);
   seedLifecycle(db);
+  seedWorkflow(db);
   return { ...identity, ...authz };
 }
 

@@ -22,6 +22,7 @@ import ObjectsPage from "./pages/ObjectsPage.jsx";
 import ObjectDetailPage from "./pages/ObjectDetailPage.jsx";
 import RelationshipTypesPage from "./pages/RelationshipTypesPage.jsx";
 import LifecyclePage from "./pages/LifecyclePage.jsx";
+import WorkflowPage from "./pages/WorkflowPage.jsx";
 import ExplorerPage from "./pages/ExplorerPage.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import AuthenticationPage from "./pages/AuthenticationPage.jsx";
@@ -170,13 +171,17 @@ const NAV_SECTIONS = [
       { to: "/metadata", label: "Metadata", platformOrAdmin: true },
       { to: "/relationship-types", label: "Relationship types" },
       { to: "/lifecycles", label: "Lifecycles" },
+      { to: "/workflows/templates", label: "Workflow Engine", platformOrAdmin: true },
       { to: "/platform", label: "Platform properties", platform: true },
     ],
   },
   {
     key: "objects",
     label: "My Data",
-    items: [{ to: "/objects", label: "Business objects" }],
+    items: [
+      { to: "/objects", label: "Business objects" },
+      { to: "/workflows", label: "My tasks & approvals", end: true },
+    ],
   },
   {
     key: "audit",
@@ -357,6 +362,8 @@ export default function App() {
         <Route path="/objects/:id" element={<ObjectDetailPage />} />
         <Route path="/relationship-types" element={<RelationshipTypesPage />} />
         <Route path="/lifecycles" element={<LifecyclePage />} />
+        <Route path="/workflows" element={<WorkflowPage mode="user" />} />
+        <Route path="/workflows/templates" element={<WorkflowPage mode="config" />} />
         <Route path="/platform" element={<PlatformPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
