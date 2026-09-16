@@ -1993,3 +1993,158 @@ CREATE TABLE IF NOT EXISTS delivery_alerts (
 
 CREATE INDEX IF NOT EXISTS idx_delivery_alerts_status ON delivery_alerts(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_delivery_alerts_tenant ON delivery_alerts(tenant_id, created_at);
+
+-- ===========================================================================
+-- Background Job Management Module (migration 015_jobs)
+--
+-- Centralized registry, submission, monitoring, control, history and result
+-- tracking for asynchronous jobs. Business modules (Bulk Import, CAD
+-- Processing, BOM Validation, Report Generation, Data Sync, Search Indexing,
+-- Workflow, Integrations, ...) submit jobs here instead of building their own
+-- job management.
+--
+-- The actual execution infrastructure is provided by the separate Job
+-- Scheduling & Execution Engine. This module stores NO queues, workers,
+-- scheduling algorithms or retry execution: it records state the engine
+-- reports and exposes management operations (submit/cancel/pause/resume/retry).
+-- ===========================================================================
+
+-- Job type registry. Business modules own the handlers; this module only stores
+-- their metadata and handler reference.
+CREATE TABLE IF NOT EXISTS job_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  source_module TEXT NOT NULL DEFAULT 'platform',
+  handler TEXT NOT NULL DEFAULT '',
+  queues_json TEXT NOT NULL DEFAULT '["default"]',
+  required_permissions_json TEXT NOT NULL DEFAULT '[]',
+  timeout_seconds INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 0,
+  default_priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (default_priority IN ('low', 'normal', 'high', 'urgent')),
+  retry_policy_json TEXT NOT NULL DEFAULT '{}',
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_types_active ON job_types(active, source_module);
+
+-- Canonical job record and its lifecycle.
+CREATE TABLE IF NOT EXISTS jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_ref TEXT NOT NULL UNIQUE,
+  job_type_code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  plant_id INTEGER,
+  site_id INTEGER,
+  department_id INTEGER,
+  source_module TEXT NOT NULL DEFAULT 'platform',
+  submitted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  submitted_as TEXT NOT NULL DEFAULT 'user'
+    CHECK (submitted_as IN ('user', 'system', 'schedule', 'event', 'workflow', 'integration')),
+  queue TEXT NOT NULL DEFAULT 'default',
+  priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  status TEXT NOT NULL DEFAULT 'created'
+    CHECK (status IN ('created', 'queued', 'waiting_for_dependency', 'scheduled', 'running', 'paused', 'completed', 'failed', 'retrying', 'cancel_requested', 'cancelled', 'timed_out', 'skipped')),
+  progress INTEGER NOT NULL DEFAULT 0,
+  stage TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  input_json TEXT NOT NULL DEFAULT '{}',
+  input_ref TEXT NOT NULL DEFAULT '',
+  related_object_type TEXT NOT NULL DEFAULT '',
+  related_object_id TEXT NOT NULL DEFAULT '',
+  related_object_name TEXT NOT NULL DEFAULT '',
+  parent_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+  correlation_id TEXT NOT NULL DEFAULT '',
+  idempotency_key TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 0,
+  timeout_seconds INTEGER NOT NULL DEFAULT 0,
+  scheduled_at TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  worker_id TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  error_json TEXT NOT NULL DEFAULT '{}',
+  result_ref TEXT NOT NULL DEFAULT '',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  cancel_reason TEXT NOT NULL DEFAULT '',
+  cancel_requested_at TEXT,
+  cancel_requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  cancelled_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency
+  ON jobs(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, queue, priority, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_tenant ON jobs(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(job_type_code, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_submitter ON jobs(submitted_by, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_source ON jobs(source_module, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_correlation ON jobs(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_parent ON jobs(parent_job_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_object ON jobs(related_object_type, related_object_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_ref ON jobs(job_ref);
+
+-- Dependency edges: job_id depends on depends_on_job_id.
+CREATE TABLE IF NOT EXISTS job_dependencies (
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  depends_on_job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  required INTEGER NOT NULL DEFAULT 1 CHECK (required IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (job_id, depends_on_job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_dependencies_depends ON job_dependencies(depends_on_job_id);
+
+-- Immutable status-transition and administrative-action history.
+CREATE TABLE IF NOT EXISTS job_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL DEFAULT 'status',
+  from_status TEXT NOT NULL DEFAULT '',
+  to_status TEXT NOT NULL DEFAULT '',
+  progress INTEGER,
+  stage TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor_type TEXT NOT NULL DEFAULT 'system',
+  source TEXT NOT NULL DEFAULT 'platform',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_history_job ON job_history(job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_history_event ON job_history(event_type, created_at);
+
+-- Result artifacts. Only secure references into the Document & File Management
+-- storage abstraction are stored here; no bytes live in this table.
+CREATE TABLE IF NOT EXISTS job_artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'output',
+  name TEXT NOT NULL DEFAULT '',
+  filename TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL DEFAULT 0,
+  url TEXT NOT NULL DEFAULT '',
+  storage_ref TEXT NOT NULL DEFAULT '',
+  checksum TEXT NOT NULL DEFAULT '',
+  secure INTEGER NOT NULL DEFAULT 0 CHECK (secure IN (0, 1)),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_job ON job_artifacts(job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_kind ON job_artifacts(kind);

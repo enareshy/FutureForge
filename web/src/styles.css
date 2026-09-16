@@ -637,3 +637,37 @@ pre.json {
 .notif-drawer-body { font-size: 14px; line-height: 1.55; color: var(--text); overflow-wrap: anywhere; }
 .notif-drawer-body a { color: var(--accent); }
 .notif-preview-subject { font-size: 15px; font-weight: 650; margin-bottom: 10px; }
+
+/* Background job management */
+.job-progress {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: #243154;
+  overflow: hidden;
+  min-width: 110px;
+  flex: 1;
+}
+.job-progress > span { display: block; height: 100%; background: var(--accent); transition: width 0.3s ease; }
+.job-progress.done > span { background: var(--ok); }
+.job-progress.failed > span { background: var(--danger); }
+.badge.job-running { background: rgba(91, 140, 255, 0.2); color: var(--accent); }
+.badge.job-queued,
+.badge.job-paused,
+.badge.job-cancel_requested { background: rgba(245, 193, 90, 0.18); color: var(--warn); }
+.badge.job-completed { background: rgba(62, 224, 192, 0.15); color: var(--ok); }
+.badge.job-failed,
+.badge.job-timed_out,
+.badge.job-cancelled { background: rgba(255, 107, 122, 0.16); color: var(--danger); }
+.badge.job-created,
+.badge.job-scheduled,
+.badge.job-waiting_for_dependency,
+.badge.job-retrying,
+.badge.job-skipped { background: #243154; color: var(--muted); }
+.job-timeline { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.job-timeline li { border-left: 2px solid var(--line); padding: 2px 0 2px 12px; }
+.job-timeline-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.job-timeline-body { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.job-progress-cell { display: flex; align-items: center; gap: 8px; min-width: 150px; }
+.job-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+

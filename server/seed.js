@@ -18,6 +18,7 @@ import * as workflow from "./services/workflow.js";
 import * as audit from "./services/audit.js";
 import * as notifications from "./services/notifications.js";
 import * as delivery from "./services/delivery.js";
+import * as jobs from "./services/jobs.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -831,6 +832,13 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.delivery.requests", name: "Delivery requests", parentCode: "iam.delivery" },
     { applicationCode: "iam", code: "iam.delivery.reminders", name: "Delivery reminders & escalations", parentCode: "iam.delivery" },
     { applicationCode: "iam", code: "iam.delivery.monitoring", name: "Delivery monitoring", parentCode: "iam.delivery" },
+    { applicationCode: "iam", code: "iam.jobs", name: "Background job management", kind: "module" },
+    { applicationCode: "iam", code: "iam.jobs.list", name: "Job list & submission", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.details", name: "Job details & history", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.control", name: "Job control", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.types", name: "Job type administration", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.results", name: "Job results & artifacts", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.monitoring", name: "Job monitoring", parentCode: "iam.jobs" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -915,7 +923,15 @@ function seedMissingCatalog(db) {
     "iam.delivery.reminders",
     "iam.delivery.monitoring",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes]) {
+  const jobResourceCodes = [
+    "iam.jobs.list",
+    "iam.jobs.details",
+    "iam.jobs.control",
+    "iam.jobs.types",
+    "iam.jobs.results",
+    "iam.jobs.monitoring",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -961,6 +977,12 @@ function reconcileReaderGrants(db) {
     ["iam.audit.history", ["read"]],
     ["iam.notifications.inbox", ["read", "update"]],
     ["iam.notifications.preferences", ["read", "update"]],
+    ["iam.jobs.list", ["read", "create"]],
+    ["iam.jobs.details", ["read"]],
+    ["iam.jobs.control", ["execute"]],
+    ["iam.jobs.results", ["read"]],
+    ["iam.jobs.types", ["read"]],
+    ["iam.jobs.monitoring", ["read"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -2160,6 +2182,117 @@ function seedDelivery(db) {
   return { deliverySeeded: true };
 }
 
+// Registers the standard job types every business module exposes and a small,
+// representative set of sample jobs so the dashboard is meaningful on a fresh
+// install. Idempotent: sample jobs are only created when the table is empty.
+function seedJobs(db) {
+  jobs.ensureDefaultJobTypes(db);
+  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM jobs").c;
+  if (existing > 0) return { jobsSeeded: true, jobTypesSeeded: true };
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const admin = queryOne(db, "SELECT id, username, display_name, email FROM users WHERE username = 'admin'");
+  const actor = admin
+    ? { id: admin.id, username: admin.username, display_name: admin.display_name, tenant_id: helix?.id ?? null, organization_id: helix?.id ?? null }
+    : null;
+  const context = { actor };
+  const hire = queryOne(db, "SELECT id, code, name FROM organizations WHERE code = 'helix' ORDER BY id LIMIT 1");
+
+  const samples = [
+    {
+      type: "REPORT_GENERATION",
+      idempotency_key: "seed:job:report",
+      name: "Quarterly cost rollup",
+      description: "Roll up approved cost records into the quarterly report.",
+      related_object_type: "report",
+      related_object_name: "Quarterly cost rollup",
+    },
+    {
+      type: "DATA_SYNC",
+      idempotency_key: "seed:job:sync",
+      name: "ERP item master sync",
+      description: "Synchronize the item master with the ERP system.",
+      related_object_type: "integration",
+      related_object_name: "ERP item master",
+    },
+    {
+      type: "CAD_PROCESSING",
+      idempotency_key: "seed:job:cad",
+      name: "Tessellate housing assembly",
+      description: "Generate viewable geometry for the housing assembly.",
+      related_object_type: "part",
+      related_object_name: "Housing assembly",
+    },
+    {
+      type: "BULK_IMPORT",
+      idempotency_key: "seed:job:import",
+      name: "Supplier contacts import",
+      description: "Import 2,400 supplier contacts from a spreadsheet.",
+      related_object_type: "import",
+      related_object_name: "Supplier contacts",
+    },
+    {
+      type: "SEARCH_INDEXING",
+      idempotency_key: "seed:job:index",
+      name: "Nightly search reindex",
+      description: "Reindex all published documents for full-text search.",
+      delay_seconds: 3600,
+      related_object_type: "index",
+      related_object_name: "Document index",
+    },
+  ];
+
+  const created = [];
+  for (const sample of samples) {
+    try {
+      const job = jobs.submitJob(
+        db,
+        { ...sample, job_type_code: sample.type, tenant_id: helix?.id ?? null, organization_id: hire?.id ?? null },
+        context
+      );
+      created.push(job);
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+
+  const byKey = (key) => created.find((job) => job.idempotency_key === key);
+  const report = byKey("seed:job:report");
+  if (report) {
+    jobs.transitionJob(db, report.id, "running", { actorId: admin?.id ?? null, source: "engine" });
+    jobs.updateProgress(db, report.id, { progress: 100, stage: "finalize", message: "Report rendered" }, {});
+    jobs.transitionJob(db, report.id, "completed", { actorId: admin?.id ?? null, source: "engine" });
+    const row = jobs.getJobRow(db, report.id);
+    jobs.setJobResult(db, row, { result: { rows: 1840, duration_seconds: 214 }, result_ref: "doc://reports/quarterly-cost-rollup" }, {});
+    jobs.addArtifact(db, report.id, {
+      kind: "report",
+      name: "Quarterly cost rollup (PDF)",
+      filename: "quarterly-cost-rollup.pdf",
+      content_type: "application/pdf",
+      size: 284113,
+      storage_ref: "doc://reports/quarterly-cost-rollup.pdf",
+    });
+  }
+
+  const sync = byKey("seed:job:sync");
+  if (sync) {
+    jobs.transitionJob(db, sync.id, "running", { actorId: admin?.id ?? null, source: "engine" });
+    jobs.transitionJob(db, sync.id, "failed", {
+      actorId: admin?.id ?? null,
+      source: "engine",
+      errorCode: "erp_timeout",
+      errorMessage: "The ERP gateway did not respond within 300 seconds",
+    });
+  }
+
+  const cad = byKey("seed:job:cad");
+  if (cad) {
+    jobs.transitionJob(db, cad.id, "running", { actorId: admin?.id ?? null, source: "engine" });
+    jobs.updateProgress(db, cad.id, { progress: 42, stage: "tessellate", message: "Processing mesh 3 of 7" }, {});
+  }
+
+  return { jobsSeeded: true, jobTypesSeeded: true, sampleJobs: created.length };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -2176,6 +2309,7 @@ export function seedDatabase(db) {
   seedAudit(db);
   seedNotifications(db);
   seedDelivery(db);
+  seedJobs(db);
   return { ...identity, ...authz };
 }
 

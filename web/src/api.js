@@ -476,6 +476,35 @@ export const delivery = {
   runs: (qs) => api(`/api/delivery/runs${qs || ""}`),
 };
 
+export const jobs = {
+  meta: () => api("/api/jobs/meta"),
+  list: (qs) => api(`/api/jobs${qs || ""}`),
+  get: (id) => api(`/api/jobs/${id}`),
+  status: (id) => api(`/api/jobs/${id}/status`),
+  submit: (body) => api("/api/jobs", { method: "POST", body }),
+  history: (id, qs) => api(`/api/jobs/${id}/history${qs || ""}`),
+  dependencies: (id) => api(`/api/jobs/${id}/dependencies`),
+  addDependency: (id, body) => api(`/api/jobs/${id}/dependencies`, { method: "POST", body }),
+  removeDependency: (id, dependsOnId) => api(`/api/jobs/${id}/dependencies/${dependsOnId}`, { method: "DELETE" }),
+  children: (id) => api(`/api/jobs/${id}/children`),
+  progress: (id, body) => api(`/api/jobs/${id}/progress`, { method: "POST", body }),
+  cancel: (id, reason) => api(`/api/jobs/${id}/cancel`, { method: "POST", body: { reason } }),
+  retry: (id) => api(`/api/jobs/${id}/retry`, { method: "POST", body: {} }),
+  pause: (id, reason) => api(`/api/jobs/${id}/pause`, { method: "POST", body: { reason } }),
+  resume: (id) => api(`/api/jobs/${id}/resume`, { method: "POST", body: {} }),
+  result: (id) => api(`/api/jobs/${id}/result`),
+  artifacts: (id) => api(`/api/jobs/${id}/artifacts`),
+
+  types: (qs) => api(`/api/job-types${qs || ""}`),
+  type: (code) => api(`/api/job-types/${code}`),
+  createType: (body) => api("/api/job-types", { method: "POST", body }),
+  updateType: (code, body) => api(`/api/job-types/${code}`, { method: "PATCH", body }),
+  setTypeStatus: (code, active) => api(`/api/job-types/${code}/status`, { method: "POST", body: { active } }),
+
+  metrics: (qs) => api(`/api/job-metrics${qs || ""}`),
+  timeseries: (qs) => api(`/api/job-metrics/timeseries${qs || ""}`),
+};
+
 export const lifecycle = {  statuses: (qs) => api(`/api/statuses${qs || ""}`),
   status: (id) => api(`/api/statuses/${id}`),
   createStatus: (body) => api("/api/statuses", { method: "POST", body }),

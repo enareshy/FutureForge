@@ -27,6 +27,10 @@ import ExplorerPage from "./pages/ExplorerPage.jsx";
 import NotificationsPage from "./pages/NotificationsPage.jsx";
 import NotificationAdminPage from "./pages/NotificationAdminPage.jsx";
 import DeliveryAdminPage from "./pages/DeliveryAdminPage.jsx";
+import JobsDashboardPage from "./pages/JobsDashboardPage.jsx";
+import JobsPage from "./pages/JobsPage.jsx";
+import JobDetailPage from "./pages/JobDetailPage.jsx";
+import JobTypesPage from "./pages/JobTypesPage.jsx";
 import NotificationBell from "./components/NotificationBell.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import AuthenticationPage from "./pages/AuthenticationPage.jsx";
@@ -199,6 +203,15 @@ const NAV_SECTIONS = [
       { to: "/notifications", label: "Inbox", end: true },
       { to: "/notifications/admin", label: "Notification admin", platformOrAdmin: true },
       { to: "/delivery/admin", label: "Delivery services", platformOrAdmin: true },
+    ],
+  },
+  {
+    key: "jobs",
+    label: "Jobs",
+    items: [
+      { to: "/jobs", label: "Job dashboard", end: true },
+      { to: "/jobs/list", label: "Jobs" },
+      { to: "/jobs/admin", label: "Job types", platformOrAdmin: true },
     ],
   },
 ];
@@ -383,6 +396,10 @@ export default function App() {
         <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="/notifications/admin" element={<NotificationAdminPage />} />
         <Route path="/delivery/admin" element={<DeliveryAdminPage />} />
+        <Route path="/jobs" element={<JobsDashboardPage />} />
+        <Route path="/jobs/list" element={<JobsPage />} />
+        <Route path="/jobs/admin" element={<JobTypesPage />} />
+        <Route path="/jobs/:id" element={<JobDetailPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </ErrorBoundary>

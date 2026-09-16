@@ -12,6 +12,7 @@ import * as policy from "./services/policy.js";
 import * as audit from "./services/audit.js";
 import * as notifications from "./services/notifications.js";
 import * as delivery from "./services/delivery.js";
+import * as jobs from "./services/jobs.js";
 import * as catalog from "./services/catalog.js";
 import * as grants from "./services/grants.js";
 import * as authorization from "./services/authorization.js";
@@ -4598,6 +4599,274 @@ export function createApp(db) {
           limit: req.query.limit,
         }),
       });
+    })
+  );
+
+  // ── Background job management ─────────────────────────────────────────────
+  // Centralized registry, submission, monitoring, control and tracking for
+  // asynchronous jobs. Business modules submit work and receive a Job ID; the
+  // Job Scheduling & Execution Engine reports progress/outcomes back here.
+  // Every route is tenant-scoped; platform admins may request ?all=true.
+  function jobScope(req) {
+    if (tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true") return null;
+    return req.tenantId || -1;
+  }
+
+  function jobQuery(req) {
+    const scope = jobScope(req);
+    return scope === null ? { ...req.query } : { ...req.query, tenantId: scope };
+  }
+
+  app.get(
+    "/api/jobs/meta",
+    auth,
+    can("iam.jobs.list", "read"),
+    wrap((_req, res) => {
+      res.json({
+        statuses: jobs.JOB_STATUSES,
+        status_labels: jobs.JOB_STATUS_LABELS,
+        terminal_statuses: jobs.TERMINAL_STATUSES,
+        transitions: jobs.JOB_TRANSITIONS,
+        priorities: jobs.PRIORITIES,
+        submitted_as: jobs.SUBMITTED_AS,
+        artifact_kinds: jobs.ARTIFACT_KINDS,
+        default_queue: jobs.DEFAULT_QUEUE,
+      });
+    })
+  );
+
+  app.get(
+    "/api/job-types",
+    auth,
+    can("iam.jobs.types", "read"),
+    wrap((req, res) => {
+      res.json(jobs.listJobTypes(db, req.query));
+    })
+  );
+
+  app.get(
+    "/api/job-types/:code",
+    auth,
+    can("iam.jobs.types", "read"),
+    wrap((req, res) => {
+      res.json(jobs.getJobType(db, req.params.code));
+    })
+  );
+
+  app.post(
+    "/api/job-types",
+    auth,
+    can("iam.jobs.types", "create"),
+    wrap((req, res) => {
+      res.status(201).json(jobs.createJobType(db, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.patch(
+    "/api/job-types/:code",
+    auth,
+    can("iam.jobs.types", "update"),
+    wrap((req, res) => {
+      res.json(jobs.updateJobType(db, req.params.code, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/job-types/:code/status",
+    auth,
+    can("iam.jobs.types", "update"),
+    wrap((req, res) => {
+      res.json(jobs.setJobTypeStatus(db, req.params.code, req.body?.active !== false, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/job-metrics",
+    auth,
+    can("iam.jobs.monitoring", "read"),
+    wrap((req, res) => {
+      res.json(jobs.jobMetrics(db, jobScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/job-metrics/timeseries",
+    auth,
+    can("iam.jobs.monitoring", "read"),
+    wrap((req, res) => {
+      res.json({ items: jobs.jobTimeseries(db, jobScope(req), { days: req.query.days }) });
+    })
+  );
+
+  app.get(
+    "/api/jobs",
+    auth,
+    can("iam.jobs.list", "read"),
+    wrap((req, res) => {
+      res.json(jobs.listJobs(db, jobQuery(req), jobScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/jobs",
+    auth,
+    can("iam.jobs.list", "create"),
+    wrap((req, res) => {
+      res.status(201).json(jobs.submitJob(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.get(
+    "/api/jobs/:id",
+    auth,
+    can("iam.jobs.details", "read"),
+    wrap((req, res) => {
+      const job = jobs.getJob(db, req.params.id, jobScope(req));
+      job.dependencies_state = jobs.dependencyState(db, job.id, jobScope(req));
+      res.json(job);
+    })
+  );
+
+  app.get(
+    "/api/jobs/:id/status",
+    auth,
+    can("iam.jobs.details", "read"),
+    wrap((req, res) => {
+      res.json(jobs.getStatus(db, req.params.id, jobScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/jobs/:id/history",
+    auth,
+    can("iam.jobs.details", "read"),
+    wrap((req, res) => {
+      const job = jobs.getJob(db, req.params.id, jobScope(req));
+      res.json(jobs.listHistory(db, job.id, req.query));
+    })
+  );
+
+  app.get(
+    "/api/jobs/:id/dependencies",
+    auth,
+    can("iam.jobs.details", "read"),
+    wrap((req, res) => {
+      res.json(jobs.listDependencies(db, req.params.id, jobScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/jobs/:id/dependencies",
+    auth,
+    can("iam.jobs.control", "execute"),
+    wrap((req, res) => {
+      const job = jobs.getJob(db, req.params.id, jobScope(req));
+      const dependencies = req.body?.dependencies || req.body?.depends_on || [];
+      res.status(201).json({ items: jobs.addDependencies(db, job.id, dependencies, { actor: req.actor, ip: clientIp(req) }) });
+    })
+  );
+
+  app.delete(
+    "/api/jobs/:id/dependencies/:dependsOnId",
+    auth,
+    can("iam.jobs.control", "execute"),
+    wrap((req, res) => {
+      const job = jobs.getJob(db, req.params.id, jobScope(req));
+      res.json(jobs.removeDependency(db, job.id, req.params.dependsOnId, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/jobs/:id/progress",
+    auth,
+    can("iam.jobs.control", "execute"),
+    wrap((req, res) => {
+      res.json(jobs.updateProgress(db, req.params.id, req.body || {}, { tenantId: jobScope(req), actor: req.actor }));
+    })
+  );
+
+  app.post(
+    "/api/jobs/:id/cancel",
+    auth,
+    can("iam.jobs.control", "execute"),
+    wrap((req, res) => {
+      res.json(jobs.cancelJob(db, req.params.id, { tenantId: jobScope(req), reason: req.body?.reason, actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/jobs/:id/retry",
+    auth,
+    can("iam.jobs.control", "execute"),
+    wrap((req, res) => {
+      res.json(jobs.retryJob(db, req.params.id, { tenantId: jobScope(req), actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/jobs/:id/pause",
+    auth,
+    can("iam.jobs.control", "execute"),
+    wrap((req, res) => {
+      res.json(jobs.pauseJob(db, req.params.id, { tenantId: jobScope(req), reason: req.body?.reason, actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/jobs/:id/resume",
+    auth,
+    can("iam.jobs.control", "execute"),
+    wrap((req, res) => {
+      res.json(jobs.resumeJob(db, req.params.id, { tenantId: jobScope(req), actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.get(
+    "/api/jobs/:id/result",
+    auth,
+    can("iam.jobs.results", "read"),
+    wrap((req, res) => {
+      const job = jobs.getJobRow(db, req.params.id, jobScope(req));
+      res.json(jobs.resultPayload(db, job));
+    })
+  );
+
+  app.post(
+    "/api/jobs/:id/result",
+    auth,
+    can("iam.jobs.results", "create"),
+    wrap((req, res) => {
+      const job = jobs.getJobRow(db, req.params.id, jobScope(req));
+      res.json(jobs.setJobResult(db, job, req.body || {}, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.get(
+    "/api/jobs/:id/artifacts",
+    auth,
+    can("iam.jobs.results", "read"),
+    wrap((req, res) => {
+      const job = jobs.getJob(db, req.params.id, jobScope(req));
+      res.json({ items: jobs.listArtifacts(db, job.id) });
+    })
+  );
+
+  app.post(
+    "/api/jobs/:id/artifacts",
+    auth,
+    can("iam.jobs.results", "create"),
+    wrap((req, res) => {
+      const job = jobs.getJob(db, req.params.id, jobScope(req));
+      res.status(201).json(jobs.addArtifact(db, job.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/jobs/:id/children",
+    auth,
+    can("iam.jobs.details", "read"),
+    wrap((req, res) => {
+      res.json({ items: jobs.listChildren(db, req.params.id, jobScope(req)) });
     })
   );
 
