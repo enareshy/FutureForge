@@ -72,6 +72,8 @@ Where things live in the UI:
 
 - Configuration section, Workflow Engine (`/workflows/templates`): admins design workflow templates.
 - My tasks & approvals (`/workflows`): end user inbox for tasks, team tasks, approvals and instances.
+- Communication section, Inbox (`/notifications`): end-user notification center (bell/unread badge, tabs, archive, deep links) and personal preferences.
+- Communication section, Notification admin (`/notifications/admin`): templates, rules, channel providers and the delivery monitor.
 - Object detail page: Graph tab for relationships and the workflow progress graph.
 
 ### 5. Production-style single port
@@ -161,6 +163,15 @@ The dev server binds to `0.0.0.0`, so other devices can reach it via your laptop
 - `/api/workflow-approvals` — approval inbox and decisions (`/decision`, `/approve`, `/reject`, `/request-changes`)
 - `/api/workflow-routing-rules` `/api/workflow-escalation-rules` `/api/workflow-escalations/sweep` — assignment routing and escalation sweeps
 - `/api/workflow-notifications` `/api/workflow-notification-templates` `/api/workflow-bindings` `/api/workflow-delegations` — notifications, event bindings and out-of-office delegation
+- `/api/notifications` — recipient-scoped in-app inbox: list with tabs/filters, `/unread-count`, `/meta`, `mark-all-read`, `archive-all-read`, read/unread/archive/delete a single notification
+- `/api/notification-preferences` — per-user delivery preferences (channels, frequency, quiet hours, self-notify, per-event overrides, `/mandatory`)
+- `/api/notification-templates` — versioned templates with `/variables`, `/versions`, `/preview`, `/test-send`, status toggling and validation (allow-listed `{{placeholders}}`, sanitized HTML)
+- `/api/notification-rules` — event-to-recipient rules: conditions, recipient definitions, channels, priority, reminders, escalations, `/status`, `/simulate`
+- `/api/notification-providers` — channel provider config (encrypted secrets, masked responses), `/test`
+- `/api/notification-history` — administrator cross-recipient delivery history with status counts
+- `/api/notification-events` `/api/notification-events/publish` — notification event stream and the reusable `publish()` entry point
+- `/api/notification-deliveries` `/stats` `/process` `/:id/retry` — delivery queue monitoring, retry and backoff processing
+- `/api/notification-reminders` `/sweep` — scheduled reminders and escalation sweeps
 - `/api/hierarchy` — Super Admin–defined org levels (operators)
 - `/api/platform/hierarchy` `/api/platform/settings` — Super Admin feature properties
 - `/api/companies` `/api/business-units` `/api/plants` `/api/sites` `/api/departments` — typed collections
@@ -174,9 +185,9 @@ IAM APIs are fail-safe: session plus `checkPermission`. Unauthorized callers rec
 
 In-process (future modules): `import { checkPermission, organizationContext } from "./server/platform.js"`
 
-Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`, `docs/LIFECYCLE_DESIGN.md`, `docs/WORKFLOW_ENGINE_DESIGN.md`, `docs/AUDIT_DESIGN.md`
+Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`, `docs/LIFECYCLE_DESIGN.md`, `docs/WORKFLOW_ENGINE_DESIGN.md`, `docs/AUDIT_DESIGN.md`, `docs/NOTIFICATIONS_DESIGN.md`
 
-The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config), lifecycle configuration under `/lifecycles`, **Workflow Engine** under `/workflows/templates` (the Configuration section where admins create and design workflow templates), and the **Audit & history** console under `/audit` (event stream, overview, policies, retention and export). End users get **My tasks & approvals** under `/workflows` (My Tasks, Team Tasks, Approvals and the instance monitor). Object lifecycle state, transitions, approvals, status history and a **History** tab appear on the object detail page. The reusable client renderer is `web/src/components/FormRenderer.jsx` and the visual workflow designer is `web/src/components/WorkflowDesigner.jsx`.
+The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config), lifecycle configuration under `/lifecycles`, **Workflow Engine** under `/workflows/templates` (the Configuration section where admins create and design workflow templates), **Audit & history** under `/audit` (event stream, overview, policies, retention and export), and **Notification admin** under `/notifications/admin` (templates with preview/test-send, rules with simulation, channel providers and the delivery monitor). Every user gets an **Inbox** under `/notifications` with a bell/unread badge, plus personal notification preferences. End users get **My tasks & approvals** under `/workflows` (My Tasks, Team Tasks, Approvals and the instance monitor). Object lifecycle state, transitions, approvals, status history and a **History** tab appear on the object detail page. The reusable client renderer is `web/src/components/FormRenderer.jsx` and the visual workflow designer is `web/src/components/WorkflowDesigner.jsx`.
 
 ## Tests
 

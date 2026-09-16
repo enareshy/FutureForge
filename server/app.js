@@ -10,6 +10,7 @@ import * as roles from "./services/roles.js";
 import * as orgs from "./services/orgs.js";
 import * as policy from "./services/policy.js";
 import * as audit from "./services/audit.js";
+import * as notifications from "./services/notifications.js";
 import * as catalog from "./services/catalog.js";
 import * as grants from "./services/grants.js";
 import * as authorization from "./services/authorization.js";
@@ -3815,6 +3816,441 @@ export function createApp(db) {
           organizationId: req.query.organizationId,
         })
       );
+    })
+  );
+
+  // ── Notification & Communication Framework ───────────────────────────────
+  // Self-service inbox routes are always scoped to the authenticated user.
+  // Administrative routes use the request tenant (or all tenants for platform
+  // admins when ?all=true).
+  function notificationSelfTenant(req) {
+    return req.tenantId || -1;
+  }
+
+  function notificationAdminScope(req) {
+    if (tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true") return null;
+    return req.tenantId || -1;
+  }
+
+  app.get(
+    "/api/notifications/unread-count",
+    auth,
+    can("iam.notifications.inbox", "read"),
+    wrap((req, res) => {
+      res.json(notifications.unreadCount(db, req.actor.id, notificationSelfTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/notifications/meta",
+    auth,
+    can("iam.notifications.inbox", "read"),
+    wrap((_req, res) => {
+      res.json({
+        channels: notifications.CHANNELS,
+        channel_labels: notifications.CHANNEL_LABELS,
+        priorities: notifications.PRIORITIES,
+        statuses: notifications.NOTIFICATION_STATUSES,
+        frequencies: notifications.FREQUENCIES,
+        provider_types: notifications.PROVIDER_TYPES,
+        recipient_types: notifications.RECIPIENT_TYPES,
+        template_roots: notifications.TEMPLATE_ROOTS,
+        sample_context: notifications.sampleContext(),
+      });
+    })
+  );
+
+  app.get(
+    "/api/notifications",
+    auth,
+    can("iam.notifications.inbox", "read"),
+    wrap((req, res) => {
+      res.json(notifications.listInbox(db, req.actor.id, notificationSelfTenant(req), req.query));
+    })
+  );
+
+  app.post(
+    "/api/notifications/mark-all-read",
+    auth,
+    can("iam.notifications.inbox", "update"),
+    wrap((req, res) => {
+      res.json(notifications.markAllRead(db, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/notifications/archive-all-read",
+    auth,
+    can("iam.notifications.inbox", "update"),
+    wrap((req, res) => {
+      res.json(notifications.archiveAllRead(db, req.actor.id, notificationSelfTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/notifications/:id",
+    auth,
+    can("iam.notifications.inbox", "read"),
+    wrap((req, res) => {
+      res.json(notifications.getNotification(db, req.params.id, req.actor.id, notificationSelfTenant(req)));
+    })
+  );
+
+  app.put(
+    "/api/notifications/:id/read",
+    auth,
+    can("iam.notifications.inbox", "update"),
+    wrap((req, res) => {
+      res.json(notifications.markRead(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    })
+  );
+
+  app.put(
+    "/api/notifications/:id/unread",
+    auth,
+    can("iam.notifications.inbox", "update"),
+    wrap((req, res) => {
+      res.json(notifications.markUnread(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    })
+  );
+
+  app.put(
+    "/api/notifications/:id/archive",
+    auth,
+    can("iam.notifications.inbox", "update"),
+    wrap((req, res) => {
+      res.json(notifications.archiveNotification(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/notifications/:id",
+    auth,
+    can("iam.notifications.inbox", "update"),
+    wrap((req, res) => {
+      res.json(notifications.deleteNotification(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    })
+  );
+
+  // ── Preferences (self-service) ───────────────────────────────────────────
+  app.get(
+    "/api/notification-preferences",
+    auth,
+    can("iam.notifications.preferences", "read"),
+    wrap((req, res) => {
+      res.json(notifications.getPreferences(db, req.actor.id, notificationSelfTenant(req)));
+    })
+  );
+
+  app.put(
+    "/api/notification-preferences",
+    auth,
+    can("iam.notifications.preferences", "update"),
+    wrap((req, res) => {
+      res.json(notifications.updatePreferences(db, req.actor.id, req.body || {}, req.actor, clientIp(req), notificationSelfTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/notification-preferences/mandatory",
+    auth,
+    can("iam.notifications.preferences", "read"),
+    wrap((req, res) => {
+      res.json({ items: notifications.mandatoryEvents(db, notificationSelfTenant(req)) });
+    })
+  );
+
+  // ── Templates ────────────────────────────────────────────────────────────
+  app.get(
+    "/api/notification-templates/variables",
+    auth,
+    can("iam.notifications.templates", "read"),
+    wrap((_req, res) => {
+      res.json({ roots: notifications.TEMPLATE_ROOTS, sample_context: notifications.sampleContext() });
+    })
+  );
+
+  app.get(
+    "/api/notification-templates",
+    auth,
+    can("iam.notifications.templates", "read"),
+    wrap((req, res) => {
+      res.json(notifications.listTemplates(db, req.query, notificationSelfTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/notification-templates",
+    auth,
+    can("iam.notifications.templates", "create"),
+    wrap((req, res) => {
+      res.status(201).json(notifications.createTemplate(db, req.body || {}, req.actor, clientIp(req), req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/notification-templates/:id",
+    auth,
+    can("iam.notifications.templates", "read"),
+    wrap((req, res) => {
+      res.json(notifications.publicTemplate(notifications.findTemplate(db, { id: req.params.id }, notificationSelfTenant(req))));
+    })
+  );
+
+  app.get(
+    "/api/notification-templates/:id/versions",
+    auth,
+    can("iam.notifications.templates", "read"),
+    wrap((req, res) => {
+      res.json({ items: notifications.listTemplateVersions(db, req.params.id, notificationSelfTenant(req)) });
+    })
+  );
+
+  app.put(
+    "/api/notification-templates/:id",
+    auth,
+    can("iam.notifications.templates", "update"),
+    wrap((req, res) => {
+      res.json(notifications.updateTemplate(db, req.params.id, req.body || {}, req.actor, clientIp(req), req.tenantId));
+    })
+  );
+
+  app.put(
+    "/api/notification-templates/:id/status",
+    auth,
+    can("iam.notifications.templates", "update"),
+    wrap((req, res) => {
+      res.json(notifications.setTemplateStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/notification-templates/:id/preview",
+    auth,
+    can("iam.notifications.templates", "execute"),
+    wrap((req, res) => {
+      res.json(notifications.previewTemplate(db, req.params.id, req.body?.context || {}, notificationSelfTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/notification-templates/:id/test-send",
+    auth,
+    can("iam.notifications.templates", "execute"),
+    wrap((req, res) => {
+      res.status(201).json(notifications.testSendTemplate(db, req.params.id, req.body || {}, req.actor, clientIp(req), notificationSelfTenant(req)));
+    })
+  );
+
+  app.delete(
+    "/api/notification-templates/:id",
+    auth,
+    can("iam.notifications.templates", "delete"),
+    wrap((req, res) => {
+      res.json(notifications.deleteTemplate(db, req.params.id, req.actor, clientIp(req), req.tenantId));
+    })
+  );
+
+  // ── Rules ────────────────────────────────────────────────────────────────
+  app.get(
+    "/api/notification-rules",
+    auth,
+    can("iam.notifications.rules", "read"),
+    wrap((req, res) => {
+      res.json(notifications.listRules(db, req.query, notificationSelfTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/notification-rules",
+    auth,
+    can("iam.notifications.rules", "create"),
+    wrap((req, res) => {
+      res.status(201).json(notifications.createRule(db, req.body || {}, req.actor, clientIp(req), req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/notification-rules/:id",
+    auth,
+    can("iam.notifications.rules", "read"),
+    wrap((req, res) => {
+      const row = notifications.getRuleRow(db, req.params.id);
+      if (!row) throw new HttpError(404, "Notification rule not found");
+      res.json(notifications.publicRule(row));
+    })
+  );
+
+  app.put(
+    "/api/notification-rules/:id",
+    auth,
+    can("iam.notifications.rules", "update"),
+    wrap((req, res) => {
+      res.json(notifications.updateRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), req.tenantId));
+    })
+  );
+
+  app.put(
+    "/api/notification-rules/:id/status",
+    auth,
+    can("iam.notifications.rules", "update"),
+    wrap((req, res) => {
+      res.json(notifications.setRuleStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/notification-rules/:id/simulate",
+    auth,
+    can("iam.notifications.rules", "execute"),
+    wrap((req, res) => {
+      res.json(notifications.simulateRule(db, req.params.id, req.body || {}, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.delete(
+    "/api/notification-rules/:id",
+    auth,
+    can("iam.notifications.rules", "delete"),
+    wrap((req, res) => {
+      res.json(notifications.deleteRule(db, req.params.id, req.actor, clientIp(req), req.tenantId));
+    })
+  );
+
+  // ── Providers ────────────────────────────────────────────────────────────
+  app.get(
+    "/api/notification-providers",
+    auth,
+    can("iam.notifications.providers", "read"),
+    wrap((req, res) => {
+      res.json({ items: notifications.listProviders(db, { channel: req.query.channel }) });
+    })
+  );
+
+  app.post(
+    "/api/notification-providers",
+    auth,
+    can("iam.notifications.providers", "create"),
+    wrap((req, res) => {
+      res.status(201).json(notifications.createProvider(db, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.put(
+    "/api/notification-providers/:id",
+    auth,
+    can("iam.notifications.providers", "update"),
+    wrap((req, res) => {
+      res.json(notifications.updateProvider(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/notification-providers/:id/test",
+    auth,
+    can("iam.notifications.providers", "execute"),
+    wrap((req, res) => {
+      res.json(notifications.testProvider(db, req.params.id, { recipient: req.body?.recipient }));
+    })
+  );
+
+  app.delete(
+    "/api/notification-providers/:id",
+    auth,
+    can("iam.notifications.providers", "delete"),
+    wrap((req, res) => {
+      res.json(notifications.deleteProvider(db, req.params.id, req.actor, clientIp(req)));
+    })
+  );
+
+  // ── History, delivery queue, reminders ───────────────────────────────────
+  app.get(
+    "/api/notification-history",
+    auth,
+    can("iam.notifications.history", "read"),
+    wrap((req, res) => {
+      res.json(notifications.listHistory(db, req.query, notificationAdminScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/notification-events",
+    auth,
+    can("iam.notifications.history", "read"),
+    wrap((req, res) => {
+      res.json(notifications.listEvents(db, req.query, notificationAdminScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/notification-events/publish",
+    auth,
+    can("iam.notifications.history", "execute"),
+    wrap((req, res) => {
+      res.status(201).json(notifications.publish(db, req.body || {}, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.get(
+    "/api/notification-events/:id",
+    auth,
+    can("iam.notifications.history", "read"),
+    wrap((req, res) => {
+      res.json(notifications.getEvent(db, req.params.id, notificationAdminScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/notification-deliveries/stats",
+    auth,
+    can("iam.notifications.history", "read"),
+    wrap((req, res) => {
+      res.json(notifications.deliveryStats(db, notificationAdminScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/notification-deliveries",
+    auth,
+    can("iam.notifications.history", "read"),
+    wrap((req, res) => {
+      res.json(notifications.listDeliveries(db, req.query, notificationAdminScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/notification-deliveries/process",
+    auth,
+    can("iam.notifications.history", "execute"),
+    wrap((req, res) => {
+      res.json(notifications.processQueue(db, { limit: req.body?.limit }));
+    })
+  );
+
+  app.post(
+    "/api/notification-deliveries/:id/retry",
+    auth,
+    can("iam.notifications.history", "execute"),
+    wrap((req, res) => {
+      res.json(notifications.retryDelivery(db, req.params.id, notificationAdminScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/notification-reminders",
+    auth,
+    can("iam.notifications.history", "read"),
+    wrap((req, res) => {
+      res.json(notifications.listReminders(db, req.query, notificationAdminScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/notification-reminders/sweep",
+    auth,
+    can("iam.notifications.history", "execute"),
+    wrap((req, res) => {
+      res.json(notifications.sweepReminders(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
     })
   );
 

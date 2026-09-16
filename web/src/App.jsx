@@ -24,6 +24,9 @@ import RelationshipTypesPage from "./pages/RelationshipTypesPage.jsx";
 import LifecyclePage from "./pages/LifecyclePage.jsx";
 import WorkflowPage from "./pages/WorkflowPage.jsx";
 import ExplorerPage from "./pages/ExplorerPage.jsx";
+import NotificationsPage from "./pages/NotificationsPage.jsx";
+import NotificationAdminPage from "./pages/NotificationAdminPage.jsx";
+import NotificationBell from "./components/NotificationBell.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import AuthenticationPage from "./pages/AuthenticationPage.jsx";
 import SessionsPage from "./pages/SessionsPage.jsx";
@@ -188,6 +191,14 @@ const NAV_SECTIONS = [
     label: "Compliance",
     items: [{ to: "/audit", label: "Audit log" }],
   },
+  {
+    key: "communication",
+    label: "Communication",
+    items: [
+      { to: "/notifications", label: "Inbox", end: true },
+      { to: "/notifications/admin", label: "Notification admin", platformOrAdmin: true },
+    ],
+  },
 ];
 
 function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
@@ -270,6 +281,7 @@ function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
           })}
         </div>
         <div className="spacer" />
+        <NotificationBell />
         <div className="mono">{me.display_name}</div>
         <button className="btn ghost" onClick={onLogout}>Sign out</button>
       </aside>
@@ -366,6 +378,8 @@ export default function App() {
         <Route path="/workflows/templates" element={<WorkflowPage mode="config" />} />
         <Route path="/platform" element={<PlatformPage />} />
         <Route path="/audit" element={<AuditPage />} />
+        <Route path="/notifications" element={<NotificationsPage />} />
+        <Route path="/notifications/admin" element={<NotificationAdminPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </ErrorBoundary>

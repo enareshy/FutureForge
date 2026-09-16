@@ -378,6 +378,63 @@ export const audit = {
   runRetention: (body) => api("/api/audit/retention/run", { method: "POST", body }),
 };
 
+export const notifications = {
+  meta: () => api("/api/notifications/meta"),
+  inbox: (qs) => api(`/api/notifications${qs || ""}`),
+  unreadCount: (qs) => api(`/api/notifications/unread-count${qs || ""}`),
+  notification: (id) => api(`/api/notifications/${id}`),
+  markRead: (id) => api(`/api/notifications/${id}/read`, { method: "PUT", body: {} }),
+  markUnread: (id) => api(`/api/notifications/${id}/unread`, { method: "PUT", body: {} }),
+  archive: (id) => api(`/api/notifications/${id}/archive`, { method: "PUT", body: {} }),
+  remove: (id) => api(`/api/notifications/${id}`, { method: "DELETE" }),
+  markAllRead: () => api("/api/notifications/mark-all-read", { method: "POST", body: {} }),
+  archiveAllRead: (qs) => api(`/api/notifications/archive-all-read${qs || ""}`, { method: "POST", body: {} }),
+  preferences: () => api("/api/notification-preferences"),
+  updatePreferences: (body) => api("/api/notification-preferences", { method: "PUT", body }),
+  mandatoryEvents: () => api("/api/notification-preferences/mandatory"),
+
+  templateVariables: () => api("/api/notification-templates/variables"),
+  templates: (qs) => api(`/api/notification-templates${qs || ""}`),
+  template: (id) => api(`/api/notification-templates/${id}`),
+  createTemplate: (body) => api("/api/notification-templates", { method: "POST", body }),
+  updateTemplate: (id, body) => api(`/api/notification-templates/${id}`, { method: "PUT", body }),
+  setTemplateStatus: (id, status) =>
+    api(`/api/notification-templates/${id}/status`, { method: "PUT", body: { status } }),
+  deleteTemplate: (id) => api(`/api/notification-templates/${id}`, { method: "DELETE" }),
+  templateVersions: (id) => api(`/api/notification-templates/${id}/versions`),
+  previewTemplate: (id, context) =>
+    api(`/api/notification-templates/${id}/preview`, { method: "POST", body: { context } }),
+  testSendTemplate: (id, body) => api(`/api/notification-templates/${id}/test-send`, { method: "POST", body }),
+
+  rules: (qs) => api(`/api/notification-rules${qs || ""}`),
+  rule: (id) => api(`/api/notification-rules/${id}`),
+  createRule: (body) => api("/api/notification-rules", { method: "POST", body }),
+  updateRule: (id, body) => api(`/api/notification-rules/${id}`, { method: "PUT", body }),
+  setRuleStatus: (id, status) =>
+    api(`/api/notification-rules/${id}/status`, { method: "PUT", body: { status } }),
+  deleteRule: (id) => api(`/api/notification-rules/${id}`, { method: "DELETE" }),
+  simulateRule: (id, body) => api(`/api/notification-rules/${id}/simulate`, { method: "POST", body }),
+
+  providers: (qs) => api(`/api/notification-providers${qs || ""}`),
+  createProvider: (body) => api("/api/notification-providers", { method: "POST", body }),
+  updateProvider: (id, body) => api(`/api/notification-providers/${id}`, { method: "PUT", body }),
+  testProvider: (id, recipient) =>
+    api(`/api/notification-providers/${id}/test`, { method: "POST", body: { recipient } }),
+  deleteProvider: (id) => api(`/api/notification-providers/${id}`, { method: "DELETE" }),
+
+  history: (qs) => api(`/api/notification-history${qs || ""}`),
+  events: (qs) => api(`/api/notification-events${qs || ""}`),
+  event: (id) => api(`/api/notification-events/${id}`),
+  publishEvent: (body) => api("/api/notification-events/publish", { method: "POST", body }),
+  deliveries: (qs) => api(`/api/notification-deliveries${qs || ""}`),
+  deliveryStats: (qs) => api(`/api/notification-deliveries/stats${qs || ""}`),
+  processDeliveries: (limit) =>
+    api("/api/notification-deliveries/process", { method: "POST", body: { limit } }),
+  retryDelivery: (id) => api(`/api/notification-deliveries/${id}/retry`, { method: "POST", body: {} }),
+  reminders: (qs) => api(`/api/notification-reminders${qs || ""}`),
+  sweepReminders: (limit) => api("/api/notification-reminders/sweep", { method: "POST", body: { limit } }),
+};
+
 export const lifecycle = {  statuses: (qs) => api(`/api/statuses${qs || ""}`),
   status: (id) => api(`/api/statuses/${id}`),
   createStatus: (body) => api("/api/statuses", { method: "POST", body }),

@@ -1,6 +1,6 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openDatabase, migrate, queryOne, queryAll } from "./db.js";
+import { openDatabase, migrate, queryOne, queryAll, run, nowIso } from "./db.js";
 import * as users from "./services/users.js";
 import * as groups from "./services/groups.js";
 import * as roles from "./services/roles.js";
@@ -16,6 +16,7 @@ import * as objects from "./services/objects.js";
 import * as lifecycle from "./services/lifecycle.js";
 import * as workflow from "./services/workflow.js";
 import * as audit from "./services/audit.js";
+import * as notifications from "./services/notifications.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -817,6 +818,13 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.workflow.tasks", name: "Workflow tasks", parentCode: "iam.workflow" },
     { applicationCode: "iam", code: "iam.workflow.approvals", name: "Workflow approvals", parentCode: "iam.workflow" },
     { applicationCode: "iam", code: "iam.workflow.config", name: "Workflow configuration", parentCode: "iam.workflow" },
+    { applicationCode: "iam", code: "iam.notifications", name: "Notifications & communication", kind: "module" },
+    { applicationCode: "iam", code: "iam.notifications.inbox", name: "Notification inbox", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.preferences", name: "Notification preferences", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.templates", name: "Notification templates", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.rules", name: "Notification rules", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.providers", name: "Notification providers", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.history", name: "Notification history", parentCode: "iam.notifications" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -887,6 +895,29 @@ function seedMissingCatalog(db) {
       if (!existing) grantAll(db, role.id, resource);
     }
   }
+  const notificationResourceCodes = [
+    "iam.notifications.inbox",
+    "iam.notifications.preferences",
+    "iam.notifications.templates",
+    "iam.notifications.rules",
+    "iam.notifications.providers",
+    "iam.notifications.history",
+  ];
+  for (const code of notificationResourceCodes) {
+    const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
+    if (!resource) continue;
+    const owners = [platform, iamAdmin].filter(Boolean);
+    for (const role of owners) {
+      const existing = queryOne(
+        db,
+        `SELECT 1 AS x FROM role_permissions rp
+         JOIN permissions p ON p.id = rp.permission_id
+         WHERE rp.role_id = ? AND p.resource_id = ? AND p.action = 'delete'`,
+        [role.id, resource.id]
+      );
+      if (!existing) grantAll(db, role.id, resource);
+    }
+  }
   if (platform && platformRes) {
     const existingGrant = queryOne(
       db,
@@ -916,6 +947,8 @@ function reconcileReaderGrants(db) {
     ["iam.workflow.tasks", ["read", "execute", "update"]],
     ["iam.workflow.approvals", ["read", "execute"]],
     ["iam.audit.history", ["read"]],
+    ["iam.notifications.inbox", ["read", "update"]],
+    ["iam.notifications.preferences", ["read", "update"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -1858,6 +1891,237 @@ function seedAudit(db) {
   return { auditSeeded: true };
 }
 
+// Default notification configuration: providers, system templates, system rules,
+// per-user preferences and a couple of sample notifications so the inbox has
+// content in a fresh environment. Idempotent: a global "task.assigned" template
+// is used as the presence marker.
+function seedNotifications(db) {
+  notifications.ensureDefaultProviders(db);
+
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const tenantId = helix?.id || null;
+  const admin = queryOne(db, "SELECT id, username, display_name, email, organization_id FROM users WHERE username = 'admin'");
+  const operator = queryOne(db, "SELECT id, username, display_name, email, organization_id FROM users WHERE username = 'j.patel'");
+  const actor = admin
+    ? { id: admin.id, username: admin.username, display_name: admin.display_name, tenant_id: tenantId }
+    : { username: "system", tenant_id: tenantId };
+
+  const ensurePrefs = () => {
+    for (const user of queryAll(db, "SELECT id, tenant_id FROM users")) {
+      try {
+        notifications.ensureDefaultPreferences(db, user.id, user.tenant_id ?? tenantId);
+      } catch {
+        /* preferences are best-effort during seeding */
+      }
+    }
+  };
+
+  const marker = queryOne(db, "SELECT id FROM notification_templates WHERE code = 'task.assigned' AND tenant_id IS NULL");
+  if (marker) {
+    ensurePrefs();
+    return { notificationsSeeded: false };
+  }
+
+  const templateDefs = [
+    {
+      code: "task.assigned",
+      name: "Task assigned",
+      description: "In-app notification when a workflow task is assigned.",
+      event_type: "task.assigned",
+      channel: "in_app",
+      subject: "New task: {{object.name}}",
+      html_body:
+        '<p>Hi {{recipient.name}} {{recipient.username}},</p><p>You have been assigned <strong>{{object.name}}</strong>.</p><p>Due: {{dueDate}}.</p><p><a href="{{applicationUrl}}{{link}}">Open task</a></p>',
+      text_body: "You have been assigned {{object.name}}. Due {{dueDate}}.",
+    },
+    {
+      code: "task.assigned",
+      name: "Task assigned (email)",
+      description: "Email notification when a workflow task is assigned.",
+      event_type: "task.assigned",
+      channel: "email",
+      subject: "[Action required] {{object.name}}",
+      html_body:
+        '<p>Hello {{recipient.username}},</p><p>The task <strong>{{object.name}}</strong> has been assigned to you.</p><p>Due: {{dueDate}}.</p>',
+      text_body: "The task {{object.name}} has been assigned to you. Due {{dueDate}}.",
+    },
+    {
+      code: "task.overdue",
+      name: "Task overdue",
+      description: "Reminder when a task passes its due date.",
+      event_type: "task.overdue",
+      channel: "in_app",
+      subject: "Overdue: {{object.name}}",
+      html_body: '<p>The task <strong>{{object.name}}</strong> is overdue (due {{dueDate}}).</p>',
+      text_body: "The task {{object.name}} is overdue. Due {{dueDate}}.",
+    },
+    {
+      code: "change.request.rejected",
+      name: "Change request rejected",
+      description: "Notifies the requester when a change request is rejected.",
+      event_type: "change.request.rejected",
+      channel: "in_app",
+      subject: "Change request rejected: {{object.name}}",
+      html_body:
+        '<p>Your change request <strong>{{object.name}}</strong> was rejected.</p><p>Reason: {{reason}}</p>',
+      text_body: "Your change request {{object.name}} was rejected. Reason: {{reason}}",
+    },
+    {
+      code: "bom.released",
+      name: "BOM released",
+      description: "Notifies stakeholders when a bill of materials is released.",
+      event_type: "bom.released",
+      channel: "in_app",
+      subject: "BOM released: {{object.name}}",
+      html_body: '<p>The BOM <strong>{{object.name}}</strong> has been released.</p><p><a href="{{applicationUrl}}{{link}}">View BOM</a></p>',
+      text_body: "The BOM {{object.name}} has been released.",
+    },
+    {
+      code: "approval.requested",
+      name: "Approval requested",
+      description: "Notifies an approver that a decision is required.",
+      event_type: "approval.requested",
+      channel: "in_app",
+      subject: "Approval requested: {{object.name}}",
+      html_body:
+        '<p>An approval is waiting for you on <strong>{{object.name}}</strong>.</p><p><a href="{{applicationUrl}}{{link}}">Review</a></p>',
+      text_body: "An approval is waiting for you on {{object.name}}.",
+    },
+    {
+      code: "lifecycle.state.changed",
+      name: "Lifecycle state changed",
+      description: "Notifies object stakeholders of a state transition.",
+      event_type: "lifecycle.state.changed",
+      channel: "in_app",
+      subject: "{{object.name}} is now {{status}}",
+      html_body: '<p><strong>{{object.name}}</strong> moved to status <strong>{{status}}</strong>.</p>',
+      text_body: "{{object.name}} moved to status {{status}}.",
+    },
+  ];
+
+  for (const def of templateDefs) {
+    try {
+      const row = notifications.createTemplate(db, { ...def, tenant_id: null }, actor, "seed", null);
+      run(db, "UPDATE notification_templates SET is_system = 1 WHERE id = ?", [row.id]);
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+
+  const ruleDefs = [
+    {
+      code: "task-assigned",
+      name: "Task assigned",
+      description: "Notify the assignee in-app and by email, with a due-date reminder.",
+      event_type: "task.assigned",
+      template_code: "task.assigned",
+      channels: ["in_app", "email"],
+      priority: "high",
+      recipient: { items: [{ type: "event_payload", value: "assignee_id" }] },
+      reminder: { enabled: true, offset_minutes: 1440, subject: "Reminder: {{object.name}} is due", repeat_minutes: 1440, max_repeats: 2 },
+    },
+    {
+      code: "task-overdue",
+      name: "Task overdue",
+      description: "Remind the assignee when a task is overdue.",
+      event_type: "task.overdue",
+      template_code: "task.overdue",
+      channels: ["in_app"],
+      priority: "urgent",
+      recipient: { items: [{ type: "event_payload", value: "assignee_id" }] },
+    },
+    {
+      code: "change-rejected",
+      name: "Change request rejected",
+      description: "Notify the requester when a change request is rejected.",
+      event_type: "change.request.rejected",
+      template_code: "change.request.rejected",
+      channels: ["in_app", "email"],
+      priority: "high",
+      recipient: { items: [{ type: "event_payload", value: "requester_id" }], fallback: [{ type: "initiator" }] },
+    },
+    {
+      code: "bom-released",
+      name: "BOM released",
+      description: "Notify the object owner and responsible organization when a BOM is released.",
+      event_type: "bom.released",
+      template_code: "bom.released",
+      channels: ["in_app"],
+      recipient: {
+        items: [{ type: "event_payload", value: "owner_id" }],
+        fallback: [{ type: "initiator" }],
+      },
+    },
+    {
+      code: "approval-requested",
+      name: "Approval requested",
+      description: "Notify the approver that a decision is required.",
+      event_type: "approval.requested",
+      template_code: "approval.requested",
+      channels: ["in_app"],
+      priority: "high",
+      recipient: { items: [{ type: "event_payload", value: "approver_id" }], fallback: [{ type: "initiator" }] },
+    },
+    {
+      code: "lifecycle-state-changed",
+      name: "Lifecycle state changed",
+      description: "Notify the object owner when a lifecycle state changes.",
+      event_type: "lifecycle.state.changed",
+      template_code: "lifecycle.state.changed",
+      channels: ["in_app"],
+      recipient: {
+        items: [{ type: "event_payload", value: "owner_id" }],
+        fallback: [{ type: "initiator" }],
+      },
+    },
+  ];
+
+  for (const def of ruleDefs) {
+    try {
+      const row = notifications.createRule(db, { ...def, tenant_id: null }, actor, "seed", null);
+      run(db, "UPDATE notification_rules SET is_system = 1 WHERE id = ?", [row.id]);
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+
+  ensurePrefs();
+
+  if (tenantId && admin) {
+    const assigneeId = operator?.id ?? admin.id;
+    notifications.publish(
+      db,
+      {
+        event_type: "task.assigned",
+        source_module: "workflow",
+        tenant_id: tenantId,
+        object_type: "task",
+        object_id: "TASK-1001",
+        object_name: "Inspect hydraulic manifold",
+        initiator: { id: admin.id, username: admin.username },
+        payload: { assignee_id: assigneeId, due_date: "2026-09-25", link: "/workflow/tasks/1001" },
+      },
+      { actor }
+    );
+    notifications.publish(
+      db,
+      {
+        event_type: "approval.requested",
+        source_module: "lifecycle",
+        tenant_id: tenantId,
+        object_type: "part",
+        object_id: "PART-000001",
+        object_name: "Hydraulic bracket",
+        initiator: { id: operator?.id ?? admin.id, username: operator?.username ?? admin.username },
+        payload: { approver_id: admin.id, link: "/lifecycle/approvals/1" },
+      },
+      { actor }
+    );
+  }
+
+  return { notificationsSeeded: true };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -1872,6 +2136,7 @@ export function seedDatabase(db) {
   seedLifecycle(db);
   seedWorkflow(db);
   seedAudit(db);
+  seedNotifications(db);
   return { ...identity, ...authz };
 }
 

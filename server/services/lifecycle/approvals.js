@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
 import { writeAudit } from "../audit.js";
+import { publish as publishNotificationEvent } from "../notifications.js";
 import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
 import * as metadata from "../metadata.js";
 import * as tenants from "../tenants.js";
@@ -513,6 +514,7 @@ export function requestRelease(db, row, transition, fromState, toState, body, ac
   );
   const releaseId = result.lastInsertRowid;
   let created = 0;
+  const approverIds = new Set();
   for (const step of steps) {
     const approvers = workflow.resolveApprovers(db, { step, object: { ...row, organization_id: body?.organization_id ?? row.organization_id }, tenantId });
     if (!approvers.length) {
@@ -527,6 +529,7 @@ export function requestRelease(db, row, transition, fromState, toState, body, ac
         [releaseId, row.id, step.id, step.code, step.sequence, step.parallel, step.approver_type, approver.id, Number(tenantId), ts, ts]
       );
       created += 1;
+      approverIds.add(Number(approver.id));
     }
   }
   workflow.startApproval(db, { releaseId, object: row, rule });
@@ -538,6 +541,27 @@ export function requestRelease(db, row, transition, fromState, toState, body, ac
     details: { code: row.code, rule: rule.code, release_id: releaseId, approvals: created },
     ip,
   });
+  for (const approverId of approverIds) {
+    publishNotificationEvent(
+      db,
+      {
+        event_type: "approval.requested",
+        source_module: "lifecycle",
+        tenant_id: Number(tenantId),
+        object_type: "object",
+        object_id: row.code || String(row.id),
+        object_name: row.name || row.code || "",
+        payload: {
+          approver_id: approverId,
+          rule: rule.code,
+          release_id: releaseId,
+          link: `/lifecycle/releases/${releaseId}`,
+        },
+        idempotency_key: `approval-requested:${releaseId}:${approverId}`,
+      },
+      { actor, ip }
+    );
+  }
   return publicRelease(db, queryOne(db, `${RELEASE_SELECT} WHERE r.id = ?`, [releaseId]));
 }
 
@@ -646,6 +670,27 @@ export function decideApproval(db, reference, approvalId, body, actor, tenantId,
     rollback(db, objectRow, rule || {}, actor, tenantId, ip);
     workflow.onApprovalComplete(db, { release: { ...release, status: "rejected" }, object: objectRow, rule });
     writeAudit(db, { actor, action: "lifecycle.release.reject", resourceType: "object", resourceId: objectRow.id, details: { code: objectRow.code, rule: rule?.code ?? null, comment }, ip });
+    if (release.requested_by) {
+      publishNotificationEvent(
+        db,
+        {
+          event_type: "change.request.rejected",
+          source_module: "lifecycle",
+          tenant_id: Number(tenantId),
+          object_type: "object",
+          object_id: objectRow.code || String(objectRow.id),
+          object_name: objectRow.name || objectRow.code || "",
+          payload: {
+            requester_id: Number(release.requested_by),
+            reason: comment || "Rejected",
+            rule: rule?.code ?? null,
+            link: `/lifecycle/releases/${release.id}`,
+          },
+          idempotency_key: `change-rejected:${release.id}:${approval.id}`,
+        },
+        { actor, ip }
+      );
+    }
     return publicRelease(db, queryOne(db, `${RELEASE_SELECT} WHERE r.id = ?`, [release.id]));
   }
   if (decision === "request_changes") {

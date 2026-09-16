@@ -1489,3 +1489,252 @@ WHEN (SELECT allow_delete FROM audit_guard WHERE id = 1) <> 1
 BEGIN
   SELECT RAISE(ABORT, 'Audit records are immutable');
 END;
+
+-- ── Notification & Communication Framework ─────────────────────────────────
+-- Central, reusable notification platform capability. Business modules publish
+-- domain events (notification_events) and the framework resolves rules,
+-- recipients, templates and preferences before handing delivery requests to the
+-- channel providers. Nothing here contains workflow/lifecycle-specific logic.
+
+-- Inbound domain events published by business modules.
+CREATE TABLE IF NOT EXISTS notification_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  source_module TEXT NOT NULL DEFAULT 'platform',
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  plant_id INTEGER,
+  site_id INTEGER,
+  department_id INTEGER,
+  object_type TEXT DEFAULT '',
+  object_id TEXT DEFAULT '',
+  object_name TEXT DEFAULT '',
+  initiator_id INTEGER REFERENCES users(id),
+  initiator_username TEXT DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  related_json TEXT NOT NULL DEFAULT '{}',
+  correlation_id TEXT DEFAULT '',
+  idempotency_key TEXT,
+  status TEXT NOT NULL DEFAULT 'processed'
+    CHECK (status IN ('received', 'processed', 'skipped', 'failed')),
+  rule_count INTEGER NOT NULL DEFAULT 0,
+  notification_count INTEGER NOT NULL DEFAULT 0,
+  error_message TEXT DEFAULT '',
+  occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_events_type ON notification_events(event_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_notification_events_tenant ON notification_events(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_notification_events_correlation ON notification_events(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_notification_events_object ON notification_events(object_type, object_id);
+
+-- Templates. Global templates have tenant_id NULL; tenants may override by
+-- creating a row with the same code/channel/locale in their own scope.
+CREATE TABLE IF NOT EXISTS notification_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  event_type TEXT DEFAULT '',
+  channel TEXT NOT NULL DEFAULT 'in_app'
+    CHECK (channel IN ('in_app', 'email', 'sms', 'teams', 'slack', 'push', 'webhook')),
+  subject TEXT NOT NULL DEFAULT '',
+  html_body TEXT NOT NULL DEFAULT '',
+  text_body TEXT NOT NULL DEFAULT '',
+  variables_json TEXT NOT NULL DEFAULT '[]',
+  locale TEXT NOT NULL DEFAULT 'en',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_templates_scope
+  ON notification_templates(code, channel, locale, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_notification_templates_event ON notification_templates(event_type, status);
+
+-- Immutable version snapshots of a template, written on every update.
+CREATE TABLE IF NOT EXISTS notification_template_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id INTEGER NOT NULL REFERENCES notification_templates(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  subject TEXT NOT NULL DEFAULT '',
+  html_body TEXT NOT NULL DEFAULT '',
+  text_body TEXT NOT NULL DEFAULT '',
+  variables_json TEXT NOT NULL DEFAULT '[]',
+  changed_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_template_versions ON notification_template_versions(template_id, version);
+
+-- Configurable rules that map an event to recipients, template and channels.
+CREATE TABLE IF NOT EXISTS notification_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  event_type TEXT NOT NULL DEFAULT '',
+  source_module TEXT DEFAULT '',
+  condition_json TEXT NOT NULL DEFAULT '{}',
+  recipient_json TEXT NOT NULL DEFAULT '{}',
+  template_id INTEGER REFERENCES notification_templates(id) ON DELETE SET NULL,
+  template_code TEXT DEFAULT '',
+  channels_json TEXT NOT NULL DEFAULT '["in_app"]',
+  priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  delivery_mode TEXT NOT NULL DEFAULT 'immediate'
+    CHECK (delivery_mode IN ('immediate', 'delayed', 'digest')),
+  delay_minutes INTEGER NOT NULL DEFAULT 0,
+  reminder_json TEXT NOT NULL DEFAULT '{}',
+  escalation_json TEXT NOT NULL DEFAULT '{}',
+  mandatory INTEGER NOT NULL DEFAULT 0 CHECK (mandatory IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_rules_scope
+  ON notification_rules(code, COALESCE(tenant_id, 0));
+CREATE INDEX IF NOT EXISTS idx_notification_rules_event ON notification_rules(event_type, status);
+
+-- Per-user channel / event preferences.
+CREATE TABLE IF NOT EXISTS notification_preferences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tenant_id INTEGER REFERENCES organizations(id),
+  in_app INTEGER NOT NULL DEFAULT 1 CHECK (in_app IN (0, 1)),
+  email INTEGER NOT NULL DEFAULT 1 CHECK (email IN (0, 1)),
+  frequency TEXT NOT NULL DEFAULT 'immediate'
+    CHECK (frequency IN ('immediate', 'daily', 'weekly', 'off')),
+  language TEXT NOT NULL DEFAULT 'en',
+  quiet_hours_json TEXT NOT NULL DEFAULT '{}',
+  reminders INTEGER NOT NULL DEFAULT 1 CHECK (reminders IN (0, 1)),
+  escalations INTEGER NOT NULL DEFAULT 1 CHECK (escalations IN (0, 1)),
+  self_notify INTEGER NOT NULL DEFAULT 1 CHECK (self_notify IN (0, 1)),
+  event_preferences_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_preferences_user
+  ON notification_preferences(user_id, COALESCE(tenant_id, 0));
+
+-- One row per recipient/channel delivery. Doubles as the notification history
+-- and the in-app inbox.
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER REFERENCES notification_events(id) ON DELETE SET NULL,
+  rule_id INTEGER REFERENCES notification_rules(id) ON DELETE SET NULL,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  recipient_address TEXT DEFAULT '',
+  channel TEXT NOT NULL DEFAULT 'in_app',
+  template_id INTEGER REFERENCES notification_templates(id) ON DELETE SET NULL,
+  template_code TEXT DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  content_ref TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'created'
+    CHECK (status IN ('created', 'queued', 'processing', 'sent', 'delivered', 'read', 'failed', 'cancelled', 'retrying')),
+  priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  read_at TEXT,
+  sent_at TEXT,
+  delivered_at TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT DEFAULT '',
+  provider_response TEXT DEFAULT '',
+  correlation_id TEXT DEFAULT '',
+  object_type TEXT DEFAULT '',
+  object_id TEXT DEFAULT '',
+  object_name TEXT DEFAULT '',
+  deep_link TEXT DEFAULT '',
+  action_links_json TEXT NOT NULL DEFAULT '[]',
+  archived_at TEXT,
+  deleted_at TEXT,
+  idempotency_key TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_idempotency
+  ON notifications(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipient_id, deleted_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_recipient_status ON notifications(recipient_id, status);
+CREATE INDEX IF NOT EXISTS idx_notifications_tenant ON notifications(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_event ON notifications(event_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_channel_status ON notifications(channel, status);
+
+-- Delivery queue / outbox with retry bookkeeping.
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  notification_id INTEGER NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+  channel TEXT NOT NULL DEFAULT 'in_app',
+  provider_code TEXT NOT NULL DEFAULT 'store',
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'processing', 'sent', 'delivered', 'failed', 'retrying', 'dead_letter', 'cancelled')),
+  attempt INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  scheduled_at TEXT NOT NULL DEFAULT (datetime('now')),
+  processed_at TEXT,
+  request_json TEXT NOT NULL DEFAULT '{}',
+  response_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT NOT NULL DEFAULT '',
+  dead_letter INTEGER NOT NULL DEFAULT 0 CHECK (dead_letter IN (0, 1)),
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_queue
+  ON notification_deliveries(status, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_notification
+  ON notification_deliveries(notification_id);
+
+-- Reminder and escalation schedule (pull-based, like workflow escalations).
+CREATE TABLE IF NOT EXISTS notification_reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_id INTEGER REFERENCES notification_rules(id) ON DELETE SET NULL,
+  event_id INTEGER REFERENCES notification_events(id) ON DELETE SET NULL,
+  notification_id INTEGER REFERENCES notifications(id) ON DELETE SET NULL,
+  tenant_id INTEGER REFERENCES organizations(id),
+  recipient_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  due_at TEXT NOT NULL,
+  fired_at TEXT,
+  level INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'fired', 'cancelled', 'skipped')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  dedupe_key TEXT,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_reminders_dedupe
+  ON notification_reminders(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_notification_reminders_due ON notification_reminders(status, due_at);
+
+-- Channel provider configuration. Credentials live encrypted in secrets_enc and
+-- are never serialized back to clients.
+CREATE TABLE IF NOT EXISTS notification_providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  channel TEXT NOT NULL DEFAULT 'email' CHECK (channel IN ('in_app', 'email', 'sms', 'teams', 'slack', 'push', 'webhook')),
+  type TEXT NOT NULL DEFAULT 'store'
+    CHECK (type IN ('store', 'smtp', 'sendgrid', 'graph', 'webhook')),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  config_json TEXT NOT NULL DEFAULT '{}',
+  secrets_enc TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
