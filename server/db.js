@@ -11,6 +11,7 @@ export function openDatabase(dbPath = ":memory:") {
   }
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
   return db;
 }
 
@@ -133,6 +134,20 @@ export function migrate(db) {
   db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("015_jobs");
+  db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("016_job_engine");
+  ensureColumn(db, "jobs", "execution_group", "execution_group TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "jobs", "schedule_id", "schedule_id INTEGER");
+  ensureColumn(db, "jobs", "attempts", "attempts INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "jobs", "lease_owner", "lease_owner TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "jobs", "lease_expires_at", "lease_expires_at TEXT");
+  ensureColumn(db, "jobs", "heartbeat_at", "heartbeat_at TEXT");
+  ensureColumn(db, "jobs", "next_retry_at", "next_retry_at TEXT");
+  ensureColumn(db, "jobs", "dead_lettered_at", "dead_lettered_at TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs(status, lease_expires_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_heartbeat ON jobs(status, heartbeat_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_schedule ON jobs(schedule_id, created_at)");
   db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();

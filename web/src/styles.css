@@ -664,6 +664,27 @@ pre.json {
 .badge.job-waiting_for_dependency,
 .badge.job-retrying,
 .badge.job-skipped { background: #243154; color: var(--muted); }
+.badge.eng-healthy,
+.badge.eng-idle,
+.badge.eng-online { background: rgba(62, 224, 192, 0.15); color: var(--ok); }
+.badge.eng-busy,
+.badge.eng-starting,
+.badge.eng-draining { background: rgba(91, 140, 255, 0.2); color: var(--accent); }
+.badge.eng-saturated,
+.badge.eng-degraded,
+.badge.eng-rate_limited,
+.badge.eng-paused { background: rgba(245, 193, 90, 0.18); color: var(--warn); }
+.badge.eng-disabled,
+.badge.eng-offline,
+.badge.eng-stopped,
+.badge.eng-unknown,
+.badge.eng-discarded { background: #243154; color: var(--muted); }
+.badge.eng-open,
+.badge.eng-requeued { background: rgba(245, 193, 90, 0.18); color: var(--warn); }
+.badge.sched-active { background: rgba(62, 224, 192, 0.15); color: var(--ok); }
+.badge.sched-paused { background: rgba(245, 193, 90, 0.18); color: var(--warn); }
+.badge.sched-disabled { background: #243154; color: var(--muted); }
+.badge.sched-failed { background: rgba(255, 107, 122, 0.16); color: var(--danger); }
 .job-timeline { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .job-timeline li { border-left: 2px solid var(--line); padding: 2px 0 2px 12px; }
 .job-timeline-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }

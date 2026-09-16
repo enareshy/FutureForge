@@ -31,6 +31,11 @@ import JobsDashboardPage from "./pages/JobsDashboardPage.jsx";
 import JobsPage from "./pages/JobsPage.jsx";
 import JobDetailPage from "./pages/JobDetailPage.jsx";
 import JobTypesPage from "./pages/JobTypesPage.jsx";
+import JobQueuesPage from "./pages/JobQueuesPage.jsx";
+import JobSchedulesPage from "./pages/JobSchedulesPage.jsx";
+import JobWorkersPage from "./pages/JobWorkersPage.jsx";
+import JobExecutionPage from "./pages/JobExecutionPage.jsx";
+import JobDeadLetterPage from "./pages/JobDeadLetterPage.jsx";
 import NotificationBell from "./components/NotificationBell.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import AuthenticationPage from "./pages/AuthenticationPage.jsx";
@@ -211,6 +216,11 @@ const NAV_SECTIONS = [
     items: [
       { to: "/jobs", label: "Job dashboard", end: true },
       { to: "/jobs/list", label: "Jobs" },
+      { to: "/jobs/execution", label: "Execution" },
+      { to: "/jobs/workers", label: "Workers" },
+      { to: "/jobs/dead-letter", label: "Dead letters" },
+      { to: "/jobs/queues", label: "Queues", platformOrAdmin: true },
+      { to: "/jobs/schedules", label: "Schedules", platformOrAdmin: true },
       { to: "/jobs/admin", label: "Job types", platformOrAdmin: true },
     ],
   },
@@ -398,6 +408,11 @@ export default function App() {
         <Route path="/delivery/admin" element={<DeliveryAdminPage />} />
         <Route path="/jobs" element={<JobsDashboardPage />} />
         <Route path="/jobs/list" element={<JobsPage />} />
+        <Route path="/jobs/execution" element={<JobExecutionPage />} />
+        <Route path="/jobs/workers" element={<JobWorkersPage />} />
+        <Route path="/jobs/dead-letter" element={<JobDeadLetterPage />} />
+        <Route path="/jobs/queues" element={<JobQueuesPage />} />
+        <Route path="/jobs/schedules" element={<JobSchedulesPage />} />
         <Route path="/jobs/admin" element={<JobTypesPage />} />
         <Route path="/jobs/:id" element={<JobDetailPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

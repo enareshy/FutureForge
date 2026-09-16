@@ -2081,6 +2081,14 @@ CREATE TABLE IF NOT EXISTS jobs (
   cancel_requested_at TEXT,
   cancel_requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   cancelled_at TEXT,
+  execution_group TEXT NOT NULL DEFAULT '',
+  schedule_id INTEGER,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_owner TEXT NOT NULL DEFAULT '',
+  lease_expires_at TEXT,
+  heartbeat_at TEXT,
+  next_retry_at TEXT,
+  dead_lettered_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -2148,3 +2156,229 @@ CREATE TABLE IF NOT EXISTS job_artifacts (
 
 CREATE INDEX IF NOT EXISTS idx_job_artifacts_job ON job_artifacts(job_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_job_artifacts_kind ON job_artifacts(kind);
+
+-- ===========================================================================
+-- Job Scheduling & Execution Engine
+--
+-- The engine owns execution concerns only: logical queues, worker liveness,
+-- scheduling/recurrence, leases, retries, timeouts, cancellation, distributed
+-- locking, dead-letter and execution bookkeeping. Business handlers are
+-- registered by the owning modules; no business logic lives in these tables.
+-- ===========================================================================
+
+-- Logical queues. Concurrency/rate-limit/retry/timeout policy is evaluated by
+-- the engine when claiming and finalising work.
+CREATE TABLE IF NOT EXISTS job_queues (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER REFERENCES organizations(id),
+  priority INTEGER NOT NULL DEFAULT 50,
+  max_concurrency INTEGER NOT NULL DEFAULT 4,
+  worker_allocation INTEGER NOT NULL DEFAULT 0,
+  rate_limit_per_minute INTEGER NOT NULL DEFAULT 0,
+  retry_max_attempts INTEGER NOT NULL DEFAULT 3,
+  retry_strategy TEXT NOT NULL DEFAULT 'exponential'
+    CHECK (retry_strategy IN ('none', 'fixed', 'exponential')),
+  retry_delay_seconds INTEGER NOT NULL DEFAULT 30,
+  retry_max_delay_seconds INTEGER NOT NULL DEFAULT 3600,
+  timeout_seconds INTEGER NOT NULL DEFAULT 600,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  paused INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  last_claimed_at TEXT,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_queues_enabled ON job_queues(enabled, priority);
+CREATE INDEX IF NOT EXISTS idx_job_queues_tenant ON job_queues(tenant_id, priority);
+
+-- Worker registry and liveness. Rows are upserted by workers at start-up and
+-- refreshed by heartbeats; stale rows are reconciled to offline by the engine.
+CREATE TABLE IF NOT EXISTS job_workers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  hostname TEXT NOT NULL DEFAULT '',
+  pid INTEGER,
+  status TEXT NOT NULL DEFAULT 'starting'
+    CHECK (status IN ('starting', 'idle', 'busy', 'draining', 'stopped', 'offline')),
+  concurrency INTEGER NOT NULL DEFAULT 1,
+  queues_json TEXT NOT NULL DEFAULT '[]',
+  version TEXT NOT NULL DEFAULT '',
+  capabilities_json TEXT NOT NULL DEFAULT '[]',
+  active_jobs INTEGER NOT NULL DEFAULT 0,
+  processed_total INTEGER NOT NULL DEFAULT 0,
+  failed_total INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  last_heartbeat TEXT,
+  stopped_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_workers_heartbeat ON job_workers(last_heartbeat);
+CREATE INDEX IF NOT EXISTS idx_job_workers_status ON job_workers(status);
+
+-- Recurring schedule definitions.
+CREATE TABLE IF NOT EXISTS job_schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  schedule_ref TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  job_type_code TEXT NOT NULL,
+  queue TEXT NOT NULL DEFAULT 'DEFAULT',
+  priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  schedule_type TEXT NOT NULL DEFAULT 'once'
+    CHECK (schedule_type IN ('once', 'interval', 'daily', 'weekly', 'monthly', 'cron')),
+  cron_expression TEXT NOT NULL DEFAULT '',
+  interval_seconds INTEGER NOT NULL DEFAULT 0,
+  daily_time TEXT NOT NULL DEFAULT '00:00',
+  weekdays_json TEXT NOT NULL DEFAULT '[]',
+  day_of_month INTEGER NOT NULL DEFAULT 1,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  start_at TEXT,
+  end_at TEXT,
+  max_executions INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 0,
+  timeout_seconds INTEGER NOT NULL DEFAULT 0,
+  retry_strategy TEXT NOT NULL DEFAULT 'exponential',
+  retry_delay_seconds INTEGER NOT NULL DEFAULT 30,
+  failure_policy TEXT NOT NULL DEFAULT 'continue'
+    CHECK (failure_policy IN ('continue', 'pause', 'disable')),
+  concurrency_policy TEXT NOT NULL DEFAULT 'allow'
+    CHECK (concurrency_policy IN ('allow', 'skip', 'queue', 'cancel_previous')),
+  catchup_policy TEXT NOT NULL DEFAULT 'skip'
+    CHECK (catchup_policy IN ('skip', 'run_once', 'run_all')),
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'paused', 'disabled', 'completed', 'expired')),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  submitted_as TEXT NOT NULL DEFAULT 'schedule',
+  execution_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_run_at TEXT,
+  last_status TEXT NOT NULL DEFAULT '',
+  last_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+  last_error TEXT NOT NULL DEFAULT '',
+  next_run_at TEXT,
+  locked_by TEXT NOT NULL DEFAULT '',
+  locked_at TEXT,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_schedules_due ON job_schedules(enabled, status, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_job_schedules_type ON job_schedules(job_type_code);
+CREATE INDEX IF NOT EXISTS idx_job_schedules_tenant ON job_schedules(tenant_id, created_at);
+
+-- One row per materialised schedule occurrence. The unique key makes duplicate
+-- execution prevention durable across restarts and concurrent schedulers.
+CREATE TABLE IF NOT EXISTS job_schedule_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  schedule_id INTEGER NOT NULL REFERENCES job_schedules(id) ON DELETE CASCADE,
+  job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+  scheduled_for TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'enqueued', 'running', 'completed', 'failed', 'skipped', 'cancelled', 'timed_out')),
+  attempt INTEGER NOT NULL DEFAULT 1,
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (schedule_id, scheduled_for)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_schedule_runs_schedule ON job_schedule_runs(schedule_id, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_job_schedule_runs_job ON job_schedule_runs(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_schedule_runs_status ON job_schedule_runs(status, scheduled_for);
+
+-- Dead-letter registry for jobs that exhausted their retry policy.
+CREATE TABLE IF NOT EXISTS job_dead_letters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  queue TEXT NOT NULL DEFAULT '',
+  job_type_code TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER REFERENCES organizations(id),
+  reason TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'unknown',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'requeued', 'discarded')),
+  requeued_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+  resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  resolved_at TEXT,
+  resolution_note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_dead_letters_status ON job_dead_letters(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_dead_letters_queue ON job_dead_letters(queue, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_dead_letters_tenant ON job_dead_letters(tenant_id, created_at);
+
+-- Distributed locks used for scheduler leadership and dedupe.
+CREATE TABLE IF NOT EXISTS job_locks (
+  name TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  purpose TEXT NOT NULL DEFAULT '',
+  acquired_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_locks_expires ON job_locks(expires_at);
+
+-- One row per handler invocation (observability + retry-from-failed-step).
+CREATE TABLE IF NOT EXISTS job_executions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  worker_id TEXT NOT NULL DEFAULT '',
+  queue TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running', 'completed', 'failed', 'timed_out', 'cancelled')),
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  last_step TEXT NOT NULL DEFAULT '',
+  steps_json TEXT NOT NULL DEFAULT '[]',
+  error_category TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_executions_job ON job_executions(job_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_job_executions_status ON job_executions(status, created_at);
+
+-- Administrative configuration audit trail (queue and schedule changes).
+CREATE TABLE IF NOT EXISTS job_engine_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER REFERENCES organizations(id),
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL DEFAULT '',
+  entity_code TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_engine_audit_entity ON job_engine_audit(entity_type, entity_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_engine_audit_tenant ON job_engine_audit(tenant_id, created_at);

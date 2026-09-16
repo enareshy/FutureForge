@@ -32,8 +32,8 @@ git clone https://github.com/enareshy/FutureForge.git
 # Enter the project
 cd FutureForge
 
-# Check out the branch with the workflow engine and audit framework work
-git checkout 260915-feat-workflow-engine
+# Check out the branch with the job management and execution engine work
+git checkout 260915-feat-audit-framework
 ```
 
 If you received a package instead of a git clone, unzip it and open the folder:
@@ -58,12 +58,30 @@ npm install
 npm run dev
 ```
 
-The first start automatically creates `data/iam.db`, applies all migrations (`001_iam_core` through `011_workflow`) and seeds demo data.
+The first start automatically creates `data/iam.db`, applies all migrations (`001_iam_core` through `016_job_engine`) and seeds demo data.
 
 - Web console: http://localhost:5173
 - API: http://localhost:3001
 
-### 4. Log in
+### 4. Run a job worker
+
+The execution engine runs in separate worker processes that share the same
+database. Start at least one worker to execute queued and scheduled jobs:
+
+```bash
+# All queues, 4-way concurrency
+npm run worker
+
+# Restrict queues / raise concurrency
+node scripts/job-worker.js --queues=IMPORT,REPORTING --concurrency=8
+
+# Local demo with the bundled simulation handlers
+node scripts/job-worker.js --demo
+```
+
+Workers shut down gracefully on `SIGTERM`. See `docs/JOB_EXECUTION_OPERATIONS.md` for tuning, dead letters and troubleshooting.
+
+### 5. Log in
 
 - Super admin: `admin` / `HelixAdmin!42`
 - End user: `j.patel` / `HelixUser!42`
@@ -76,9 +94,10 @@ Where things live in the UI:
 - Communication section, Notification admin (`/notifications/admin`): templates, rules, channel providers and the delivery monitor.
 - Communication section, Delivery services (`/delivery/admin`): centralized outbound queue, provider routing/failover, retries and dead-letters, reminders/escalations, provider configuration and operational monitoring.
 - Jobs section, Job dashboard (`/jobs`), Jobs (`/jobs/list`) and Job types (`/jobs/admin`): centralized background job registry, submission, monitoring, control (cancel/retry/pause/resume), dependencies, history, results/artifacts and job-type administration.
+- Jobs section, Execution engine: **Execution** (`/jobs/execution`), **Workers** (`/jobs/workers`) and **Dead letters** (`/jobs/dead-letter`) for operators, plus administrator **Queues** (`/jobs/queues`) and **Schedules** (`/jobs/schedules`).
 - Object detail page: Graph tab for relationships and the workflow progress graph.
 
-### 5. Production-style single port
+### 6. Production-style single port
 
 The Express server serves the built console when `web/dist` exists, so everything can run on one port.
 
@@ -92,7 +111,7 @@ npm start
 
 Then open http://localhost:3001.
 
-### 6. Configuration
+### 7. Configuration
 
 - `PORT` — API port, default `3001`.
 - `IAM_DB` — database file path, default `data/iam.db`.
@@ -108,7 +127,7 @@ On Windows PowerShell:
 $env:PORT="4000"; npm start
 ```
 
-### 7. Reset the database
+### 8. Reset the database
 
 Stop the server, then remove `data/iam.db` (and any `data/iam.db-wal` / `data/iam.db-shm`). The next start recreates and seeds it. Migrations are safe to re-run and never drop data. To re-seed an existing database:
 
@@ -117,11 +136,11 @@ Stop the server, then remove `data/iam.db` (and any `data/iam.db-wal` / `data/ia
 npm run seed
 ```
 
-### 8. Access from other devices on your network
+### 9. Access from other devices on your network
 
 The dev server binds to `0.0.0.0`, so other devices can reach it via your laptop IP, for example `http://192.168.x.x:5173`. Vite allows `localhost`, IP addresses and `*.monkeycode-ai.live`; add more hostnames to `server.allowedHosts` in `vite.config.js` if needed.
 
-### 9. Troubleshooting
+### 10. Troubleshooting
 
 - Port already in use (`EADDRINUSE`): stop the other process, or change `PORT` and update `server.port` plus the `/api` proxy target in `vite.config.js`.
 - Blank page after `npm start`: run `npx vite build` first so `web/dist` exists.
@@ -182,6 +201,10 @@ The dev server binds to `0.0.0.0`, so other devices can reach it via your laptop
 - `/api/jobs/:id/cancel` `/retry` `/pause` `/resume` `/progress` — job control operations; `/dependencies` `POST`/`DELETE` manage dependency edges
 - `/api/job-types` (+ `/status`) — background job type registry (metadata + handler reference) that business modules register their asynchronous work in
 - `/api/job-metrics` `/timeseries` — job dashboard counters, status/type breakdowns, queue depth, durations, recent failures and throughput
+- `/api/job-queues` (+ `/meta`, `/:id`, `/:id/health`, `/:id/status`) — execution engine queue administration: concurrency, priority, rate limits, retry/timeout policy, enable/pause
+- `/api/schedules` (+ `/:id`, `/:id/enable|disable|pause|resume|run-now`, `/:id/runs`) — recurring job schedules: interval/daily/weekly/monthly/cron, time zones, catch-up/concurrency/failure policies and run history
+- `/api/job-execution` — engine observability and control: `/status` `/metrics` `/workers` `/handlers` `/audit`, `/dead-letter` (+ `/:id/retry` `/:id/discard`), `/jobs/:id/execute`, `/tick` and `/maintenance`
+- `scripts/job-worker.js` (`npm run worker`) — durable worker process; `--queues`, `--concurrency`, `--demo` and graceful `SIGTERM` shutdown
 - `/api/hierarchy` — Super Admin–defined org levels (operators)
 - `/api/platform/hierarchy` `/api/platform/settings` — Super Admin feature properties
 - `/api/companies` `/api/business-units` `/api/plants` `/api/sites` `/api/departments` — typed collections
@@ -195,9 +218,9 @@ IAM APIs are fail-safe: session plus `checkPermission`. Unauthorized callers rec
 
 In-process (future modules): `import { checkPermission, organizationContext } from "./server/platform.js"`
 
-Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`, `docs/LIFECYCLE_DESIGN.md`, `docs/WORKFLOW_ENGINE_DESIGN.md`, `docs/AUDIT_DESIGN.md`, `docs/NOTIFICATIONS_DESIGN.md`, `docs/DELIVERY_DESIGN.md`, `docs/JOB_MANAGEMENT_DESIGN.md` and the day-2 guides `docs/DELIVERY_OPERATIONS.md`, `docs/JOB_MANAGEMENT_OPERATIONS.md`
+Design notes: `docs/IAM_DESIGN.md`, `docs/AUTHORIZATION_DESIGN.md`, `docs/ORGS_DESIGN.md`, `docs/ORGANIZATION_ADMIN_DESIGN.md`, `docs/AUTHENTICATION_DESIGN.md`, `docs/METADATA_DESIGN.md`, `docs/OBJECT_FRAMEWORK_DESIGN.md`, `docs/LIFECYCLE_DESIGN.md`, `docs/WORKFLOW_ENGINE_DESIGN.md`, `docs/AUDIT_DESIGN.md`, `docs/NOTIFICATIONS_DESIGN.md`, `docs/DELIVERY_DESIGN.md`, `docs/JOB_MANAGEMENT_DESIGN.md`, `docs/JOB_EXECUTION_DESIGN.md` and the day-2 guides `docs/DELIVERY_OPERATIONS.md`, `docs/JOB_MANAGEMENT_OPERATIONS.md`, `docs/JOB_EXECUTION_OPERATIONS.md`
 
-The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config), lifecycle configuration under `/lifecycles`, **Workflow Engine** under `/workflows/templates` (the Configuration section where admins create and design workflow templates), **Audit & history** under `/audit` (event stream, overview, policies, retention and export), and **Notification admin** under `/notifications/admin` (templates with preview/test-send, rules with simulation, channel providers and the delivery monitor). Operators get a **Delivery services** console under `/delivery/admin` for the outbound queue, provider routing and failover, retry/dead-letter recovery, reminders and escalations, and operational monitoring. The **Jobs** section provides a **Job dashboard** (`/jobs`), a searchable **Jobs** list (`/jobs/list`) for submitting and controlling background work (cancel/retry/pause/resume) and an administrator **Job types** registry (`/jobs/admin`). Every user gets an **Inbox** under `/notifications` with a bell/unread badge, plus personal notification preferences. End users get **My tasks & approvals** under `/workflows` (My Tasks, Team Tasks, Approvals and the instance monitor). Object lifecycle state, transitions, approvals, status history and a **History** tab appear on the object detail page. The reusable client renderer is `web/src/components/FormRenderer.jsx` and the visual workflow designer is `web/src/components/WorkflowDesigner.jsx`.
+The admin console exposes metadata under `/metadata` (types, attributes, LOVs, forms, rules, record builder, scoped config), lifecycle configuration under `/lifecycles`, **Workflow Engine** under `/workflows/templates` (the Configuration section where admins create and design workflow templates), **Audit & history** under `/audit` (event stream, overview, policies, retention and export), and **Notification admin** under `/notifications/admin` (templates with preview/test-send, rules with simulation, channel providers and the delivery monitor). Operators get a **Delivery services** console under `/delivery/admin` for the outbound queue, provider routing and failover, retry/dead-letter recovery, reminders and escalations, and operational monitoring. The **Jobs** section provides a **Job dashboard** (`/jobs`), a searchable **Jobs** list (`/jobs/list`) for submitting and controlling background work (cancel/retry/pause/resume) and an administrator **Job types** registry (`/jobs/admin`). Operators get an execution engine view with **Execution** (`/jobs/execution`), **Workers** (`/jobs/workers`) and **Dead letters** (`/jobs/dead-letter`), and administrators get **Queues** (`/jobs/queues`) and **Schedules** (`/jobs/schedules`). Every user gets an **Inbox** under `/notifications` with a bell/unread badge, plus personal notification preferences. End users get **My tasks & approvals** under `/workflows` (My Tasks, Team Tasks, Approvals and the instance monitor). Object lifecycle state, transitions, approvals, status history and a **History** tab appear on the object detail page. The reusable client renderer is `web/src/components/FormRenderer.jsx` and the visual workflow designer is `web/src/components/WorkflowDesigner.jsx`.
 
 ## Tests
 

@@ -13,6 +13,7 @@ import * as audit from "./services/audit.js";
 import * as notifications from "./services/notifications.js";
 import * as delivery from "./services/delivery.js";
 import * as jobs from "./services/jobs.js";
+import * as jobExecution from "./services/job-execution.js";
 import * as catalog from "./services/catalog.js";
 import * as grants from "./services/grants.js";
 import * as authorization from "./services/authorization.js";
@@ -4867,6 +4868,286 @@ export function createApp(db) {
     can("iam.jobs.details", "read"),
     wrap((req, res) => {
       res.json({ items: jobs.listChildren(db, req.params.id, jobScope(req)) });
+    })
+  );
+
+  // ── Job Scheduling & Execution Engine ─────────────────────────────────────
+  // Queue administration, schedule administration and execution observability.
+  // The engine owns execution; these routes expose configuration and control.
+  function execScope(req) {
+    if (tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true") return null;
+    return req.tenantId || -1;
+  }
+
+  app.get(
+    "/api/job-queues/meta",
+    auth,
+    can("iam.jobs.queues", "read"),
+    wrap((_req, res) => {
+      res.json({
+        logical_queues: jobExecution.LOGICAL_QUEUES,
+        retry_strategies: jobExecution.RETRY_STRATEGIES,
+        schedule_types: jobExecution.SCHEDULE_TYPES,
+        schedule_statuses: jobExecution.SCHEDULE_STATUSES,
+        failure_policies: jobExecution.FAILURE_POLICIES,
+        concurrency_policies: jobExecution.CONCURRENCY_POLICIES,
+        catchup_policies: jobExecution.CATCHUP_POLICIES,
+        worker_statuses: jobExecution.WORKER_STATUSES,
+        dead_letter_statuses: jobExecution.DEAD_LETTER_STATUSES,
+        error_categories: jobExecution.ERROR_CATEGORIES,
+        priorities: jobs.PRIORITIES,
+        handlers: jobExecution.listHandlers(),
+      });
+    })
+  );
+
+  app.get(
+    "/api/job-queues",
+    auth,
+    can("iam.jobs.queues", "read"),
+    wrap((req, res) => {
+      res.json(jobExecution.listQueues(db, req.query, execScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/job-queues",
+    auth,
+    can("iam.jobs.queues", "create"),
+    wrap((req, res) => {
+      res.status(201).json(jobExecution.createQueue(db, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/job-queues/:id/health",
+    auth,
+    can("iam.jobs.queues", "read"),
+    wrap((req, res) => {
+      res.json(jobExecution.queueHealth(db, req.params.id));
+    })
+  );
+
+  app.get(
+    "/api/job-queues/:id",
+    auth,
+    can("iam.jobs.queues", "read"),
+    wrap((req, res) => {
+      res.json(jobExecution.getQueue(db, req.params.id));
+    })
+  );
+
+  const updateQueueHandler = (req, res) => {
+    res.json(jobExecution.updateQueue(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+  };
+  app.put("/api/job-queues/:id", auth, can("iam.jobs.queues", "update"), wrap(updateQueueHandler));
+  app.patch("/api/job-queues/:id", auth, can("iam.jobs.queues", "update"), wrap(updateQueueHandler));
+
+  app.post(
+    "/api/job-queues/:id/status",
+    auth,
+    can("iam.jobs.queues", "update"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      if (body.paused !== undefined) {
+        res.json(jobExecution.setQueuePaused(db, req.params.id, body.paused !== false, req.actor, clientIp(req)));
+      } else {
+        res.json(jobExecution.setQueueEnabled(db, req.params.id, body.enabled !== false, req.actor, clientIp(req)));
+      }
+    })
+  );
+
+  // ── Schedules ──
+  app.get(
+    "/api/schedules",
+    auth,
+    can("iam.jobs.schedules", "read"),
+    wrap((req, res) => {
+      res.json(jobExecution.listSchedules(db, req.query, execScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/schedules",
+    auth,
+    can("iam.jobs.schedules", "create"),
+    wrap((req, res) => {
+      res.status(201).json(jobExecution.createSchedule(db, { ...(req.body || {}), tenant_id: req.tenantId }, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/schedules/:id",
+    auth,
+    can("iam.jobs.schedules", "read"),
+    wrap((req, res) => {
+      res.json(jobExecution.getSchedule(db, req.params.id, execScope(req)));
+    })
+  );
+
+  const updateScheduleHandler = (req, res) => {
+    res.json(jobExecution.updateSchedule(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+  };
+  app.put("/api/schedules/:id", auth, can("iam.jobs.schedules", "update"), wrap(updateScheduleHandler));
+  app.patch("/api/schedules/:id", auth, can("iam.jobs.schedules", "update"), wrap(updateScheduleHandler));
+
+  app.post(
+    "/api/schedules/:id/enable",
+    auth,
+    can("iam.jobs.schedules", "update"),
+    wrap((req, res) => {
+      res.json(jobExecution.setScheduleEnabled(db, req.params.id, true, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/schedules/:id/disable",
+    auth,
+    can("iam.jobs.schedules", "update"),
+    wrap((req, res) => {
+      res.json(jobExecution.setScheduleEnabled(db, req.params.id, false, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/schedules/:id/pause",
+    auth,
+    can("iam.jobs.schedules", "update"),
+    wrap((req, res) => {
+      res.json(jobExecution.setScheduleStatus(db, req.params.id, "paused", req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/schedules/:id/resume",
+    auth,
+    can("iam.jobs.schedules", "update"),
+    wrap((req, res) => {
+      res.json(jobExecution.setScheduleStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/schedules/:id/run-now",
+    auth,
+    can("iam.jobs.schedules", "execute"),
+    wrap((req, res) => {
+      res.status(202).json(jobExecution.runScheduleNow(db, req.params.id, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.get(
+    "/api/schedules/:id/runs",
+    auth,
+    can("iam.jobs.schedules", "read"),
+    wrap((req, res) => {
+      res.json(jobExecution.listScheduleRuns(db, req.params.id, req.query));
+    })
+  );
+
+  // ── Execution observability & control ──
+  app.get(
+    "/api/job-execution/status",
+    auth,
+    can("iam.jobs.execution", "read"),
+    wrap((_req, res) => {
+      res.json(jobExecution.engineStatus(db));
+    })
+  );
+
+  app.get(
+    "/api/job-execution/metrics",
+    auth,
+    can("iam.jobs.execution", "read"),
+    wrap((req, res) => {
+      res.json(jobExecution.executionMetrics(db, execScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/job-execution/workers",
+    auth,
+    can("iam.jobs.execution", "read"),
+    wrap((req, res) => {
+      res.json(jobExecution.listWorkers(db, req.query));
+    })
+  );
+
+  app.get(
+    "/api/job-execution/handlers",
+    auth,
+    can("iam.jobs.execution", "read"),
+    wrap((_req, res) => {
+      res.json({ items: jobExecution.listHandlers() });
+    })
+  );
+
+  app.get(
+    "/api/job-execution/dead-letter",
+    auth,
+    can("iam.jobs.execution", "read"),
+    wrap((req, res) => {
+      res.json(jobExecution.listDeadLetters(db, req.query, execScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/job-execution/dead-letter/:id/retry",
+    auth,
+    can("iam.jobs.execution", "execute"),
+    wrap((req, res) => {
+      res.json(jobExecution.requeueDeadLetter(db, req.params.id, { actor: req.actor, note: req.body?.note, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/job-execution/dead-letter/:id/discard",
+    auth,
+    can("iam.jobs.execution", "execute"),
+    wrap((req, res) => {
+      res.json(jobExecution.discardDeadLetter(db, req.params.id, { actor: req.actor, note: req.body?.note }));
+    })
+  );
+
+  app.post(
+    "/api/job-execution/tick",
+    auth,
+    can("iam.jobs.execution", "execute"),
+    wrap(async (req, res) => {
+      const result = await jobExecution.tick(db, {
+        workerId: "api-tick",
+        run: req.body?.run !== false,
+        limit: Number(req.body?.limit) || 10,
+        queueCodes: Array.isArray(req.body?.queues) ? req.body.queues : null,
+      });
+      res.json(result);
+    })
+  );
+
+  app.post(
+    "/api/job-execution/jobs/:id/execute",
+    auth,
+    can("iam.jobs.execution", "execute"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.runJobNow(db, req.params.id, { workerId: "api-run-now" }));
+    })
+  );
+
+  app.post(
+    "/api/job-execution/maintenance",
+    auth,
+    can("iam.jobs.execution", "execute"),
+    wrap((_req, res) => {
+      res.json(jobExecution.engineMaintenance(db));
+    })
+  );
+
+  app.get(
+    "/api/job-execution/audit",
+    auth,
+    can("iam.jobs.execution", "read"),
+    wrap((req, res) => {
+      res.json({ items: jobExecution.listEngineAudit(db, { tenantId: execScope(req), limit: req.query.limit }) });
     })
   );
 

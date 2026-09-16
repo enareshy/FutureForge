@@ -505,6 +505,40 @@ export const jobs = {
   timeseries: (qs) => api(`/api/job-metrics/timeseries${qs || ""}`),
 };
 
+export const jobExecution = {
+  meta: () => api("/api/job-queues/meta"),
+
+  queues: (qs) => api(`/api/job-queues${qs || ""}`),
+  queue: (id) => api(`/api/job-queues/${id}`),
+  createQueue: (body) => api("/api/job-queues", { method: "POST", body }),
+  updateQueue: (id, body) => api(`/api/job-queues/${id}`, { method: "PATCH", body }),
+  setQueueStatus: (id, body) => api(`/api/job-queues/${id}/status`, { method: "POST", body }),
+  queueHealth: (id) => api(`/api/job-queues/${id}/health`),
+
+  schedules: (qs) => api(`/api/schedules${qs || ""}`),
+  schedule: (id) => api(`/api/schedules/${id}`),
+  createSchedule: (body) => api("/api/schedules", { method: "POST", body }),
+  updateSchedule: (id, body) => api(`/api/schedules/${id}`, { method: "PATCH", body }),
+  enableSchedule: (id) => api(`/api/schedules/${id}/enable`, { method: "POST", body: {} }),
+  disableSchedule: (id) => api(`/api/schedules/${id}/disable`, { method: "POST", body: {} }),
+  pauseSchedule: (id) => api(`/api/schedules/${id}/pause`, { method: "POST", body: {} }),
+  resumeSchedule: (id) => api(`/api/schedules/${id}/resume`, { method: "POST", body: {} }),
+  runScheduleNow: (id) => api(`/api/schedules/${id}/run-now`, { method: "POST", body: {} }),
+  scheduleRuns: (id, qs) => api(`/api/schedules/${id}/runs${qs || ""}`),
+
+  status: () => api("/api/job-execution/status"),
+  metrics: (qs) => api(`/api/job-execution/metrics${qs || ""}`),
+  workers: (qs) => api(`/api/job-execution/workers${qs || ""}`),
+  handlers: () => api("/api/job-execution/handlers"),
+  deadLetters: (qs) => api(`/api/job-execution/dead-letter${qs || ""}`),
+  retryDeadLetter: (id, body) => api(`/api/job-execution/dead-letter/${id}/retry`, { method: "POST", body: body || {} }),
+  discardDeadLetter: (id, body) => api(`/api/job-execution/dead-letter/${id}/discard`, { method: "POST", body: body || {} }),
+  tick: (body) => api("/api/job-execution/tick", { method: "POST", body: body || {} }),
+  executeJob: (id) => api(`/api/job-execution/jobs/${id}/execute`, { method: "POST", body: {} }),
+  maintenance: () => api("/api/job-execution/maintenance", { method: "POST", body: {} }),
+  audit: (qs) => api(`/api/job-execution/audit${qs || ""}`),
+};
+
 export const lifecycle = {  statuses: (qs) => api(`/api/statuses${qs || ""}`),
   status: (id) => api(`/api/statuses/${id}`),
   createStatus: (body) => api("/api/statuses", { method: "POST", body }),

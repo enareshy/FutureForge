@@ -19,6 +19,7 @@ import * as audit from "./services/audit.js";
 import * as notifications from "./services/notifications.js";
 import * as delivery from "./services/delivery.js";
 import * as jobs from "./services/jobs.js";
+import * as jobExecution from "./services/job-execution.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -839,6 +840,9 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.jobs.types", name: "Job type administration", parentCode: "iam.jobs" },
     { applicationCode: "iam", code: "iam.jobs.results", name: "Job results & artifacts", parentCode: "iam.jobs" },
     { applicationCode: "iam", code: "iam.jobs.monitoring", name: "Job monitoring", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.queues", name: "Job queue administration", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.schedules", name: "Job schedule administration", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.execution", name: "Job execution monitoring & dead-letter", parentCode: "iam.jobs" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -930,6 +934,9 @@ function seedMissingCatalog(db) {
     "iam.jobs.types",
     "iam.jobs.results",
     "iam.jobs.monitoring",
+    "iam.jobs.queues",
+    "iam.jobs.schedules",
+    "iam.jobs.execution",
   ];
   for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -983,6 +990,9 @@ function reconcileReaderGrants(db) {
     ["iam.jobs.results", ["read"]],
     ["iam.jobs.types", ["read"]],
     ["iam.jobs.monitoring", ["read"]],
+    ["iam.jobs.queues", ["read"]],
+    ["iam.jobs.schedules", ["read"]],
+    ["iam.jobs.execution", ["read"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -2293,6 +2303,67 @@ function seedJobs(db) {
   return { jobsSeeded: true, jobTypesSeeded: true, sampleJobs: created.length };
 }
 
+// Ensures the logical execution queues and a representative set of recurring
+// schedules exist. Queues are system configuration and are only created when
+// missing; admin edits are never overwritten.
+function seedJobEngine(db) {
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const admin = queryOne(db, "SELECT id, username, display_name, email FROM users WHERE username = 'admin'");
+  const actor = admin
+    ? { id: admin.id, username: admin.username, display_name: admin.display_name, tenant_id: helix?.id ?? null, organization_id: helix?.id ?? null }
+    : null;
+  jobExecution.ensureDefaultQueues(db, actor);
+
+  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM job_schedules").c;
+  if (existing > 0) return { jobEngineSeeded: true, queuesSeeded: jobExecution.LOGICAL_QUEUES.length };
+
+  const samples = [
+    {
+      code: "NIGHTLY_SEARCH_REINDEX",
+      name: "Nightly search reindex",
+      description: "Rebuild the full-text search index every night at 02:00 UTC.",
+      job_type_code: "SEARCH_INDEXING",
+      queue: "SEARCH_INDEXING",
+      schedule_type: "cron",
+      cron_expression: "0 2 * * *",
+      timezone: "UTC",
+      catchup_policy: "skip",
+    },
+    {
+      code: "HOURLY_ERP_SYNC",
+      name: "Hourly ERP sync",
+      description: "Synchronize the item master with the ERP system every hour.",
+      job_type_code: "DATA_SYNC",
+      queue: "INTEGRATION",
+      schedule_type: "interval",
+      interval_seconds: 3600,
+      failure_policy: "continue",
+    },
+    {
+      code: "WEEKLY_COST_ROLLUP",
+      name: "Weekly cost rollup",
+      description: "Roll up approved cost records into the weekly report on Mondays.",
+      job_type_code: "REPORT_GENERATION",
+      queue: "REPORTING",
+      schedule_type: "weekly",
+      weekdays: [1],
+      daily_time: "06:00",
+      timezone: "UTC",
+      max_retries: 2,
+    },
+  ];
+  let created = 0;
+  for (const sample of samples) {
+    try {
+      jobExecution.createSchedule(db, { ...sample, tenant_id: helix?.id ?? null }, actor, "seed");
+      created += 1;
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+  return { jobEngineSeeded: true, queuesSeeded: jobExecution.LOGICAL_QUEUES.length, schedulesSeeded: created };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -2310,6 +2381,7 @@ export function seedDatabase(db) {
   seedNotifications(db);
   seedDelivery(db);
   seedJobs(db);
+  seedJobEngine(db);
   return { ...identity, ...authz };
 }
 
