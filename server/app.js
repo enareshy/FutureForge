@@ -11,6 +11,7 @@ import * as orgs from "./services/orgs.js";
 import * as policy from "./services/policy.js";
 import * as audit from "./services/audit.js";
 import * as notifications from "./services/notifications.js";
+import * as delivery from "./services/delivery.js";
 import * as catalog from "./services/catalog.js";
 import * as grants from "./services/grants.js";
 import * as authorization from "./services/authorization.js";
@@ -4251,6 +4252,352 @@ export function createApp(db) {
     can("iam.notifications.history", "execute"),
     wrap((req, res) => {
       res.json(notifications.sweepReminders(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  // ── Communication & Delivery Services ────────────────────────────────────
+  // Provider configuration, delivery requests, queue processing, reminders,
+  // escalations and operational monitoring. All administrative routes are
+  // tenant-scoped; platform admins may request ?all=true.
+  function deliveryScope(req) {
+    if (tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true") return null;
+    return req.tenantId || -1;
+  }
+
+  function deliveryQuery(req) {
+    const scope = deliveryScope(req);
+    return scope === null ? { ...req.query } : { ...req.query, tenantId: scope };
+  }
+
+  app.get(
+    "/api/delivery/meta",
+    auth,
+    can("iam.delivery.providers", "read"),
+    wrap((_req, res) => {
+      res.json({
+        statuses: delivery.DELIVERY_STATUSES,
+        status_labels: delivery.DELIVERY_STATUS_LABELS,
+        reminder_statuses: delivery.REMINDER_STATUSES,
+        reminder_kinds: delivery.REMINDER_KINDS,
+        escalation_statuses: delivery.ESCALATION_STATUSES,
+        alert_severities: delivery.ALERT_SEVERITIES,
+        channels: delivery.CHANNELS,
+        priorities: delivery.PRIORITIES,
+        provider_types: delivery.PROVIDER_TYPES,
+        transport_types: delivery.transportTypes(),
+        escalation_recipient_types: delivery.ESCALATION_RECIPIENT_TYPES,
+      });
+    })
+  );
+
+  app.get(
+    "/api/delivery/requests",
+    auth,
+    can("iam.delivery.requests", "read"),
+    wrap((req, res) => {
+      res.json(delivery.listRequests(db, deliveryQuery(req), deliveryScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/delivery/requests",
+    auth,
+    can("iam.delivery.requests", "create"),
+    wrap((req, res) => {
+      res.status(201).json(delivery.submitRequest(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.get(
+    "/api/delivery/requests/:id",
+    auth,
+    can("iam.delivery.requests", "read"),
+    wrap((req, res) => {
+      const request = delivery.getRequest(db, req.params.id, deliveryScope(req));
+      request.attempts = delivery.listAttempts(db, request.id);
+      res.json(request);
+    })
+  );
+
+  app.get(
+    "/api/delivery/requests/:id/attempts",
+    auth,
+    can("iam.delivery.requests", "read"),
+    wrap((req, res) => {
+      const request = delivery.getRequest(db, req.params.id, deliveryScope(req));
+      res.json({ items: delivery.listAttempts(db, request.id) });
+    })
+  );
+
+  app.post(
+    "/api/delivery/requests/:id/cancel",
+    auth,
+    can("iam.delivery.requests", "execute"),
+    wrap((req, res) => {
+      res.json(delivery.cancelRequest(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/delivery/requests/:id/retry",
+    auth,
+    can("iam.delivery.requests", "execute"),
+    wrap((req, res) => {
+      res.json(delivery.retryRequest(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/delivery/process",
+    auth,
+    can("iam.delivery.requests", "execute"),
+    wrap((req, res) => {
+      res.json(delivery.processDue(db, { limit: req.body?.limit, tenantId: deliveryScope(req) }));
+    })
+  );
+
+  // Providers
+  app.get(
+    "/api/delivery/providers",
+    auth,
+    can("iam.delivery.providers", "read"),
+    wrap((req, res) => {
+      res.json({ items: delivery.listDeliveryProviders(db, deliveryQuery(req)) });
+    })
+  );
+
+  app.post(
+    "/api/delivery/providers",
+    auth,
+    can("iam.delivery.providers", "create"),
+    wrap((req, res) => {
+      res.status(201).json(delivery.createDeliveryProvider(db, { ...(req.body || {}), tenant_id: req.tenantId }, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/delivery/providers/:id",
+    auth,
+    can("iam.delivery.providers", "read"),
+    wrap((req, res) => {
+      res.json(delivery.getDeliveryProvider(db, req.params.id));
+    })
+  );
+
+  app.put(
+    "/api/delivery/providers/:id",
+    auth,
+    can("iam.delivery.providers", "update"),
+    wrap((req, res) => {
+      res.json(delivery.updateDeliveryProvider(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.put(
+    "/api/delivery/providers/:id/status",
+    auth,
+    can("iam.delivery.providers", "update"),
+    wrap((req, res) => {
+      res.json(delivery.setDeliveryProviderStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/delivery/providers/:id/test",
+    auth,
+    can("iam.delivery.providers", "execute"),
+    wrap((req, res) => {
+      res.json(delivery.testDeliveryProvider(db, req.params.id, { recipient: req.body?.recipient }));
+    })
+  );
+
+  app.delete(
+    "/api/delivery/providers/:id",
+    auth,
+    can("iam.delivery.providers", "delete"),
+    wrap((req, res) => {
+      res.json(delivery.deleteDeliveryProvider(db, req.params.id, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/delivery/provider-failures",
+    auth,
+    can("iam.delivery.providers", "read"),
+    wrap((req, res) => {
+      res.json({ items: delivery.listProviderFailures(db, req.query, deliveryScope(req)), summary: delivery.providerFailureSummary(db, deliveryScope(req)) });
+    })
+  );
+
+  app.get(
+    "/api/delivery/provider-health",
+    auth,
+    can("iam.delivery.providers", "read"),
+    wrap((req, res) => {
+      res.json(delivery.providerHealth(db, deliveryScope(req)));
+    })
+  );
+
+  // Reminders
+  app.get(
+    "/api/delivery/reminders",
+    auth,
+    can("iam.delivery.reminders", "read"),
+    wrap((req, res) => {
+      res.json(delivery.listReminders(db, deliveryQuery(req), deliveryScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/delivery/reminders",
+    auth,
+    can("iam.delivery.reminders", "create"),
+    wrap((req, res) => {
+      res.status(201).json(delivery.scheduleReminder(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.get(
+    "/api/delivery/reminders/:id",
+    auth,
+    can("iam.delivery.reminders", "read"),
+    wrap((req, res) => {
+      res.json(delivery.getReminder(db, req.params.id, deliveryScope(req)));
+    })
+  );
+
+  app.put(
+    "/api/delivery/reminders/:id",
+    auth,
+    can("iam.delivery.reminders", "update"),
+    wrap((req, res) => {
+      res.json(delivery.updateReminder(db, req.params.id, req.body || {}, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/delivery/reminders/:id/cancel",
+    auth,
+    can("iam.delivery.reminders", "execute"),
+    wrap((req, res) => {
+      res.json(delivery.cancelReminder(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/delivery/reminders/sweep",
+    auth,
+    can("iam.delivery.reminders", "execute"),
+    wrap((req, res) => {
+      res.json(delivery.sweepReminders(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  // Escalations
+  app.get(
+    "/api/delivery/escalations",
+    auth,
+    can("iam.delivery.reminders", "read"),
+    wrap((req, res) => {
+      res.json(delivery.listEscalations(db, deliveryQuery(req), deliveryScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/delivery/escalations",
+    auth,
+    can("iam.delivery.reminders", "create"),
+    wrap((req, res) => {
+      res.status(201).json(delivery.scheduleEscalation(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.get(
+    "/api/delivery/escalations/:id",
+    auth,
+    can("iam.delivery.reminders", "read"),
+    wrap((req, res) => {
+      res.json(delivery.getEscalation(db, req.params.id, deliveryScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/delivery/escalations/:id/cancel",
+    auth,
+    can("iam.delivery.reminders", "execute"),
+    wrap((req, res) => {
+      res.json(delivery.cancelEscalation(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.post(
+    "/api/delivery/escalations/sweep",
+    auth,
+    can("iam.delivery.reminders", "execute"),
+    wrap((req, res) => {
+      res.json(delivery.sweepEscalations(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  // Monitoring, alerts and run history
+  app.get(
+    "/api/delivery/metrics",
+    auth,
+    can("iam.delivery.monitoring", "read"),
+    wrap((req, res) => {
+      res.json(delivery.deliveryMetrics(db, { tenantId: deliveryScope(req), from: req.query.from, to: req.query.to }));
+    })
+  );
+
+  app.get(
+    "/api/delivery/stats",
+    auth,
+    can("iam.delivery.monitoring", "read"),
+    wrap((req, res) => {
+      res.json(delivery.deliveryStats(db, deliveryScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/delivery/timeseries",
+    auth,
+    can("iam.delivery.monitoring", "read"),
+    wrap((req, res) => {
+      res.json({ items: delivery.deliveryTimeseries(db, { tenantId: deliveryScope(req), from: req.query.from, to: req.query.to }) });
+    })
+  );
+
+  app.get(
+    "/api/delivery/alerts",
+    auth,
+    can("iam.delivery.monitoring", "read"),
+    wrap((req, res) => {
+      res.json(delivery.listAlerts(db, req.query, deliveryScope(req)));
+    })
+  );
+
+  app.post(
+    "/api/delivery/alerts/:id/acknowledge",
+    auth,
+    can("iam.delivery.monitoring", "update"),
+    wrap((req, res) => {
+      res.json(delivery.acknowledgeAlert(db, req.params.id, { actor: req.actor, ip: clientIp(req) }));
+    })
+  );
+
+  app.get(
+    "/api/delivery/runs",
+    auth,
+    can("iam.delivery.monitoring", "read"),
+    wrap((req, res) => {
+      res.json({
+        items: delivery.listRuns(db, {
+          kind: req.query.kind,
+          reminderId: req.query.reminderId,
+          escalationId: req.query.escalationId,
+          limit: req.query.limit,
+        }),
+      });
     })
   );
 

@@ -26,6 +26,7 @@ import WorkflowPage from "./pages/WorkflowPage.jsx";
 import ExplorerPage from "./pages/ExplorerPage.jsx";
 import NotificationsPage from "./pages/NotificationsPage.jsx";
 import NotificationAdminPage from "./pages/NotificationAdminPage.jsx";
+import DeliveryAdminPage from "./pages/DeliveryAdminPage.jsx";
 import NotificationBell from "./components/NotificationBell.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import AuthenticationPage from "./pages/AuthenticationPage.jsx";
@@ -197,6 +198,7 @@ const NAV_SECTIONS = [
     items: [
       { to: "/notifications", label: "Inbox", end: true },
       { to: "/notifications/admin", label: "Notification admin", platformOrAdmin: true },
+      { to: "/delivery/admin", label: "Delivery services", platformOrAdmin: true },
     ],
   },
 ];
@@ -380,6 +382,7 @@ export default function App() {
         <Route path="/audit" element={<AuditPage />} />
         <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="/notifications/admin" element={<NotificationAdminPage />} />
+        <Route path="/delivery/admin" element={<DeliveryAdminPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </ErrorBoundary>

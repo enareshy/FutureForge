@@ -435,6 +435,47 @@ export const notifications = {
   sweepReminders: (limit) => api("/api/notification-reminders/sweep", { method: "POST", body: { limit } }),
 };
 
+export const delivery = {
+  meta: () => api("/api/delivery/meta"),
+  requests: (qs) => api(`/api/delivery/requests${qs || ""}`),
+  request: (id) => api(`/api/delivery/requests/${id}`),
+  submitRequest: (body) => api("/api/delivery/requests", { method: "POST", body }),
+  cancelRequest: (id) => api(`/api/delivery/requests/${id}/cancel`, { method: "POST", body: {} }),
+  retryRequest: (id) => api(`/api/delivery/requests/${id}/retry`, { method: "POST", body: {} }),
+  attempts: (id) => api(`/api/delivery/requests/${id}/attempts`),
+  process: (limit) => api("/api/delivery/process", { method: "POST", body: { limit } }),
+
+  providers: (qs) => api(`/api/delivery/providers${qs || ""}`),
+  provider: (id) => api(`/api/delivery/providers/${id}`),
+  createProvider: (body) => api("/api/delivery/providers", { method: "POST", body }),
+  updateProvider: (id, body) => api(`/api/delivery/providers/${id}`, { method: "PUT", body }),
+  setProviderStatus: (id, status) => api(`/api/delivery/providers/${id}/status`, { method: "PUT", body: { status } }),
+  testProvider: (id, recipient) => api(`/api/delivery/providers/${id}/test`, { method: "POST", body: { recipient } }),
+  deleteProvider: (id) => api(`/api/delivery/providers/${id}`, { method: "DELETE" }),
+  providerHealth: (qs) => api(`/api/delivery/provider-health${qs || ""}`),
+  providerFailures: (qs) => api(`/api/delivery/provider-failures${qs || ""}`),
+
+  reminders: (qs) => api(`/api/delivery/reminders${qs || ""}`),
+  reminder: (id) => api(`/api/delivery/reminders/${id}`),
+  createReminder: (body) => api("/api/delivery/reminders", { method: "POST", body }),
+  updateReminder: (id, body) => api(`/api/delivery/reminders/${id}`, { method: "PUT", body }),
+  cancelReminder: (id) => api(`/api/delivery/reminders/${id}/cancel`, { method: "POST", body: {} }),
+  sweepReminders: (limit) => api("/api/delivery/reminders/sweep", { method: "POST", body: { limit } }),
+
+  escalations: (qs) => api(`/api/delivery/escalations${qs || ""}`),
+  escalation: (id) => api(`/api/delivery/escalations/${id}`),
+  createEscalation: (body) => api("/api/delivery/escalations", { method: "POST", body }),
+  cancelEscalation: (id) => api(`/api/delivery/escalations/${id}/cancel`, { method: "POST", body: {} }),
+  sweepEscalations: (limit) => api("/api/delivery/escalations/sweep", { method: "POST", body: { limit } }),
+
+  metrics: (qs) => api(`/api/delivery/metrics${qs || ""}`),
+  stats: (qs) => api(`/api/delivery/stats${qs || ""}`),
+  timeseries: (qs) => api(`/api/delivery/timeseries${qs || ""}`),
+  alerts: (qs) => api(`/api/delivery/alerts${qs || ""}`),
+  acknowledgeAlert: (id) => api(`/api/delivery/alerts/${id}/acknowledge`, { method: "POST", body: {} }),
+  runs: (qs) => api(`/api/delivery/runs${qs || ""}`),
+};
+
 export const lifecycle = {  statuses: (qs) => api(`/api/statuses${qs || ""}`),
   status: (id) => api(`/api/statuses/${id}`),
   createStatus: (body) => api("/api/statuses", { method: "POST", body }),

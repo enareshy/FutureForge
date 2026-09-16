@@ -17,6 +17,7 @@ import * as lifecycle from "./services/lifecycle.js";
 import * as workflow from "./services/workflow.js";
 import * as audit from "./services/audit.js";
 import * as notifications from "./services/notifications.js";
+import * as delivery from "./services/delivery.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -825,6 +826,11 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.notifications.rules", name: "Notification rules", parentCode: "iam.notifications" },
     { applicationCode: "iam", code: "iam.notifications.providers", name: "Notification providers", parentCode: "iam.notifications" },
     { applicationCode: "iam", code: "iam.notifications.history", name: "Notification history", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.delivery", name: "Communication & delivery", kind: "module" },
+    { applicationCode: "iam", code: "iam.delivery.providers", name: "Delivery providers", parentCode: "iam.delivery" },
+    { applicationCode: "iam", code: "iam.delivery.requests", name: "Delivery requests", parentCode: "iam.delivery" },
+    { applicationCode: "iam", code: "iam.delivery.reminders", name: "Delivery reminders & escalations", parentCode: "iam.delivery" },
+    { applicationCode: "iam", code: "iam.delivery.monitoring", name: "Delivery monitoring", parentCode: "iam.delivery" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -903,7 +909,13 @@ function seedMissingCatalog(db) {
     "iam.notifications.providers",
     "iam.notifications.history",
   ];
-  for (const code of notificationResourceCodes) {
+  const deliveryResourceCodes = [
+    "iam.delivery.providers",
+    "iam.delivery.requests",
+    "iam.delivery.reminders",
+    "iam.delivery.monitoring",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2122,6 +2134,32 @@ function seedNotifications(db) {
   return { notificationsSeeded: true };
 }
 
+// Idempotent delivery-module seed. Ensures the built-in store/email providers
+// exist and registers placeholder entries for the future external channels so
+// administrators can see and configure them from the delivery console without
+// the platform sending anything by default.
+function seedDelivery(db) {
+  delivery.ensureDefaultProviders(db);
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const admin = queryOne(db, "SELECT id, username, display_name, email FROM users WHERE username = 'admin'");
+  const actor = admin
+    ? { id: admin.id, username: admin.username, display_name: admin.display_name, tenant_id: helix?.id ?? null }
+    : { username: "system", tenant_id: helix?.id ?? null };
+  const defs = [
+    { code: "teams-webhook", name: "Microsoft Teams (webhook)", channel: "teams", type: "teams", enabled: false, status: "inactive", config: {} },
+    { code: "slack-webhook", name: "Slack (webhook)", channel: "slack", type: "slack", enabled: false, status: "inactive", config: {} },
+  ];
+  for (const def of defs) {
+    if (queryOne(db, "SELECT id FROM notification_providers WHERE code = ?", [def.code])) continue;
+    try {
+      delivery.createDeliveryProvider(db, def, actor, "seed");
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+  return { deliverySeeded: true };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -2137,6 +2175,7 @@ export function seedDatabase(db) {
   seedWorkflow(db);
   seedAudit(db);
   seedNotifications(db);
+  seedDelivery(db);
   return { ...identity, ...authz };
 }
 

@@ -29,7 +29,21 @@ export const OPEN_STATUSES = ["created", "queued", "processing", "retrying"];
 export const PRIORITIES = ["low", "normal", "high", "urgent"];
 export const DELIVERY_MODES = ["immediate", "delayed", "digest"];
 export const FREQUENCIES = ["immediate", "daily", "weekly", "off"];
-export const PROVIDER_TYPES = ["store", "smtp", "sendgrid", "graph", "webhook"];
+export const PROVIDER_TYPES = [
+  "store",
+  "smtp",
+  "sendgrid",
+  "graph",
+  "webhook",
+  "ses",
+  "mailgun",
+  "postmark",
+  "teams",
+  "slack",
+  "twilio",
+  "fcm",
+  "custom",
+];
 export const EVENT_STATUSES = ["received", "processed", "skipped", "failed"];
 export const REMINDER_STATUSES = ["pending", "fired", "cancelled", "skipped"];
 

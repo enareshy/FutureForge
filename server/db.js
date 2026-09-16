@@ -111,6 +111,25 @@ export function migrate(db) {
   db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("013_notifications");
+  ensureColumn(db, "notification_providers", "tenant_id", "tenant_id INTEGER REFERENCES organizations(id)");
+  ensureColumn(db, "notification_providers", "organization_id", "organization_id INTEGER REFERENCES organizations(id)");
+  ensureColumn(db, "notification_providers", "is_default", "is_default INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "notification_providers", "priority", "priority INTEGER NOT NULL DEFAULT 100");
+  ensureColumn(db, "notification_providers", "rate_limit_per_minute", "rate_limit_per_minute INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "notification_providers", "max_attempts", "max_attempts INTEGER NOT NULL DEFAULT 5");
+  ensureColumn(db, "notification_providers", "backoff_seconds", "backoff_seconds INTEGER NOT NULL DEFAULT 30");
+  ensureColumn(db, "notification_providers", "timeout_ms", "timeout_ms INTEGER NOT NULL DEFAULT 10000");
+  ensureColumn(db, "notification_providers", "credential_ref", "credential_ref TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "notification_providers", "status", "status TEXT NOT NULL DEFAULT 'active'");
+  ensureColumn(db, "notification_providers", "last_tested_at", "last_tested_at TEXT");
+  ensureColumn(db, "notification_providers", "last_test_status", "last_test_status TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "notification_providers", "last_test_message", "last_test_message TEXT NOT NULL DEFAULT ''");
+  rebuildNotificationProvidersTypeCheck(db);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_notification_providers_tenant ON notification_providers(tenant_id, channel)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_notification_providers_default ON notification_providers(channel, is_default, priority)");
+  db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("014_delivery");
   db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();
@@ -215,10 +234,63 @@ function rebuildOrganizationsTable(db, withKindCheck) {
   db.exec("PRAGMA foreign_keys = ON");
 }
 
+// Widens the notification_providers.type (and channel) CHECK constraint for
+// databases created before the Communication & Delivery Services module added
+// the Teams, Slack, SMS, push and additional email provider types. SQLite
+// cannot ALTER a CHECK constraint, so the table is rebuilt and its rows copied,
+// following the same safe pattern used for organizations.
+function rebuildNotificationProvidersTypeCheck(db) {
+  const row = queryOne(db, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notification_providers'");
+  if (!row?.sql) return;
+  if (!row.sql.includes("CHECK (type IN")) return;
+  if (row.sql.includes("'custom'")) return;
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.exec(`
+    CREATE TABLE notification_providers_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      channel TEXT NOT NULL DEFAULT 'email' CHECK (channel IN ('in_app', 'email', 'sms', 'teams', 'slack', 'push', 'webhook')),
+      type TEXT NOT NULL DEFAULT 'store'
+        CHECK (type IN ('store', 'smtp', 'sendgrid', 'graph', 'webhook', 'ses', 'mailgun', 'postmark', 'teams', 'slack', 'twilio', 'fcm', 'custom')),
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+      config_json TEXT NOT NULL DEFAULT '{}',
+      secrets_enc TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      tenant_id INTEGER REFERENCES organizations(id),
+      organization_id INTEGER REFERENCES organizations(id),
+      is_default INTEGER NOT NULL DEFAULT 0,
+      priority INTEGER NOT NULL DEFAULT 100,
+      rate_limit_per_minute INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 5,
+      backoff_seconds INTEGER NOT NULL DEFAULT 30,
+      timeout_ms INTEGER NOT NULL DEFAULT 10000,
+      credential_ref TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      last_tested_at TEXT,
+      last_test_status TEXT NOT NULL DEFAULT '',
+      last_test_message TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  db.exec(`
+    INSERT INTO notification_providers_new
+      (id, code, name, channel, type, enabled, config_json, secrets_enc, created_at, updated_at,
+       tenant_id, organization_id, is_default, priority, rate_limit_per_minute, max_attempts,
+       backoff_seconds, timeout_ms, credential_ref, status, last_tested_at, last_test_status, last_test_message)
+    SELECT id, code, name, channel, type, enabled, config_json, secrets_enc, created_at, updated_at,
+       tenant_id, organization_id, is_default, priority, rate_limit_per_minute, max_attempts,
+       backoff_seconds, timeout_ms, credential_ref, status, last_tested_at, last_test_status, last_test_message
+    FROM notification_providers
+  `);
+  db.exec("DROP TABLE notification_providers");
+  db.exec("ALTER TABLE notification_providers_new RENAME TO notification_providers");
+  db.exec("PRAGMA foreign_keys = ON");
+}
+
 export function nowIso() {
   return new Date().toISOString().replace("T", " ").slice(0, 19);
 }
-
 export function queryAll(db, sql, params = []) {
   return db.prepare(sql).all(...params);
 }

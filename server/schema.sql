@@ -1731,10 +1731,265 @@ CREATE TABLE IF NOT EXISTS notification_providers (
   name TEXT NOT NULL,
   channel TEXT NOT NULL DEFAULT 'email' CHECK (channel IN ('in_app', 'email', 'sms', 'teams', 'slack', 'push', 'webhook')),
   type TEXT NOT NULL DEFAULT 'store'
-    CHECK (type IN ('store', 'smtp', 'sendgrid', 'graph', 'webhook')),
+    CHECK (type IN ('store', 'smtp', 'sendgrid', 'graph', 'webhook', 'ses', 'mailgun', 'postmark', 'teams', 'slack', 'twilio', 'fcm', 'custom')),
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   config_json TEXT NOT NULL DEFAULT '{}',
   secrets_enc TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ===========================================================================
+-- Communication & Delivery Services Module (migration 014_delivery)
+--
+-- This module is the centralized outbound delivery infrastructure. It receives
+-- rendered delivery requests from the Notification Management module (or any
+-- other producer) and owns the provider abstraction, queue, background worker,
+-- retry/dead-letter handling, delivery tracking, provider configuration,
+-- reminder/escalation execution and operational alerts.
+--
+-- It deliberately contains NO notification rules, templates, recipient
+-- resolution heuristics or user preference logic: those stay in the
+-- Notification Management module, which hands off the finished message.
+-- ===========================================================================
+
+-- Canonical outbound delivery request and its delivery-tracking lifecycle.
+CREATE TABLE IF NOT EXISTS delivery_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  plant_id INTEGER,
+  site_id INTEGER,
+  department_id INTEGER,
+  notification_id INTEGER REFERENCES notifications(id) ON DELETE SET NULL,
+  event_id INTEGER REFERENCES notification_events(id) ON DELETE SET NULL,
+  source_module TEXT NOT NULL DEFAULT 'platform',
+  recipient_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  recipient_name TEXT NOT NULL DEFAULT '',
+  recipient_address TEXT NOT NULL DEFAULT '',
+  recipient_json TEXT NOT NULL DEFAULT '{}',
+  channel TEXT NOT NULL DEFAULT 'in_app'
+    CHECK (channel IN ('in_app', 'email', 'sms', 'teams', 'slack', 'push', 'webhook')),
+  provider_id INTEGER REFERENCES notification_providers(id) ON DELETE SET NULL,
+  provider_code TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  content_ref TEXT NOT NULL DEFAULT '',
+  priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  status TEXT NOT NULL DEFAULT 'created'
+    CHECK (status IN ('created', 'queued', 'processing', 'sent', 'delivered', 'failed', 'retrying', 'cancelled', 'dead_lettered')),
+  attempt INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  scheduled_at TEXT NOT NULL DEFAULT (datetime('now')),
+  queued_at TEXT,
+  processing_at TEXT,
+  sent_at TEXT,
+  delivered_at TEXT,
+  last_retry_at TEXT,
+  processed_at TEXT,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  provider_response_json TEXT NOT NULL DEFAULT '{}',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  idempotency_key TEXT,
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  object_name TEXT NOT NULL DEFAULT '',
+  deep_link TEXT NOT NULL DEFAULT '',
+  related_json TEXT NOT NULL DEFAULT '{}',
+  dead_letter INTEGER NOT NULL DEFAULT 0 CHECK (dead_letter IN (0, 1)),
+  cancelled_at TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_requests_idempotency
+  ON delivery_requests(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_delivery_requests_queue
+  ON delivery_requests(status, scheduled_at, priority);
+CREATE INDEX IF NOT EXISTS idx_delivery_requests_tenant
+  ON delivery_requests(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_delivery_requests_notification
+  ON delivery_requests(notification_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_requests_event
+  ON delivery_requests(event_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_requests_correlation
+  ON delivery_requests(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_requests_channel_status
+  ON delivery_requests(channel, status);
+CREATE INDEX IF NOT EXISTS idx_delivery_requests_provider_status
+  ON delivery_requests(provider_code, status);
+CREATE INDEX IF NOT EXISTS idx_delivery_requests_recipient
+  ON delivery_requests(recipient_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_delivery_requests_ref
+  ON delivery_requests(request_ref);
+
+-- One row per delivery attempt, for provider error capture and latency stats.
+CREATE TABLE IF NOT EXISTS delivery_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL REFERENCES delivery_requests(id) ON DELETE CASCADE,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  provider_id INTEGER REFERENCES notification_providers(id) ON DELETE SET NULL,
+  provider_code TEXT NOT NULL DEFAULT '',
+  channel TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'processing',
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  response_json TEXT NOT NULL DEFAULT '{}',
+  duration_ms INTEGER,
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_attempts_request ON delivery_attempts(request_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_attempts_provider ON delivery_attempts(provider_code, created_at);
+CREATE INDEX IF NOT EXISTS idx_delivery_attempts_created ON delivery_attempts(created_at);
+
+-- Provider failure log (feeds "view provider failures" and operational alerts).
+CREATE TABLE IF NOT EXISTS delivery_provider_failures (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_id INTEGER REFERENCES notification_providers(id) ON DELETE SET NULL,
+  provider_code TEXT NOT NULL DEFAULT '',
+  request_id INTEGER REFERENCES delivery_requests(id) ON DELETE SET NULL,
+  tenant_id INTEGER REFERENCES organizations(id),
+  channel TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  permanent INTEGER NOT NULL DEFAULT 0 CHECK (permanent IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_provider_failures_provider
+  ON delivery_provider_failures(provider_code, created_at);
+
+-- Sliding-window rate-limit buckets for bulk and test-send operations.
+CREATE TABLE IF NOT EXISTS delivery_rate_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bucket TEXT NOT NULL,
+  tenant_id INTEGER REFERENCES organizations(id),
+  provider_id INTEGER,
+  action TEXT NOT NULL DEFAULT 'send',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_rate_events_bucket
+  ON delivery_rate_events(bucket, created_at);
+
+-- Reminder schedule. The sender supplies the recipient and schedule; the
+-- delivery service only executes due/overdue/repeat reminders.
+CREATE TABLE IF NOT EXISTS delivery_reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT,
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  source_module TEXT NOT NULL DEFAULT 'platform',
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  object_name TEXT NOT NULL DEFAULT '',
+  deep_link TEXT NOT NULL DEFAULT '',
+  recipient_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  recipient_json TEXT NOT NULL DEFAULT '{}',
+  kind TEXT NOT NULL DEFAULT 'due'
+    CHECK (kind IN ('due', 'overdue', 'repeat')),
+  due_at TEXT NOT NULL,
+  next_run_at TEXT,
+  repeat_minutes INTEGER NOT NULL DEFAULT 0,
+  max_repeats INTEGER NOT NULL DEFAULT 0,
+  repeat_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'fired', 'cancelled', 'completed', 'skipped')),
+  stop_on_complete INTEGER NOT NULL DEFAULT 1 CHECK (stop_on_complete IN (0, 1)),
+  completed_at TEXT,
+  last_run_at TEXT,
+  last_error TEXT NOT NULL DEFAULT '',
+  level INTEGER NOT NULL DEFAULT 0,
+  escalation_json TEXT NOT NULL DEFAULT '{}',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  dedupe_key TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_reminders_dedupe
+  ON delivery_reminders(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_delivery_reminders_due ON delivery_reminders(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_delivery_reminders_tenant ON delivery_reminders(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_delivery_reminders_object ON delivery_reminders(object_type, object_id);
+
+-- Escalation schedule: level-based escalation to a supplied recipient set.
+CREATE TABLE IF NOT EXISTS delivery_escalations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reminder_id INTEGER REFERENCES delivery_reminders(id) ON DELETE SET NULL,
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  source_module TEXT NOT NULL DEFAULT 'platform',
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  object_name TEXT NOT NULL DEFAULT '',
+  deep_link TEXT NOT NULL DEFAULT '',
+  recipient_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  recipient_json TEXT NOT NULL DEFAULT '{}',
+  level INTEGER NOT NULL DEFAULT 1,
+  max_level INTEGER NOT NULL DEFAULT 3,
+  after_minutes INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'fired', 'cancelled', 'completed')),
+  due_at TEXT,
+  fired_at TEXT,
+  last_run_at TEXT,
+  last_error TEXT NOT NULL DEFAULT '',
+  priority TEXT NOT NULL DEFAULT 'high' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  dedupe_key TEXT,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_escalations_dedupe
+  ON delivery_escalations(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_delivery_escalations_due ON delivery_escalations(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_delivery_escalations_object ON delivery_escalations(object_type, object_id);
+
+-- Reminder/escalation execution history.
+CREATE TABLE IF NOT EXISTS delivery_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL DEFAULT 'reminder' CHECK (kind IN ('reminder', 'escalation')),
+  reminder_id INTEGER REFERENCES delivery_reminders(id) ON DELETE SET NULL,
+  escalation_id INTEGER REFERENCES delivery_escalations(id) ON DELETE SET NULL,
+  level INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'fired',
+  request_id INTEGER REFERENCES delivery_requests(id) ON DELETE SET NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  ran_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_runs_reminder ON delivery_runs(reminder_id, ran_at);
+CREATE INDEX IF NOT EXISTS idx_delivery_runs_escalation ON delivery_runs(escalation_id, ran_at);
+CREATE INDEX IF NOT EXISTS idx_delivery_runs_kind ON delivery_runs(kind, ran_at);
+
+-- Operational alerts raised on dead-lettering / provider failures.
+CREATE TABLE IF NOT EXISTS delivery_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL DEFAULT 'delivery_failed',
+  severity TEXT NOT NULL DEFAULT 'warning'
+    CHECK (severity IN ('info', 'warning', 'critical')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  provider_id INTEGER,
+  provider_code TEXT NOT NULL DEFAULT '',
+  request_id INTEGER REFERENCES delivery_requests(id) ON DELETE SET NULL,
+  channel TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'acknowledged')),
+  acknowledged_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  acknowledged_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_alerts_status ON delivery_alerts(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_delivery_alerts_tenant ON delivery_alerts(tenant_id, created_at);

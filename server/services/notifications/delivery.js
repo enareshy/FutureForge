@@ -3,6 +3,7 @@ import { pagination } from "../../validation.js";
 import { homeTenantId } from "../tenants.js";
 import { safeParse } from "./validation.js";
 import { providerForChannel, providerConfig, providerSecrets } from "./providers.js";
+import { ingestNotification } from "../delivery/requests.js";
 
 // Channel provider abstraction and delivery queue. External channels are
 // processed asynchronously by `processQueue`, which is pull-based (invoked by
@@ -120,6 +121,7 @@ export function deliverDirect(db, {
   correlationId = "",
   idempotencyKey = null,
   delaySeconds = 0,
+  deliverVia = "notification",
 } = {}) {
   if (!user || !user.id) return null;
   const resolvedTenant = tenantId ?? user.tenant_id ?? homeTenantId(db, user);
@@ -157,6 +159,35 @@ export function deliverDirect(db, {
       ts,
     ]
   );
+  const nowTs = nowIso();
+  if (deliverVia === "delivery") {
+    // Hand the finished message to the Communication & Delivery Services
+    // engine. The notification module keeps its own history record but does
+    // not process the external channel itself, so the message is never
+    // delivered twice.
+    ingestNotification(
+      db,
+      {
+        id: result.lastInsertRowid,
+        tenant_id: resolvedTenant,
+        recipient_id: user.id,
+        recipient_name: user.display_name || user.username || "",
+        recipient_address: user.email || "",
+        channel,
+        subject,
+        body,
+        priority,
+        correlation_id: correlationId,
+        object_type: objectType,
+        object_id: objectId,
+        object_name: objectName,
+        deep_link: deepLink,
+      },
+      { delaySeconds }
+    );
+    run(db, "UPDATE notifications SET status = 'processing', updated_at = ? WHERE id = ?", [nowTs, result.lastInsertRowid]);
+    return result.lastInsertRowid;
+  }
   enqueue(db, { id: result.lastInsertRowid, channel, tenant_id: resolvedTenant }, { delaySeconds });
   return result.lastInsertRowid;
 }
