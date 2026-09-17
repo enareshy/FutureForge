@@ -66,6 +66,27 @@ export async function apiDownload(path, { method = "GET", body } = {}) {
   };
 }
 
+export async function apiUpload(path, { method = "POST", body, contentType = "application/octet-stream" } = {}) {
+  const headers = { Accept: "application/json", "Content-Type": contentType };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(path, { method, headers, body });
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    const err = new Error(data?.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    err.details = data?.details;
+    throw err;
+  }
+  return data;
+}
+
 export const iam = {
   login: (username, password, provider) =>
     api("/api/authentication/login", { method: "POST", body: { username, password, provider } }),
@@ -537,6 +558,102 @@ export const jobExecution = {
   executeJob: (id) => api(`/api/job-execution/jobs/${id}/execute`, { method: "POST", body: {} }),
   maintenance: () => api("/api/job-execution/maintenance", { method: "POST", body: {} }),
   audit: (qs) => api(`/api/job-execution/audit${qs || ""}`),
+};
+
+export const files = {
+  meta: () => api("/api/files/meta"),
+  metrics: (qs) => api(`/api/files/metrics${qs || ""}`),
+  storageMetrics: (qs) => api(`/api/files/metrics/storage${qs || ""}`),
+  processingMetrics: (qs) => api(`/api/files/metrics/processing${qs || ""}`),
+  facets: (qs) => api(`/api/files/facets${qs || ""}`),
+  events: (qs) => api(`/api/files/events${qs || ""}`),
+  processEvent: (body) => api("/api/files/events", { method: "POST", body }),
+
+  list: (qs) => api(`/api/files${qs || ""}`),
+  get: (ref) => api(`/api/files/${encodeURIComponent(ref)}`),
+  update: (ref, body) => api(`/api/files/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  remove: (ref, body) => api(`/api/files/${encodeURIComponent(ref)}`, { method: "DELETE", body }),
+  restore: (ref) => api(`/api/files/${encodeURIComponent(ref)}/restore`, { method: "POST", body: {} }),
+  move: (ref, folderId) =>
+    api(`/api/files/${encodeURIComponent(ref)}/move`, { method: "POST", body: { folder_id: folderId } }),
+  fileEvents: (ref, qs) => api(`/api/files/${encodeURIComponent(ref)}/events${qs || ""}`),
+  processing: (ref) => api(`/api/files/${encodeURIComponent(ref)}/processing`),
+  requeueProcessing: (ref, type) =>
+    api(`/api/files/${encodeURIComponent(ref)}/processing/requeue`, { method: "POST", body: { type } }),
+  downloadInfo: (ref) => api(`/api/files/${encodeURIComponent(ref)}/download`),
+  versionDownloadInfo: (ref, version) =>
+    api(`/api/files/${encodeURIComponent(ref)}/versions/${encodeURIComponent(version)}/download`),
+
+  versions: (ref, qs) => api(`/api/files/${encodeURIComponent(ref)}/versions${qs || ""}`),
+  createVersion: (ref, body) =>
+    api(`/api/files/${encodeURIComponent(ref)}/versions`, { method: "POST", body: body || {} }),
+  version: (ref, version) =>
+    api(`/api/files/${encodeURIComponent(ref)}/versions/${encodeURIComponent(version)}`),
+  restoreVersion: (ref, version, body) =>
+    api(`/api/files/${encodeURIComponent(ref)}/versions/${encodeURIComponent(version)}/restore`, {
+      method: "POST",
+      body: body || {},
+    }),
+
+  uploads: (qs) => api(`/api/files/uploads${qs || ""}`),
+  upload: (id) => api(`/api/files/uploads/${encodeURIComponent(id)}`),
+  initiateUpload: (body) => api("/api/files/uploads", { method: "POST", body }),
+  uploadChunk: (id, index, blob) =>
+    apiUpload(`/api/files/uploads/${encodeURIComponent(id)}/chunks/${index}`, { method: "PUT", body: blob }),
+  completeUploadBuffer: (id, buffer, contentType) =>
+    apiUpload(`/api/files/uploads/${encodeURIComponent(id)}/complete`, {
+      method: "POST",
+      body: buffer,
+      contentType,
+    }),
+  completeUpload: (id, body) =>
+    api(`/api/files/uploads/${encodeURIComponent(id)}/complete`, { method: "POST", body: body || {} }),
+  abortUpload: (id, body) =>
+    api(`/api/files/uploads/${encodeURIComponent(id)}/abort`, { method: "POST", body: body || {} }),
+
+  permissions: (qs) => api(`/api/files/permissions${qs || ""}`),
+  grantPermission: (body) => api("/api/files/permissions", { method: "POST", body }),
+  revokePermission: (id) => api(`/api/files/permissions/${id}`, { method: "DELETE" }),
+  filePermissions: (ref) => api(`/api/files/${encodeURIComponent(ref)}/permissions`),
+
+  folders: (qs) => api(`/api/folders${qs || ""}`),
+  folderTree: (qs) => api(`/api/folders/tree${qs || ""}`),
+  folder: (id) => api(`/api/folders/${id}`),
+  createFolder: (body) => api("/api/folders", { method: "POST", body }),
+  updateFolder: (id, body) => api(`/api/folders/${id}`, { method: "PATCH", body }),
+  deleteFolder: (id, force) => api(`/api/folders/${id}${force ? "?force=true" : ""}`, { method: "DELETE" }),
+  restoreFolder: (id) => api(`/api/folders/${id}/restore`, { method: "POST", body: {} }),
+  folderBreadcrumb: (id) => api(`/api/folders/${id}/breadcrumb`),
+  folderFiles: (id, qs) => api(`/api/folders/${id}/files${qs || ""}`),
+  moveFilesToFolder: (id, fileIds) => api(`/api/folders/${id}/files`, { method: "POST", body: { file_ids: fileIds } }),
+  removeFileFromFolder: (id, fileId) => api(`/api/folders/${id}/files/${fileId}`, { method: "DELETE" }),
+
+  collections: (qs) => api(`/api/file-collections${qs || ""}`),
+  collection: (id) => api(`/api/file-collections/${id}`),
+  createCollection: (body) => api("/api/file-collections", { method: "POST", body }),
+  updateCollection: (id, body) => api(`/api/file-collections/${id}`, { method: "PATCH", body }),
+  deleteCollection: (id) => api(`/api/file-collections/${id}`, { method: "DELETE" }),
+  addCollectionMembers: (id, fileIds) =>
+    api(`/api/file-collections/${id}/members`, { method: "POST", body: { file_ids: fileIds } }),
+  removeCollectionMember: (id, fileId) => api(`/api/file-collections/${id}/members/${fileId}`, { method: "DELETE" }),
+  fileCollections: (ref) => api(`/api/files/${encodeURIComponent(ref)}/collections`),
+
+  associations: (qs) => api(`/api/file-associations${qs || ""}`),
+  objectAssociations: (qs) => api(`/api/file-associations${qs || ""}`),
+  updateAssociation: (id, body) => api(`/api/file-associations/${id}`, { method: "PATCH", body }),
+  removeAssociation: (id) => api(`/api/file-associations/${id}`, { method: "DELETE" }),
+  fileAssociations: (ref) => api(`/api/files/${encodeURIComponent(ref)}/associations`),
+  createAssociation: (ref, body) =>
+    api(`/api/files/${encodeURIComponent(ref)}/associations`, { method: "POST", body }),
+
+  locks: (qs) => api(`/api/file-locks${qs || ""}`),
+  lock: (ref) => api(`/api/files/${encodeURIComponent(ref)}/lock`),
+  checkout: (ref, body) => api(`/api/files/${encodeURIComponent(ref)}/checkout`, { method: "POST", body: body || {} }),
+  checkin: (ref, body) => api(`/api/files/${encodeURIComponent(ref)}/checkin`, { method: "POST", body: body || {} }),
+  releaseLock: (ref, body) =>
+    api(`/api/files/${encodeURIComponent(ref)}/lock/release`, { method: "POST", body: body || {} }),
+  forceReleaseLock: (ref, body) =>
+    api(`/api/files/${encodeURIComponent(ref)}/lock/force-release`, { method: "POST", body: body || {} }),
 };
 
 export const lifecycle = {  statuses: (qs) => api(`/api/statuses${qs || ""}`),

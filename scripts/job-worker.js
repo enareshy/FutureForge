@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openDatabase, migrate } from "../server/db.js";
 import { ensureDefaultQueues, createWorker, registerDemoHandlers } from "../server/services/job-execution.js";
+import { registerFileProcessingHandlers, expireUploads, releaseExpiredLocks } from "../server/services/files.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -71,6 +72,26 @@ if (demo) {
   log("warn", "Demo handlers registered; do not use in production");
 }
 
+// Document & File Management processing handlers (virus scan / preview). These
+// are production handlers and are always registered.
+registerFileProcessingHandlers();
+
+// Periodic file housekeeping: expire abandoned upload sessions and auto-release
+// stale check-out locks so operators never fight a lock nobody is using.
+const fileMaintenanceMs = positive(process.env.FILE_MAINTENANCE_MS, 60000);
+const fileMaintenance = setInterval(async () => {
+  try {
+    const locks = releaseExpiredLocks(db);
+    const uploads = await expireUploads(db);
+    if (locks.released_count || uploads.expired_count) {
+      log("info", "File housekeeping", { expired_locks: locks.released_count, expired_uploads: uploads.expired_count });
+    }
+  } catch (error) {
+    log("warn", "File housekeeping failed", { error: error.message });
+  }
+}, fileMaintenanceMs);
+fileMaintenance.unref?.();
+
 const worker = createWorker(db, {
   id: args.id || undefined,
   name: args.name || undefined,
@@ -87,6 +108,7 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearInterval(fileMaintenance);
   log("info", "Worker draining", { signal, drain_ms: drainMs, active_jobs: worker.active.size });
   try {
     await worker.stop({ timeoutMs: drainMs });

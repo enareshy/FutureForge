@@ -149,6 +149,9 @@ export function migrate(db) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_heartbeat ON jobs(status, heartbeat_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_schedule ON jobs(schedule_id, created_at)");
   db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("017_files");
+  db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();
 }

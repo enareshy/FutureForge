@@ -104,6 +104,28 @@ const DEFAULT_TYPES = [
     max_retries: 3,
     default_priority: "normal",
   },
+  {
+    code: "FILE_VIRUS_SCAN",
+    name: "File virus scan",
+    description: "Scan a stored file version for malware before it is released.",
+    source_module: "files",
+    handler: "files.virusScan",
+    queues: ["default"],
+    timeout_seconds: 900,
+    max_retries: 2,
+    default_priority: "high",
+  },
+  {
+    code: "FILE_PREVIEW_GENERATION",
+    name: "File preview generation",
+    description: "Generate preview and rendition derivatives for a stored file version.",
+    source_module: "files",
+    handler: "files.previewGeneration",
+    queues: ["default"],
+    timeout_seconds: 900,
+    max_retries: 2,
+    default_priority: "normal",
+  },
 ];
 
 export function publicJobType(row) {

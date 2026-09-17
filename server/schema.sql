@@ -2382,3 +2382,349 @@ CREATE TABLE IF NOT EXISTS job_engine_audit (
 
 CREATE INDEX IF NOT EXISTS idx_job_engine_audit_entity ON job_engine_audit(entity_type, entity_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_job_engine_audit_tenant ON job_engine_audit(tenant_id, created_at);
+
+-- ── Document & File Management module ────────────────────────────────────────
+-- Business-facing file metadata, versions, check-in/out, folders, collections,
+-- associations and access control. Physical bytes, virus scanning, preview and
+-- rendition generation are owned by the separate File Storage & Processing
+-- Services module; this module only stores opaque storage references.
+
+CREATE TABLE IF NOT EXISTS folders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  parent_id INTEGER REFERENCES folders(id),
+  path TEXT NOT NULL DEFAULT '/',
+  owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  plant_id INTEGER,
+  site_id INTEGER,
+  department_id INTEGER,
+  security_classification TEXT NOT NULL DEFAULT 'internal'
+    CHECK (security_classification IN ('public', 'internal', 'confidential', 'restricted')),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  deleted_at TEXT,
+  deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_code
+  ON folders(tenant_id, code) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_sibling_name
+  ON folders(tenant_id, COALESCE(parent_id, 0), name) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
+CREATE INDEX IF NOT EXISTS idx_folders_tenant ON folders(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(tenant_id, path);
+
+CREATE TABLE IF NOT EXISTS files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_ref TEXT NOT NULL UNIQUE,
+  uuid TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  plant_id INTEGER,
+  site_id INTEGER,
+  department_id INTEGER,
+  folder_id INTEGER REFERENCES folders(id),
+  name TEXT NOT NULL,
+  original_name TEXT NOT NULL DEFAULT '',
+  extension TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  file_category TEXT NOT NULL DEFAULT 'document'
+    CHECK (file_category IN ('document', 'drawing', 'image', 'pdf', 'spreadsheet', 'presentation',
+      'archive', 'video', 'audio', 'cad', 'text', 'other')),
+  description TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  checksum_algorithm TEXT NOT NULL DEFAULT 'sha256',
+  current_version_id INTEGER,
+  version_count INTEGER NOT NULL DEFAULT 0,
+  owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'available'
+    CHECK (status IN ('uploading', 'upload_failed', 'pending_scan', 'scan_in_progress', 'available',
+      'quarantined', 'scan_failed', 'checked_out', 'locked', 'processing', 'deleted', 'archived')),
+  security_classification TEXT NOT NULL DEFAULT 'internal'
+    CHECK (security_classification IN ('public', 'internal', 'confidential', 'restricted')),
+  virus_scan_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (virus_scan_status IN ('pending', 'in_progress', 'clean', 'infected', 'failed', 'skipped')),
+  preview_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (preview_status IN ('pending', 'processing', 'ready', 'failed', 'unsupported')),
+  rendition_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (rendition_status IN ('pending', 'processing', 'ready', 'failed')),
+  custom_metadata_json TEXT NOT NULL DEFAULT '{}',
+  storage_provider TEXT NOT NULL DEFAULT '',
+  storage_key TEXT NOT NULL DEFAULT '',
+  storage_bucket TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  deleted_at TEXT,
+  deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_tenant ON files(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id, deleted_at);
+CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
+CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner_id);
+CREATE INDEX IF NOT EXISTS idx_files_name ON files(name);
+CREATE INDEX IF NOT EXISTS idx_files_checksum ON files(checksum);
+CREATE INDEX IF NOT EXISTS idx_files_type ON files(mime_type, extension);
+CREATE INDEX IF NOT EXISTS idx_files_category ON files(file_category);
+CREATE INDEX IF NOT EXISTS idx_files_deleted ON files(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_files_org ON files(organization_id, deleted_at);
+
+-- Immutable version chain. Historical versions are never overwritten; restoring
+-- an old version creates a brand-new version row with a new version number.
+CREATE TABLE IF NOT EXISTS file_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  version_number INTEGER NOT NULL,
+  version_label TEXT NOT NULL DEFAULT '',
+  major INTEGER NOT NULL DEFAULT 1,
+  minor INTEGER NOT NULL DEFAULT 0,
+  is_current INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
+  previous_version_id INTEGER REFERENCES file_versions(id),
+  name TEXT NOT NULL DEFAULT '',
+  original_name TEXT NOT NULL DEFAULT '',
+  extension TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  checksum_algorithm TEXT NOT NULL DEFAULT 'sha256',
+  storage_provider TEXT NOT NULL DEFAULT '',
+  storage_key TEXT NOT NULL DEFAULT '',
+  storage_bucket TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'available'
+    CHECK (status IN ('uploading', 'processing', 'available', 'quarantined', 'failed', 'deleted')),
+  virus_scan_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (virus_scan_status IN ('pending', 'in_progress', 'clean', 'infected', 'failed', 'skipped')),
+  checkin_comment TEXT NOT NULL DEFAULT '',
+  restored_from_version_id INTEGER REFERENCES file_versions(id),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  deleted_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (file_id, version_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_versions_file ON file_versions(file_id, version_number);
+CREATE INDEX IF NOT EXISTS idx_file_versions_current ON file_versions(file_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_file_versions_checksum ON file_versions(checksum);
+
+-- Exclusive/shared checkout locks. The partial unique index is the durable
+-- guarantee that two users can never hold an active lock on the same file.
+CREATE TABLE IF NOT EXISTS file_locks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  lock_type TEXT NOT NULL DEFAULT 'exclusive' CHECK (lock_type IN ('exclusive', 'shared')),
+  lock_token TEXT NOT NULL UNIQUE,
+  locked_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  tenant_id INTEGER REFERENCES organizations(id),
+  reason TEXT NOT NULL DEFAULT '',
+  expires_at TEXT,
+  last_activity_at TEXT,
+  released_at TEXT,
+  released_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  force_released INTEGER NOT NULL DEFAULT 0 CHECK (force_released IN (0, 1)),
+  release_reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_file_locks_active
+  ON file_locks(file_id) WHERE released_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_file_locks_file ON file_locks(file_id, released_at);
+CREATE INDEX IF NOT EXISTS idx_file_locks_owner ON file_locks(locked_by, released_at);
+CREATE INDEX IF NOT EXISTS idx_file_locks_expiry ON file_locks(expires_at, released_at);
+
+-- Upload sessions (single, multipart/chunked and resumable). The upload id is
+-- the client-facing handle; storage keys stay server-side and opaque.
+CREATE TABLE IF NOT EXISTS file_uploads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  upload_id TEXT NOT NULL UNIQUE,
+  file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  plant_id INTEGER,
+  site_id INTEGER,
+  department_id INTEGER,
+  folder_id INTEGER REFERENCES folders(id),
+  name TEXT NOT NULL DEFAULT '',
+  original_name TEXT NOT NULL DEFAULT '',
+  extension TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  file_category TEXT NOT NULL DEFAULT 'document',
+  description TEXT NOT NULL DEFAULT '',
+  security_classification TEXT NOT NULL DEFAULT 'internal',
+  custom_metadata_json TEXT NOT NULL DEFAULT '{}',
+  declared_size INTEGER NOT NULL DEFAULT 0,
+  declared_checksum TEXT NOT NULL DEFAULT '',
+  upload_mode TEXT NOT NULL DEFAULT 'single' CHECK (upload_mode IN ('single', 'multipart', 'external')),
+  chunk_size INTEGER NOT NULL DEFAULT 0,
+  total_chunks INTEGER NOT NULL DEFAULT 0,
+  received_chunks INTEGER NOT NULL DEFAULT 0,
+  received_bytes INTEGER NOT NULL DEFAULT 0,
+  staging_key TEXT NOT NULL DEFAULT '',
+  storage_provider TEXT NOT NULL DEFAULT '',
+  storage_key TEXT NOT NULL DEFAULT '',
+  storage_bucket TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'initiated'
+    CHECK (status IN ('initiated', 'in_progress', 'completing', 'completed', 'aborted', 'expired', 'failed')),
+  idempotency_key TEXT,
+  duplicate_of_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+  error_message TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  expires_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_file_uploads_idempotency
+  ON file_uploads(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_file_uploads_tenant ON file_uploads(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_file_uploads_status ON file_uploads(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_file_uploads_file ON file_uploads(file_id);
+
+-- Generic file ↔ business-object associations (Product Revision, Change Notice,
+-- Manufacturing Operation, ...). Business objects live in the Object &
+-- Relationship Framework; this table records the attachment semantics.
+CREATE TABLE IF NOT EXISTS file_associations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  business_object_type TEXT NOT NULL DEFAULT '',
+  business_object_id TEXT NOT NULL DEFAULT '',
+  business_object_name TEXT NOT NULL DEFAULT '',
+  relationship_type TEXT NOT NULL DEFAULT 'attachment',
+  association_role TEXT NOT NULL DEFAULT '',
+  is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
+  display_order INTEGER NOT NULL DEFAULT 0,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  deleted_at TEXT,
+  deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_file_associations_unique
+  ON file_associations(file_id, business_object_type, business_object_id, relationship_type)
+  WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_file_associations_file ON file_associations(file_id, deleted_at);
+CREATE INDEX IF NOT EXISTS idx_file_associations_object
+  ON file_associations(business_object_type, business_object_id, deleted_at);
+CREATE INDEX IF NOT EXISTS idx_file_associations_tenant ON file_associations(tenant_id, created_at);
+
+-- Logical groupings / saved file sets. Membership never duplicates bytes.
+CREATE TABLE IF NOT EXISTS file_collections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  deleted_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_file_collections_code
+  ON file_collections(tenant_id, code) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_file_collections_tenant ON file_collections(tenant_id, deleted_at);
+
+CREATE TABLE IF NOT EXISTS file_collection_members (
+  collection_id INTEGER NOT NULL REFERENCES file_collections(id) ON DELETE CASCADE,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  display_order INTEGER NOT NULL DEFAULT 0,
+  added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (collection_id, file_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_collection_members_file ON file_collection_members(file_id);
+
+-- Resource-level ACL for files, folders and collections. Explicit deny always
+-- wins over allow; tenant/org/role/group/user/file principals are supported.
+CREATE TABLE IF NOT EXISTS file_permissions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  resource_type TEXT NOT NULL CHECK (resource_type IN ('file', 'folder', 'collection')),
+  resource_id INTEGER NOT NULL,
+  principal_type TEXT NOT NULL
+    CHECK (principal_type IN ('user', 'group', 'role', 'tenant', 'organization')),
+  principal_id INTEGER,
+  permission TEXT NOT NULL,
+  effect TEXT NOT NULL DEFAULT 'allow' CHECK (effect IN ('allow', 'deny')),
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  granted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  expires_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_file_permissions_unique
+  ON file_permissions(resource_type, resource_id, principal_type, COALESCE(principal_id, 0), permission);
+CREATE INDEX IF NOT EXISTS idx_file_permissions_resource ON file_permissions(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS idx_file_permissions_principal
+  ON file_permissions(principal_type, principal_id, tenant_id);
+
+-- Storage/processing status (virus scan, preview, rendition, checksum). Rows are
+-- written by the File Storage & Processing Services module via this module's
+-- integration hooks so UI and API always reflect real processing state.
+CREATE TABLE IF NOT EXISTS file_processing (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  version_id INTEGER REFERENCES file_versions(id) ON DELETE CASCADE,
+  processing_type TEXT NOT NULL
+    CHECK (processing_type IN ('virus_scan', 'preview', 'rendition', 'checksum', 'metadata_extraction')),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'skipped')),
+  provider TEXT NOT NULL DEFAULT '',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  result_json TEXT NOT NULL DEFAULT '{}',
+  error_message TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  completed_at TEXT,
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (version_id, processing_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_processing_file ON file_processing(file_id, processing_type);
+CREATE INDEX IF NOT EXISTS idx_file_processing_status ON file_processing(status);
+
+-- Module event outbox. File domain events are appended here and re-published
+-- through the platform Event & Messaging / Notification framework.
+CREATE TABLE IF NOT EXISTS file_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+  version_id INTEGER REFERENCES file_versions(id) ON DELETE SET NULL,
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  correlation_id TEXT NOT NULL DEFAULT '',
+  idempotency_key TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'recorded' CHECK (status IN ('recorded', 'published', 'failed')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_file_events_idempotency
+  ON file_events(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_file_events_type ON file_events(event_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_file_events_file ON file_events(file_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_file_events_tenant ON file_events(tenant_id, created_at);

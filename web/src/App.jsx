@@ -41,6 +41,9 @@ import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import AuthenticationPage from "./pages/AuthenticationPage.jsx";
 import SessionsPage from "./pages/SessionsPage.jsx";
 import MfaPage from "./pages/MfaPage.jsx";
+import FilesPage from "./pages/FilesPage.jsx";
+import FileDetailPage from "./pages/FileDetailPage.jsx";
+import FileAdminPage from "./pages/FileAdminPage.jsx";
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -194,6 +197,14 @@ const NAV_SECTIONS = [
     items: [
       { to: "/objects", label: "Business objects" },
       { to: "/workflows", label: "My tasks & approvals", end: true },
+    ],
+  },
+  {
+    key: "documents",
+    label: "Documents",
+    items: [
+      { to: "/files", label: "File browser", end: true },
+      { to: "/files/admin", label: "File administration", platformOrAdmin: true },
     ],
   },
   {
@@ -406,6 +417,9 @@ export default function App() {
         <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="/notifications/admin" element={<NotificationAdminPage />} />
         <Route path="/delivery/admin" element={<DeliveryAdminPage />} />
+        <Route path="/files" element={<FilesPage />} />
+        <Route path="/files/admin" element={<FileAdminPage />} />
+        <Route path="/files/:ref" element={<FileDetailPage />} />
         <Route path="/jobs" element={<JobsDashboardPage />} />
         <Route path="/jobs/list" element={<JobsPage />} />
         <Route path="/jobs/execution" element={<JobExecutionPage />} />

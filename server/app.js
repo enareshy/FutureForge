@@ -28,6 +28,8 @@ import * as metadata from "./services/metadata.js";
 import * as objects from "./services/objects.js";
 import * as lifecycle from "./services/lifecycle.js";
 import * as workflow from "./services/workflow.js";
+import * as files from "./services/files.js";
+import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
 import { effectiveAccess } from "./services/access.js";
@@ -5148,6 +5150,740 @@ export function createApp(db) {
     can("iam.jobs.execution", "read"),
     wrap((req, res) => {
       res.json({ items: jobExecution.listEngineAudit(db, { tenantId: execScope(req), limit: req.query.limit }) });
+    })
+  );
+
+  // ── Document & File Management ────────────────────────────────────────────
+  // Business-facing file management: browser/search, uploads, immutable
+  // versions, check-out/check-in locks, folders, associations, collections,
+  // access control, processing status and audit. Physical bytes and processing
+  // are handled by the File Storage & Processing Services module; clients only
+  // ever receive opaque references and signed short-lived download URLs.
+  // Every route is tenant-scoped; platform admins may request ?all=true.
+  const fileTenant = (req) => req.tenantId || -1;
+  const filePlatformAll = (req) =>
+    tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true";
+  const RAW_UPLOAD_LIMIT = process.env.FILE_HTTP_UPLOAD_LIMIT || "64mb";
+  const rawBody = express.raw({ type: () => true, limit: RAW_UPLOAD_LIMIT });
+
+  // Converts a download descriptor into a signed, short-lived URL. The physical
+  // storage key is embedded in the HMAC token only and never returned to clients.
+  function fileDownloadResponse(result) {
+    const d = result.descriptor || {};
+    const token = signDownload({
+      key: d.key,
+      bucket: d.bucket,
+      filename: d.filename,
+      mimeType: d.mimeType,
+      disposition: d.disposition,
+      tenantId: d.tenantId,
+      versionId: d.versionId,
+    });
+    return {
+      file: result.file,
+      version: result.version,
+      download_url: signedDownloadPath(token),
+      filename: d.filename,
+      mime_type: d.mimeType,
+      size_bytes: d.size,
+      expires_in: storageConfig().signedUrlTtlSeconds,
+    };
+  }
+
+  app.get(
+    "/api/files/meta",
+    auth,
+    can("iam.files.browser", "read"),
+    wrap((_req, res) => {
+      res.json({
+        ...files.vocabulary,
+        sortable: Object.keys(files.SORTABLE_FILES),
+        downloadable_statuses: files.DOWNLOADABLE_STATUSES,
+        max_file_size: storageConfig().maxFileSize,
+      });
+    })
+  );
+
+  app.get(
+    "/api/files/metrics",
+    auth,
+    can("iam.files.browser", "read"),
+    wrap((req, res) => {
+      res.json(files.fileMetrics(db, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/files/metrics/storage",
+    auth,
+    can("iam.files.browser", "read"),
+    wrap((req, res) => {
+      res.json(files.storageBreakdown(db, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/files/metrics/processing",
+    auth,
+    can("iam.files.browser", "read"),
+    wrap((req, res) => {
+      res.json(files.processingSummary(db, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/files/events",
+    auth,
+    can("iam.files.browser", "read"),
+    wrap((req, res) => {
+      res.json(
+        files.listFileEvents(db, {
+          fileId: req.query.fileId,
+          eventType: req.query.eventType,
+          tenantId: filePlatformAll(req) ? null : fileTenant(req),
+          limit: req.query.limit,
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/files/facets",
+    auth,
+    can("iam.files.browser", "read"),
+    wrap((req, res) => {
+      res.json(files.fileFacets(db, req.query, req.actor, fileTenant(req)));
+    })
+  );
+
+  // File ACL administration.
+  app.get(
+    "/api/files/permissions",
+    auth,
+    can("iam.files.permissions", "read"),
+    wrap((req, res) => {
+      res.json(files.listPermissions(db, req.query, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/permissions",
+    auth,
+    can("iam.files.permissions", "create"),
+    wrap((req, res) => {
+      res.status(201).json(files.grantPermission(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/files/permissions/:id",
+    auth,
+    can("iam.files.permissions", "delete"),
+    wrap((req, res) => {
+      res.json(files.revokePermission(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  // Associations by business object (the file-side view lives under /api/files/:ref).
+  app.get(
+    "/api/file-associations",
+    auth,
+    can("iam.files.associations", "read"),
+    wrap((req, res) => {
+      if (req.query.businessObjectType || req.query.business_object_type) {
+        return res.json(
+          files.listObjectAssociations(
+            db,
+            {
+              businessObjectType: req.query.businessObjectType || req.query.business_object_type,
+              businessObjectId: req.query.businessObjectId || req.query.business_object_id,
+              relationshipType: req.query.relationshipType || req.query.relationship_type,
+            },
+            req.actor,
+            fileTenant(req)
+          )
+        );
+      }
+      res.json(files.listAssociations(db, req.query, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.patch(
+    "/api/file-associations/:id",
+    auth,
+    can("iam.files.associations", "update"),
+    wrap((req, res) => {
+      res.json(files.updateAssociation(db, req.params.id, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/file-associations/:id",
+    auth,
+    can("iam.files.associations", "delete"),
+    wrap((req, res) => {
+      res.json(files.removeAssociation(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  // ── Uploads (single, multipart/chunked, resumable) ──
+  app.get(
+    "/api/files/uploads",
+    auth,
+    can("iam.files.uploads", "read"),
+    wrap((req, res) => {
+      res.json(files.listUploads(db, req.query, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/uploads",
+    auth,
+    can("iam.files.uploads", "create"),
+    wrap((req, res) => {
+      res.status(201).json(files.initiateUpload(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/files/uploads/:uploadId",
+    auth,
+    can("iam.files.uploads", "read"),
+    wrap((req, res) => {
+      res.json(files.getUpload(db, req.params.uploadId, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.put(
+    "/api/files/uploads/:uploadId/chunks/:index",
+    auth,
+    can("iam.files.uploads", "create"),
+    rawBody,
+    wrap(async (req, res) => {
+      const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body?.data || "", "base64");
+      res.json(await files.uploadChunk(db, req.params.uploadId, req.params.index, buffer, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/uploads/:uploadId/complete",
+    auth,
+    can("iam.files.uploads", "create"),
+    rawBody,
+    wrap(async (req, res) => {
+      const payload = Buffer.isBuffer(req.body) ? { buffer: req.body } : (req.body || {});
+      res.json(await files.completeUpload(db, req.params.uploadId, payload, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/uploads/:uploadId/abort",
+    auth,
+    can("iam.files.uploads", "create"),
+    wrap((req, res) => {
+      res.json(files.abortUpload(db, req.params.uploadId, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  // Convenience: initiate + complete a single-shot upload in one request.
+  app.post(
+    "/api/files/upload",
+    auth,
+    can("iam.files.uploads", "create"),
+    rawBody,
+    wrap(async (req, res) => {
+      const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body?.data || "", "base64");
+      const name = req.query.name || req.headers["x-file-name"] || req.body?.name || "upload.bin";
+      const initiated = files.initiateUpload(
+        db,
+        {
+          name,
+          size: buffer.length,
+          mime_type: req.query.mime_type || req.headers["content-type"],
+          folder_id: req.query.folderId || req.query.folder_id,
+          security_classification: req.query.security_classification,
+          description: req.query.description,
+        },
+        req.actor,
+        fileTenant(req),
+        clientIp(req)
+      );
+      res.status(201).json(
+        await files.completeUpload(
+          db,
+          initiated.upload.upload_id,
+          { buffer },
+          req.actor,
+          fileTenant(req),
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  // Signed download endpoint: verifies the short-lived HMAC token, then streams
+  // the stored object. The physical storage key never leaves the backend.
+  app.get(
+    "/api/files/download/:token",
+    auth,
+    wrap(async (req, res) => {
+      const payload = verifyDownloadToken(req.params.token);
+      const provider = getStorageProvider();
+      const info = await provider.stat(payload.k);
+      if (!info) throw new HttpError(404, "Stored object not found");
+      const filename = files.sanitizeFilename(payload.f || "download");
+      res.setHeader("Content-Type", payload.m || "application/octet-stream");
+      res.setHeader("Content-Length", String(info.size ?? 0));
+      res.setHeader(
+        "Content-Disposition",
+        `${payload.d === "inline" ? "inline" : "attachment"}; filename="${filename}"`
+      );
+      provider.getStream(payload.k).pipe(res);
+    })
+  );
+
+  // ── Folders ──
+  app.get(
+    "/api/folders",
+    auth,
+    can("iam.files.folders", "read"),
+    wrap((req, res) => {
+      res.json(files.listFolders(db, req.query, fileTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/folders/tree",
+    auth,
+    can("iam.files.folders", "read"),
+    wrap((req, res) => {
+      res.json(files.folderTree(db, fileTenant(req), { rootId: req.query.rootId }));
+    })
+  );
+
+  app.post(
+    "/api/folders",
+    auth,
+    can("iam.files.folders", "create"),
+    wrap((req, res) => {
+      res.status(201).json(files.createFolder(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/folders/:id/breadcrumb",
+    auth,
+    can("iam.files.folders", "read"),
+    wrap((req, res) => {
+      res.json(files.folderBreadcrumb(db, req.params.id, fileTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/folders/:id/files",
+    auth,
+    can("iam.files.folders", "read"),
+    wrap((req, res) => {
+      res.json(files.listFolderFiles(db, req.params.id, req.query, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/folders/:id/files",
+    auth,
+    can("iam.files.folders", "update"),
+    wrap((req, res) => {
+      res.json(
+        files.moveFilesToFolder(
+          db,
+          req.params.id,
+          (req.body || {}).file_ids || (req.body || {}).fileIds || [],
+          req.actor,
+          fileTenant(req),
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  app.delete(
+    "/api/folders/:id/files/:fileId",
+    auth,
+    can("iam.files.folders", "update"),
+    wrap((req, res) => {
+      res.json(files.removeFileFromFolder(db, req.params.id, req.params.fileId, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/folders/:id",
+    auth,
+    can("iam.files.folders", "read"),
+    wrap((req, res) => {
+      res.json(files.getFolder(db, req.params.id, fileTenant(req)));
+    })
+  );
+
+  const updateFolderHandler = (req, res) => {
+    res.json(files.updateFolder(db, req.params.id, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+  };
+  app.put("/api/folders/:id", auth, can("iam.files.folders", "update"), wrap(updateFolderHandler));
+  app.patch("/api/folders/:id", auth, can("iam.files.folders", "update"), wrap(updateFolderHandler));
+
+  app.delete(
+    "/api/folders/:id",
+    auth,
+    can("iam.files.folders", "delete"),
+    wrap((req, res) => {
+      res.json(
+        files.deleteFolder(
+          db,
+          req.params.id,
+          { force: req.query.force === "true" || (req.body || {}).force === true },
+          req.actor,
+          fileTenant(req),
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  app.post(
+    "/api/folders/:id/restore",
+    auth,
+    can("iam.files.folders", "update"),
+    wrap((req, res) => {
+      res.json(files.restoreFolder(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  // ── Collections ──
+  app.get(
+    "/api/file-collections",
+    auth,
+    can("iam.files.folders", "read"),
+    wrap((req, res) => {
+      res.json(files.listCollections(db, req.query, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/file-collections",
+    auth,
+    can("iam.files.folders", "create"),
+    wrap((req, res) => {
+      res.status(201).json(files.createCollection(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/file-collections/:id",
+    auth,
+    can("iam.files.folders", "read"),
+    wrap((req, res) => {
+      res.json(files.getCollection(db, req.params.id, req.actor, fileTenant(req)));
+    })
+  );
+
+  const updateCollectionHandler = (req, res) => {
+    res.json(files.updateCollection(db, req.params.id, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+  };
+  app.put("/api/file-collections/:id", auth, can("iam.files.folders", "update"), wrap(updateCollectionHandler));
+  app.patch("/api/file-collections/:id", auth, can("iam.files.folders", "update"), wrap(updateCollectionHandler));
+
+  app.delete(
+    "/api/file-collections/:id",
+    auth,
+    can("iam.files.folders", "delete"),
+    wrap((req, res) => {
+      res.json(files.deleteCollection(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/file-collections/:id/members",
+    auth,
+    can("iam.files.associations", "create"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      res.json(
+        files.addCollectionMembers(
+          db,
+          req.params.id,
+          body.file_ids || body.fileIds || [],
+          req.actor,
+          fileTenant(req),
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  app.delete(
+    "/api/file-collections/:id/members/:fileId",
+    auth,
+    can("iam.files.associations", "delete"),
+    wrap((req, res) => {
+      res.json(files.removeCollectionMember(db, req.params.id, req.params.fileId, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  // ── Files (definitions after the more specific /api/files/* routes above) ──
+  app.get(
+    "/api/files",
+    auth,
+    can("iam.files.browser", "read"),
+    wrap((req, res) => {
+      res.json(
+        files.listFiles(db, req.query, req.actor, fileTenant(req), { platformAll: filePlatformAll(req) })
+      );
+    })
+  );
+
+  app.get(
+    "/api/files/:reference",
+    auth,
+    can("iam.files.details", "read"),
+    wrap((req, res) => {
+      res.json(files.getFile(db, req.params.reference, req.actor, fileTenant(req)));
+    })
+  );
+
+  const updateFileHandler = (req, res) => {
+    res.json(files.updateFileMetadata(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+  };
+  app.put("/api/files/:reference", auth, can("iam.files.details", "update"), wrap(updateFileHandler));
+  app.patch("/api/files/:reference", auth, can("iam.files.details", "update"), wrap(updateFileHandler));
+
+  app.delete(
+    "/api/files/:reference",
+    auth,
+    can("iam.files.details", "delete"),
+    wrap((req, res) => {
+      res.json(files.deleteFile(db, req.params.reference, req.body || req.query || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/restore",
+    auth,
+    can("iam.files.details", "update"),
+    wrap((req, res) => {
+      res.json(files.restoreFile(db, req.params.reference, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/move",
+    auth,
+    can("iam.files.details", "update"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      res.json(
+        files.moveFile(db, req.params.reference, body.folder_id ?? body.folderId ?? null, req.actor, fileTenant(req), clientIp(req))
+      );
+    })
+  );
+
+  app.get(
+    "/api/files/:reference/events",
+    auth,
+    can("iam.files.details", "read"),
+    wrap((req, res) => {
+      const file = files.getFile(db, req.params.reference, req.actor, fileTenant(req)).file;
+      res.json(files.listFileEvents(db, { fileId: file.id, eventType: req.query.eventType, limit: req.query.limit }));
+    })
+  );
+
+  app.get(
+    "/api/files/:reference/permissions",
+    auth,
+    can("iam.files.permissions", "read"),
+    wrap((req, res) => {
+      const file = files.getFile(db, req.params.reference, req.actor, fileTenant(req)).file;
+      res.json(files.listPermissions(db, { resourceType: "file", resourceId: file.id }, fileTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/files/:reference/processing",
+    auth,
+    can("iam.files.details", "read"),
+    wrap((req, res) => {
+      res.json(files.getProcessingStatus(db, req.params.reference, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/processing/requeue",
+    auth,
+    can("iam.files.details", "update"),
+    wrap(async (req, res) => {
+      res.json(
+        await files.requeueProcessing(
+          db,
+          req.params.reference,
+          (req.body || {}).type || "virus_scan",
+          req.actor,
+          fileTenant(req),
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  // Versions.
+  app.get(
+    "/api/files/:reference/versions",
+    auth,
+    can("iam.files.versions", "read"),
+    wrap((req, res) => {
+      res.json(files.listVersions(db, req.params.reference, req.query, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/versions",
+    auth,
+    can("iam.files.versions", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(
+        await files.createVersion(
+          db,
+          req.params.reference,
+          req.body || {},
+          { actor: req.actor, tenantId: fileTenant(req), ip: clientIp(req), source: "manual" }
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/files/:reference/versions/:version",
+    auth,
+    can("iam.files.versions", "read"),
+    wrap((req, res) => {
+      res.json(files.getVersion(db, req.params.reference, req.params.version, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/versions/:version/restore",
+    auth,
+    can("iam.files.versions", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(
+        await files.restoreVersion(
+          db,
+          req.params.reference,
+          req.params.version,
+          req.body || {},
+          { actor: req.actor, tenantId: fileTenant(req), ip: clientIp(req) }
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/files/:reference/versions/:version/download",
+    auth,
+    can("iam.files.details", "read"),
+    wrap((req, res) => {
+      res.json(fileDownloadResponse(files.versionDownload(db, req.params.reference, req.params.version, req.actor, fileTenant(req))));
+    })
+  );
+
+  app.get(
+    "/api/files/:reference/download",
+    auth,
+    can("iam.files.details", "read"),
+    wrap((req, res) => {
+      res.json(fileDownloadResponse(files.versionDownload(db, req.params.reference, null, req.actor, fileTenant(req))));
+    })
+  );
+
+  // Check-out / check-in / locks.
+  app.get(
+    "/api/files/:reference/lock",
+    auth,
+    can("iam.files.locks", "read"),
+    wrap((req, res) => {
+      res.json(files.getLock(db, req.params.reference, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/checkout",
+    auth,
+    can("iam.files.locks", "execute"),
+    wrap((req, res) => {
+      res.status(201).json(files.checkOutFile(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/checkin",
+    auth,
+    can("iam.files.locks", "execute"),
+    wrap(async (req, res) => {
+      res.json(await files.checkInFile(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/lock/release",
+    auth,
+    can("iam.files.locks", "execute"),
+    wrap((req, res) => {
+      res.json(files.releaseLock(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/lock/force-release",
+    auth,
+    can("iam.files.locks", "execute"),
+    wrap((req, res) => {
+      res.json(files.forceReleaseLock(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  // File associations.
+  app.get(
+    "/api/files/:reference/associations",
+    auth,
+    can("iam.files.associations", "read"),
+    wrap((req, res) => {
+      res.json(files.listFileAssociations(db, req.params.reference, req.actor, fileTenant(req)));
+    })
+  );
+
+  app.post(
+    "/api/files/:reference/associations",
+    auth,
+    can("iam.files.associations", "create"),
+    wrap((req, res) => {
+      res.status(201).json(files.createAssociation(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/files/:reference/collections",
+    auth,
+    can("iam.files.folders", "read"),
+    wrap((req, res) => {
+      const file = files.getFile(db, req.params.reference, req.actor, fileTenant(req)).file;
+      res.json(files.listCollectionsForFile(db, file.id, req.actor, fileTenant(req)));
+    })
+  );
+
+  // Locks (tenant-wide view).
+  app.get(
+    "/api/file-locks",
+    auth,
+    can("iam.files.locks", "read"),
+    wrap((req, res) => {
+      res.json(files.listLocks(db, req.query, req.actor, fileTenant(req)));
     })
   );
 

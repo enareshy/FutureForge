@@ -843,6 +843,15 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.jobs.queues", name: "Job queue administration", parentCode: "iam.jobs" },
     { applicationCode: "iam", code: "iam.jobs.schedules", name: "Job schedule administration", parentCode: "iam.jobs" },
     { applicationCode: "iam", code: "iam.jobs.execution", name: "Job execution monitoring & dead-letter", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.files", name: "Document & file management", kind: "module" },
+    { applicationCode: "iam", code: "iam.files.browser", name: "File browser & search", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.details", name: "File details, metadata & download", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.uploads", name: "File uploads", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.versions", name: "File versions", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.locks", name: "Check-out/check-in locks", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.associations", name: "File associations", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.folders", name: "Folders & collections", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.permissions", name: "File access control", parentCode: "iam.files" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -938,7 +947,17 @@ function seedMissingCatalog(db) {
     "iam.jobs.schedules",
     "iam.jobs.execution",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes]) {
+  const fileResourceCodes = [
+    "iam.files.browser",
+    "iam.files.details",
+    "iam.files.uploads",
+    "iam.files.versions",
+    "iam.files.locks",
+    "iam.files.associations",
+    "iam.files.folders",
+    "iam.files.permissions",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -993,6 +1012,13 @@ function reconcileReaderGrants(db) {
     ["iam.jobs.queues", ["read"]],
     ["iam.jobs.schedules", ["read"]],
     ["iam.jobs.execution", ["read"]],
+    ["iam.files.browser", ["read"]],
+    ["iam.files.details", ["read", "update", "delete"]],
+    ["iam.files.uploads", ["create"]],
+    ["iam.files.versions", ["read", "create"]],
+    ["iam.files.locks", ["read", "execute"]],
+    ["iam.files.associations", ["read", "create", "delete"]],
+    ["iam.files.folders", ["read", "create", "update"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
