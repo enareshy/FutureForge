@@ -15,8 +15,22 @@ import {
 import { safeDeleteReport } from "./references.js";
 import { snapshot, recordObjectVersion } from "./versions.js";
 import { applyInitialLifecycle } from "../lifecycle/engine.js";
+import { emitObjectIndexChange } from "../search/hooks.js";
 
 export { recordObjectVersion };
+
+// Event-driven search indexing: business writes enqueue a lightweight change so
+// the search framework can (re)index without coupling to this module.
+function emitIndexChange(db, row, operation, reason) {
+  if (!row) return;
+  emitObjectIndexChange(db, {
+    tenantId: row.tenant_id,
+    objectType: "object",
+    objectId: row.id,
+    operation,
+    reason,
+  });
+}
 
 // Object domain service: metadata-typed business instances with lifecycle,
 // revisioning, check-out locking, soft deletion, bulk operations and search.
@@ -228,6 +242,7 @@ export function createObject(db, body, actor, tenantId, ip) {
     details: { code: row.code, type: typeRow.code },
     ip,
   });
+  emitIndexChange(db, row, "upsert", "object.create");
   return publicObject(row);
 }
 
@@ -337,6 +352,7 @@ export function updateObject(db, reference, body, actor, tenantId, ip) {
     details: { code: next.code, revision: next.revision },
     ip,
   });
+  emitIndexChange(db, next, "upsert", "object.update");
   return publicObject(next);
 }
 
@@ -370,6 +386,7 @@ export function setObjectStatus(db, reference, status, actor, tenantId, ip) {
     details: { code: next.code, status },
     ip,
   });
+  emitIndexChange(db, next, "upsert", "object.status");
   return publicObject(next);
 }
 
@@ -588,6 +605,7 @@ export function softDeleteObject(db, reference, { force = false, summary } = {},
       details: { code: row.code, cascade: report.cascade.length, forced: force },
       ip,
     });
+    emitIndexChange(db, next, "delete", "object.delete");
     return publicObject(next);
   });
 }
@@ -618,6 +636,7 @@ export function restoreObject(db, reference, actor, tenantId, ip) {
     details: { code: row.code },
     ip,
   });
+  emitIndexChange(db, next, "upsert", "object.restore");
   return publicObject(next);
 }
 

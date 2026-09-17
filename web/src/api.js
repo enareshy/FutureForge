@@ -656,6 +656,61 @@ export const files = {
     api(`/api/files/${encodeURIComponent(ref)}/lock/force-release`, { method: "POST", body: body || {} }),
 };
 
+export const search = {
+  meta: () => api("/api/search/meta"),
+  query: (qs) => api(`/api/search${qs || ""}`),
+  global: (body) => api("/api/search", { method: "POST", body }),
+  suggestions: (qs) => api(`/api/search/suggestions${qs || ""}`),
+  facets: (qs) => api(`/api/search/facets${qs || ""}`),
+  advanced: (body) => api("/api/search/advanced", { method: "POST", body }),
+  byType: (objectType, body) => api(`/api/search/by-type/${encodeURIComponent(objectType)}`, { method: "POST", body }),
+  byAttributes: (body) => api("/api/search/by-attributes", { method: "POST", body }),
+  byRelationship: (body) => api("/api/search/by-relationship", { method: "POST", body }),
+
+  saved: (qs) => api(`/api/search/saved${qs || ""}`),
+  savedSearch: (reference) => api(`/api/search/saved/${encodeURIComponent(reference)}`),
+  createSaved: (body) => api("/api/search/saved", { method: "POST", body }),
+  updateSaved: (reference, body) => api(`/api/search/saved/${encodeURIComponent(reference)}`, { method: "PATCH", body }),
+  deleteSaved: (reference) => api(`/api/search/saved/${encodeURIComponent(reference)}`, { method: "DELETE" }),
+  runSaved: (reference, body) =>
+    api(`/api/search/saved/${encodeURIComponent(reference)}/run`, { method: "POST", body: body || {} }),
+
+  history: (qs) => api(`/api/search/history${qs || ""}`),
+  clearHistory: (all) => api(`/api/search/history${all ? "?all=true" : ""}`, { method: "DELETE" }),
+  deleteHistory: (id) => api(`/api/search/history/${id}`, { method: "DELETE" }),
+
+  exports: (qs) => api(`/api/search/exports${qs || ""}`),
+  searchExport: (reference) => api(`/api/search/exports/${encodeURIComponent(reference)}`),
+  createExport: (body) => api("/api/search/exports", { method: "POST", body }),
+  downloadExport: (reference) => apiDownload(`/api/search/exports/${encodeURIComponent(reference)}/download`),
+
+  objectTypes: (qs) => api(`/api/search/object-types${qs || ""}`),
+  objectType: (code) => api(`/api/search/object-types/${encodeURIComponent(code)}`),
+  createObjectType: (body) => api("/api/search/object-types", { method: "POST", body }),
+  updateObjectType: (code, body) => api(`/api/search/object-types/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  setObjectTypeStatus: (code, status) =>
+    api(`/api/search/object-types/${encodeURIComponent(code)}/status`, { method: "POST", body: { status } }),
+  deleteObjectType: (code) => api(`/api/search/object-types/${encodeURIComponent(code)}`, { method: "DELETE" }),
+
+  indexStatus: () => api("/api/search/indexes/status"),
+  indexFailures: (qs) => api(`/api/search/indexes/failures${qs || ""}`),
+  retryFailures: (body) => api("/api/search/indexes/retry", { method: "POST", body: body || {} }),
+  drainIndex: (body) => api("/api/search/indexes/drain", { method: "POST", body: body || {} }),
+  reindex: (body) => api("/api/search/indexes/reindex", { method: "POST", body: body || {} }),
+  reindexObject: (objectType, objectId) =>
+    api(`/api/search/indexes/reindex/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`, {
+      method: "POST",
+      body: {},
+    }),
+  pruneIndex: (body) => api("/api/search/indexes/prune", { method: "POST", body: body || {} }),
+  indexJob: (body) => api("/api/search/indexes/jobs", { method: "POST", body: body || {} }),
+
+  configuration: () => api("/api/search/configuration"),
+  updateConfiguration: (body) => api("/api/search/configuration", { method: "PUT", body }),
+  metrics: () => api("/api/search/metrics"),
+  health: () => api("/api/search/health"),
+};
+
 export const lifecycle = {  statuses: (qs) => api(`/api/statuses${qs || ""}`),
   status: (id) => api(`/api/statuses/${id}`),
   createStatus: (body) => api("/api/statuses", { method: "POST", body }),

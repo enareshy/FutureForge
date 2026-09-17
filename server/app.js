@@ -29,6 +29,7 @@ import * as objects from "./services/objects.js";
 import * as lifecycle from "./services/lifecycle.js";
 import * as workflow from "./services/workflow.js";
 import * as files from "./services/files.js";
+import * as search from "./services/search.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -5884,6 +5885,482 @@ export function createApp(db) {
     can("iam.files.locks", "read"),
     wrap((req, res) => {
       res.json(files.listLocks(db, req.query, req.actor, fileTenant(req)));
+    })
+  );
+
+  // ── Search & Discovery Framework ─────────────────────────────────────────
+  // A shared platform search service. Business modules register searchable
+  // object types; the framework owns indexing, query execution, facets,
+  // suggestions, saved searches, history, permission-aware filtering, index
+  // administration, configuration and exports.
+  const searchTenant = (req) => req.tenantId || -1;
+
+  function searchInput(req) {
+    return req.method === "GET" ? { ...req.query } : { ...(req.body || {}) };
+  }
+
+  app.get(
+    "/api/search/meta",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json({
+        ...search.vocabulary,
+        providers: search.listSearchProviders(),
+        object_types: search.searchableObjectTypes(db, searchTenant(req)),
+        configuration: search.getConfiguration(db, searchTenant(req)),
+      });
+    })
+  );
+
+  app.post(
+    "/api/search",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.search(db, req.body || {}, req.actor, { tenantId: searchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/search",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.search(db, searchInput(req), req.actor, { tenantId: searchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/search/suggestions",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.getSuggestions(db, searchInput(req), req.actor, { tenantId: searchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/search/facets",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.getFacets(db, searchInput(req), req.actor, { tenantId: searchTenant(req) }));
+    })
+  );
+
+  app.post(
+    "/api/search/advanced",
+    auth,
+    can("iam.search.advanced", "read"),
+    wrap((req, res) => {
+      res.json(search.advancedSearch(db, req.body || {}, req.actor, { tenantId: searchTenant(req) }));
+    })
+  );
+
+  app.post(
+    "/api/search/by-type/:objectType",
+    auth,
+    can("iam.search.advanced", "read"),
+    wrap((req, res) => {
+      res.json(
+        search.searchByType(db, req.params.objectType, req.body || {}, req.actor, {
+          tenantId: searchTenant(req),
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/search/by-attributes",
+    auth,
+    can("iam.search.advanced", "read"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      res.json(
+        search.searchByAttributes(db, body.attributes || {}, body, req.actor, {
+          tenantId: searchTenant(req),
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/search/by-relationship",
+    auth,
+    can("iam.search.advanced", "read"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      res.json(
+        search.searchByRelationship(db, body.related_to || body.relatedTo || {}, body, req.actor, {
+          tenantId: searchTenant(req),
+        })
+      );
+    })
+  );
+
+  // ── Saved searches ──
+  app.get(
+    "/api/search/saved",
+    auth,
+    can("iam.search.saved", "read"),
+    wrap((req, res) => {
+      res.json({
+        items: search.listSavedSearches(db, {
+          tenantId: searchTenant(req),
+          actorId: req.actor.id,
+          includeShared: req.query.include_shared !== "false",
+        }),
+      });
+    })
+  );
+
+  app.post(
+    "/api/search/saved",
+    auth,
+    can("iam.search.saved", "create"),
+    wrap((req, res) => {
+      res.status(201).json(search.createSavedSearch(db, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/search/saved/:reference",
+    auth,
+    can("iam.search.saved", "read"),
+    wrap((req, res) => {
+      res.json(search.getSavedSearch(db, req.params.reference, req.actor, searchTenant(req)));
+    })
+  );
+
+  app.patch(
+    "/api/search/saved/:reference",
+    auth,
+    can("iam.search.saved", "update"),
+    wrap((req, res) => {
+      res.json(
+        search.updateSavedSearch(db, req.params.reference, req.body || {}, req.actor, searchTenant(req), clientIp(req))
+      );
+    })
+  );
+
+  app.delete(
+    "/api/search/saved/:reference",
+    auth,
+    can("iam.search.saved", "delete"),
+    wrap((req, res) => {
+      res.json(search.deleteSavedSearch(db, req.params.reference, req.actor, searchTenant(req), clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/search/saved/:reference/run",
+    auth,
+    can("iam.search.saved", "read"),
+    wrap((req, res) => {
+      res.json(
+        search.runSavedSearch(db, req.params.reference, req.body || {}, req.actor, searchTenant(req), clientIp(req))
+      );
+    })
+  );
+
+  // ── Search history ──
+  app.get(
+    "/api/search/history",
+    auth,
+    can("iam.search.history", "read"),
+    wrap((req, res) => {
+      res.json({
+        items: search.listSearchHistory(db, {
+          tenantId: searchTenant(req),
+          actorId: req.actor.id,
+          limit: req.query.limit,
+          q: req.query.q,
+        }),
+      });
+    })
+  );
+
+  app.delete(
+    "/api/search/history",
+    auth,
+    can("iam.search.history", "delete"),
+    wrap((req, res) => {
+      res.json(search.clearSearchHistory(db, req.actor, searchTenant(req), { all: req.query.all === "true" }));
+    })
+  );
+
+  app.delete(
+    "/api/search/history/:id",
+    auth,
+    can("iam.search.history", "delete"),
+    wrap((req, res) => {
+      res.json(search.deleteSearchHistoryEntry(db, req.params.id, req.actor, searchTenant(req)));
+    })
+  );
+
+  // ── Exports ──
+  app.get(
+    "/api/search/exports",
+    auth,
+    can("iam.search.export", "read"),
+    wrap((req, res) => {
+      res.json({
+        items: search.listExports(db, {
+          tenantId: searchTenant(req),
+          actorId: req.query.all === "true" ? null : req.actor.id,
+          limit: req.query.limit,
+        }),
+      });
+    })
+  );
+
+  app.post(
+    "/api/search/exports",
+    auth,
+    can("iam.search.export", "create"),
+    wrap((req, res) => {
+      res.status(201).json(search.requestExport(db, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/search/exports/:reference",
+    auth,
+    can("iam.search.export", "read"),
+    wrap((req, res) => {
+      res.json(search.getExport(db, req.params.reference, req.actor, searchTenant(req)));
+    })
+  );
+
+  app.get(
+    "/api/search/exports/:reference/download",
+    auth,
+    can("iam.search.export", "read"),
+    wrap((req, res) => {
+      const result = search.getExport(db, req.params.reference, req.actor, searchTenant(req), {
+        includeContent: true,
+      });
+      const extension = result.format === "csv" ? "csv" : "json";
+      res.setHeader("Content-Type", result.format === "csv" ? "text/csv; charset=utf-8" : "application/json; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="search-export-${result.uuid}.${extension}"`);
+      res.send(result.content);
+    })
+  );
+
+  // ── Index administration ──
+  app.get(
+    "/api/search/object-types",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((req, res) => {
+      res.json({
+        items: search.listObjectTypes(db, {
+          tenantId: searchTenant(req),
+          includeDisabled: req.query.include_disabled === "true",
+        }),
+      });
+    })
+  );
+
+  app.post(
+    "/api/search/object-types",
+    auth,
+    can("iam.search.indexes", "create"),
+    wrap((req, res) => {
+      res.status(201).json(search.registerObjectType(db, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/search/object-types/:code",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((req, res) => {
+      res.json(search.getObjectType(db, req.params.code, searchTenant(req)));
+    })
+  );
+
+  app.patch(
+    "/api/search/object-types/:code",
+    auth,
+    can("iam.search.indexes", "update"),
+    wrap((req, res) => {
+      res.json(search.updateObjectType(db, req.params.code, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/search/object-types/:code/status",
+    auth,
+    can("iam.search.indexes", "update"),
+    wrap((req, res) => {
+      res.json(
+        search.setObjectTypeStatus(db, req.params.code, req.body?.status, req.actor, searchTenant(req), clientIp(req))
+      );
+    })
+  );
+
+  app.delete(
+    "/api/search/object-types/:code",
+    auth,
+    can("iam.search.indexes", "delete"),
+    wrap((req, res) => {
+      res.json(search.deleteObjectType(db, req.params.code, req.actor, searchTenant(req), clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/search/indexes/status",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((req, res) => {
+      res.json(search.indexingStatus(db, { tenantId: searchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/search/indexes/failures",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((req, res) => {
+      res.json({ items: search.listIndexFailures(db, { tenantId: searchTenant(req), limit: req.query.limit }) });
+    })
+  );
+
+  app.post(
+    "/api/search/indexes/retry",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      res.json(
+        search.retryIndexFailures(
+          db,
+          { tenantId: searchTenant(req), includeDeadLetter: req.body?.include_dead_letter === true },
+          req.actor,
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  app.post(
+    "/api/search/indexes/drain",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      res.json(search.drainIndexQueue(db, { tenantId: searchTenant(req), limit: req.body?.limit }));
+    })
+  );
+
+  app.post(
+    "/api/search/indexes/reindex",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const objectType = body.object_type || body.objectType || null;
+      if (body.async === true) {
+        const job = jobs.submitJob(
+          db,
+          {
+            job_type_code: "SEARCH_REINDEX",
+            name: objectType ? `Reindex ${objectType}` : "Reindex tenant search index",
+            tenant_id: searchTenant(req),
+            input: { tenant_id: searchTenant(req), object_type: objectType, limit: body.limit },
+            source_module: "search",
+          },
+          { actor: req.actor, ip: clientIp(req) }
+        );
+        return res.status(202).json({ queued: true, job_ref: job.job_ref, job });
+      }
+      if (objectType) {
+        return res.json(
+          search.reindexType(db, { tenantId: searchTenant(req), objectType, limit: body.limit }, req.actor, clientIp(req))
+        );
+      }
+      return res.json(search.reindexTenant(db, { tenantId: searchTenant(req), limit: body.limit }, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/search/indexes/reindex/:objectType/:objectId",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      res.json(
+        search.reindexObject(
+          db,
+          { tenantId: searchTenant(req), objectType: req.params.objectType, objectId: req.params.objectId },
+          req.actor,
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  app.post(
+    "/api/search/indexes/prune",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      res.json(search.pruneIndex(db, { tenantId: searchTenant(req) }, req.actor, clientIp(req)));
+    })
+  );
+
+  app.post(
+    "/api/search/indexes/jobs",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      const job = jobs.submitJob(
+        db,
+        {
+          job_type_code: "SEARCH_INDEX",
+          name: "Search index maintenance",
+          tenant_id: searchTenant(req),
+          input: { tenant_id: searchTenant(req), limit: req.body?.limit },
+          source_module: "search",
+        },
+        { actor: req.actor, ip: clientIp(req) }
+      );
+      res.status(202).json({ queued: true, job_ref: job.job_ref, job });
+    })
+  );
+
+  app.get(
+    "/api/search/configuration",
+    auth,
+    can("iam.search.configuration", "read"),
+    wrap((req, res) => {
+      res.json(search.getConfiguration(db, searchTenant(req)));
+    })
+  );
+
+  app.put(
+    "/api/search/configuration",
+    auth,
+    can("iam.search.configuration", "update"),
+    wrap((req, res) => {
+      res.json(search.updateConfiguration(db, searchTenant(req), req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/search/metrics",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((req, res) => {
+      res.json(search.searchMetrics(db, { tenantId: searchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/search/health",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((_req, res) => {
+      res.json(search.searchHealth(db));
     })
   );
 

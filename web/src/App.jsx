@@ -44,6 +44,8 @@ import MfaPage from "./pages/MfaPage.jsx";
 import FilesPage from "./pages/FilesPage.jsx";
 import FileDetailPage from "./pages/FileDetailPage.jsx";
 import FileAdminPage from "./pages/FileAdminPage.jsx";
+import SearchPage from "./pages/SearchPage.jsx";
+import SearchAdminPage from "./pages/SearchAdminPage.jsx";
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -205,6 +207,14 @@ const NAV_SECTIONS = [
     items: [
       { to: "/files", label: "File browser", end: true },
       { to: "/files/admin", label: "File administration", platformOrAdmin: true },
+    ],
+  },
+  {
+    key: "discovery",
+    label: "Search",
+    items: [
+      { to: "/search", label: "Search & Discovery", end: true },
+      { to: "/search/admin", label: "Search administration", platformOrAdmin: true },
     ],
   },
   {
@@ -420,6 +430,8 @@ export default function App() {
         <Route path="/files" element={<FilesPage />} />
         <Route path="/files/admin" element={<FileAdminPage />} />
         <Route path="/files/:ref" element={<FileDetailPage />} />
+        <Route path="/search" element={<SearchPage />} />
+        <Route path="/search/admin" element={<SearchAdminPage />} />
         <Route path="/jobs" element={<JobsDashboardPage />} />
         <Route path="/jobs/list" element={<JobsPage />} />
         <Route path="/jobs/execution" element={<JobExecutionPage />} />

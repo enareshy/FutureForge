@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { openDatabase, migrate } from "../server/db.js";
 import { ensureDefaultQueues, createWorker, registerDemoHandlers } from "../server/services/job-execution.js";
 import { registerFileProcessingHandlers, expireUploads, releaseExpiredLocks } from "../server/services/files.js";
+import { registerSearchHandlers, runSearchMaintenance } from "../server/services/search.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -76,6 +77,9 @@ if (demo) {
 // are production handlers and are always registered.
 registerFileProcessingHandlers();
 
+// Search & Discovery background handlers (index maintenance, rebuild, export).
+registerSearchHandlers();
+
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
 const fileMaintenanceMs = positive(process.env.FILE_MAINTENANCE_MS, 60000);
@@ -91,6 +95,27 @@ const fileMaintenance = setInterval(async () => {
   }
 }, fileMaintenanceMs);
 fileMaintenance.unref?.();
+
+// Periodic search housekeeping: converge the index queue and prune expired
+// search history / exports.
+const searchMaintenanceMs = positive(process.env.SEARCH_MAINTENANCE_MS, 30000);
+const searchMaintenance = setInterval(() => {
+  try {
+    const summary = runSearchMaintenance(db);
+    if (summary.drained.succeeded || summary.drained.failed || summary.history_pruned || summary.exports_expired) {
+      log("info", "Search housekeeping", {
+        indexed: summary.drained.succeeded,
+        failed: summary.drained.failed,
+        dead_lettered: summary.drained.dead_lettered,
+        history_pruned: summary.history_pruned,
+        exports_expired: summary.exports_expired,
+      });
+    }
+  } catch (error) {
+    log("warn", "Search housekeeping failed", { error: error.message });
+  }
+}, searchMaintenanceMs);
+searchMaintenance.unref?.();
 
 const worker = createWorker(db, {
   id: args.id || undefined,
@@ -109,6 +134,7 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(fileMaintenance);
+  clearInterval(searchMaintenance);
   log("info", "Worker draining", { signal, drain_ms: drainMs, active_jobs: worker.active.size });
   try {
     await worker.stop({ timeoutMs: drainMs });

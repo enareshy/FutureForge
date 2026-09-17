@@ -4,6 +4,7 @@ import { publish } from "../notifications.js";
 import { publicEvent, safeParse } from "./repository.js";
 import { assertEventType } from "./validation.js";
 import { HttpError } from "../../validation.js";
+import { emitObjectIndexChange } from "../search/hooks.js";
 
 // File domain events. Every state change is (1) written to the module outbox
 // `file_events` for durability/audit and (2) re-published through the platform
@@ -70,6 +71,15 @@ export function recordFileEvent(db, {
     run(db, "UPDATE file_events SET status = 'failed' WHERE id = ?", [row.id]);
   }
   const stored = queryAll(db, "SELECT * FROM file_events WHERE id = ?", [row.id])[0];
+  if (file?.id) {
+    emitObjectIndexChange(db, {
+      tenantId: eventTenant,
+      objectType: "file",
+      objectId: file.id,
+      operation: eventType === "FileDeleted" ? "delete" : "upsert",
+      reason: eventType,
+    });
+  }
   return { ...publicEvent(stored), notification: summary ? { published: summary.published, event_id: summary.event_id, reason: summary.reason || "" } : null };
 }
 

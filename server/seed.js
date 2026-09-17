@@ -20,6 +20,7 @@ import * as notifications from "./services/notifications.js";
 import * as delivery from "./services/delivery.js";
 import * as jobs from "./services/jobs.js";
 import * as jobExecution from "./services/job-execution.js";
+import * as search from "./services/search.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -852,6 +853,14 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.files.associations", name: "File associations", parentCode: "iam.files" },
     { applicationCode: "iam", code: "iam.files.folders", name: "Folders & collections", parentCode: "iam.files" },
     { applicationCode: "iam", code: "iam.files.permissions", name: "File access control", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.search", name: "Search & discovery", kind: "module" },
+    { applicationCode: "iam", code: "iam.search.global", name: "Global search", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.advanced", name: "Advanced search", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.saved", name: "Saved searches", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.history", name: "Search history", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.indexes", name: "Search index administration", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.configuration", name: "Search configuration", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.export", name: "Search result exports", parentCode: "iam.search" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -957,7 +966,16 @@ function seedMissingCatalog(db) {
     "iam.files.folders",
     "iam.files.permissions",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes]) {
+  const searchResourceCodes = [
+    "iam.search.global",
+    "iam.search.advanced",
+    "iam.search.saved",
+    "iam.search.history",
+    "iam.search.indexes",
+    "iam.search.configuration",
+    "iam.search.export",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -1019,6 +1037,11 @@ function reconcileReaderGrants(db) {
     ["iam.files.locks", ["read", "execute"]],
     ["iam.files.associations", ["read", "create", "delete"]],
     ["iam.files.folders", ["read", "create", "update"]],
+    ["iam.search.global", ["read"]],
+    ["iam.search.advanced", ["read"]],
+    ["iam.search.saved", ["read", "create", "update", "delete"]],
+    ["iam.search.history", ["read", "delete"]],
+    ["iam.search.export", ["read", "create"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -2408,7 +2431,17 @@ export function seedDatabase(db) {
   seedDelivery(db);
   seedJobs(db);
   seedJobEngine(db);
-  return { ...identity, ...authz };
+  const searchResult = seedSearch(db);
+  return { ...identity, ...authz, ...searchResult };
+}
+
+function seedSearch(db) {
+  try {
+    const result = search.initializeSearch(db);
+    return { searchSeeded: true, ...result };
+  } catch (err) {
+    return { searchSeeded: false, searchError: err.message };
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

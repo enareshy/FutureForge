@@ -2728,3 +2728,211 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_file_events_idempotency
 CREATE INDEX IF NOT EXISTS idx_file_events_type ON file_events(event_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_file_events_file ON file_events(file_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_file_events_tenant ON file_events(tenant_id, created_at);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Search & Discovery Framework (migration 018_search)
+--
+-- A shared, tenant-aware search platform. Business modules register their
+-- searchable object types and index documents here instead of building their
+-- own search. The index is a denormalised read model; source modules remain
+-- the system of record and are re-read only during (re)indexing.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Registry of searchable object types contributed by business modules.
+CREATE TABLE IF NOT EXISTS search_object_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  source_module TEXT NOT NULL DEFAULT '',
+  source_table TEXT NOT NULL DEFAULT '',
+  key_column TEXT NOT NULL DEFAULT 'id',
+  title_attribute TEXT NOT NULL DEFAULT 'name',
+  subtitle_attribute TEXT NOT NULL DEFAULT '',
+  summary_attribute TEXT NOT NULL DEFAULT 'description',
+  body_attributes_json TEXT NOT NULL DEFAULT '[]',
+  facet_attributes_json TEXT NOT NULL DEFAULT '[]',
+  filter_attributes_json TEXT NOT NULL DEFAULT '[]',
+  relationship_types_json TEXT NOT NULL DEFAULT '[]',
+  permission_resource TEXT NOT NULL DEFAULT '',
+  permission_action TEXT NOT NULL DEFAULT 'read',
+  sensitivity TEXT NOT NULL DEFAULT 'internal' CHECK (sensitivity IN ('public', 'internal', 'confidential', 'restricted')),
+  display_order INTEGER NOT NULL DEFAULT 100,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'draft')),
+  registered_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_object_types_tenant ON search_object_types(tenant_id, status, display_order);
+
+-- Denormalised search index documents. One row per indexed object per tenant.
+CREATE TABLE IF NOT EXISTS search_index (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  object_uuid TEXT,
+  code TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  subtitle TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  searchable_text TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  lifecycle_state TEXT NOT NULL DEFAULT '',
+  owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  owner_name TEXT NOT NULL DEFAULT '',
+  classification TEXT NOT NULL DEFAULT 'internal',
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  relationships_json TEXT NOT NULL DEFAULT '[]',
+  revisions TEXT NOT NULL DEFAULT '',
+  source_revision TEXT,
+  score_weight REAL NOT NULL DEFAULT 1,
+  indexed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type, object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_index_tenant ON search_index(tenant_id, object_type);
+CREATE INDEX IF NOT EXISTS idx_search_index_type ON search_index(object_type, status);
+CREATE INDEX IF NOT EXISTS idx_search_index_org ON search_index(tenant_id, organization_id);
+CREATE INDEX IF NOT EXISTS idx_search_index_owner ON search_index(tenant_id, owner_id);
+CREATE INDEX IF NOT EXISTS idx_search_index_status ON search_index(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_search_index_title ON search_index(tenant_id, title);
+CREATE INDEX IF NOT EXISTS idx_search_index_indexed ON search_index(tenant_id, indexed_at);
+
+-- Indexing work queue and per-object index status. Business modules emit
+-- change events; the indexer drains this queue (synchronously or via the
+-- background job engine). Unique per object so bursts coalesce.
+CREATE TABLE IF NOT EXISTS search_index_status (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  operation TEXT NOT NULL DEFAULT 'upsert' CHECK (operation IN ('upsert', 'delete')),
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'dead_letter')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  available_at TEXT NOT NULL DEFAULT (datetime('now')),
+  locked_at TEXT,
+  last_error TEXT,
+  correlation_id TEXT NOT NULL DEFAULT '',
+  indexed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type, object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_index_status_pending ON search_index_status(status, available_at);
+CREATE INDEX IF NOT EXISTS idx_search_index_status_tenant ON search_index_status(tenant_id, status, updated_at);
+
+-- Saved searches (personal and shared).
+CREATE TABLE IF NOT EXISTS search_saved_searches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  query_json TEXT NOT NULL DEFAULT '{}',
+  strategy TEXT NOT NULL DEFAULT 'standard',
+  is_shared INTEGER NOT NULL DEFAULT 0,
+  sharing_scope TEXT NOT NULL DEFAULT 'private' CHECK (sharing_scope IN ('private', 'organization', 'tenant')),
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_saved_tenant ON search_saved_searches(tenant_id, owner_id);
+CREATE INDEX IF NOT EXISTS idx_search_saved_shared ON search_saved_searches(tenant_id, is_shared, sharing_scope);
+
+-- Search history (per user).
+CREATE TABLE IF NOT EXISTS search_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  query_text TEXT NOT NULL DEFAULT '',
+  strategy TEXT NOT NULL DEFAULT 'standard',
+  scope TEXT NOT NULL DEFAULT 'tenant',
+  filters_json TEXT NOT NULL DEFAULT '{}',
+  result_count INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  saved_search_id INTEGER REFERENCES search_saved_searches(id) ON DELETE SET NULL,
+  executed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_history_user ON search_history(tenant_id, user_id, executed_at);
+CREATE INDEX IF NOT EXISTS idx_search_history_query ON search_history(tenant_id, query_text);
+
+-- Export requests. Large result sets are materialised asynchronously by the
+-- background job engine and stored through the File service when available.
+CREATE TABLE IF NOT EXISTS search_exports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  name TEXT NOT NULL DEFAULT '',
+  query_json TEXT NOT NULL DEFAULT '{}',
+  format TEXT NOT NULL DEFAULT 'json' CHECK (format IN ('json', 'csv')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'expired')),
+  row_count INTEGER NOT NULL DEFAULT 0,
+  file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+  result_json TEXT,
+  error TEXT,
+  expires_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_exports_tenant ON search_exports(tenant_id, status, created_at);
+
+-- Per-tenant search configuration (a single row per tenant).
+CREATE TABLE IF NOT EXISTS search_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL UNIQUE REFERENCES organizations(id),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  default_scope TEXT NOT NULL DEFAULT 'tenant' CHECK (default_scope IN ('tenant', 'organization', 'global')),
+  page_size INTEGER NOT NULL DEFAULT 20,
+  max_results INTEGER NOT NULL DEFAULT 500,
+  min_query_length INTEGER NOT NULL DEFAULT 2,
+  max_query_length INTEGER NOT NULL DEFAULT 400,
+  highlight INTEGER NOT NULL DEFAULT 1,
+  fuzzy INTEGER NOT NULL DEFAULT 1,
+  history_retention_days INTEGER NOT NULL DEFAULT 90,
+  index_files INTEGER NOT NULL DEFAULT 1,
+  excluded_types_json TEXT NOT NULL DEFAULT '[]',
+  default_sort TEXT NOT NULL DEFAULT 'relevance',
+  settings_json TEXT NOT NULL DEFAULT '{}',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Directed relationship edges projected from source modules for
+-- relationship-aware search. Kept separate from the denormalised documents so
+-- that edges can be filtered and traversed without scanning documents.
+CREATE TABLE IF NOT EXISTS search_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  relationship_type TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'out' CHECK (direction IN ('out', 'in')),
+  label TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, source_type, source_id, target_type, target_id, relationship_type, direction)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_rel_source ON search_relationships(tenant_id, source_type, source_id, relationship_type);
+CREATE INDEX IF NOT EXISTS idx_search_rel_target ON search_relationships(tenant_id, target_type, target_id, relationship_type);

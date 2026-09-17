@@ -152,6 +152,9 @@ export function migrate(db) {
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("017_files");
   db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("018_search");
+  db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();
 }

@@ -6,12 +6,27 @@ import * as tenants from "../tenants.js";
 import { findObjectRow, briefObject } from "./repository.js";
 import { findRelationshipType, publicRelationshipType } from "./relationship-types.js";
 import { RELATIONSHIP_STATUSES, assertValidEdgeValues } from "./validation.js";
+import { emitObjectIndexChange } from "../search/hooks.js";
 
 // Relationship engine. Creates, validates and traverses typed edges while
 // enforcing type compatibility, cardinality, tenant isolation and referential
 // integrity. Edges are soft-deleted so the graph keeps an auditable history.
 
 export const MAX_TRAVERSAL_DEPTH = 10;
+
+// Relationship changes alter both endpoints' relationship projections, so both
+// objects are queued for search reindexing.
+function emitRelationshipIndex(db, tenantId, ...objectIds) {
+  for (const objectId of new Set(objectIds.filter(Boolean))) {
+    emitObjectIndexChange(db, {
+      tenantId,
+      objectType: "object",
+      objectId,
+      operation: "upsert",
+      reason: "relationship",
+    });
+  }
+}
 
 const REL_SELECT = `
   SELECT r.*,
@@ -259,6 +274,7 @@ export function createRelationship(db, body, actor, tenantId, ip) {
     },
     ip,
   });
+  emitRelationshipIndex(db, plan.tenantId, plan.sourceRow.id, plan.targetRow.id);
   return publicRelationship(getRelationshipRow(db, result.lastInsertRowid));
 }
 
@@ -368,6 +384,7 @@ export function updateRelationship(db, id, body, actor, tenantId, ip) {
     details: { type: row.type_code, status },
     ip,
   });
+  emitRelationshipIndex(db, row.tenant_id, row.source_object_id, row.target_object_id);
   return publicRelationship(getRelationshipRow(db, row.id));
 }
 
@@ -397,6 +414,7 @@ export function deleteRelationship(db, id, { force = false } = {}, actor, tenant
     details: { type: row.type_code, source: row.source_object_id, target: row.target_object_id, forced: force },
     ip,
   });
+  emitRelationshipIndex(db, row.tenant_id, row.source_object_id, row.target_object_id);
   return { deleted: true, id: row.id };
 }
 
