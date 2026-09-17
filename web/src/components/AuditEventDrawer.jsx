@@ -49,11 +49,21 @@ export default function AuditEventDrawer({ event, onClose }) {
 
         <div className="audit-meta">
           <div><span>Actor</span><b>{event.actor_username || "system"}</b>{event.user_display_name ? <i>{event.user_display_name}</i> : null}</div>
+          <div><span>Actor type</span><b>{event.actor_type || "user"}</b></div>
           <div><span>Type</span><b>{event.event_type || "—"}</b></div>
+          <div><span>Category</span><b>{event.category || "—"}</b></div>
+          <div><span>Classification</span><b>{event.security_classification || "internal"}</b></div>
+          <div><span>Retention</span><b>{event.retention_category || "standard"}</b></div>
           <div><span>Status</span><StatusBadge status={event.status} /></div>
           <div><span>Source</span><b>{event.source || "api"}</b></div>
           <div><span>Object</span><b className="mono">{event.object_type}{event.object_id ? ` #${event.object_id}` : ""}</b></div>
           <div><span>Object name</span><b>{event.object_name || "—"}</b></div>
+          {event.object_revision ? <div><span>Revision</span><b className="mono">{event.object_revision}</b></div> : null}
+          {event.related_resource_type ? (
+            <div><span>Related object</span><b className="mono">{event.related_resource_type}{event.related_resource_id ? ` #${event.related_resource_id}` : ""}</b></div>
+          ) : null}
+          {event.failure_category ? <div><span>Failure</span><b>{event.failure_category}</b></div> : null}
+          {event.session_id ? <div><span>Session</span><b className="mono" title={event.session_id}>{String(event.session_id).slice(0, 16)}</b></div> : null}
           <div><span>IP</span><b className="mono">{event.ip || "—"}</b></div>
           <div><span>Duration</span><b>{event.duration_ms == null ? "—" : `${event.duration_ms} ms`}</b></div>
           <div><span>Correlation</span><b className="mono">{event.correlation_id || "—"}</b></div>

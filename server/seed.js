@@ -1837,6 +1837,8 @@ function seedWorkflow(db) {
 // the console has content on a fresh installation.
 function seedAudit(db) {
   audit.ensureDefaultPolicies(db);
+  audit.ensureSystemActionTypes(db);
+  audit.ensureDefaultRetentionPolicies(db);
   const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
   const admin = queryOne(db, "SELECT id, username, display_name FROM users WHERE username = 'admin'");
   const tenantId = helix?.id || null;

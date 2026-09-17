@@ -23,6 +23,7 @@ import { openDatabase, migrate } from "../server/db.js";
 import { ensureDefaultQueues, createWorker, registerDemoHandlers } from "../server/services/job-execution.js";
 import { registerFileProcessingHandlers, expireUploads, releaseExpiredLocks } from "../server/services/files.js";
 import { registerSearchHandlers, runSearchMaintenance } from "../server/services/search.js";
+import { registerAuditHandlers, runAuditMaintenance } from "../server/services/audit.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -80,6 +81,9 @@ registerFileProcessingHandlers();
 // Search & Discovery background handlers (index maintenance, rebuild, export).
 registerSearchHandlers();
 
+// Audit & History background handlers (event export, retention execution).
+registerAuditHandlers();
+
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
 const fileMaintenanceMs = positive(process.env.FILE_MAINTENANCE_MS, 60000);
@@ -117,6 +121,26 @@ const searchMaintenance = setInterval(() => {
 }, searchMaintenanceMs);
 searchMaintenance.unref?.();
 
+// Periodic audit housekeeping: expire stale exports and apply retention
+// policies for tenants that have configured them.
+const auditMaintenanceMs = positive(process.env.AUDIT_MAINTENANCE_MS, 120000);
+const auditMaintenance = setInterval(() => {
+  try {
+    const summary = runAuditMaintenance(db);
+    if (summary.exports_expired || summary.purged) {
+      log("info", "Audit housekeeping", {
+        exports_expired: summary.exports_expired,
+        tenants: summary.tenants,
+        archived: summary.archived,
+        purged: summary.purged,
+      });
+    }
+  } catch (error) {
+    log("warn", "Audit housekeeping failed", { error: error.message });
+  }
+}, auditMaintenanceMs);
+auditMaintenance.unref?.();
+
 const worker = createWorker(db, {
   id: args.id || undefined,
   name: args.name || undefined,
@@ -135,6 +159,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   clearInterval(fileMaintenance);
   clearInterval(searchMaintenance);
+  clearInterval(auditMaintenance);
   log("info", "Worker draining", { signal, drain_ms: drainMs, active_jobs: worker.active.size });
   try {
     await worker.stop({ timeoutMs: drainMs });

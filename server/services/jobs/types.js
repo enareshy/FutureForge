@@ -159,6 +159,28 @@ const DEFAULT_TYPES = [
     max_retries: 2,
     default_priority: "normal",
   },
+  {
+    code: "AUDIT_EXPORT",
+    name: "Audit event export",
+    description: "Materialise a filtered audit event set as CSV, JSON or Excel.",
+    source_module: "audit",
+    handler: "audit.export",
+    queues: ["reports", "default"],
+    timeout_seconds: 1800,
+    max_retries: 2,
+    default_priority: "normal",
+  },
+  {
+    code: "AUDIT_RETENTION",
+    name: "Audit retention",
+    description: "Apply audit retention policies: archive and/or purge expired events.",
+    source_module: "audit",
+    handler: "audit.retention",
+    queues: ["default"],
+    timeout_seconds: 3600,
+    max_retries: 1,
+    default_priority: "low",
+  },
 ];
 
 export function publicJobType(row) {

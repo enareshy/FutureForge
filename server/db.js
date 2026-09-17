@@ -98,6 +98,33 @@ export function migrate(db) {
   ensureColumn(db, "audit_logs", "related_json", "related_json TEXT");
   ensureColumn(db, "audit_logs", "device", "device TEXT");
   ensureColumn(db, "audit_logs", "duration_ms", "duration_ms INTEGER");
+  ensureColumn(db, "audit_logs", "actor_type", "actor_type TEXT DEFAULT 'user'");
+  ensureColumn(db, "audit_logs", "actor_ref", "actor_ref TEXT");
+  ensureColumn(db, "audit_logs", "category", "category TEXT DEFAULT 'administration'");
+  ensureColumn(db, "audit_logs", "security_classification", "security_classification TEXT DEFAULT 'internal'");
+  ensureColumn(db, "audit_logs", "retention_category", "retention_category TEXT DEFAULT 'standard'");
+  ensureColumn(db, "audit_logs", "session_id", "session_id TEXT");
+  ensureColumn(db, "audit_logs", "object_revision", "object_revision TEXT");
+  ensureColumn(db, "audit_logs", "related_resource_type", "related_resource_type TEXT");
+  ensureColumn(db, "audit_logs", "related_resource_id", "related_resource_id TEXT");
+  ensureColumn(db, "audit_logs", "failure_category", "failure_category TEXT");
+  ensureColumn(db, "audit_policies", "categories_json", "categories_json TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "audit_policies", "export_allowed", "export_allowed INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "audit_policies", "system_mandatory", "system_mandatory INTEGER NOT NULL DEFAULT 0");
+  for (const column of [
+    "actor_type TEXT DEFAULT 'user'",
+    "actor_ref TEXT",
+    "category TEXT DEFAULT 'administration'",
+    "security_classification TEXT DEFAULT 'internal'",
+    "retention_category TEXT DEFAULT 'standard'",
+    "session_id TEXT",
+    "object_revision TEXT",
+    "related_resource_type TEXT",
+    "related_resource_id TEXT",
+    "failure_category TEXT",
+  ]) {
+    ensureColumn(db, "audit_logs_archive", column.split(" ")[0], column);
+  }
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_tenant_created ON audit_logs(tenant_id, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_actor_created ON audit_logs(actor_id, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_action_created ON audit_logs(action, created_at)");
@@ -106,6 +133,10 @@ export function migrate(db) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_correlation ON audit_logs(correlation_id)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_object_time ON audit_logs(resource_type, resource_id, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_source_created ON audit_logs(source, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_category_created ON audit_logs(category, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_actor_type_created ON audit_logs(actor_type, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_classification ON audit_logs(security_classification, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_related ON audit_logs(related_resource_type, related_resource_id, created_at)");
   db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("012_audit");
@@ -154,6 +185,9 @@ export function migrate(db) {
   db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("018_search");
+  db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("019_audit_framework");
   db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();

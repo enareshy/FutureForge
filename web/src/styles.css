@@ -753,3 +753,25 @@ pre.json {
 .chip.active { background: var(--accent); color: #08132e; }
 .chip { cursor: pointer; border: 1px solid transparent; }
 
+
+.notice {
+  background: rgba(62, 224, 192, 0.12);
+  border: 1px solid rgba(62, 224, 192, 0.35);
+  color: var(--ok);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.link {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+.link.muted { color: var(--muted); margin-left: 6px; }
+.audit-saved-filters { padding-top: 12px; padding-bottom: 12px; }
+.audit-saved-filters .chips { align-items: center; }
+.audit-saved-filters .chip { display: inline-flex; align-items: center; }

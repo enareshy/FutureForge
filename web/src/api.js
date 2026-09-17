@@ -383,20 +383,55 @@ export const audit = {
   event: (id) => api(`/api/audit/events/${id}`),
   summary: (qs) => api(`/api/audit/summary${qs || ""}`),
   facets: (qs) => api(`/api/audit/facets${qs || ""}`),
+  metrics: (qs) => api(`/api/audit/metrics${qs || ""}`),
   record: (body) => api("/api/audit/events", { method: "POST", body }),
+  recordBatch: (events) => api("/api/audit/events/batch", { method: "POST", body: { events } }),
   objectHistory: (objectType, objectId, qs) =>
     api(
       `/api/audit/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/history${qs || ""}`
     ),
+  attributeHistory: (objectType, objectId, qs) =>
+    api(
+      `/api/audit/attributes/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/history${qs || ""}`
+    ),
+  relationshipHistory: (objectType, objectId, qs) =>
+    api(
+      `/api/audit/relationships/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/history${qs || ""}`
+    ),
   userActivity: (userId, qs) => api(`/api/audit/users/${userId}/activity${qs || ""}`),
+  security: (qs) => api(`/api/audit/security${qs || ""}`),
+  workflow: (qs) => api(`/api/audit/workflows${qs || ""}`),
+  lifecycle: (qs) => api(`/api/audit/lifecycle${qs || ""}`),
+  configuration: (qs) => api(`/api/audit/configuration${qs || ""}`),
   exportEvents: (body) => apiDownload("/api/audit/export", { method: "POST", body }),
+  exports: (qs) => api(`/api/audit/exports${qs || ""}`),
+  exportRequest: (id) => api(`/api/audit/exports/${id}`),
+  createExport: (body) => api("/api/audit/exports", { method: "POST", body }),
+  downloadExport: (id) => apiDownload(`/api/audit/exports/${id}/download`, { method: "GET" }),
   policies: (qs) => api(`/api/audit/policies${qs || ""}`),
   policy: (id) => api(`/api/audit/policies/${id}`),
   createPolicy: (body) => api("/api/audit/policies", { method: "POST", body }),
   updatePolicy: (id, body) => api(`/api/audit/policies/${id}`, { method: "PUT", body }),
   deletePolicy: (id) => api(`/api/audit/policies/${id}`, { method: "DELETE" }),
+  validatePolicy: (body) => api("/api/audit/policies/validate", { method: "POST", body }),
+  actionTypes: (qs) => api(`/api/audit/action-types${qs || ""}`),
+  createActionType: (body) => api("/api/audit/action-types", { method: "POST", body }),
+  updateActionType: (code, body) =>
+    api(`/api/audit/action-types/${encodeURIComponent(code)}`, { method: "PUT", body }),
+  deleteActionType: (code) =>
+    api(`/api/audit/action-types/${encodeURIComponent(code)}`, { method: "DELETE" }),
+  filters: (qs) => api(`/api/audit/filters${qs || ""}`),
+  createFilter: (body) => api("/api/audit/filters", { method: "POST", body }),
+  updateFilter: (id, body) => api(`/api/audit/filters/${id}`, { method: "PUT", body }),
+  deleteFilter: (id) => api(`/api/audit/filters/${id}`, { method: "DELETE" }),
   retentionRuns: (qs) => api(`/api/audit/retention/runs${qs || ""}`),
   runRetention: (body) => api("/api/audit/retention/run", { method: "POST", body }),
+  retentionPolicies: (qs) => api(`/api/audit/retention/policies${qs || ""}`),
+  createRetentionPolicy: (body) => api("/api/audit/retention/policies", { method: "POST", body }),
+  updateRetentionPolicy: (id, body) =>
+    api(`/api/audit/retention/policies/${id}`, { method: "PUT", body }),
+  deleteRetentionPolicy: (id) => api(`/api/audit/retention/policies/${id}`, { method: "DELETE" }),
+  executeRetention: (body) => api("/api/audit/retention/execute", { method: "POST", body }),
 };
 
 export const notifications = {

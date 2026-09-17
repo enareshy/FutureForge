@@ -4,6 +4,7 @@ import http from "node:http";
 import { openDatabase, migrate, queryOne } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
+import * as auditService from "../services/audit.js";
 
 function listen(app) {
   return new Promise((resolve) => {
@@ -314,5 +315,184 @@ describe("audit REST APIs", () => {
     assert.equal(update.status, 404);
     const remove = await request(port, "DELETE", `/api/audit/events/${id}`, { token });
     assert.equal(remove.status, 404);
+  });
+});
+
+// REST coverage for the extended audit framework: classification filters,
+// batch ingest, specialised history endpoints, metrics, async exports, action
+// types, saved filters and dedicated retention policies.
+describe("audit REST API extensions", () => {
+  let port;
+  let server;
+  let token;
+  let database;
+  let tenantId;
+
+  before(async () => {
+    database = openDatabase(":memory:");
+    migrate(database);
+    seedDatabase(database);
+    tenantId = queryOne(database, "SELECT id FROM organizations WHERE code = 'helix'").id;
+    const started = await listen(createApp(database));
+    server = started.server;
+    port = started.port;
+    const login = await request(port, "POST", "/api/auth/login", {
+      body: { username: "admin", password: "HelixAdmin!42" },
+    });
+    assert.equal(login.status, 200);
+    token = login.body.token;
+  });
+
+  after(() => server?.close());
+
+  test("ingests audit events in batch and exposes classified filters", async () => {
+    const batch = await request(port, "POST", "/api/audit/events/batch", {
+      token,
+      body: {
+        events: [
+          { action: "access.denied", objectType: "object", objectId: "BATCH-1", status: "denied", category: "security" },
+          { action: "object.update", objectType: "part", objectId: "BATCH-2", before: { a: 1 }, after: { a: 2 } },
+        ],
+      },
+    });
+    assert.equal(batch.status, 201);
+    assert.equal(batch.body.captured, 2);
+
+    const security = await request(port, "GET", "/api/audit/security?pageSize=5", { token });
+    assert.equal(security.status, 200);
+    assert.ok(security.body.items.every((event) => event.category === "security"));
+
+    const classification = await request(
+      port,
+      "GET",
+      "/api/audit/events?securityClassification=restricted&pageSize=5",
+      { token }
+    );
+    assert.equal(classification.status, 200);
+    assert.ok(classification.body.items.every((event) => event.security_classification === "restricted"));
+  });
+
+  test("returns attribute history and operational metrics", async () => {
+    await request(port, "POST", "/api/audit/events", {
+      token,
+      body: {
+        action: "object.update",
+        objectType: "part",
+        objectId: "ATTR-API-1",
+        before: { "part.weight_kg": 3 },
+        after: { "part.weight_kg": 4 },
+      },
+    });
+    const history = await request(
+      port,
+      "GET",
+      "/api/audit/attributes/part/ATTR-API-1/history?attribute=part.weight_kg",
+      { token }
+    );
+    assert.equal(history.status, 200);
+    assert.equal(history.body.attribute, "part.weight_kg");
+    assert.ok(history.body.items.length >= 1);
+
+    const metrics = await request(port, "GET", "/api/audit/metrics", { token });
+    assert.equal(metrics.status, 200);
+    assert.ok(metrics.body.total > 0);
+    assert.ok(Array.isArray(metrics.body.by_category));
+  });
+
+  test("manages the audit action type registry", async () => {
+    const created = await request(port, "POST", "/api/audit/action-types", {
+      token,
+      body: { code: "custom.api.probe", category: "configuration", event_type: "CONFIGURATION_CHANGED" },
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.code, "custom.api.probe");
+
+    const list = await request(port, "GET", "/api/audit/action-types?category=configuration", { token });
+    assert.equal(list.status, 200);
+    assert.ok(list.body.items.some((item) => item.code === "custom.api.probe"));
+
+    const update = await request(port, "PUT", "/api/audit/action-types/custom.api.probe", {
+      token,
+      body: { label: "API probe" },
+    });
+    assert.equal(update.status, 200);
+    assert.equal(update.body.label, "API probe");
+
+    const remove = await request(port, "DELETE", "/api/audit/action-types/custom.api.probe", { token });
+    assert.equal(remove.status, 200);
+  });
+
+  test("creates, lists and deletes saved filters", async () => {
+    const created = await request(port, "POST", "/api/audit/filters", {
+      token,
+      body: { name: "Denied access", scope: "security", filters: { status: "denied" }, shared: true },
+    });
+    assert.equal(created.status, 201);
+    const id = created.body.id;
+    const list = await request(port, "GET", "/api/audit/filters", { token });
+    assert.equal(list.status, 200);
+    assert.ok(list.body.items.some((item) => item.id === id));
+    const remove = await request(port, "DELETE", `/api/audit/filters/${id}`, { token });
+    assert.equal(remove.status, 200);
+  });
+
+  test("validates policies and manages retention policies", async () => {
+    const validation = await request(port, "POST", "/api/audit/policies/validate", {
+      token,
+      body: { name: "Probe", capture_views: true, capture_reads: false },
+    });
+    assert.equal(validation.status, 200);
+    assert.ok(validation.body.warnings.length >= 1);
+
+    const created = await request(port, "POST", "/api/audit/retention/policies", {
+      token,
+      body: { name: "API retention", category: "compliance", retention_days: 730, action: "archive" },
+    });
+    assert.equal(created.status, 201);
+    const id = created.body.id;
+
+    const list = await request(port, "GET", "/api/audit/retention/policies", { token });
+    assert.equal(list.status, 200);
+    assert.ok(list.body.items.some((item) => item.id === id));
+
+    const hold = await request(port, "PUT", `/api/audit/retention/policies/${id}`, {
+      token,
+      body: { legal_hold: true },
+    });
+    assert.equal(hold.status, 200);
+    assert.equal(hold.body.legal_hold, true);
+
+    const execute = await request(port, "POST", "/api/audit/retention/execute", {
+      token,
+      body: { dryRun: true, policyId: id },
+    });
+    assert.equal(execute.status, 200);
+    assert.equal(execute.body.dry_run, true);
+  });
+
+  test("requests an async export, then materialises and downloads it", async () => {
+    const created = await request(port, "POST", "/api/audit/exports", {
+      token,
+      body: { format: "csv", filters: { objectType: "part" } },
+    });
+    assert.equal(created.status, 202);
+    assert.equal(created.body.status, "pending");
+    const uuid = created.body.uuid;
+
+    const list = await request(port, "GET", "/api/audit/exports", { token });
+    assert.equal(list.status, 200);
+    assert.ok(list.body.items.some((item) => item.uuid === uuid));
+
+    const done = auditService.runAuditExport(database, created.body.id);
+    assert.equal(done.status, "completed");
+
+    const download = await request(port, "GET", `/api/audit/exports/${uuid}/download`, { token, raw: true });
+    assert.equal(download.status, 200);
+    assert.match(download.headers["content-type"], /text\/csv/);
+    assert.ok(download.body.length > 0);
+
+    const detail = await request(port, "GET", `/api/audit/exports/${uuid}`, { token });
+    assert.equal(detail.status, 200);
+    assert.ok(detail.body.download_count >= 1);
   });
 });

@@ -19,11 +19,14 @@ const DEFAULT_POLICY = {
   capture_views: 0,
   capture_downloads: 1,
   actions: [],
+  categories: [],
   track_attributes: [],
   masked_attributes: [],
   ignored_attributes: [],
   retention_days: 2555,
   visibility: "admin",
+  export_allowed: 1,
+  system_mandatory: 0,
 };
 
 function parseArray(raw) {
@@ -52,11 +55,14 @@ export function publicPolicy(row) {
     capture_views: !!row.capture_views,
     capture_downloads: !!row.capture_downloads,
     actions: parseArray(row.actions_json),
+    categories: parseArray(row.categories_json),
     track_attributes: parseArray(row.track_attributes_json),
     masked_attributes: parseArray(row.masked_attributes_json),
     ignored_attributes: parseArray(row.ignored_attributes_json),
     retention_days: Number(row.retention_days),
     visibility: row.visibility,
+    export_allowed: row.export_allowed === undefined ? true : row.export_allowed === 1,
+    system_mandatory: row.system_mandatory === 1,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -75,11 +81,14 @@ function effectiveFromRow(row) {
     capture_views: policy.capture_views,
     capture_downloads: policy.capture_downloads,
     actions: policy.actions,
+    categories: policy.categories,
     track_attributes: policy.track_attributes,
     masked_attributes: policy.masked_attributes,
     ignored_attributes: policy.ignored_attributes,
     retention_days: policy.retention_days,
     visibility: policy.visibility,
+    export_allowed: policy.export_allowed,
+    system_mandatory: policy.system_mandatory,
   };
 }
 
@@ -88,6 +97,7 @@ export function defaultEffectivePolicy() {
     ...DEFAULT_POLICY,
     enabled: true,
     actions: [],
+    categories: [],
     track_attributes: [],
     masked_attributes: [],
     ignored_attributes: [],
@@ -175,10 +185,10 @@ export function createPolicy(db, body, actor = null, tenantId = null) {
     db,
     `INSERT INTO audit_policies
       (tenant_id, object_type, name, description, status, record_success, record_failure,
-       capture_reads, capture_views, capture_downloads, actions_json, track_attributes_json,
-       masked_attributes_json, ignored_attributes_json, retention_days, visibility, created_by,
-       created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       capture_reads, capture_views, capture_downloads, actions_json, categories_json,
+       track_attributes_json, masked_attributes_json, ignored_attributes_json, retention_days,
+       visibility, export_allowed, system_mandatory, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       effectiveTenant,
       input.object_type,
@@ -191,11 +201,14 @@ export function createPolicy(db, body, actor = null, tenantId = null) {
       input.capture_views ? 1 : 0,
       input.capture_downloads === false ? 0 : 1,
       JSON.stringify(input.actions || []),
+      JSON.stringify(input.categories || []),
       JSON.stringify(input.track_attributes || []),
       JSON.stringify(input.masked_attributes || []),
       JSON.stringify(input.ignored_attributes || []),
       input.retention_days ?? 2555,
       normalizeVisibility(input.visibility || "admin"),
+      input.export_allowed === false ? 0 : 1,
+      body.system_mandatory ? 1 : 0,
       actor?.id ?? null,
       ts,
       ts,
@@ -223,6 +236,7 @@ export function updatePolicy(db, id, body, tenantId = null) {
     capture_downloads:
       input.capture_downloads === undefined ? row.capture_downloads : input.capture_downloads ? 1 : 0,
     actions_json: input.actions === undefined ? row.actions_json : JSON.stringify(input.actions),
+    categories_json: input.categories === undefined ? row.categories_json : JSON.stringify(input.categories),
     track_attributes_json:
       input.track_attributes === undefined ? row.track_attributes_json : JSON.stringify(input.track_attributes),
     masked_attributes_json:
@@ -231,7 +245,11 @@ export function updatePolicy(db, id, body, tenantId = null) {
       input.ignored_attributes === undefined ? row.ignored_attributes_json : JSON.stringify(input.ignored_attributes),
     retention_days: input.retention_days ?? row.retention_days,
     visibility: input.visibility ?? row.visibility,
+    export_allowed: input.export_allowed === undefined ? row.export_allowed : input.export_allowed ? 1 : 0,
   };
+  if (row.system_mandatory === 1 && next.status !== "active") {
+    throw new HttpError(409, "System-mandatory audit policies cannot be disabled");
+  }
   if (next.object_type !== row.object_type) {
     const clash = queryOne(
       db,
@@ -244,9 +262,9 @@ export function updatePolicy(db, id, body, tenantId = null) {
     db,
     `UPDATE audit_policies SET
        object_type = ?, name = ?, description = ?, status = ?, record_success = ?, record_failure = ?,
-       capture_reads = ?, capture_views = ?, capture_downloads = ?, actions_json = ?,
+       capture_reads = ?, capture_views = ?, capture_downloads = ?, actions_json = ?, categories_json = ?,
        track_attributes_json = ?, masked_attributes_json = ?, ignored_attributes_json = ?,
-       retention_days = ?, visibility = ?, updated_at = ?
+       retention_days = ?, visibility = ?, export_allowed = ?, updated_at = ?
      WHERE id = ?`,
     [
       next.object_type,
@@ -259,11 +277,13 @@ export function updatePolicy(db, id, body, tenantId = null) {
       next.capture_views,
       next.capture_downloads,
       next.actions_json,
+      next.categories_json,
       next.track_attributes_json,
       next.masked_attributes_json,
       next.ignored_attributes_json,
       next.retention_days,
       next.visibility,
+      next.export_allowed,
       nowIso(),
       id,
     ]
@@ -277,8 +297,45 @@ export function deletePolicy(db, id, tenantId = null) {
   if (tenantId != null && row.tenant_id != null && Number(row.tenant_id) !== Number(tenantId)) {
     throw new HttpError(404, "Audit policy not found");
   }
+  if (row.system_mandatory === 1) {
+    throw new HttpError(409, "System-mandatory audit policies cannot be deleted");
+  }
   run(db, "DELETE FROM audit_policies WHERE id = ?", [id]);
   return { ok: true, id: Number(id) };
+}
+
+// Validates a policy payload without persisting it. Returns the normalized
+// policy, any warnings, and a sample of how many recent events it would match.
+export function validatePolicy(db, body = {}, { id = null } = {}) {
+  const input = validatePolicyInput(body, { partial: id != null });
+  const warnings = [];
+  if (input.capture_views === true && input.capture_reads === false) {
+    warnings.push("capture_views is enabled without capture_reads; view events are recorded but read events are not.");
+  }
+  if (input.actions && input.actions.length && input.categories && input.categories.length) {
+    warnings.push("Both actions and categories are restricted; events must satisfy both filters to be captured.");
+  }
+  if (input.retention_days !== undefined && Number(input.retention_days) > 3650) {
+    warnings.push("retention_days exceeds 10 years; consider a dedicated retention policy instead.");
+  }
+  let sampleMatches = null;
+  try {
+    const clauses = [];
+    const params = [];
+    if (input.actions && input.actions.length) {
+      clauses.push(`action IN (${input.actions.map(() => "?").join(", ")})`);
+      params.push(...input.actions);
+    }
+    if (input.categories && input.categories.length) {
+      clauses.push(`category IN (${input.categories.map(() => "?").join(", ")})`);
+      params.push(...input.categories);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    sampleMatches = queryOne(db, `SELECT COUNT(*) AS c FROM audit_logs ${where}`, params).c;
+  } catch {
+    sampleMatches = null;
+  }
+  return { valid: true, policy: input, warnings, sample_matches: sampleMatches };
 }
 
 // Idempotently creates the system wildcard policy. Called from the seeder so
@@ -301,6 +358,7 @@ export function ensureDefaultPolicies(db) {
           capture_downloads: true,
           retention_days: 2555,
           track_attributes: [],
+          system_mandatory: true,
         },
         null,
         null
@@ -321,10 +379,14 @@ export function ensureDefaultPolicies(db) {
         capture_downloads: true,
         retention_days: 2555,
         track_attributes: [],
+        system_mandatory: true,
       },
       null,
       null
     );
+  }
+  for (const row of queryAll(db, "SELECT id FROM audit_policies WHERE tenant_id IS NULL")) {
+    run(db, "UPDATE audit_policies SET system_mandatory = 1 WHERE id = ?", [row.id]);
   }
   return baseline;
 }

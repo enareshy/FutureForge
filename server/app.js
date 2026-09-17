@@ -125,6 +125,12 @@ export function createApp(db) {
   app.use(audit.auditContext());
   app.use(audit.captureApiFailures(db));
 
+  // Optional audit-to-notifications bridge. Off by default so deployments opt
+  // in explicitly; enable with AUDIT_NOTIFY_EVENTS=true.
+  if (/^(1|true|yes)$/i.test(String(process.env.AUDIT_NOTIFY_EVENTS || ""))) {
+    audit.createNotificationBridge(db);
+  }
+
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, service: "helix-iam" });
   });
@@ -3371,10 +3377,21 @@ export function createApp(db) {
       objectId: req.query.objectId,
       actorId: req.query.actorId,
       actorUsername: req.query.actorUsername,
+      actorType: req.query.actorType,
       action: req.query.action,
+      category: req.query.category,
       eventType: req.query.eventType,
       source: req.query.source,
       status: req.query.status,
+      securityClassification: req.query.securityClassification,
+      retentionCategory: req.query.retentionCategory,
+      sessionId: req.query.sessionId,
+      objectRevision: req.query.objectRevision,
+      relatedResourceType: req.query.relatedResourceType || req.query.relatedObjectType,
+      relatedResourceId: req.query.relatedResourceId || req.query.relatedObjectId,
+      changedAttribute: req.query.changedAttribute || req.query.attribute,
+      hasChanges: req.query.hasChanges,
+      failureCategory: req.query.failureCategory,
       organizationId: req.query.organizationId,
       correlationId: req.query.correlationId,
       parentEventId: req.query.parentEventId,
@@ -3634,6 +3651,374 @@ export function createApp(db) {
       const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
       res.json(
         audit.runRetention(db, {
+          tenantId: isPlatform && body.tenantId !== undefined ? body.tenantId : req.tenantId,
+          policyId: body.policyId,
+          actor: req.actor,
+          dryRun: !!body.dryRun,
+        })
+      );
+    })
+  );
+
+  // ── Audit framework extensions: batch ingest, specialised history, exports,
+  // action types, saved filters and dedicated retention policies ─────────────
+
+  app.post(
+    "/api/audit/events/batch",
+    auth,
+    can("iam.audit.events", "create"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const events = Array.isArray(body.events) ? body.events : [];
+      if (!events.length) throw new HttpError(400, "events must be a non-empty array");
+      if (events.length > 500) throw new HttpError(400, "A batch may contain at most 500 events");
+      const ids = audit.recordBatch(
+        db,
+        events.map((event) =>
+          audit.auditFromRequest(req, {
+            action: event.action,
+            event_type: event.event_type || event.eventType,
+            category: event.category,
+            object_type: event.objectType || event.object_type,
+            object_id: event.objectId || event.object_id,
+            object_name: event.objectName || event.object_name,
+            status: event.status,
+            source: event.source || "api",
+            actor_type: event.actorType || event.actor_type,
+            security_classification: event.securityClassification || event.security_classification,
+            retention_category: event.retentionCategory || event.retention_category,
+            session_id: event.sessionId || event.session_id,
+            object_revision: event.objectRevision || event.object_revision,
+            related_resource_type: event.relatedResourceType || event.related_resource_type,
+            related_resource_id: event.relatedResourceId || event.related_resource_id,
+            reason: event.reason,
+            details: event.details,
+            before: event.before,
+            after: event.after,
+            related: event.related,
+          })
+        )
+      );
+      res.status(201).json({ captured: ids.length, ids });
+    })
+  );
+
+  const historyViews = {
+    security: "securityActivity",
+    workflows: "workflowAudit",
+    lifecycle: "lifecycleAudit",
+    configuration: "configurationAudit",
+    approvals: "approvalAudit",
+    documents: "documentAudit",
+    integrations: "integrationAudit",
+    "background-jobs": "backgroundJobAudit",
+  };
+  for (const [path, fn] of Object.entries(historyViews)) {
+    app.get(
+      `/api/audit/${path}`,
+      auth,
+      can("iam.audit.events", "read"),
+      wrap((req, res) => {
+        res.json(audit[fn](db, eventFilters(req), auditScope(req)));
+      })
+    );
+  }
+
+  app.get(
+    "/api/audit/metrics",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(audit.auditMetrics(db, eventFilters(req), auditScope(req)));
+    })
+  );
+
+  app.get(
+    "/api/audit/attributes/:objectType/:objectId/history",
+    auth,
+    can("iam.audit.history", "read"),
+    wrap((req, res) => {
+      assertHistoryVisible(req, req.params.objectType);
+      const attribute = req.query.attribute || req.query.changedAttribute;
+      if (!attribute) throw new HttpError(400, "attribute query parameter is required");
+      res.json(
+        audit.attributeHistory(
+          db,
+          { objectType: req.params.objectType, objectId: req.params.objectId, attribute },
+          eventFilters(req),
+          auditScope(req)
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/audit/relationships/:objectType/:objectId/history",
+    auth,
+    can("iam.audit.history", "read"),
+    wrap((req, res) => {
+      assertHistoryVisible(req, req.params.objectType);
+      res.json(
+        audit.relationshipHistory(
+          db,
+          { objectType: req.params.objectType, objectId: req.params.objectId },
+          eventFilters(req),
+          auditScope(req)
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/audit/exports",
+    auth,
+    can("iam.audit.export", "read"),
+    wrap((req, res) => {
+      const page = pagination(req.query);
+      res.json(
+        audit.listAuditExports(db, {
+          tenantId: req.tenantId,
+          actorId: req.query.mine === "true" ? req.actor.id : null,
+          status: req.query.status,
+          limit: page.pageSize,
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/audit/exports",
+    auth,
+    can("iam.audit.export", "execute"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      const tenantId = isPlatform && (body.tenant_id === null || body.tenantId === null)
+        ? null
+        : body.tenant_id ?? body.tenantId ?? req.tenantId;
+      res.status(202).json(
+        audit.requestAuditExport(
+          db,
+          {
+            ...body,
+            filters: { ...eventFilters(req), ...(body.filters || {}) },
+            tenant_id: tenantId,
+          },
+          req.actor,
+          tenantId,
+          clientIp(req)
+        )
+      );
+    })
+  );
+
+  app.get(
+    "/api/audit/exports/:id",
+    auth,
+    can("iam.audit.export", "read"),
+    wrap((req, res) => {
+      res.json(audit.getAuditExport(db, req.params.id, { tenantId: req.tenantId }));
+    })
+  );
+
+  app.get(
+    "/api/audit/exports/:id/download",
+    auth,
+    can("iam.audit.export", "read"),
+    wrap((req, res) => {
+      const result = audit.getAuditExport(db, req.params.id, { tenantId: req.tenantId, includeContent: true });
+      audit.markAuditExportDownloaded(db, result.id);
+      res.setHeader("Content-Type", result.content_type);
+      res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+      res.send(result.content);
+    })
+  );
+
+  app.post(
+    "/api/audit/policies/validate",
+    auth,
+    can("iam.audit.policies", "read"),
+    wrap((req, res) => {
+      res.json(audit.validatePolicy(db, req.body || {}));
+    })
+  );
+
+  app.get(
+    "/api/audit/action-types",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(
+        audit.listActionTypes(db, {
+          category: req.query.category,
+          active: req.query.active,
+          mandatory: req.query.mandatory,
+          q: req.query.q,
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/audit/action-types/:code",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(audit.getActionType(db, req.params.code));
+    })
+  );
+
+  app.post(
+    "/api/audit/action-types",
+    auth,
+    can("iam.audit.policies", "create"),
+    wrap((req, res) => {
+      res.status(201).json(audit.createActionType(db, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.put(
+    "/api/audit/action-types/:code",
+    auth,
+    can("iam.audit.policies", "update"),
+    wrap((req, res) => {
+      res.json(audit.updateActionType(db, req.params.code, req.body || {}, req.actor, clientIp(req)));
+    })
+  );
+
+  app.delete(
+    "/api/audit/action-types/:code",
+    auth,
+    can("iam.audit.policies", "delete"),
+    wrap((req, res) => {
+      res.json(audit.deleteActionType(db, req.params.code, req.actor, clientIp(req)));
+    })
+  );
+
+  app.get(
+    "/api/audit/filters",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(
+        audit.listSavedFilters(db, {
+          tenantId: req.tenantId,
+          ownerId: req.actor.id,
+          scope: req.query.scope,
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/audit/filters",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.status(201).json(audit.createSavedFilter(db, req.body || {}, req.actor, req.tenantId));
+    })
+  );
+
+  app.put(
+    "/api/audit/filters/:id",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(audit.updateSavedFilter(db, req.params.id, req.body || {}, req.actor, req.tenantId));
+    })
+  );
+
+  app.delete(
+    "/api/audit/filters/:id",
+    auth,
+    can("iam.audit.events", "read"),
+    wrap((req, res) => {
+      res.json(audit.deleteSavedFilter(db, req.params.id, req.actor, req.tenantId));
+    })
+  );
+
+  app.get(
+    "/api/audit/retention/policies",
+    auth,
+    can("iam.audit.retention", "read"),
+    wrap((req, res) => {
+      res.json(
+        audit.listRetentionPolicies(db, {
+          tenantId: tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true" ? null : req.tenantId,
+          status: req.query.status,
+          category: req.query.category,
+          objectType: req.query.objectType,
+          includeSystem: req.query.includeSystem !== "false",
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/audit/retention/policies/:id",
+    auth,
+    can("iam.audit.retention", "read"),
+    wrap((req, res) => {
+      res.json(audit.getRetentionPolicy(db, req.params.id, tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId));
+    })
+  );
+
+  app.post(
+    "/api/audit/retention/policies",
+    auth,
+    can("iam.audit.retention", "create"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      const tenantId = isPlatform && (body.tenant_id === null || body.tenantId === null)
+        ? null
+        : body.tenant_id ?? body.tenantId ?? req.tenantId;
+      res.status(201).json(audit.createRetentionPolicy(db, { ...body, tenant_id: tenantId }, req.actor, tenantId));
+    })
+  );
+
+  app.put(
+    "/api/audit/retention/policies/:id",
+    auth,
+    can("iam.audit.retention", "update"),
+    wrap((req, res) => {
+      res.json(
+        audit.updateRetentionPolicy(
+          db,
+          req.params.id,
+          req.body || {},
+          req.actor,
+          tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId
+        )
+      );
+    })
+  );
+
+  app.delete(
+    "/api/audit/retention/policies/:id",
+    auth,
+    can("iam.audit.retention", "delete"),
+    wrap((req, res) => {
+      res.json(
+        audit.deleteRetentionPolicy(
+          db,
+          req.params.id,
+          req.actor,
+          tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId
+        )
+      );
+    })
+  );
+
+  app.post(
+    "/api/audit/retention/execute",
+    auth,
+    can("iam.audit.retention", "execute"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      res.json(
+        audit.executeRetentionPolicies(db, {
           tenantId: isPlatform && body.tenantId !== undefined ? body.tenantId : req.tenantId,
           policyId: body.policyId,
           actor: req.actor,

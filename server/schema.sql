@@ -1399,11 +1399,14 @@ CREATE TABLE IF NOT EXISTS audit_policies (
   capture_views INTEGER NOT NULL DEFAULT 0,
   capture_downloads INTEGER NOT NULL DEFAULT 1,
   actions_json TEXT NOT NULL DEFAULT '[]',
+  categories_json TEXT NOT NULL DEFAULT '[]',
   track_attributes_json TEXT NOT NULL DEFAULT '[]',
   masked_attributes_json TEXT NOT NULL DEFAULT '[]',
   ignored_attributes_json TEXT NOT NULL DEFAULT '[]',
   retention_days INTEGER NOT NULL DEFAULT 2555,
   visibility TEXT NOT NULL DEFAULT 'admin' CHECK (visibility IN ('user', 'manager', 'admin')),
+  export_allowed INTEGER NOT NULL DEFAULT 1,
+  system_mandatory INTEGER NOT NULL DEFAULT 0,
   created_by INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1441,18 +1444,28 @@ CREATE TABLE IF NOT EXISTS audit_logs_archive (
   actor_id INTEGER,
   actor_username TEXT,
   user_display_name TEXT,
+  actor_type TEXT DEFAULT 'user',
+  actor_ref TEXT,
   action TEXT NOT NULL,
   event_type TEXT,
+  category TEXT DEFAULT 'administration',
   source TEXT,
+  security_classification TEXT DEFAULT 'internal',
+  retention_category TEXT DEFAULT 'standard',
   resource_type TEXT NOT NULL,
   resource_id TEXT,
   object_name TEXT,
+  object_revision TEXT,
+  session_id TEXT,
+  related_resource_type TEXT,
+  related_resource_id TEXT,
   details TEXT,
   changed_fields TEXT,
   before_values TEXT,
   after_values TEXT,
   related_json TEXT,
   status TEXT,
+  failure_category TEXT,
   error_message TEXT,
   reason TEXT,
   correlation_id TEXT,
@@ -1489,6 +1502,102 @@ WHEN (SELECT allow_delete FROM audit_guard WHERE id = 1) <> 1
 BEGIN
   SELECT RAISE(ABORT, 'Audit records are immutable');
 END;
+
+-- Action type registry. Maps stable action codes to the category and coarse
+-- event type used for classification, filtering and mandatory-capture rules.
+-- Business modules may register additional action types at runtime.
+CREATE TABLE IF NOT EXISTS audit_action_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'administration',
+  event_type TEXT NOT NULL DEFAULT 'ADMIN_ACTION',
+  description TEXT DEFAULT '',
+  mandatory INTEGER NOT NULL DEFAULT 0,
+  system INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_action_types_category ON audit_action_types(category, active);
+
+-- Dedicated retention policies. A policy targets a category and/or object type
+-- for a tenant, optionally under legal hold. Distinct from audit_policies
+-- (capture policies) so compliance teams can manage lifecycle independently.
+CREATE TABLE IF NOT EXISTS audit_retention_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT DEFAULT '',
+  category TEXT NOT NULL DEFAULT '*',
+  object_type TEXT NOT NULL DEFAULT '*',
+  retention_days INTEGER NOT NULL DEFAULT 2555,
+  action TEXT NOT NULL DEFAULT 'archive' CHECK (action IN ('archive', 'purge')),
+  legal_hold INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  priority INTEGER NOT NULL DEFAULT 100,
+  system INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_retention_policies_scope
+  ON audit_retention_policies(COALESCE(tenant_id, 0), category, object_type);
+CREATE INDEX IF NOT EXISTS idx_audit_retention_policies_status
+  ON audit_retention_policies(tenant_id, status, priority);
+
+-- Asynchronous export requests. The export is materialised by a background job
+-- and retained for a bounded window, so large result sets never block a request.
+CREATE TABLE IF NOT EXISTS audit_export_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER,
+  requested_by INTEGER,
+  name TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT 'csv',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'expired')),
+  filters_json TEXT NOT NULL DEFAULT '{}',
+  scope_json TEXT NOT NULL DEFAULT '{}',
+  columns_json TEXT NOT NULL DEFAULT '[]',
+  reason TEXT,
+  row_count INTEGER NOT NULL DEFAULT 0,
+  content TEXT,
+  content_type TEXT,
+  error TEXT,
+  job_id INTEGER,
+  expires_at TEXT,
+  downloaded_at TEXT,
+  download_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_export_requests_tenant
+  ON audit_export_requests(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_export_requests_status
+  ON audit_export_requests(status, expires_at);
+
+-- Reusable saved filter definitions for the audit console and APIs.
+CREATE TABLE IF NOT EXISTS audit_saved_filters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER,
+  owner_id INTEGER,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  scope TEXT NOT NULL DEFAULT 'events',
+  filters_json TEXT NOT NULL DEFAULT '{}',
+  shared INTEGER NOT NULL DEFAULT 0,
+  system INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_saved_filters_owner
+  ON audit_saved_filters(tenant_id, owner_id, scope);
 
 -- ── Notification & Communication Framework ─────────────────────────────────
 -- Central, reusable notification platform capability. Business modules publish
