@@ -1,6 +1,9 @@
 import React, { useState } from "react";
 import {
   EventsOverviewPanel,
+  EventRecordsPanel,
+  EventHandlersPanel,
+  EventTracePanel,
   EventRegistryPanel,
   EventSubscriptionsPanel,
   EventDeliveriesPanel,
@@ -12,6 +15,9 @@ import {
 
 const TABS = [
   ["overview", "Overview"],
+  ["records", "Event records"],
+  ["handlers", "Handlers"],
+  ["trace", "Trace"],
   ["registry", "Event registry"],
   ["subscriptions", "Subscriptions"],
   ["deliveries", "Deliveries"],
@@ -43,6 +49,9 @@ export default function EventsPage() {
       </div>
 
       {tab === "overview" ? <EventsOverviewPanel /> : null}
+      {tab === "records" ? <EventRecordsPanel /> : null}
+      {tab === "handlers" ? <EventHandlersPanel /> : null}
+      {tab === "trace" ? <EventTracePanel /> : null}
       {tab === "registry" ? <EventRegistryPanel /> : null}
       {tab === "subscriptions" ? <EventSubscriptionsPanel /> : null}
       {tab === "deliveries" ? <EventDeliveriesPanel /> : null}

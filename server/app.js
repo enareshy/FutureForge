@@ -8367,6 +8367,14 @@ export function createApp(db) {
       res.json(events.DeadLetter.deadLetterStats(db, { tenantId: eventTenant(req), ...req.query }));
     })
   );
+  eventsRouter.post(
+    "/dead-letters/bulk-retry",
+    auth,
+    canEventDeadLetters("update"),
+    wrap((req, res) => {
+      res.json(events.DeadLetter.retryDeadLetters(db, { ...(req.body || {}), tenantId: eventTenant(req), actor: req.actor }));
+    })
+  );
   eventsRouter.get(
     "/dead-letters/:id",
     auth,

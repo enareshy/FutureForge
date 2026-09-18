@@ -5,6 +5,15 @@ import { publicEvent, safeParse } from "./repository.js";
 import { assertEventType } from "./validation.js";
 import { HttpError } from "../../validation.js";
 import { emitObjectIndexChange } from "../search/hooks.js";
+import { emitDomainEvent } from "../events/emit.js";
+
+// File domain events are bridged onto the platform Event & Messaging framework
+// under the DOCUMENT category so other modules can react to document lifecycle
+// changes without depending on the files module directly.
+const DOCUMENT_EVENT_MAP = {
+  FileUploaded: "DocumentCreated",
+  FileCheckedIn: "DocumentReleased",
+};
 
 // File domain events. Every state change is (1) written to the module outbox
 // `file_events` for durability/audit and (2) re-published through the platform
@@ -79,6 +88,35 @@ export function recordFileEvent(db, {
       operation: eventType === "FileDeleted" ? "delete" : "upsert",
       reason: eventType,
     });
+    const documentEventType = DOCUMENT_EVENT_MAP[eventType];
+    if (documentEventType) {
+      emitDomainEvent(
+        db,
+        {
+          event_type_code: documentEventType,
+          category: "document",
+          source_module: "files",
+          source_system: "files",
+          source_object_type: "file",
+          source_object_id: file.id,
+          source_object_revision: versionId ?? file.current_version_id ?? null,
+          tenant_id: eventTenant,
+          organization_id: organizationId ?? file.organization_id ?? null,
+          correlation_id: correlationId || undefined,
+          idempotency_key: idempotencyKey ? `${idempotencyKey}:${documentEventType}` : undefined,
+          payload: {
+            file_ref: file.file_ref,
+            name: file.name,
+            mime_type: file.mime_type,
+            classification: file.security_classification,
+            version_id: versionId ?? null,
+            ...payload,
+          },
+          metadata: { file_event_type: eventType },
+        },
+        actor
+      );
+    }
   }
   return { ...publicEvent(stored), notification: summary ? { published: summary.published, event_id: summary.event_id, reason: summary.reason || "" } : null };
 }

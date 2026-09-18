@@ -445,8 +445,22 @@ export function EventDeliveriesPanel() {
 export function EventDeadLetterPanel() {
   const [page, setPageState] = useState(1);
   const [notice, setNotice] = useState("");
-  const list = useAsync(() => events.deadLetters(`?page=${page}&pageSize=25`), [page]);
+  const [filters, setFilters] = useState({ status: "open", eventTypeCode: "", handler: "", q: "" });
+  const [selected, setSelected] = useState([]);
+  const [detailId, setDetailId] = useState(null);
+  const meta = useAsync(() => events.meta(), []);
+  const qs = `?page=${page}&pageSize=25`
+    + (filters.status ? `&status=${encodeURIComponent(filters.status)}` : "")
+    + (filters.eventTypeCode ? `&eventTypeCode=${encodeURIComponent(filters.eventTypeCode)}` : "")
+    + (filters.handler ? `&handler=${encodeURIComponent(filters.handler)}` : "")
+    + (filters.q ? `&q=${encodeURIComponent(filters.q)}` : "");
+  const list = useAsync(() => events.deadLetters(qs), [qs]);
   const stats = useAsync(() => events.deadLetterStats(), []);
+  const detail = useAsync(() => (detailId ? events.deadLetter(detailId) : Promise.resolve(null)), [detailId]);
+
+  function toggle(id) {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.concat(id)));
+  }
 
   async function resolve(row, action) {
     try {
@@ -459,8 +473,44 @@ export function EventDeadLetterPanel() {
     }
   }
 
+  async function bulkRetry(useSelection) {
+    try {
+      const body = useSelection
+        ? { ids: selected, reason: "bulk retry (selected) from console" }
+        : {
+          status: filters.status || "open",
+          eventTypeCode: filters.eventTypeCode || undefined,
+          handler: filters.handler || undefined,
+          reason: "bulk retry (matching) from console",
+        };
+      const result = await events.bulkRetryDeadLetters(body);
+      setNotice(`Bulk retry: ${result.retried}/${result.requested} requeued.`);
+      setSelected([]);
+      list.reload();
+      stats.reload();
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  const rows = list.data?.items || [];
+
   return (
     <>
+      <Toolbar>
+        <input className="input" placeholder="Search ref, error, handler…" value={filters.q} onChange={(e) => { setFilters({ ...filters, q: e.target.value }); setPageState(1); }} />
+        <select className="input" value={filters.status} onChange={(e) => { setFilters({ ...filters, status: e.target.value }); setPageState(1); }}>
+          <option value="">All statuses</option>
+          {["open", "retrying", "resolved", "ignored"].map((st) => <option key={st} value={st}>{st}</option>)}
+        </select>
+        <select className="input" value={filters.eventTypeCode} onChange={(e) => { setFilters({ ...filters, eventTypeCode: e.target.value }); setPageState(1); }}>
+          <option value="">All event types</option>
+          {(meta.data?.event_types || []).map((t) => <option key={t.code} value={t.code}>{t.code}</option>)}
+        </select>
+        <input className="input" placeholder="handler" value={filters.handler} onChange={(e) => { setFilters({ ...filters, handler: e.target.value }); setPageState(1); }} />
+        <button className="btn" type="button" disabled={!selected.length} onClick={() => bulkRetry(true)}>Retry selected ({selected.length})</button>
+        <button className="btn secondary" type="button" onClick={() => bulkRetry(false)}>Retry matching</button>
+      </Toolbar>
       <Notice kind={/error|fail/i.test(notice) ? "error" : "ok"}>{notice}</Notice>
       <StatGrid
         items={[
@@ -473,6 +523,9 @@ export function EventDeadLetterPanel() {
       <Section title="Dead letters" className="intg-section">
         <Table
           columns={[
+            { key: "pick", label: "", render: (r) => (
+              <input type="checkbox" className="checkbox" checked={selected.includes(r.id)} onChange={() => toggle(r.id)} onClick={(e) => e.stopPropagation()} />
+            ) },
             { key: "id", label: "#" },
             { key: "event_type_code", label: "Event type", render: (r) => <span className="mono">{r.event_type_code}</span> },
             { key: "handler", label: "Handler", render: (r) => <span className="mono">{r.handler || "—"}</span> },
@@ -480,17 +533,43 @@ export function EventDeadLetterPanel() {
             { key: "status", label: "Status", render: (r) => <StatusBadge value={r.status} prefix="eng-" /> },
             { key: "actions", label: "", render: (r) => (
               <span className="inline">
+                <button className="btn ghost" type="button" onClick={() => setDetailId(r.id)}>View</button>
                 <button className="btn ghost" type="button" onClick={() => resolve(r, "retry")}>Requeue</button>
                 <button className="btn ghost" type="button" onClick={() => resolve(r, "ignore")}>Ignore</button>
               </span>
             ) },
           ]}
-          rows={list.data?.items || []}
+          rows={rows}
           empty="No dead letters"
           loading={list.loading}
         />
         <Pager page={page} pageSize={25} total={list.data?.total} onPage={setPageState} />
       </Section>
+
+      {detailId ? (
+        <Drawer title={`Dead letter ${detailId}`} subtitle={detail.data?.event_ref} onClose={() => setDetailId(null)}>
+          {detail.error ? <Notice kind="error">{detail.error}</Notice> : null}
+          {detail.data ? (
+            <>
+              <div className="chips">
+                <span className="chip">Type: {detail.data.event_type_code}</span>
+                <span className="chip">Handler: {detail.data.handler || "—"}</span>
+                <span className="chip">Category: {titleCase(detail.data.error_category)}</span>
+                <span className="chip">Attempts: {detail.data.attempts}</span>
+                <span className="chip">Status: {detail.data.status}</span>
+              </div>
+              {detail.data.error_message ? <Notice kind="error">{detail.data.error_code ? `${detail.data.error_code}: ` : ""}{detail.data.error_message}</Notice> : null}
+              <Section title="Payload">
+                <JsonBlock value={detail.data.payload ?? {}} />
+              </Section>
+              <div className="inline">
+                <button className="btn" type="button" onClick={() => { resolve(detail.data, "retry"); setDetailId(null); }}>Requeue</button>
+                <button className="btn secondary" type="button" onClick={() => { resolve(detail.data, "ignore"); setDetailId(null); }}>Ignore</button>
+              </div>
+            </>
+          ) : null}
+        </Drawer>
+      ) : null}
     </>
   );
 }
@@ -790,6 +869,428 @@ export function EventTopologyPanel() {
           />
         </Section>
       </div>
+    </>
+  );
+}
+
+function Facts({ items }) {
+  return (
+    <Table
+      columns={[
+        { key: "label", label: "Field", width: "38%" },
+        { key: "value", label: "Value", render: (r) => (r.mono ? <span className="mono">{asText(r.value, "—")}</span> : asText(r.value, "—")) },
+      ]}
+      rows={items}
+      empty="—"
+    />
+  );
+}
+
+export function EventDetailsDrawer({ eventRef, onClose, onOpenEvent, onTrace }) {
+  const detail = useAsync(() => events.event(eventRef), [eventRef]);
+  const ev = detail.data;
+  const related = useAsync(
+    () => (ev && (ev.correlation_id || ev.trace_id)
+      ? events.monitoringTraceability(ev.correlation_id
+        ? `?correlationId=${encodeURIComponent(ev.correlation_id)}`
+        : `?traceId=${encodeURIComponent(ev.trace_id)}`)
+      : Promise.resolve(null)),
+    [ev?.correlation_id, ev?.trace_id]
+  );
+  const [notice, setNotice] = useState("");
+
+  async function route() {
+    try {
+      await events.routeEvent(eventRef);
+      setNotice("Event routed to current subscribers.");
+      detail.reload();
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  const timelines = related.data?.events || [];
+
+  return (
+    <Drawer title={ev?.event_type_code || eventRef} subtitle={ev?.event_ref || eventRef} onClose={onClose}>
+      {detail.error ? <Notice kind="error">{detail.error}</Notice> : null}
+      <Notice kind={/error|fail|not found/i.test(notice) ? "error" : "ok"}>{notice}</Notice>
+      {ev ? (
+        <>
+          <div className="chips">
+            <span className="chip">Status: {ev.status}</span>
+            <span className="chip">Version: {ev.event_version}</span>
+            <span className="chip">Classification: {ev.security_classification}</span>
+            <span className="chip">Source: {ev.source_module || "—"}</span>
+          </div>
+          <div className="inline" style={{ margin: "10px 0" }}>
+            <button className="btn ghost" type="button" onClick={route}>Route event</button>
+            {onTrace ? <button className="btn ghost" type="button" onClick={() => onTrace(ev)}>View trace</button> : null}
+          </div>
+
+          <Section title="Identity">
+            <Facts items={[
+              { label: "Event id", value: ev.event_id, mono: true },
+              { label: "Event ref", value: ev.event_ref, mono: true },
+              { label: "Event type", value: ev.event_type_code, mono: true },
+              { label: "Event version", value: ev.event_version },
+              { label: "Status", value: ev.status },
+              { label: "Security classification", value: ev.security_classification },
+              { label: "Priority", value: ev.priority },
+              { label: "Sequence number", value: ev.sequence_number },
+              { label: "Partition key", value: ev.partition_key, mono: true },
+            ]} />
+          </Section>
+
+          <Section title="Source & actor">
+            <Facts items={[
+              { label: "Source module", value: ev.source_module },
+              { label: "Source system", value: ev.source_system },
+              { label: "Object type", value: ev.source_object_type },
+              { label: "Object id", value: ev.source_object_id, mono: true },
+              { label: "Object revision", value: ev.source_object_revision },
+              { label: "Actor", value: ev.actor_id, mono: true },
+              { label: "Actor type", value: ev.actor_type },
+            ]} />
+          </Section>
+
+          <Section title="Traceability">
+            <Facts items={[
+              { label: "Correlation id", value: ev.correlation_id, mono: true },
+              { label: "Causation id", value: ev.causation_id, mono: true },
+              { label: "Trace id", value: ev.trace_id, mono: true },
+              { label: "Parent event id", value: ev.parent_event_id },
+            ]} />
+          </Section>
+
+          <Section title="Scope">
+            <Facts items={[
+              { label: "Tenant", value: ev.tenant_id },
+              { label: "Organization", value: ev.organization_id },
+              { label: "Plant", value: ev.plant_id },
+              { label: "Site", value: ev.site_id },
+            ]} />
+          </Section>
+
+          <Section title="Timing & delivery">
+            <Facts items={[
+              { label: "Occurred at", value: ts(ev.occurred_at) },
+              { label: "Created at", value: ts(ev.created_at) },
+              { label: "Updated at", value: ts(ev.updated_at) },
+              { label: "Subscribers", value: ev.subscriber_count },
+              { label: "Delivered", value: ev.delivered_count },
+              { label: "Failed", value: ev.failed_count },
+            ]} />
+          </Section>
+
+          <Section title="Payload">
+            <JsonBlock value={ev.payload ?? {}} />
+          </Section>
+          <Section title="Metadata">
+            <JsonBlock value={ev.metadata ?? {}} maxHeight={160} />
+          </Section>
+
+          <Section title="Subscribers">
+            <Table
+              columns={[
+                { key: "id", label: "#" },
+                { key: "handler", label: "Handler", render: (r) => <span className="mono">{r.handler || "—"}</span> },
+                { key: "subscriber", label: "Subscriber", render: (r) => <span className="mono">{r.subscriber || "—"}</span> },
+                { key: "status", label: "Status", render: (r) => <StatusBadge value={r.status} prefix="eng-" /> },
+                { key: "attempts", label: "Attempts" },
+              ]}
+              rows={ev.deliveries || []}
+              empty="No subscribers"
+            />
+          </Section>
+
+          <Section title="Related events">
+            <Table
+              columns={[
+                { key: "event_type_code", label: "Event type", render: (r) => <span className="mono">{r.event_type_code}</span> },
+                { key: "event_ref", label: "Ref", render: (r) => <span className="mono">{r.event_ref}</span> },
+                { key: "status", label: "Status", render: (r) => <StatusBadge value={r.status} prefix="eng-" /> },
+                { key: "created_at", label: "When", render: (r) => ts(r.created_at) },
+                { key: "open", label: "", render: (r) => (onOpenEvent && r.event_ref !== ev.event_ref
+                  ? <button className="btn ghost" type="button" onClick={() => onOpenEvent(r.event_ref)}>Open</button>
+                  : null) },
+              ]}
+              rows={timelines}
+              empty="No correlated events"
+            />
+          </Section>
+        </>
+      ) : null}
+    </Drawer>
+  );
+}
+
+export function EventRecordsPanel() {
+  const [page, setPageState] = useState(1);
+  const [filters, setFilters] = useState({ q: "", status: "", sourceModule: "", eventTypeCode: "" });
+  const [selected, setSelected] = useState(null);
+  const meta = useAsync(() => events.meta(), []);
+  const qs = `?page=${page}&pageSize=25`
+    + (filters.q ? `&q=${encodeURIComponent(filters.q)}` : "")
+    + (filters.status ? `&status=${encodeURIComponent(filters.status)}` : "")
+    + (filters.sourceModule ? `&sourceModule=${encodeURIComponent(filters.sourceModule)}` : "")
+    + (filters.eventTypeCode ? `&eventTypeCode=${encodeURIComponent(filters.eventTypeCode)}` : "");
+  const list = useAsync(() => events.events(qs), [qs]);
+
+  return (
+    <>
+      <Toolbar>
+        <input className="input" placeholder="Search ref, type, object…" value={filters.q} onChange={(e) => { setFilters({ ...filters, q: e.target.value }); setPageState(1); }} />
+        <select className="input" value={filters.status} onChange={(e) => { setFilters({ ...filters, status: e.target.value }); setPageState(1); }}>
+          <option value="">All statuses</option>
+          {["pending", "published", "routed", "partially_delivered", "delivered", "failed", "dead_letter"].map((st) => <option key={st} value={st}>{st}</option>)}
+        </select>
+        <select className="input" value={filters.eventTypeCode} onChange={(e) => { setFilters({ ...filters, eventTypeCode: e.target.value }); setPageState(1); }}>
+          <option value="">All event types</option>
+          {(meta.data?.event_types || []).map((t) => <option key={t.code} value={t.code}>{t.code}</option>)}
+        </select>
+        <input className="input" placeholder="source module" value={filters.sourceModule} onChange={(e) => { setFilters({ ...filters, sourceModule: e.target.value }); setPageState(1); }} />
+        <button className="btn secondary" type="button" onClick={() => list.reload()}>Refresh</button>
+        <span className="muted">{list.data?.total ?? 0} events</span>
+      </Toolbar>
+      <Section title="Event records">
+        <Table
+          columns={[
+            { key: "event_ref", label: "Ref", render: (r) => <span className="mono">{r.event_ref}</span> },
+            { key: "event_type_code", label: "Event type", render: (r) => <span className="mono">{r.event_type_code}</span> },
+            { key: "event_version", label: "Ver" },
+            { key: "source_module", label: "Module" },
+            { key: "status", label: "Status", render: (r) => <StatusBadge value={r.status} prefix="eng-" /> },
+            { key: "subscriber_count", label: "Subs" },
+            { key: "created_at", label: "When", render: (r) => ts(r.created_at) },
+            { key: "open", label: "", render: (r) => <button className="btn ghost" type="button" onClick={() => setSelected(r.event_ref)}>Details</button> },
+          ]}
+          rows={list.data?.items || []}
+          empty="No events"
+          loading={list.loading}
+          onRow={(r) => setSelected(r.event_ref)}
+        />
+        <Pager page={page} pageSize={25} total={list.data?.total} onPage={setPageState} />
+      </Section>
+      {selected ? <EventDetailsDrawer eventRef={selected} onClose={() => setSelected(null)} onOpenEvent={(ref) => setSelected(ref)} /> : null}
+    </>
+  );
+}
+
+export function EventHandlersPanel() {
+  const [windowHours, setWindowHours] = useState(24);
+  const [selected, setSelected] = useState(null);
+  const handlers = useAsync(() => events.handlers(), []);
+  const stats = useAsync(() => events.handlerStats(`?windowHours=${windowHours}`), [windowHours]);
+  const detail = useAsync(() => (selected ? events.handlerDetail(selected) : Promise.resolve(null)), [selected]);
+  const recent = useAsync(() => (selected ? events.deliveries(`?handler=${encodeURIComponent(selected)}&pageSize=10`) : Promise.resolve(null)), [selected]);
+
+  const rows = stats.data?.items || [];
+  const totals = rows.reduce(
+    (acc, r) => ({
+      total: acc.total + (r.total || 0),
+      failed: acc.failed + (r.failed || 0),
+      retrying: acc.retrying + (r.retrying || 0),
+      durations: r.avg_duration_ms !== null && r.avg_duration_ms !== undefined ? acc.durations.concat(r.avg_duration_ms) : acc.durations,
+    }),
+    { total: 0, failed: 0, retrying: 0, durations: [] }
+  );
+  const avgLatency = totals.durations.length
+    ? Math.round(totals.durations.reduce((a, b) => a + b, 0) / totals.durations.length)
+    : null;
+
+  return (
+    <>
+      <Toolbar>
+        <label className="field"><span>Window (hours)</span>
+          <select className="input" value={windowHours} onChange={(e) => setWindowHours(Number(e.target.value))}>
+            {[1, 6, 24, 72, 168].map((h) => <option key={h} value={h}>{h}h</option>)}
+          </select>
+        </label>
+        <button className="btn secondary" type="button" onClick={() => { handlers.reload(); stats.reload(); }}>Refresh</button>
+        <span className="muted">{handlers.data?.items?.length ?? 0} registered</span>
+      </Toolbar>
+
+      <StatGrid
+        items={[
+          { label: "Registered handlers", value: handlers.data?.items?.length },
+          { label: "Handler/type pairs", value: rows.length },
+          { label: "Failed deliveries", value: totals.failed, hint: `${totals.retrying} retrying` },
+          { label: "Avg latency", value: avgLatency === null ? "—" : `${avgLatency} ms` },
+        ]}
+      />
+
+      <Section title="Registered handlers" className="intg-section">
+        <Table
+          columns={[
+            { key: "code", label: "Handler", render: (r) => <span className="mono">{r.code}</span> },
+            { key: "module", label: "Module" },
+            { key: "builtin", label: "Built-in", render: (r) => (r.builtin ? "yes" : "no") },
+            { key: "description", label: "Description" },
+            { key: "open", label: "", render: (r) => <button className="btn ghost" type="button" onClick={() => setSelected(r.code)}>Open</button> },
+          ]}
+          rows={handlers.data?.items || []}
+          empty="No handlers registered"
+          loading={handlers.loading}
+          onRow={(r) => setSelected(r.code)}
+        />
+      </Section>
+
+      <Section title="Handler activity" className="intg-section">
+        <Table
+          columns={[
+            { key: "handler", label: "Handler", render: (r) => <span className="mono">{r.handler}</span> },
+            { key: "event_type_code", label: "Event type", render: (r) => <span className="mono">{r.event_type_code}</span> },
+            { key: "registered", label: "Reg", render: (r) => (r.registered ? "yes" : "no") },
+            { key: "total", label: "Total" },
+            { key: "succeeded", label: "OK" },
+            { key: "failed", label: "Failed" },
+            { key: "retried", label: "Retried" },
+            { key: "success_rate", label: "Success %", render: (r) => (r.success_rate === null ? "—" : r.success_rate) },
+            { key: "avg_duration_ms", label: "Avg ms" },
+            { key: "last_activity_at", label: "Last activity", render: (r) => ts(r.last_activity_at) },
+            { key: "open", label: "", render: (r) => <button className="btn ghost" type="button" onClick={() => setSelected(r.handler)}>Open</button> },
+          ]}
+          rows={rows}
+          empty="No handler activity"
+          loading={stats.loading}
+          onRow={(r) => setSelected(r.handler)}
+        />
+      </Section>
+
+      <Section title="Slowest handlers" className="intg-section">
+        <Table
+          columns={[
+            { key: "handler", label: "Handler", render: (r) => <span className="mono">{r.handler}</span> },
+            { key: "event_type_code", label: "Event type", render: (r) => <span className="mono">{r.event_type_code}</span> },
+            { key: "avg_duration_ms", label: "Avg ms" },
+            { key: "max_duration_ms", label: "Max ms" },
+            { key: "total", label: "Total" },
+          ]}
+          rows={stats.data?.slow || []}
+          empty="No latency data"
+        />
+      </Section>
+
+      {selected ? (
+        <Drawer title={detail.data?.registered ? selected : `${selected} (unregistered)`} subtitle="Handler detail" onClose={() => setSelected(null)}>
+          {detail.error ? <Notice kind="error">{detail.error}</Notice> : null}
+          <div className="chips">
+            <span className="chip">Module: {detail.data?.module || "—"}</span>
+            <span className="chip">Built-in: {detail.data?.builtin ? "yes" : "no"}</span>
+            <span className="chip">Registered: {detail.data?.registered ? "yes" : "no"}</span>
+          </div>
+          {detail.data?.description ? <p className="muted">{detail.data.description}</p> : null}
+
+          <Section title="Stats by event type">
+            <Table
+              columns={[
+                { key: "event_type_code", label: "Event type", render: (r) => <span className="mono">{r.event_type_code}</span> },
+                { key: "total", label: "Total" },
+                { key: "succeeded", label: "OK" },
+                { key: "failed", label: "Failed" },
+                { key: "success_rate", label: "Success %" },
+                { key: "avg_duration_ms", label: "Avg ms" },
+              ]}
+              rows={detail.data?.stats || []}
+              empty="No activity in window"
+            />
+          </Section>
+
+          <Section title="Recent deliveries">
+            <Table
+              columns={[
+                { key: "event_ref", label: "Event", render: (r) => <span className="mono">{r.event_ref}</span> },
+                { key: "event_type_code", label: "Type", render: (r) => <span className="mono">{r.event_type_code}</span> },
+                { key: "status", label: "Status", render: (r) => <StatusBadge value={r.status} prefix="eng-" /> },
+                { key: "attempts", label: "Attempts" },
+                { key: "updated_at", label: "When", render: (r) => ts(r.updated_at) },
+              ]}
+              rows={recent.data?.items || []}
+              empty="No recent deliveries"
+              loading={recent.loading}
+            />
+          </Section>
+        </Drawer>
+      ) : null}
+    </>
+  );
+}
+
+export function EventTracePanel() {
+  const [lookup, setLookup] = useState({ correlationId: "", traceId: "" });
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(null);
+  const trace = useAsync(
+    () => (query ? events.monitoringTraceability(query) : Promise.resolve(null)),
+    [query]
+  );
+
+  function search() {
+    if (lookup.correlationId) setQuery(`?correlationId=${encodeURIComponent(lookup.correlationId)}`);
+    else if (lookup.traceId) setQuery(`?traceId=${encodeURIComponent(lookup.traceId)}`);
+    else setQuery("");
+  }
+
+  const events_ = trace.data?.events || [];
+  const deliveries = trace.data?.deliveries || [];
+  const delivered = deliveries.filter((d) => d.status === "delivered").length;
+  const failed = deliveries.filter((d) => d.status === "failed" || d.status === "dead_letter").length;
+
+  return (
+    <>
+      <Toolbar>
+        <input className="input" placeholder="Correlation id" value={lookup.correlationId} onChange={(e) => setLookup({ correlationId: e.target.value, traceId: "" })} />
+        <input className="input" placeholder="Trace id" value={lookup.traceId} onChange={(e) => setLookup({ traceId: e.target.value, correlationId: "" })} />
+        <button className="btn" type="button" disabled={!lookup.correlationId && !lookup.traceId} onClick={search}>Trace</button>
+        {query ? <button className="btn secondary" type="button" onClick={() => trace.reload()}>Refresh</button> : null}
+      </Toolbar>
+
+      {!query ? <div className="audit-empty">Enter a correlation id or trace id to follow an event chain across modules.</div> : null}
+      {query ? (
+        <>
+          <StatGrid
+            items={[
+              { label: "Events", value: events_.length },
+              { label: "Deliveries", value: deliveries.length },
+              { label: "Delivered", value: delivered },
+              { label: "Failed", value: failed },
+            ]}
+          />
+          <div className="split" style={{ marginTop: 16 }}>
+            <Section title="Events in trace">
+              <Table
+                columns={[
+                  { key: "event_type_code", label: "Event type", render: (r) => <span className="mono">{r.event_type_code}</span> },
+                  { key: "event_ref", label: "Ref", render: (r) => <span className="mono">{r.event_ref}</span> },
+                  { key: "status", label: "Status", render: (r) => <StatusBadge value={r.status} prefix="eng-" /> },
+                  { key: "created_at", label: "When", render: (r) => ts(r.created_at) },
+                  { key: "open", label: "", render: (r) => <button className="btn ghost" type="button" onClick={() => setSelected(r.event_ref)}>Details</button> },
+                ]}
+                rows={events_}
+                empty="No events in this trace"
+                onRow={(r) => setSelected(r.event_ref)}
+              />
+            </Section>
+            <Section title="Deliveries in trace">
+              <Table
+                columns={[
+                  { key: "handler", label: "Handler", render: (r) => <span className="mono">{r.handler || "—"}</span> },
+                  { key: "event_ref", label: "Event", render: (r) => <span className="mono">{r.event_ref}</span> },
+                  { key: "status", label: "Status", render: (r) => <StatusBadge value={r.status} prefix="eng-" /> },
+                  { key: "attempts", label: "Attempts" },
+                  { key: "duration_ms", label: "ms" },
+                  { key: "updated_at", label: "When", render: (r) => ts(r.updated_at) },
+                ]}
+                rows={deliveries}
+                empty="No deliveries in this trace"
+              />
+            </Section>
+          </div>
+        </>
+      ) : null}
+
+      {selected ? <EventDetailsDrawer eventRef={selected} onClose={() => setSelected(null)} onOpenEvent={(ref) => setSelected(ref)} /> : null}
     </>
   );
 }

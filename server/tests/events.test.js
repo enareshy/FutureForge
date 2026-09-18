@@ -354,4 +354,37 @@ describe("event & messaging framework services", () => {
     events.Bus.unregisterBusProvider("testbus");
     assert.ok(!events.Bus.listBusProviders().includes("testbus"));
   });
+
+  test("bulk retry requeues a filtered batch of dead letters", async () => {
+    events.Handlers.registerHandler(
+      "test.bulk-boom",
+      async () => {
+        const error = new Error("bulk handler exploded");
+        error.category = "technical";
+        throw error;
+      },
+      { module: "test" }
+    );
+    events.Registry.createEventType(db, { code: "WidgetBulkFailure" }, actor);
+    events.Subscriptions.createSubscription(
+      db,
+      { code: "widget-bulk-failure-sub", event_type_code: "WidgetBulkFailure", subscriber: "test", handler: "test.bulk-boom", retry_policy: { max_attempts: 1 } },
+      actor
+    );
+    events.Subscriptions.setSubscriptionStatus(db, "widget-bulk-failure-sub", "active", actor);
+    events.publishEvent(db, { event_type_code: "WidgetBulkFailure", payload: { n: 1 } }, actor, { useOutbox: false });
+    events.publishEvent(db, { event_type_code: "WidgetBulkFailure", payload: { n: 2 } }, actor, { useOutbox: false });
+    await events.Consumer.processDeliveries(db);
+
+    const before = events.DeadLetter.listDeadLetters(db, { eventTypeCode: "WidgetBulkFailure", status: "open" });
+    assert.equal(before.total, 2);
+
+    const result = events.DeadLetter.retryDeadLetters(db, { eventTypeCode: "WidgetBulkFailure", actor });
+    assert.equal(result.requested, 2);
+    assert.equal(result.retried, 2);
+    assert.equal(result.failed, 0);
+
+    const after = events.DeadLetter.listDeadLetters(db, { eventTypeCode: "WidgetBulkFailure", status: "retrying" });
+    assert.equal(after.total, 2);
+  });
 });

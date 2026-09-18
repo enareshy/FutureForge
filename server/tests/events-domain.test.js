@@ -1,9 +1,13 @@
+process.env.FILE_STORAGE_PROVIDER = "memory";
+
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { openDatabase, migrate, queryOne, queryAll } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as events from "../services/events.js";
 import * as objects from "../services/objects.js";
+import * as files from "../services/files.js";
+import * as users from "../services/users.js";
 
 // Verifies that business modules publish domain events through the Event &
 // Messaging Framework (transactional outbox) and that the seeded default
@@ -29,11 +33,12 @@ describe("event framework domain integration", () => {
     const first = events.Subscriptions.ensureDefaultSubscriptions(db);
     const second = events.Subscriptions.ensureDefaultSubscriptions(db);
     assert.equal(second.created, 0, "default subscriptions are idempotent");
-    assert.equal(first.total, 9);
+    assert.equal(first.total, 13);
     const subs = events.Subscriptions.listSubscriptions(db, { pageSize: 100 }).items;
     assert.ok(subs.some((s) => s.code === "event-search-lifecycle" && s.handler === "search.index"));
     assert.ok(subs.some((s) => s.code === "event-workflow-item-status" && s.handler === "workflow.trigger"));
     assert.ok(subs.some((s) => s.code === "event-analytics-lifecycle" && s.handler === "analytics.record"));
+    assert.ok(subs.some((s) => s.code === "event-notify-product-released" && s.handler === "notification.dispatch"));
     assert.ok(subs.every((s) => s.status === "active"));
   });
 
@@ -94,5 +99,63 @@ describe("event framework domain integration", () => {
     assert.ok(totalSystem >= 30);
     const objectCreated = queryOne(db, "SELECT system FROM event_registry WHERE code = 'ObjectCreated'");
     assert.equal(Number(objectCreated.system), 1);
+  });
+
+  test("file lifecycle emits DocumentCreated and DocumentReleased", async () => {
+    const admin = queryOne(db, "SELECT * FROM users WHERE username = 'admin'");
+    const scope = admin.tenant_id ?? admin.organization_id;
+    const init = files.initiateUpload(db, { name: "evt-doc.txt", size: 5 }, admin, scope, IP);
+    const uploaded = await files.completeUpload(db, init.upload.upload_id, { buffer: Buffer.from("hello") }, admin, scope, IP);
+
+    const created = queryOne(
+      db,
+      "SELECT * FROM event_records WHERE event_type_code = 'DocumentCreated' AND source_object_id = ?",
+      [String(uploaded.file.id)]
+    );
+    assert.ok(created, "DocumentCreated event is stored");
+    assert.equal(created.source_module, "files");
+
+    files.checkOutFile(db, uploaded.file.file_ref, {}, admin, scope, IP);
+    await files.checkInFile(db, uploaded.file.file_ref, { buffer: Buffer.from("hello v2") }, admin, scope, IP);
+    const released = queryOne(
+      db,
+      "SELECT * FROM event_records WHERE event_type_code = 'DocumentReleased' AND source_object_id = ?",
+      [String(uploaded.file.id)]
+    );
+    assert.ok(released, "DocumentReleased event is stored");
+  });
+
+  test("user lifecycle emits UserCreated and UserUpdated", () => {
+    const created = users.createUser(
+      db,
+      {
+        username: "evt.user.one",
+        email: "evt.user.one@example.com",
+        employee_id: "EVT1001",
+        display_name: "Event User One",
+        password: "EventUser!42x",
+        organization_id: tenantId,
+      },
+      ACTOR,
+      IP
+    );
+    const createdEvent = queryOne(
+      db,
+      "SELECT * FROM event_records WHERE event_type_code = 'UserCreated' AND source_object_id = ?",
+      [String(created.id)]
+    );
+    assert.ok(createdEvent, "UserCreated event is stored");
+    assert.equal(createdEvent.source_module, "iam");
+
+    users.updateUser(db, created.id, { display_name: "Event User Renamed" }, ACTOR, IP);
+    const updatedEvent = queryOne(
+      db,
+      "SELECT * FROM event_records WHERE event_type_code = 'UserUpdated' AND source_object_id = ?",
+      [String(created.id)]
+    );
+    assert.ok(updatedEvent, "UserUpdated event is stored");
+    const payload = JSON.parse(updatedEvent.payload_json);
+    assert.equal(payload.changed.display_name, true);
+    assert.equal(payload.after.display_name, "Event User Renamed");
   });
 });

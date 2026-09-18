@@ -169,8 +169,68 @@ export function resolveDeadLetter(db, id, { action = "resolve", reason = "", act
   return publicDeadLetter(queryOne(db, "SELECT * FROM event_dead_letters WHERE id = ?", [row.id]), { includePayload: true });
 }
 
-export function deadLetterStats(db, { tenantId = null, windowHours = 168 } = {}) {
-  const since = new Date(Date.now() - Number(windowHours || 168) * 3600 * 1000).toISOString().replace("T", " ").slice(0, 19);
+// Bulk requeue. Accepts an explicit set of ids or a filter (status, event type,
+// handler, queue) so operators can drain a batch of matching failures. Each
+// requeue reuses the single-item path, so audit and delivery reset semantics are
+// identical to an individual retry.
+export function retryDeadLetters(db, { ids = [], status = "open", eventTypeCode, handler, queueCode, tenantId, reason = "", limit = 100, actor = null } = {}) {
+  const clauses = [];
+  const params = [];
+  const cleanIds = Array.isArray(ids)
+    ? ids.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)
+    : [];
+  if (cleanIds.length) {
+    clauses.push(`id IN (${cleanIds.map(() => "?").join(",")})`);
+    params.push(...cleanIds);
+  } else {
+    if (status) {
+      clauses.push("status = ?");
+      params.push(status);
+    }
+    if (eventTypeCode) {
+      clauses.push("event_type_code = ?");
+      params.push(eventTypeCode);
+    }
+    if (handler) {
+      clauses.push("handler = ?");
+      params.push(handler);
+    }
+    if (queueCode) {
+      clauses.push("queue_code = ?");
+      params.push(queueCode);
+    }
+  }
+  if (tenantId !== undefined && tenantId !== null) {
+    clauses.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const max = clampInt(limit, 1, 500, 100);
+  const rows = queryAll(
+    db,
+    `SELECT * FROM event_dead_letters ${where} ORDER BY failure_at ASC, id ASC LIMIT ?`,
+    [...params, max]
+  );
+  const items = [];
+  for (const row of rows) {
+    try {
+      resolveDeadLetter(db, row.id, { action: "retry", reason: reason || "bulk requeue by operator", actor });
+      items.push({ id: row.id, event_ref: row.event_ref, handler: row.handler, retried: true });
+    } catch (error) {
+      items.push({ id: row.id, event_ref: row.event_ref, handler: row.handler, retried: false, error: error.message });
+    }
+  }
+  const retried = items.filter((item) => item.retried).length;
+  auditEvent(db, {
+    actor,
+    action: "event.dead_letter.bulk_retry",
+    resourceType: "event_dead_letter",
+    details: { requested: rows.length, retried, reason },
+  });
+  return { requested: rows.length, retried, failed: items.length - retried, items };
+}
+
+export function deadLetterStats(db, { tenantId = null, windowHours = 168 } = {}) {  const since = new Date(Date.now() - Number(windowHours || 168) * 3600 * 1000).toISOString().replace("T", " ").slice(0, 19);
   const clause = tenantId !== undefined && tenantId !== null ? "AND tenant_id = ?" : "";
   const params = tenantId !== undefined && tenantId !== null ? [since, Number(tenantId)] : [since];
   const totals = queryOne(

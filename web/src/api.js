@@ -950,6 +950,7 @@ export const events = {
   deadLetterStats: (qs) => api(`/api/events/dead-letters/stats${qs || ""}`),
   deadLetter: (id) => api(`/api/events/dead-letters/${id}`),
   resolveDeadLetter: (id, body) => api(`/api/events/dead-letters/${id}/resolve`, { method: "POST", body: body || {} }),
+  bulkRetryDeadLetters: (body) => api("/api/events/dead-letters/bulk-retry", { method: "POST", body: body || {} }),
 
   replays: (qs) => api(`/api/events/replays${qs || ""}`),
   replay: (ref) => api(`/api/events/replays/${encodeURIComponent(ref)}`),
@@ -967,6 +968,10 @@ export const events = {
   applyRetentionPolicy: (code, body) => api(`/api/events/retention-policies/${encodeURIComponent(code)}/apply`, { method: "POST", body: body || {} }),
   applyRetention: (body) => api("/api/events/retention/apply", { method: "POST", body: body || {} }),
   retentionStats: () => api("/api/events/retention/stats"),
+
+  handlers: () => api("/api/events/handlers"),
+  handlerStats: (qs) => api(`/api/events/handlers/stats${qs || ""}`),
+  handlerDetail: (code) => api(`/api/events/handlers/${encodeURIComponent(code)}`),
 
   monitoringDashboard: (qs) => api(`/api/events/monitoring/dashboard${qs || ""}`),
   monitoringHealth: () => api("/api/events/monitoring/health"),

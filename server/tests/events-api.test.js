@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate } from "../db.js";
+import { openDatabase, migrate, queryOne, run } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -316,6 +316,44 @@ describe("Event & Messaging Framework REST APIs", () => {
     const stats = await request(port, "GET", "/api/events/dead-letters/stats", auth());
     assert.equal(stats.status, 200);
     assert.ok("open" in stats.body);
+  });
+
+  test("bulk retry requeues the requested dead letters", async () => {
+    const tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;
+    const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
+    const ids = [];
+    for (let i = 0; i < 2; i += 1) {
+      const result = run(
+        db,
+        `INSERT INTO event_dead_letters
+          (event_ref, event_type_code, event_version, subscriber, handler, attempts, error_category, error_message,
+           failure_at, payload_json, security_classification, status, tenant_id, created_at, updated_at)
+         VALUES (?, 'WidgetApiBulk', 1, 'test', 'test.api-bulk', 1, 'technical', 'manual', ?, '{}', 'internal', 'open', ?, ?, ?)`,
+        [`EVT-API-BULK-${i}`, ts, tenantId, ts, ts]
+      );
+      ids.push(Number(result.lastInsertRowid));
+    }
+
+    const result = await request(port, "POST", "/api/events/dead-letters/bulk-retry", { ...auth(), body: { ids } });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.requested, 2);
+    assert.equal(result.body.retried, 2);
+    assert.equal(result.body.failed, 0);
+
+    const stats = await request(port, "GET", "/api/events/dead-letters/stats", auth());
+    assert.ok(stats.body.retrying >= 2);
+  });
+
+  test("denied access emits a SecurityAccessDenied platform event", async () => {
+    const denied = await request(port, "GET", "/api/events/event-types", { token: userToken });
+    assert.equal(denied.status, 403);
+    const event = queryOne(
+      db,
+      "SELECT * FROM event_records WHERE event_type_code = 'SecurityAccessDenied' ORDER BY id DESC LIMIT 1"
+    );
+    assert.ok(event, "SecurityAccessDenied event is stored");
+    assert.equal(event.security_classification, "confidential");
+    assert.equal(event.source_module, "iam");
   });
 
   test("monitoring exposes dashboard, health, breakdowns and traceability", async () => {

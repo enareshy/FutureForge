@@ -4,6 +4,7 @@ import { HttpError, requireFields, validateUsername, validateEmail, validateEmpl
 import { getPolicy } from "./policy.js";
 import { writeAudit } from "./audit.js";
 import * as orgs from "./orgs.js";
+import { emitDomainEvent } from "./events/emit.js";
 
 const PUBLIC_USER_COLS = `id, username, email, employee_id, display_name, status,
   organization_id, tenant_id, failed_login_attempts, locked_until, last_login_at,
@@ -181,6 +182,28 @@ export function createUser(db, body, actor, ip) {
     details: { username: user.username },
     ip,
   });
+  emitDomainEvent(
+    db,
+    {
+      event_type_code: "UserCreated",
+      category: "user",
+      source_module: "iam",
+      source_system: "iam",
+      source_object_type: "user",
+      source_object_id: user.id,
+      tenant_id: user.tenant_id ?? null,
+      organization_id: user.organization_id ?? null,
+      payload: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        display_name: user.display_name,
+        status: user.status,
+        organization_id: user.organization_id ?? null,
+      },
+    },
+    actor
+  );
   return user;
 }
 
@@ -230,6 +253,43 @@ export function updateUser(db, id, body, actor, ip) {
     details: { before: current, after: user },
     ip,
   });
+  emitDomainEvent(
+    db,
+    {
+      event_type_code: "UserUpdated",
+      category: "user",
+      source_module: "iam",
+      source_system: "iam",
+      source_object_type: "user",
+      source_object_id: user.id,
+      tenant_id: user.tenant_id ?? null,
+      organization_id: user.organization_id ?? null,
+      payload: {
+        id: user.id,
+        username: user.username,
+        status: user.status,
+        changed: {
+          email: current.email !== user.email,
+          employee_id: current.employee_id !== user.employee_id,
+          display_name: current.display_name !== user.display_name,
+          organization_id: (current.organization_id ?? null) !== (user.organization_id ?? null),
+        },
+        before: {
+          email: current.email,
+          employee_id: current.employee_id,
+          display_name: current.display_name,
+          organization_id: current.organization_id ?? null,
+        },
+        after: {
+          email: user.email,
+          employee_id: user.employee_id,
+          display_name: user.display_name,
+          organization_id: user.organization_id ?? null,
+        },
+      },
+    },
+    actor
+  );
   return user;
 }
 
