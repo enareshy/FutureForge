@@ -775,3 +775,88 @@ pre.json {
 .audit-saved-filters { padding-top: 12px; padding-bottom: 12px; }
 .audit-saved-filters .chips { align-items: center; }
 .audit-saved-filters .chip { display: inline-flex; align-items: center; }
+
+/* Integration & API framework */
+.intg-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.intg-toolbar input { min-width: 220px; }
+.intg-section { margin-top: 16px; }
+.intg-stat-hint { display: block; font-size: 11px; margin-top: 2px; }
+.intg-table-wrap { overflow-x: auto; }
+.intg-table td { vertical-align: top; }
+.intg-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  padding: 6px 8px;
+}
+.intg-table td { padding: 8px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.intg-table tr:last-child td { border-bottom: 0; }
+.intg-table tr.intg-clickable { cursor: pointer; }
+.intg-table tr.intg-clickable:hover { background: #1b2748; }
+.intg-json {
+  background: #0d1428;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.intg-ellipsis { display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.intg-key {
+  display: block;
+  background: #0d1428;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 13px;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+textarea { width: 100%; background: #0f1730; border: 1px solid var(--line); border-radius: 10px; color: var(--text); padding: 10px; font: inherit; resize: vertical; }
+
+.badge.draft,
+.badge.enabled,
+.badge.paused,
+.badge.retry,
+.badge.retrying,
+.badge.partial,
+.badge.degraded,
+.badge.deprecated,
+.badge.conflict,
+.badge.duplicate,
+.badge.skipped { background: rgba(245, 193, 90, 0.18); color: var(--warn); }
+.badge.succeeded,
+.badge.delivered,
+.badge.resolved,
+.badge.closed,
+.badge.healthy,
+.badge.enabled.ok { background: rgba(62, 224, 192, 0.15); color: var(--ok); }
+.badge.failed,
+.badge.timed_out,
+.badge.cancelled,
+.badge.dead_letter,
+.badge.down,
+.badge.revoked,
+.badge.expired,
+.badge.retired,
+.badge.disabled { background: rgba(255, 107, 122, 0.16); color: var(--danger); }
+.badge.running,
+.badge.processing,
+.badge.draft.info { background: rgba(91, 140, 255, 0.2); color: var(--accent); }
+.badge.pending,
+.badge.queued,
+.badge.inactive,
+.badge.unknown,
+.badge.discarded { background: #243154; color: var(--muted); }

@@ -3045,3 +3045,673 @@ CREATE TABLE IF NOT EXISTS search_relationships (
 
 CREATE INDEX IF NOT EXISTS idx_search_rel_source ON search_relationships(tenant_id, source_type, source_id, relationship_type);
 CREATE INDEX IF NOT EXISTS idx_search_rel_target ON search_relationships(tenant_id, target_type, target_id, relationship_type);
+
+-- ── Integration & API Framework ────────────────────────────────────────────
+-- Centralised Integration Hub. Business modules never build point-to-point
+-- integrations; they register integration definitions, publish/subscribe to
+-- domain events, enqueue asynchronous messages and use shared adapters,
+-- transformation, import/export, webhook, scheduling, retry, dead-letter and
+-- monitoring services provided here. No external system is hard-coded.
+
+-- Credential references. Secrets are always encrypted at rest (server/crypto)
+-- and are never returned to the API or written to logs.
+CREATE TABLE IF NOT EXISTS integration_credentials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'api_key',
+  description TEXT DEFAULT '',
+  tenant_id INTEGER,
+  secret_enc TEXT NOT NULL DEFAULT '',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'expired', 'revoked')),
+  rotated_at TEXT,
+  expires_at TEXT,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_credentials_tenant ON integration_credentials(tenant_id, status);
+
+-- External systems the platform integrates with (SAP, MES, CAD, ERP, CRM,
+-- PLM, suppliers, customers, ...). Provider-independent connection metadata.
+CREATE TABLE IF NOT EXISTS external_systems (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  system_type TEXT NOT NULL DEFAULT 'custom',
+  description TEXT DEFAULT '',
+  environment TEXT NOT NULL DEFAULT 'production',
+  base_url TEXT DEFAULT '',
+  connection_ref TEXT DEFAULT '',
+  auth_method TEXT NOT NULL DEFAULT 'none',
+  credential_id INTEGER REFERENCES integration_credentials(id) ON DELETE SET NULL,
+  protocols_json TEXT NOT NULL DEFAULT '[]',
+  health_check_json TEXT NOT NULL DEFAULT '{}',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
+  connection_status TEXT NOT NULL DEFAULT 'unknown' CHECK (connection_status IN ('unknown', 'healthy', 'degraded', 'down')),
+  last_health_at TEXT,
+  last_health_message TEXT DEFAULT '',
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  owner_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_systems_tenant ON external_systems(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_external_systems_type ON external_systems(system_type, environment);
+
+-- Integration schedule definitions. Platform scheduling (cron/interval/timezone)
+-- is delegated to the Background Job framework; this row keeps the
+-- integration-specific metadata and a reference to the engine schedule.
+CREATE TABLE IF NOT EXISTS integration_schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT DEFAULT '',
+  integration_id INTEGER,
+  schedule_type TEXT NOT NULL DEFAULT 'interval' CHECK (schedule_type IN ('once', 'interval', 'cron', 'daily', 'weekly', 'monthly')),
+  cron_expression TEXT DEFAULT '',
+  interval_seconds INTEGER NOT NULL DEFAULT 0,
+  daily_time TEXT DEFAULT '',
+  weekdays_json TEXT NOT NULL DEFAULT '[]',
+  day_of_month INTEGER NOT NULL DEFAULT 0,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  start_at TEXT,
+  end_at TEXT,
+  overlap_policy TEXT NOT NULL DEFAULT 'skip' CHECK (overlap_policy IN ('skip', 'allow', 'queue')),
+  catchup_policy TEXT NOT NULL DEFAULT 'skip',
+  max_duration_seconds INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'inactive')),
+  job_schedule_code TEXT DEFAULT '',
+  last_run_at TEXT,
+  next_run_at TEXT,
+  last_status TEXT DEFAULT '',
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_schedules_tenant ON integration_schedules(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_integration_schedules_integration ON integration_schedules(integration_id, status);
+
+-- Transformation & mapping definitions. Versioned, declarative and pluggable:
+-- custom handlers are referenced by name only so business mapping logic never
+-- lives inside the engine.
+CREATE TABLE IF NOT EXISTS transformation_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'inactive')),
+  source_format TEXT NOT NULL DEFAULT 'json',
+  target_format TEXT NOT NULL DEFAULT 'json',
+  source_schema_json TEXT NOT NULL DEFAULT '{}',
+  target_schema_json TEXT NOT NULL DEFAULT '{}',
+  mappings_json TEXT NOT NULL DEFAULT '[]',
+  constants_json TEXT NOT NULL DEFAULT '{}',
+  conditionals_json TEXT NOT NULL DEFAULT '[]',
+  conversions_json TEXT NOT NULL DEFAULT '[]',
+  lookups_json TEXT NOT NULL DEFAULT '[]',
+  validation_json TEXT NOT NULL DEFAULT '[]',
+  error_handling TEXT NOT NULL DEFAULT 'fail' CHECK (error_handling IN ('fail', 'skip', 'null', 'default')),
+  sample_input_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_transformation_definitions_tenant ON transformation_definitions(tenant_id, status);
+
+-- Canonical integration definitions (the hub's routing configuration).
+CREATE TABLE IF NOT EXISTS integration_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT DEFAULT '',
+  integration_type TEXT NOT NULL DEFAULT 'api',
+  direction TEXT NOT NULL DEFAULT 'inbound' CHECK (direction IN ('inbound', 'outbound', 'bidirectional')),
+  adapter_type TEXT NOT NULL DEFAULT 'rest',
+  protocol TEXT NOT NULL DEFAULT 'https',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'inactive', 'suspended', 'retired')),
+  source_system_id INTEGER REFERENCES external_systems(id) ON DELETE SET NULL,
+  target_system_id INTEGER REFERENCES external_systems(id) ON DELETE SET NULL,
+  credential_id INTEGER REFERENCES integration_credentials(id) ON DELETE SET NULL,
+  transformation_id INTEGER REFERENCES transformation_definitions(id) ON DELETE SET NULL,
+  schedule_id INTEGER REFERENCES integration_schedules(id) ON DELETE SET NULL,
+  endpoint_id INTEGER,
+  retry_policy_json TEXT NOT NULL DEFAULT '{}',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  auth_json TEXT NOT NULL DEFAULT '{}',
+  timeout_seconds INTEGER NOT NULL DEFAULT 30,
+  owner_id INTEGER,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  last_run_at TEXT,
+  last_status TEXT DEFAULT '',
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_definitions_tenant ON integration_definitions(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_integration_definitions_systems ON integration_definitions(source_system_id, target_system_id);
+
+-- Immutable snapshot history for integration definitions (version + clone).
+CREATE TABLE IF NOT EXISTS integration_definition_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES integration_definitions(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  notes TEXT DEFAULT '',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_definition_versions ON integration_definition_versions(definition_id, version);
+
+-- Exposed / consumed API endpoints (API catalog + versioning + rate limits).
+CREATE TABLE IF NOT EXISTS integration_endpoints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT DEFAULT '',
+  integration_id INTEGER REFERENCES integration_definitions(id) ON DELETE SET NULL,
+  external_system_id INTEGER REFERENCES external_systems(id) ON DELETE SET NULL,
+  direction TEXT NOT NULL DEFAULT 'inbound' CHECK (direction IN ('inbound', 'outbound')),
+  method TEXT NOT NULL DEFAULT 'POST',
+  path TEXT NOT NULL DEFAULT '',
+  api_version TEXT NOT NULL DEFAULT 'v1',
+  request_format TEXT NOT NULL DEFAULT 'json',
+  response_format TEXT NOT NULL DEFAULT 'json',
+  request_schema_json TEXT NOT NULL DEFAULT '{}',
+  response_schema_json TEXT NOT NULL DEFAULT '{}',
+  auth_required INTEGER NOT NULL DEFAULT 1,
+  auth_method TEXT NOT NULL DEFAULT 'jwt',
+  authorization_policy TEXT DEFAULT '',
+  ip_allowlist_json TEXT NOT NULL DEFAULT '[]',
+  timeout_seconds INTEGER NOT NULL DEFAULT 30,
+  rate_limit_per_minute INTEGER NOT NULL DEFAULT 0,
+  retry_policy_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled', 'disabled')),
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_endpoints_tenant ON integration_endpoints(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_integration_endpoints_version ON integration_endpoints(api_version, status);
+
+-- Execution records: one row per integration run, with step-level timeline.
+CREATE TABLE IF NOT EXISTS integration_executions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  execution_ref TEXT NOT NULL UNIQUE,
+  definition_id INTEGER REFERENCES integration_definitions(id) ON DELETE SET NULL,
+  integration_code TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT DEFAULT '',
+  parent_execution_id INTEGER,
+  trigger_type TEXT NOT NULL DEFAULT 'manual',
+  source_system_id INTEGER,
+  target_system_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'partial', 'cancelled', 'timed_out')),
+  current_step TEXT DEFAULT '',
+  request_ref TEXT DEFAULT '',
+  response_ref TEXT DEFAULT '',
+  record_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT DEFAULT '',
+  error_message TEXT DEFAULT '',
+  error_category TEXT DEFAULT '',
+  initiated_by INTEGER,
+  initiated_as TEXT NOT NULL DEFAULT 'user',
+  job_id INTEGER,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  started_at TEXT,
+  finished_at TEXT,
+  duration_ms INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_executions_tenant ON integration_executions(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_integration_executions_definition ON integration_executions(definition_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_integration_executions_status ON integration_executions(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_integration_executions_correlation ON integration_executions(correlation_id);
+
+CREATE TABLE IF NOT EXISTS integration_execution_steps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  execution_id INTEGER NOT NULL REFERENCES integration_executions(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL DEFAULT 1,
+  name TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'succeeded', 'failed', 'skipped', 'retrying')),
+  message TEXT DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT,
+  duration_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_execution_steps ON integration_execution_steps(execution_id, seq);
+
+-- Provider-independent messages. Long-running / high-volume work is enqueued
+-- here and processed asynchronously by the worker via background jobs.
+CREATE TABLE IF NOT EXISTS integration_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_ref TEXT NOT NULL UNIQUE,
+  message_type TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'inbound' CHECK (direction IN ('inbound', 'outbound')),
+  integration_id INTEGER REFERENCES integration_definitions(id) ON DELETE SET NULL,
+  queue TEXT NOT NULL DEFAULT 'INTEGRATION',
+  source_system_id INTEGER,
+  target_system_id INTEGER,
+  correlation_id TEXT DEFAULT '',
+  idempotency_key TEXT,
+  payload_ref TEXT DEFAULT '',
+  payload_format TEXT NOT NULL DEFAULT 'json',
+  payload_json TEXT,
+  payload_size INTEGER NOT NULL DEFAULT 0,
+  priority TEXT NOT NULL DEFAULT 'normal',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'delivered', 'retry', 'dead_letter', 'duplicate', 'ignored', 'cancelled')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  next_retry_at TEXT,
+  last_error TEXT DEFAULT '',
+  error_category TEXT DEFAULT '',
+  scheduled_at TEXT,
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  processed_at TEXT,
+  failed_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_messages_queue ON integration_messages(queue, status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_integration_messages_tenant ON integration_messages(tenant_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_integration_messages_idempotency ON integration_messages(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS integration_dead_letters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id INTEGER REFERENCES integration_messages(id) ON DELETE SET NULL,
+  execution_id INTEGER REFERENCES integration_executions(id) ON DELETE SET NULL,
+  integration_id INTEGER,
+  correlation_id TEXT DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  error_category TEXT DEFAULT '',
+  error_code TEXT DEFAULT '',
+  attempt_history_json TEXT NOT NULL DEFAULT '[]',
+  stack_ref TEXT DEFAULT '',
+  payload_ref TEXT DEFAULT '',
+  payload_json TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'retrying', 'reprocessed', 'ignored', 'closed')),
+  resolution TEXT DEFAULT '',
+  resolved_by INTEGER,
+  resolved_at TEXT,
+  tenant_id INTEGER,
+  dead_lettered_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_dead_letters_tenant ON integration_dead_letters(tenant_id, status, created_at);
+
+-- External-to-internal object identity mapping with conflict detection.
+CREATE TABLE IF NOT EXISTS external_object_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  external_system_id INTEGER NOT NULL REFERENCES external_systems(id) ON DELETE CASCADE,
+  external_object_type TEXT NOT NULL,
+  external_object_id TEXT NOT NULL,
+  internal_object_type TEXT NOT NULL,
+  internal_object_id TEXT NOT NULL,
+  internal_revision TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'conflict', 'orphan', 'ignored')),
+  source_of_truth TEXT NOT NULL DEFAULT 'external' CHECK (source_of_truth IN ('external', 'internal')),
+  conflict_status TEXT DEFAULT '',
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  last_synced_at TEXT,
+  last_execution_id INTEGER,
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (external_system_id, external_object_type, external_object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_object_mappings_internal ON external_object_mappings(internal_object_type, internal_object_id);
+CREATE INDEX IF NOT EXISTS idx_external_object_mappings_tenant ON external_object_mappings(tenant_id, status);
+
+-- Event catalog and subscriptions for the shared event framework.
+CREATE TABLE IF NOT EXISTS integration_event_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 1,
+  description TEXT DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'domain',
+  direction TEXT NOT NULL DEFAULT 'outbound' CHECK (direction IN ('inbound', 'outbound', 'internal')),
+  schema_json TEXT NOT NULL DEFAULT '{}',
+  example_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'deprecated')),
+  system INTEGER NOT NULL DEFAULT 0,
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_event_types_category ON integration_event_types(category, status);
+
+CREATE TABLE IF NOT EXISTS integration_event_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  event_type_code TEXT NOT NULL,
+  subscriber_type TEXT NOT NULL DEFAULT 'webhook' CHECK (subscriber_type IN ('webhook', 'integration', 'queue', 'internal', 'subscription')),
+  target_ref TEXT DEFAULT '',
+  filter_json TEXT NOT NULL DEFAULT '{}',
+  delivery_mode TEXT NOT NULL DEFAULT 'push' CHECK (delivery_mode IN ('push', 'pull')),
+  retry_policy_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  connection_status TEXT NOT NULL DEFAULT 'unknown',
+  last_delivery_at TEXT,
+  last_status TEXT DEFAULT '',
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_event_subscriptions_event ON integration_event_subscriptions(event_type_code, status);
+CREATE INDEX IF NOT EXISTS idx_integration_event_subscriptions_tenant ON integration_event_subscriptions(tenant_id, status);
+
+-- Published domain events and their per-subscription deliveries.
+CREATE TABLE IF NOT EXISTS integration_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_ref TEXT NOT NULL UNIQUE,
+  event_type_code TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  source_module TEXT NOT NULL DEFAULT 'integration',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  correlation_id TEXT DEFAULT '',
+  idempotency_key TEXT,
+  status TEXT NOT NULL DEFAULT 'published' CHECK (status IN ('published', 'processing', 'processed', 'partial', 'failed')),
+  subscriber_count INTEGER NOT NULL DEFAULT 0,
+  delivered_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_events_type ON integration_events(event_type_code, created_at);
+CREATE INDEX IF NOT EXISTS idx_integration_events_tenant ON integration_events(tenant_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_integration_events_idempotency ON integration_events(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS integration_event_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL REFERENCES integration_events(id) ON DELETE CASCADE,
+  subscription_id INTEGER REFERENCES integration_event_subscriptions(id) ON DELETE SET NULL,
+  event_type_code TEXT NOT NULL DEFAULT '',
+  subscriber_type TEXT NOT NULL DEFAULT '',
+  target_ref TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'delivered', 'failed', 'retry', 'dead_letter', 'skipped')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  next_retry_at TEXT,
+  response_code INTEGER,
+  last_error TEXT DEFAULT '',
+  payload_json TEXT,
+  correlation_id TEXT DEFAULT '',
+  tenant_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  delivered_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_event_deliveries_status ON integration_event_deliveries(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_integration_event_deliveries_event ON integration_event_deliveries(event_id);
+
+-- Inbound webhook endpoints.
+CREATE TABLE IF NOT EXISTS integration_webhook_endpoints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT DEFAULT '',
+  integration_id INTEGER REFERENCES integration_definitions(id) ON DELETE SET NULL,
+  path TEXT NOT NULL UNIQUE,
+  method TEXT NOT NULL DEFAULT 'POST',
+  auth_type TEXT NOT NULL DEFAULT 'signature' CHECK (auth_type IN ('none', 'api_key', 'signature', 'basic')),
+  credential_id INTEGER REFERENCES integration_credentials(id) ON DELETE SET NULL,
+  event_type_code TEXT DEFAULT '',
+  payload_schema_json TEXT NOT NULL DEFAULT '{}',
+  ip_allowlist_json TEXT NOT NULL DEFAULT '[]',
+  replay_window_seconds INTEGER NOT NULL DEFAULT 300,
+  rate_limit_per_minute INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'disabled')),
+  last_received_at TEXT,
+  receive_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_webhook_endpoints_tenant ON integration_webhook_endpoints(tenant_id, status);
+
+-- Inbound webhook receipt log (replay protection + failed tracking).
+CREATE TABLE IF NOT EXISTS integration_webhook_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint_id INTEGER REFERENCES integration_webhook_endpoints(id) ON DELETE CASCADE,
+  signature TEXT DEFAULT '',
+  event_type_code TEXT DEFAULT '',
+  payload_json TEXT,
+  status TEXT NOT NULL DEFAULT 'accepted' CHECK (status IN ('accepted', 'duplicate', 'rejected', 'failed')),
+  reason TEXT DEFAULT '',
+  message_id INTEGER,
+  execution_id INTEGER,
+  correlation_id TEXT DEFAULT '',
+  tenant_id INTEGER,
+  received_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_webhook_receipts_endpoint ON integration_webhook_receipts(endpoint_id, received_at);
+
+-- Outbound webhook subscriptions and deliveries.
+CREATE TABLE IF NOT EXISTS integration_webhook_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT DEFAULT '',
+  url TEXT NOT NULL,
+  event_filter_json TEXT NOT NULL DEFAULT '{}',
+  credential_id INTEGER REFERENCES integration_credentials(id) ON DELETE SET NULL,
+  header_json TEXT NOT NULL DEFAULT '{}',
+  retry_policy_json TEXT NOT NULL DEFAULT '{}',
+  timeout_seconds INTEGER NOT NULL DEFAULT 30,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'disabled')),
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  failure_threshold INTEGER NOT NULL DEFAULT 10,
+  disabled_reason TEXT DEFAULT '',
+  last_delivery_at TEXT,
+  last_status_code INTEGER,
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_webhook_subscriptions_tenant ON integration_webhook_subscriptions(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS integration_webhook_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription_id INTEGER REFERENCES integration_webhook_subscriptions(id) ON DELETE CASCADE,
+  event_id INTEGER,
+  event_type_code TEXT DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'outbound',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'delivered', 'failed', 'retry', 'dead_letter')),
+  attempt INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  request_headers_json TEXT NOT NULL DEFAULT '{}',
+  payload_json TEXT,
+  response_code INTEGER,
+  response_body TEXT DEFAULT '',
+  duration_ms INTEGER,
+  error TEXT DEFAULT '',
+  next_retry_at TEXT,
+  correlation_id TEXT DEFAULT '',
+  tenant_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  delivered_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_webhook_deliveries_status ON integration_webhook_deliveries(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_integration_webhook_deliveries_subscription ON integration_webhook_deliveries(subscription_id, created_at);
+
+-- Import/export transfers (file or REST based).
+CREATE TABLE IF NOT EXISTS integration_transfers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  transfer_ref TEXT NOT NULL UNIQUE,
+  direction TEXT NOT NULL CHECK (direction IN ('import', 'export')),
+  name TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT 'csv',
+  resource_type TEXT NOT NULL DEFAULT '',
+  integration_id INTEGER REFERENCES integration_definitions(id) ON DELETE SET NULL,
+  mapping_id INTEGER REFERENCES transformation_definitions(id) ON DELETE SET NULL,
+  mode TEXT NOT NULL DEFAULT 'upsert' CHECK (mode IN ('create', 'create_only', 'upsert', 'replace')),
+  dry_run INTEGER NOT NULL DEFAULT 0,
+  filename TEXT DEFAULT '',
+  content_type TEXT DEFAULT '',
+  content TEXT,
+  template_code TEXT DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'preview', 'validating', 'running', 'completed', 'partial', 'failed', 'cancelled')),
+  total_rows INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  duplicate_count INTEGER NOT NULL DEFAULT 0,
+  progress INTEGER NOT NULL DEFAULT 0,
+  errors_json TEXT NOT NULL DEFAULT '[]',
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  job_id INTEGER,
+  tenant_id INTEGER,
+  initiated_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  finished_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_transfers_tenant ON integration_transfers(tenant_id, direction, created_at);
+CREATE INDEX IF NOT EXISTS idx_integration_transfers_status ON integration_transfers(status);
+
+-- API management catalog: externally visible API versions and lifecycle
+-- (active / deprecated / retired) with auth and rate-limit metadata.
+CREATE TABLE IF NOT EXISTS integration_api_catalog (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  api_group TEXT NOT NULL DEFAULT 'integration',
+  version TEXT NOT NULL DEFAULT 'v1',
+  description TEXT DEFAULT '',
+  auth_required INTEGER NOT NULL DEFAULT 1,
+  auth_methods_json TEXT NOT NULL DEFAULT '[]',
+  rate_limit_per_minute INTEGER NOT NULL DEFAULT 0,
+  request_schema_json TEXT NOT NULL DEFAULT '{}',
+  response_schema_json TEXT NOT NULL DEFAULT '{}',
+  docs_url TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('beta', 'active', 'deprecated', 'retired')),
+  deprecated_at TEXT,
+  sunset_at TEXT,
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (api_group, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_api_catalog_status ON integration_api_catalog(status, api_group);
+
+-- API consumers / service accounts. The plaintext key is shown once on create;
+-- only its hash is persisted.
+CREATE TABLE IF NOT EXISTS integration_api_clients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  client_type TEXT NOT NULL DEFAULT 'service_account' CHECK (client_type IN ('service_account', 'integration', 'external')),
+  api_key_prefix TEXT DEFAULT '',
+  api_key_hash TEXT DEFAULT '',
+  credential_id INTEGER REFERENCES integration_credentials(id) ON DELETE SET NULL,
+  scopes_json TEXT NOT NULL DEFAULT '[]',
+  allowed_systems_json TEXT NOT NULL DEFAULT '[]',
+  ip_allowlist_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'revoked')),
+  last_used_at TEXT,
+  expires_at TEXT,
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_api_clients_tenant ON integration_api_clients(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS integration_api_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER,
+  endpoint_code TEXT DEFAULT '',
+  api_version TEXT DEFAULT 'v1',
+  method TEXT DEFAULT '',
+  path TEXT DEFAULT '',
+  status_code INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  correlation_id TEXT DEFAULT '',
+  tenant_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_api_usage_tenant ON integration_api_usage(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_integration_api_usage_client ON integration_api_usage(client_id, created_at);
+
+-- External system health check history.
+CREATE TABLE IF NOT EXISTS integration_health_checks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  system_id INTEGER REFERENCES external_systems(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'unknown' CHECK (status IN ('healthy', 'degraded', 'down', 'unknown')),
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  message TEXT DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER,
+  checked_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_health_checks_system ON integration_health_checks(system_id, checked_at);

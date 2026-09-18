@@ -46,6 +46,7 @@ import FileDetailPage from "./pages/FileDetailPage.jsx";
 import FileAdminPage from "./pages/FileAdminPage.jsx";
 import SearchPage from "./pages/SearchPage.jsx";
 import SearchAdminPage from "./pages/SearchAdminPage.jsx";
+import IntegrationPage from "./pages/IntegrationPage.jsx";
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -221,6 +222,11 @@ const NAV_SECTIONS = [
     key: "audit",
     label: "Compliance",
     items: [{ to: "/audit", label: "Audit log" }],
+  },
+  {
+    key: "integration",
+    label: "Integration",
+    items: [{ to: "/integration", label: "Integration hub", platformOrAdmin: true }],
   },
   {
     key: "communication",
@@ -432,6 +438,7 @@ export default function App() {
         <Route path="/files/:ref" element={<FileDetailPage />} />
         <Route path="/search" element={<SearchPage />} />
         <Route path="/search/admin" element={<SearchAdminPage />} />
+        <Route path="/integration" element={<IntegrationPage />} />
         <Route path="/jobs" element={<JobsDashboardPage />} />
         <Route path="/jobs/list" element={<JobsPage />} />
         <Route path="/jobs/execution" element={<JobExecutionPage />} />

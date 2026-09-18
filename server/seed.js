@@ -21,6 +21,7 @@ import * as delivery from "./services/delivery.js";
 import * as jobs from "./services/jobs.js";
 import * as jobExecution from "./services/job-execution.js";
 import * as search from "./services/search.js";
+import * as integration from "./services/integration.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -861,6 +862,19 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.search.indexes", name: "Search index administration", parentCode: "iam.search" },
     { applicationCode: "iam", code: "iam.search.configuration", name: "Search configuration", parentCode: "iam.search" },
     { applicationCode: "iam", code: "iam.search.export", name: "Search result exports", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.integration", name: "Integration & API framework", kind: "module" },
+    { applicationCode: "iam", code: "iam.integration.systems", name: "External systems & credentials", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.endpoints", name: "Integration endpoints", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.transforms", name: "Transformation & mapping definitions", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.mappings", name: "External object mapping", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.schedules", name: "Scheduled integrations", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.events", name: "Events & subscriptions", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.webhooks", name: "Webhooks", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.messages", name: "Message queues", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.deadletters", name: "Dead-letter queues", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.transfers", name: "Import & export", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.monitoring", name: "Integration monitoring", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.api", name: "API catalog & clients", parentCode: "iam.integration" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -975,7 +989,22 @@ function seedMissingCatalog(db) {
     "iam.search.configuration",
     "iam.search.export",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes]) {
+  const integrationResourceCodes = [
+    "iam.integration",
+    "iam.integration.systems",
+    "iam.integration.endpoints",
+    "iam.integration.transforms",
+    "iam.integration.mappings",
+    "iam.integration.schedules",
+    "iam.integration.events",
+    "iam.integration.webhooks",
+    "iam.integration.messages",
+    "iam.integration.deadletters",
+    "iam.integration.transfers",
+    "iam.integration.monitoring",
+    "iam.integration.api",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2434,7 +2463,8 @@ export function seedDatabase(db) {
   seedJobs(db);
   seedJobEngine(db);
   const searchResult = seedSearch(db);
-  return { ...identity, ...authz, ...searchResult };
+  const integrationResult = seedIntegration(db);
+  return { ...identity, ...authz, ...searchResult, ...integrationResult };
 }
 
 function seedSearch(db) {
@@ -2443,6 +2473,17 @@ function seedSearch(db) {
     return { searchSeeded: true, ...result };
   } catch (err) {
     return { searchSeeded: false, searchError: err.message };
+  }
+}
+
+// Registers the platform's default domain event types so business modules can
+// publish/subscribe without any manual catalogue maintenance.
+function seedIntegration(db) {
+  try {
+    const result = integration.Events.ensureDefaultEventTypes(db);
+    return { integrationSeeded: true, eventTypes: result.total };
+  } catch (err) {
+    return { integrationSeeded: false, integrationError: err.message };
   }
 }
 

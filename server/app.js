@@ -30,6 +30,7 @@ import * as lifecycle from "./services/lifecycle.js";
 import * as workflow from "./services/workflow.js";
 import * as files from "./services/files.js";
 import * as search from "./services/search.js";
+import * as integration from "./services/integration.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -110,7 +111,14 @@ function wrap(fn) {
 export function createApp(db) {
   const app = express();
   app.disable("x-powered-by");
-  app.use(express.json({ limit: "1mb" }));
+  app.use(
+    express.json({
+      limit: "1mb",
+      verify: (req, _res, buf) => {
+        req.rawBody = buf && buf.length ? buf.toString("utf8") : "";
+      },
+    })
+  );
   app.use(express.urlencoded({ extended: false }));
   providers.ensureDefaultProviders(db);
   config.ensureDefinitions(db);
@@ -6748,6 +6756,1120 @@ export function createApp(db) {
       res.json(search.searchHealth(db));
     })
   );
+
+  // ── Integration & API Framework ───────────────────────────────────────────
+  const integrationTenant = (req) => req.tenantId ?? null;
+  const canIntegrations = (action) => can("iam.integration", action);
+  const canIntSystems = (action) => can("iam.integration.systems", action);
+  const canIntEndpoints = (action) => can("iam.integration.endpoints", action);
+  const canIntTransforms = (action) => can("iam.integration.transforms", action);
+  const canIntMappings = (action) => can("iam.integration.mappings", action);
+  const canIntSchedules = (action) => can("iam.integration.schedules", action);
+  const canIntEvents = (action) => can("iam.integration.events", action);
+  const canIntWebhooks = (action) => can("iam.integration.webhooks", action);
+  const canIntMessages = (action) => can("iam.integration.messages", action);
+  const canIntDeadLetters = (action) => can("iam.integration.deadletters", action);
+  const canIntTransfers = (action) => can("iam.integration.transfers", action);
+  const canIntMonitoring = (action) => can("iam.integration.monitoring", action);
+  const canIntApi = (action) => can("iam.integration.api", action);
+
+  const integrationRouter = express.Router();
+
+  integrationRouter.get(
+    "/meta",
+    auth,
+    canIntegrations("read"),
+    wrap((_req, res) => {
+      res.json({
+        ...integration.Validation.vocabulary(),
+        adapters: integration.Adapters.listAdapters(),
+        handlers: integration.Definitions.listIntegrationHandlers(),
+        transfer_handlers: integration.Transfers.listTransferHandlers(),
+      });
+    })
+  );
+
+  // Definitions
+  integrationRouter.get(
+    "/definitions",
+    auth,
+    canIntegrations("read"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.listDefinitions(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/definitions",
+    auth,
+    canIntegrations("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Definitions.createDefinition(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/definitions/:code",
+    auth,
+    canIntegrations("read"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.getDefinition(db, req.params.code, { tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.patch(
+    "/definitions/:code",
+    auth,
+    canIntegrations("update"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.updateDefinition(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/definitions/:code/status",
+    auth,
+    canIntegrations("update"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.setDefinitionStatus(db, req.params.code, req.body?.status, req.actor, req.body?.reason));
+    })
+  );
+  integrationRouter.delete(
+    "/definitions/:code",
+    auth,
+    canIntegrations("delete"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.deleteDefinition(db, req.params.code, req.actor));
+    })
+  );
+  integrationRouter.get(
+    "/definitions/:code/versions",
+    auth,
+    canIntegrations("read"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.listDefinitionVersions(db, req.params.code));
+    })
+  );
+  integrationRouter.post(
+    "/definitions/:code/versions/:version/restore",
+    auth,
+    canIntegrations("update"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.restoreDefinitionVersion(db, req.params.code, req.params.version, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/definitions/:code/run",
+    auth,
+    canIntegrations("execute"),
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      if (body.async === true) {
+        const definition = integration.Definitions.getDefinition(db, req.params.code);
+        const job = jobs.submitJob(
+          db,
+          {
+            job_type_code: "INTEGRATION_SYNC",
+            name: `Run integration ${definition.code}`,
+            tenant_id: integrationTenant(req),
+            input: { integration_code: definition.code, trigger_type: "api", payload: body.payload || {} },
+            source_module: "integration",
+          },
+          { actor: req.actor, ip: clientIp(req) }
+        );
+        return res.status(202).json({ queued: true, job_ref: job.job_ref, job });
+      }
+      const result = await integration.Definitions.executeIntegration(db, req.params.code, {
+        triggerType: "api",
+        actor: req.actor,
+        input: { payload: body.payload || {}, correlation_id: body.correlation_id, request_ref: body.request_ref },
+      });
+      res.json(result);
+    })
+  );
+
+  // Executions
+  integrationRouter.get(
+    "/executions",
+    auth,
+    canIntegrations("read"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.listExecutions(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.get(
+    "/executions/:ref",
+    auth,
+    canIntegrations("read"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.getExecution(db, req.params.ref));
+    })
+  );
+  integrationRouter.post(
+    "/executions/:ref/retry",
+    auth,
+    canIntegrations("execute"),
+    wrap(async (req, res) => {
+      res.json(await integration.Definitions.retryExecution(db, req.params.ref, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/executions/:ref/cancel",
+    auth,
+    canIntegrations("execute"),
+    wrap((req, res) => {
+      res.json(integration.Definitions.markExecutionCancelled(db, req.params.ref, req.actor));
+    })
+  );
+
+  // Credentials
+  integrationRouter.get(
+    "/credentials",
+    auth,
+    canIntSystems("read"),
+    wrap((req, res) => {
+      res.json(integration.Systems.listCredentials(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/credentials",
+    auth,
+    canIntSystems("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Systems.createCredential(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/credentials/:code",
+    auth,
+    canIntSystems("read"),
+    wrap((req, res) => {
+      res.json(integration.Systems.getCredential(db, req.params.code, { tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.patch(
+    "/credentials/:code",
+    auth,
+    canIntSystems("update"),
+    wrap((req, res) => {
+      res.json(integration.Systems.updateCredential(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.delete(
+    "/credentials/:code",
+    auth,
+    canIntSystems("delete"),
+    wrap((req, res) => {
+      res.json(integration.Systems.deleteCredential(db, req.params.code, req.actor));
+    })
+  );
+
+  // External systems
+  integrationRouter.get(
+    "/systems",
+    auth,
+    canIntSystems("read"),
+    wrap((req, res) => {
+      res.json(integration.Systems.listExternalSystems(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/systems",
+    auth,
+    canIntSystems("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Systems.createExternalSystem(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/systems/:code",
+    auth,
+    canIntSystems("read"),
+    wrap((req, res) => {
+      res.json(integration.Systems.getExternalSystem(db, req.params.code, { tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.patch(
+    "/systems/:code",
+    auth,
+    canIntSystems("update"),
+    wrap((req, res) => {
+      res.json(integration.Systems.updateExternalSystem(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.delete(
+    "/systems/:code",
+    auth,
+    canIntSystems("delete"),
+    wrap((req, res) => {
+      res.json(integration.Systems.deleteExternalSystem(db, req.params.code, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/systems/:code/test",
+    auth,
+    canIntSystems("execute"),
+    wrap((req, res) => {
+      res.json(integration.Systems.testConnection(db, req.params.code, req.actor, clientIp(req)));
+    })
+  );
+  integrationRouter.get(
+    "/systems/:code/health",
+    auth,
+    canIntSystems("read"),
+    wrap((req, res) => {
+      res.json({ items: integration.Systems.listHealthChecks(db, req.params.code, { limit: req.query.limit }) });
+    })
+  );
+
+  // Endpoints
+  integrationRouter.get(
+    "/endpoints",
+    auth,
+    canIntEndpoints("read"),
+    wrap((req, res) => {
+      res.json(integration.Endpoints.listEndpoints(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/endpoints",
+    auth,
+    canIntEndpoints("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Endpoints.createEndpoint(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/endpoints/:code",
+    auth,
+    canIntEndpoints("read"),
+    wrap((req, res) => {
+      res.json(integration.Endpoints.getEndpoint(db, req.params.code, { tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.patch(
+    "/endpoints/:code",
+    auth,
+    canIntEndpoints("update"),
+    wrap((req, res) => {
+      res.json(integration.Endpoints.updateEndpoint(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.delete(
+    "/endpoints/:code",
+    auth,
+    canIntEndpoints("delete"),
+    wrap((req, res) => {
+      res.json(integration.Endpoints.deleteEndpoint(db, req.params.code, req.actor));
+    })
+  );
+
+  // Transformations
+  integrationRouter.get(
+    "/transformations",
+    auth,
+    canIntTransforms("read"),
+    wrap((req, res) => {
+      res.json(integration.Transform.listTransformations(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/transformations",
+    auth,
+    canIntTransforms("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Transform.createTransformation(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/transformations/:code",
+    auth,
+    canIntTransforms("read"),
+    wrap((req, res) => {
+      res.json(integration.Transform.getTransformation(db, req.params.code, { tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.patch(
+    "/transformations/:code",
+    auth,
+    canIntTransforms("update"),
+    wrap((req, res) => {
+      res.json(integration.Transform.updateTransformation(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.delete(
+    "/transformations/:code",
+    auth,
+    canIntTransforms("delete"),
+    wrap((req, res) => {
+      res.json(integration.Transform.deleteTransformation(db, req.params.code, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/transformations/:code/test",
+    auth,
+    canIntTransforms("execute"),
+    wrap((req, res) => {
+      res.json(integration.Transform.testTransformation(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+
+  // External object mappings
+  integrationRouter.get(
+    "/mappings/stats",
+    auth,
+    canIntMappings("read"),
+    wrap((req, res) => {
+      res.json(integration.Mappings.mappingStats(db, { tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.get(
+    "/mappings",
+    auth,
+    canIntMappings("read"),
+    wrap((req, res) => {
+      res.json(integration.Mappings.listMappings(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/mappings",
+    auth,
+    canIntMappings("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Mappings.upsertMapping(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/mappings/:id",
+    auth,
+    canIntMappings("read"),
+    wrap((req, res) => {
+      res.json(integration.Mappings.getMapping(db, req.params.id));
+    })
+  );
+  integrationRouter.patch(
+    "/mappings/:id",
+    auth,
+    canIntMappings("update"),
+    wrap((req, res) => {
+      res.json(integration.Mappings.updateMapping(db, req.params.id, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.delete(
+    "/mappings/:id",
+    auth,
+    canIntMappings("delete"),
+    wrap((req, res) => {
+      res.json(integration.Mappings.deleteMapping(db, req.params.id, req.actor));
+    })
+  );
+
+  // Schedules
+  integrationRouter.get(
+    "/schedules",
+    auth,
+    canIntSchedules("read"),
+    wrap((req, res) => {
+      res.json(integration.Schedules.listSchedules(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/schedules",
+    auth,
+    canIntSchedules("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Schedules.createSchedule(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/schedules/:code",
+    auth,
+    canIntSchedules("read"),
+    wrap((req, res) => {
+      res.json(integration.Schedules.getSchedule(db, req.params.code, { tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.patch(
+    "/schedules/:code",
+    auth,
+    canIntSchedules("update"),
+    wrap((req, res) => {
+      res.json(integration.Schedules.updateSchedule(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/schedules/:code/status",
+    auth,
+    canIntSchedules("update"),
+    wrap((req, res) => {
+      res.json(integration.Schedules.setScheduleStatus(db, req.params.code, req.body?.status, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/schedules/:code/run",
+    auth,
+    canIntSchedules("execute"),
+    wrap((req, res) => {
+      res.json(integration.Schedules.runScheduleNow(db, req.params.code, req.actor));
+    })
+  );
+  integrationRouter.delete(
+    "/schedules/:code",
+    auth,
+    canIntSchedules("delete"),
+    wrap((req, res) => {
+      res.json(integration.Schedules.deleteSchedule(db, req.params.code, req.actor));
+    })
+  );
+
+  // Event types
+  integrationRouter.get(
+    "/event-types",
+    auth,
+    canIntEvents("read"),
+    wrap((req, res) => {
+      res.json(integration.Events.listEventTypes(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/event-types",
+    auth,
+    canIntEvents("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Events.createEventType(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.patch(
+    "/event-types/:code",
+    auth,
+    canIntEvents("update"),
+    wrap((req, res) => {
+      res.json(integration.Events.updateEventType(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.delete(
+    "/event-types/:code",
+    auth,
+    canIntEvents("delete"),
+    wrap((req, res) => {
+      res.json(integration.Events.deleteEventType(db, req.params.code, req.actor));
+    })
+  );
+
+  // Event subscriptions
+  integrationRouter.get(
+    "/subscriptions",
+    auth,
+    canIntEvents("read"),
+    wrap((req, res) => {
+      res.json(integration.Events.listSubscriptions(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/subscriptions",
+    auth,
+    canIntEvents("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Events.createSubscription(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.patch(
+    "/subscriptions/:code",
+    auth,
+    canIntEvents("update"),
+    wrap((req, res) => {
+      res.json(integration.Events.updateSubscription(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/subscriptions/:code/status",
+    auth,
+    canIntEvents("update"),
+    wrap((req, res) => {
+      res.json(integration.Events.setSubscriptionStatus(db, req.params.code, req.body?.status, req.actor));
+    })
+  );
+  integrationRouter.delete(
+    "/subscriptions/:code",
+    auth,
+    canIntEvents("delete"),
+    wrap((req, res) => {
+      res.json(integration.Events.deleteSubscription(db, req.params.code, req.actor));
+    })
+  );
+
+  // Events
+  integrationRouter.get(
+    "/events",
+    auth,
+    canIntEvents("read"),
+    wrap((req, res) => {
+      res.json(integration.Events.listEvents(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/events",
+    auth,
+    canIntEvents("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Events.publishEvent(db, { ...(req.body || {}), tenant_id: integrationTenant(req) }, req.actor));
+    })
+  );
+  integrationRouter.get(
+    "/events/:ref",
+    auth,
+    canIntEvents("read"),
+    wrap((req, res) => {
+      res.json(integration.Events.getEvent(db, req.params.ref, { includePayload: req.query.include_payload === "true" }));
+    })
+  );
+  integrationRouter.post(
+    "/events/:ref/replay",
+    auth,
+    canIntEvents("execute"),
+    wrap((req, res) => {
+      res.json(integration.Events.replayEvent(db, req.params.ref, req.actor));
+    })
+  );
+
+  // Event deliveries
+  integrationRouter.get(
+    "/deliveries",
+    auth,
+    canIntEvents("read"),
+    wrap((req, res) => {
+      res.json(integration.Events.listDeliveries(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/deliveries/:id/retry",
+    auth,
+    canIntEvents("execute"),
+    wrap((req, res) => {
+      res.json(integration.Events.retryDelivery(db, req.params.id, req.actor));
+    })
+  );
+
+  // Inbound webhooks
+  integrationRouter.get(
+    "/webhooks/inbound",
+    auth,
+    canIntWebhooks("read"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.listInboundWebhooks(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/webhooks/inbound",
+    auth,
+    canIntWebhooks("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Webhooks.createInboundWebhook(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/webhooks/inbound/:code",
+    auth,
+    canIntWebhooks("read"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.getInboundWebhook(db, req.params.code));
+    })
+  );
+  integrationRouter.patch(
+    "/webhooks/inbound/:code",
+    auth,
+    canIntWebhooks("update"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.updateInboundWebhook(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/webhooks/inbound/:code/status",
+    auth,
+    canIntWebhooks("update"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.setInboundWebhookStatus(db, req.params.code, req.body?.status, req.actor));
+    })
+  );
+  integrationRouter.delete(
+    "/webhooks/inbound/:code",
+    auth,
+    canIntWebhooks("delete"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.deleteInboundWebhook(db, req.params.code, req.actor));
+    })
+  );
+  integrationRouter.get(
+    "/webhooks/inbound/:code/receipts",
+    auth,
+    canIntWebhooks("read"),
+    wrap((req, res) => {
+      const endpoint = integration.Webhooks.getInboundWebhook(db, req.params.code);
+      res.json(integration.Webhooks.listInboundReceipts(db, { endpointId: endpoint.id, ...req.query }));
+    })
+  );
+
+  // Outbound webhooks
+  integrationRouter.get(
+    "/webhooks/outbound",
+    auth,
+    canIntWebhooks("read"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.listOutboundWebhooks(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/webhooks/outbound",
+    auth,
+    canIntWebhooks("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Webhooks.createOutboundWebhook(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/webhooks/outbound/:code",
+    auth,
+    canIntWebhooks("read"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.getOutboundWebhook(db, req.params.code));
+    })
+  );
+  integrationRouter.patch(
+    "/webhooks/outbound/:code",
+    auth,
+    canIntWebhooks("update"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.updateOutboundWebhook(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/webhooks/outbound/:code/status",
+    auth,
+    canIntWebhooks("update"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.setOutboundWebhookStatus(db, req.params.code, req.body?.status, req.actor, req.body?.reason));
+    })
+  );
+  integrationRouter.delete(
+    "/webhooks/outbound/:code",
+    auth,
+    canIntWebhooks("delete"),
+    wrap((req, res) => {
+      res.json(integration.Webhooks.deleteOutboundWebhook(db, req.params.code, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/webhooks/outbound/:code/test",
+    auth,
+    canIntWebhooks("execute"),
+    wrap(async (req, res) => {
+      res.json(await integration.Webhooks.testOutboundWebhook(db, req.params.code));
+    })
+  );
+  integrationRouter.get(
+    "/webhooks/outbound/:code/deliveries",
+    auth,
+    canIntWebhooks("read"),
+    wrap((req, res) => {
+      const webhook = integration.Webhooks.getOutboundWebhook(db, req.params.code);
+      res.json(integration.Webhooks.listOutboundDeliveries(db, { subscriptionId: webhook.id, ...req.query }));
+    })
+  );
+
+  // Public inbound webhook receiver (authenticated by endpoint signature/API key,
+  // not by the session bearer token).
+  const receiveWebhook = wrap((req, res) => {
+    const body = req.body && Object.keys(req.body).length ? req.body : req.rawBody || {};
+    const result = integration.Webhooks.receiveInboundWebhook(db, req.params.code, {
+      headers: req.headers,
+      body,
+      rawBody: req.rawBody,
+      ip: clientIp(req),
+    });
+    res.status(202).json(result);
+  });
+  integrationRouter.post("/webhooks/receive/:code", receiveWebhook);
+  app.post("/api/v1/integration/webhooks/receive/:code", receiveWebhook);
+
+  // Messages & queues
+  integrationRouter.get(
+    "/queues",
+    auth,
+    canIntMessages("read"),
+    wrap((req, res) => {
+      res.json({ items: integration.Messages.listQueues(db, { tenantId: integrationTenant(req) }) });
+    })
+  );
+  integrationRouter.get(
+    "/messages",
+    auth,
+    canIntMessages("read"),
+    wrap((req, res) => {
+      res.json(integration.Messages.listMessages(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/messages",
+    auth,
+    canIntMessages("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.Messages.enqueueMessage(db, { ...(req.body || {}), tenant_id: integrationTenant(req) }, req.actor));
+    })
+  );
+  integrationRouter.get(
+    "/messages/:ref",
+    auth,
+    canIntMessages("read"),
+    wrap((req, res) => {
+      res.json(integration.Messages.getMessage(db, req.params.ref, { includePayload: req.query.include_payload === "true" }));
+    })
+  );
+  integrationRouter.post(
+    "/messages/:ref/retry",
+    auth,
+    canIntMessages("execute"),
+    wrap((req, res) => {
+      res.json(integration.Messages.requeueMessage(db, req.params.ref, { resetAttempts: req.body?.reset_attempts === true, actor: req.actor }));
+    })
+  );
+  integrationRouter.post(
+    "/messages/:ref/cancel",
+    auth,
+    canIntMessages("execute"),
+    wrap((req, res) => {
+      res.json(integration.Messages.cancelMessage(db, req.params.ref, req.actor, req.body?.reason));
+    })
+  );
+
+  // Dead letters
+  integrationRouter.get(
+    "/dead-letters/stats",
+    auth,
+    canIntDeadLetters("read"),
+    wrap((req, res) => {
+      res.json(integration.DeadLetter.deadLetterStats(db, { tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.get(
+    "/dead-letters",
+    auth,
+    canIntDeadLetters("read"),
+    wrap((req, res) => {
+      res.json(integration.DeadLetter.listDeadLetters(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/dead-letters/bulk-retry",
+    auth,
+    canIntDeadLetters("execute"),
+    wrap((req, res) => {
+      res.json(integration.DeadLetter.bulkRetryDeadLetters(db, req.body?.ids || [], req.actor));
+    })
+  );
+  integrationRouter.get(
+    "/dead-letters/:id",
+    auth,
+    canIntDeadLetters("read"),
+    wrap((req, res) => {
+      res.json(integration.DeadLetter.getDeadLetter(db, req.params.id, { includePayload: req.query.include_payload === "true" }));
+    })
+  );
+  integrationRouter.post(
+    "/dead-letters/:id/inspect",
+    auth,
+    canIntDeadLetters("read"),
+    wrap((req, res) => {
+      res.json(integration.DeadLetter.inspectDeadLetterPayload(db, req.params.id, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/dead-letters/:id/retry",
+    auth,
+    canIntDeadLetters("execute"),
+    wrap((req, res) => {
+      res.json(integration.DeadLetter.retryDeadLetter(db, req.params.id, req.actor, { resetAttempts: req.body?.reset_attempts !== false }));
+    })
+  );
+  integrationRouter.post(
+    "/dead-letters/:id/resolve",
+    auth,
+    canIntDeadLetters("execute"),
+    wrap((req, res) => {
+      res.json(integration.DeadLetter.resolveDeadLetter(db, req.params.id, { status: req.body?.status, resolution: req.body?.resolution, actor: req.actor }));
+    })
+  );
+
+  // Transfers (import/export)
+  integrationRouter.get(
+    "/transfers/handlers",
+    auth,
+    canIntTransfers("read"),
+    wrap((_req, res) => {
+      res.json(integration.Transfers.listTransferHandlers());
+    })
+  );
+  integrationRouter.get(
+    "/transfers",
+    auth,
+    canIntTransfers("read"),
+    wrap((req, res) => {
+      res.json(integration.Transfers.listTransfers(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/transfers/import/preview",
+    auth,
+    canIntTransfers("create"),
+    wrap((req, res) => {
+      res.json(integration.Transfers.previewImport(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.post(
+    "/transfers/import",
+    auth,
+    canIntTransfers("execute"),
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      if (body.async === true) {
+        const transfer = await integration.Transfers.runImportTransfer(db, { ...body, dry_run: true }, req.actor, integrationTenant(req));
+        const job = jobs.submitJob(
+          db,
+          {
+            job_type_code: "INTEGRATION_TRANSFER",
+            name: `Import ${body.resource_type || "data"}`,
+            tenant_id: integrationTenant(req),
+            input: { transfer_ref: transfer.transfer_ref, direction: "import" },
+            source_module: "integration",
+          },
+          { actor: req.actor, ip: clientIp(req) }
+        );
+        return res.status(202).json({ queued: true, transfer_ref: transfer.transfer_ref, job_ref: job.job_ref, job });
+      }
+      res.status(201).json(await integration.Transfers.runImportTransfer(db, body, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.post(
+    "/transfers/export",
+    auth,
+    canIntTransfers("execute"),
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      if (body.async === true) {
+        const transfer = await integration.Transfers.runExportTransfer(db, { ...body, dry_run: true }, req.actor, integrationTenant(req));
+        const job = jobs.submitJob(
+          db,
+          {
+            job_type_code: "INTEGRATION_TRANSFER",
+            name: `Export ${body.resource_type || "data"}`,
+            tenant_id: integrationTenant(req),
+            input: { transfer_ref: transfer.transfer_ref, direction: "export" },
+            source_module: "integration",
+          },
+          { actor: req.actor, ip: clientIp(req) }
+        );
+        return res.status(202).json({ queued: true, transfer_ref: transfer.transfer_ref, job_ref: job.job_ref, job });
+      }
+      res.status(201).json(await integration.Transfers.runExportTransfer(db, body, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/transfers/:ref",
+    auth,
+    canIntTransfers("read"),
+    wrap((req, res) => {
+      res.json(integration.Transfers.getTransfer(db, req.params.ref));
+    })
+  );
+  integrationRouter.get(
+    "/transfers/:ref/download",
+    auth,
+    canIntTransfers("read"),
+    wrap((req, res) => {
+      const result = integration.Transfers.getTransferContent(db, req.params.ref);
+      res.setHeader("Content-Type", result.content_type);
+      res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+      res.send(result.content);
+    })
+  );
+  integrationRouter.post(
+    "/transfers/:ref/cancel",
+    auth,
+    canIntTransfers("execute"),
+    wrap((req, res) => {
+      res.json(integration.Transfers.cancelTransfer(db, req.params.ref, req.actor));
+    })
+  );
+
+  // Monitoring & dashboards
+  integrationRouter.get(
+    "/monitoring/overview",
+    auth,
+    canIntMonitoring("read"),
+    wrap((req, res) => {
+      res.json(integration.Monitoring.monitoringOverview(db, { tenantId: integrationTenant(req), hours: req.query.hours }));
+    })
+  );
+  integrationRouter.get(
+    "/monitoring/executions",
+    auth,
+    canIntMonitoring("read"),
+    wrap((req, res) => {
+      res.json(integration.Monitoring.executionMetrics(db, { tenantId: integrationTenant(req), hours: req.query.hours }));
+    })
+  );
+  integrationRouter.get(
+    "/monitoring/deliveries",
+    auth,
+    canIntMonitoring("read"),
+    wrap((req, res) => {
+      res.json(integration.Monitoring.deliveryMetrics(db, { tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.get(
+    "/monitoring/systems",
+    auth,
+    canIntMonitoring("read"),
+    wrap((req, res) => {
+      res.json({ items: integration.Monitoring.listSystemsHealth(db, { tenantId: integrationTenant(req), status: req.query.status }) });
+    })
+  );
+  integrationRouter.get(
+    "/monitoring/systems/:code/uptime",
+    auth,
+    canIntMonitoring("read"),
+    wrap((req, res) => {
+      res.json(integration.Monitoring.systemUptime(db, req.params.code, { hours: req.query.hours }));
+    })
+  );
+  integrationRouter.post(
+    "/monitoring/health-checks/run",
+    auth,
+    canIntMonitoring("execute"),
+    wrap((req, res) => {
+      res.json(integration.Monitoring.runHealthChecks(db, { actor: req.actor, tenantId: integrationTenant(req), systemType: req.body?.system_type }));
+    })
+  );
+  integrationRouter.get(
+    "/monitoring/api-usage",
+    auth,
+    canIntMonitoring("read"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.apiUsageStats(db, { tenantId: integrationTenant(req), hours: req.query.hours }));
+    })
+  );
+
+  // API catalog & clients
+  integrationRouter.get(
+    "/api-catalog",
+    auth,
+    canIntApi("read"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.listApiCatalog(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/api-catalog",
+    auth,
+    canIntApi("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.ApiCatalog.createCatalogEntry(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/api-catalog/:code",
+    auth,
+    canIntApi("read"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.getCatalogEntry(db, req.params.code));
+    })
+  );
+  integrationRouter.patch(
+    "/api-catalog/:code",
+    auth,
+    canIntApi("update"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.updateCatalogEntry(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/api-catalog/:code/status",
+    auth,
+    canIntApi("update"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.setCatalogStatus(db, req.params.code, req.body?.status, req.actor, req.body || {}));
+    })
+  );
+  integrationRouter.delete(
+    "/api-catalog/:code",
+    auth,
+    canIntApi("delete"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.deleteCatalogEntry(db, req.params.code, req.actor));
+    })
+  );
+  integrationRouter.get(
+    "/api-clients",
+    auth,
+    canIntApi("read"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.listApiClients(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+  integrationRouter.post(
+    "/api-clients",
+    auth,
+    canIntApi("create"),
+    wrap((req, res) => {
+      res.status(201).json(integration.ApiCatalog.createApiClient(db, req.body || {}, req.actor, integrationTenant(req)));
+    })
+  );
+  integrationRouter.get(
+    "/api-clients/:code",
+    auth,
+    canIntApi("read"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.getApiClient(db, req.params.code));
+    })
+  );
+  integrationRouter.patch(
+    "/api-clients/:code",
+    auth,
+    canIntApi("update"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.updateApiClient(db, req.params.code, req.body || {}, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/api-clients/:code/rotate",
+    auth,
+    canIntApi("execute"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.rotateApiKey(db, req.params.code, req.actor));
+    })
+  );
+  integrationRouter.post(
+    "/api-clients/:code/revoke",
+    auth,
+    canIntApi("execute"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.revokeApiClient(db, req.params.code, req.actor, req.body?.reason));
+    })
+  );
+  integrationRouter.delete(
+    "/api-clients/:code",
+    auth,
+    canIntApi("delete"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.deleteApiClient(db, req.params.code, req.actor));
+    })
+  );
+  integrationRouter.get(
+    "/api-usage",
+    auth,
+    canIntApi("read"),
+    wrap((req, res) => {
+      res.json(integration.ApiCatalog.listApiUsage(db, { ...req.query, tenantId: integrationTenant(req) }));
+    })
+  );
+
+  app.use("/api/integration", integrationRouter);
+  app.use("/api/v1/integration", integrationRouter);
 
   const dist = join(__dirname, "..", "web", "dist");
   if (existsSync(dist)) {

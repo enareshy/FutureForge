@@ -24,6 +24,7 @@ import { ensureDefaultQueues, createWorker, registerDemoHandlers } from "../serv
 import { registerFileProcessingHandlers, expireUploads, releaseExpiredLocks } from "../server/services/files.js";
 import { registerSearchHandlers, runSearchMaintenance } from "../server/services/search.js";
 import { registerAuditHandlers, runAuditMaintenance } from "../server/services/audit.js";
+import { registerIntegrationHandlers, runIntegrationMaintenance } from "../server/services/integration/jobs.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -84,6 +85,10 @@ registerSearchHandlers();
 // Audit & History background handlers (event export, retention execution).
 registerAuditHandlers();
 
+// Integration & API Framework background handlers (message delivery, event
+// fan-out, webhooks, imports/exports, health probes, dead-letter retry).
+registerIntegrationHandlers();
+
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
 const fileMaintenanceMs = positive(process.env.FILE_MAINTENANCE_MS, 60000);
@@ -141,6 +146,26 @@ const auditMaintenance = setInterval(() => {
 }, auditMaintenanceMs);
 auditMaintenance.unref?.();
 
+// Periodic integration housekeeping: converge event deliveries, outbound
+// webhooks and queued messages so async integrations complete without an
+// operator having to submit jobs manually.
+const integrationMaintenanceMs = positive(process.env.INTEGRATION_MAINTENANCE_MS, 15000);
+const integrationMaintenance = setInterval(async () => {
+  try {
+    const summary = await runIntegrationMaintenance(db);
+    if (summary.events.delivered || summary.webhooks.delivered || summary.messages.succeeded) {
+      log("info", "Integration housekeeping", {
+        events: summary.events.delivered,
+        webhooks: summary.webhooks.delivered,
+        messages: summary.messages.succeeded,
+      });
+    }
+  } catch (error) {
+    log("warn", "Integration housekeeping failed", { error: error.message });
+  }
+}, integrationMaintenanceMs);
+integrationMaintenance.unref?.();
+
 const worker = createWorker(db, {
   id: args.id || undefined,
   name: args.name || undefined,
@@ -160,6 +185,7 @@ async function shutdown(signal) {
   clearInterval(fileMaintenance);
   clearInterval(searchMaintenance);
   clearInterval(auditMaintenance);
+  clearInterval(integrationMaintenance);
   log("info", "Worker draining", { signal, drain_ms: drainMs, active_jobs: worker.active.size });
   try {
     await worker.stop({ timeoutMs: drainMs });

@@ -746,6 +746,153 @@ export const search = {
   health: () => api("/api/search/health"),
 };
 
+export const integration = {
+  meta: () => api("/api/integration/meta"),
+
+  definitions: (qs) => api(`/api/integration/definitions${qs || ""}`),
+  definition: (code) => api(`/api/integration/definitions/${encodeURIComponent(code)}`),
+  createDefinition: (body) => api("/api/integration/definitions", { method: "POST", body }),
+  updateDefinition: (code, body) => api(`/api/integration/definitions/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  setDefinitionStatus: (code, status, reason) =>
+    api(`/api/integration/definitions/${encodeURIComponent(code)}/status`, { method: "POST", body: { status, reason } }),
+  deleteDefinition: (code) => api(`/api/integration/definitions/${encodeURIComponent(code)}`, { method: "DELETE" }),
+  definitionVersions: (code) => api(`/api/integration/definitions/${encodeURIComponent(code)}/versions`),
+  restoreDefinitionVersion: (code, version) =>
+    api(`/api/integration/definitions/${encodeURIComponent(code)}/versions/${version}/restore`, { method: "POST" }),
+  runDefinition: (code, body) => api(`/api/integration/definitions/${encodeURIComponent(code)}/run`, { method: "POST", body: body || {} }),
+  executions: (qs) => api(`/api/integration/executions${qs || ""}`),
+  execution: (ref) => api(`/api/integration/executions/${encodeURIComponent(ref)}`),
+  retryExecution: (ref) => api(`/api/integration/executions/${encodeURIComponent(ref)}/retry`, { method: "POST" }),
+  cancelExecution: (ref) => api(`/api/integration/executions/${encodeURIComponent(ref)}/cancel`, { method: "POST" }),
+
+  credentials: (qs) => api(`/api/integration/credentials${qs || ""}`),
+  credential: (code) => api(`/api/integration/credentials/${encodeURIComponent(code)}`),
+  createCredential: (body) => api("/api/integration/credentials", { method: "POST", body }),
+  updateCredential: (code, body) => api(`/api/integration/credentials/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  deleteCredential: (code) => api(`/api/integration/credentials/${encodeURIComponent(code)}`, { method: "DELETE" }),
+
+  systems: (qs) => api(`/api/integration/systems${qs || ""}`),
+  system: (code) => api(`/api/integration/systems/${encodeURIComponent(code)}`),
+  createSystem: (body) => api("/api/integration/systems", { method: "POST", body }),
+  updateSystem: (code, body) => api(`/api/integration/systems/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  deleteSystem: (code) => api(`/api/integration/systems/${encodeURIComponent(code)}`, { method: "DELETE" }),
+  testSystem: (code) => api(`/api/integration/systems/${encodeURIComponent(code)}/test`, { method: "POST" }),
+  systemHealth: (code, qs) => api(`/api/integration/systems/${encodeURIComponent(code)}/health${qs || ""}`),
+
+  endpoints: (qs) => api(`/api/integration/endpoints${qs || ""}`),
+  endpoint: (code) => api(`/api/integration/endpoints/${encodeURIComponent(code)}`),
+  createEndpoint: (body) => api("/api/integration/endpoints", { method: "POST", body }),
+  updateEndpoint: (code, body) => api(`/api/integration/endpoints/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  deleteEndpoint: (code) => api(`/api/integration/endpoints/${encodeURIComponent(code)}`, { method: "DELETE" }),
+
+  transformations: (qs) => api(`/api/integration/transformations${qs || ""}`),
+  transformation: (code) => api(`/api/integration/transformations/${encodeURIComponent(code)}`),
+  createTransformation: (body) => api("/api/integration/transformations", { method: "POST", body }),
+  updateTransformation: (code, body) => api(`/api/integration/transformations/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  deleteTransformation: (code) => api(`/api/integration/transformations/${encodeURIComponent(code)}`, { method: "DELETE" }),
+  testTransformation: (code, body) => api(`/api/integration/transformations/${encodeURIComponent(code)}/test`, { method: "POST", body: body || {} }),
+
+  mappingStats: () => api("/api/integration/mappings/stats"),
+  mappings: (qs) => api(`/api/integration/mappings${qs || ""}`),
+  createMapping: (body) => api("/api/integration/mappings", { method: "POST", body }),
+  updateMapping: (id, body) => api(`/api/integration/mappings/${id}`, { method: "PATCH", body }),
+  deleteMapping: (id) => api(`/api/integration/mappings/${id}`, { method: "DELETE" }),
+
+  schedules: (qs) => api(`/api/integration/schedules${qs || ""}`),
+  schedule: (code) => api(`/api/integration/schedules/${encodeURIComponent(code)}`),
+  createSchedule: (body) => api("/api/integration/schedules", { method: "POST", body }),
+  updateSchedule: (code, body) => api(`/api/integration/schedules/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  setScheduleStatus: (code, status) =>
+    api(`/api/integration/schedules/${encodeURIComponent(code)}/status`, { method: "POST", body: { status } }),
+  runSchedule: (code) => api(`/api/integration/schedules/${encodeURIComponent(code)}/run`, { method: "POST" }),
+  deleteSchedule: (code) => api(`/api/integration/schedules/${encodeURIComponent(code)}`, { method: "DELETE" }),
+
+  eventTypes: (qs) => api(`/api/integration/event-types${qs || ""}`),
+  createEventType: (body) => api("/api/integration/event-types", { method: "POST", body }),
+  updateEventType: (code, body) => api(`/api/integration/event-types/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  deleteEventType: (code) => api(`/api/integration/event-types/${encodeURIComponent(code)}`, { method: "DELETE" }),
+
+  subscriptions: (qs) => api(`/api/integration/subscriptions${qs || ""}`),
+  createSubscription: (body) => api("/api/integration/subscriptions", { method: "POST", body }),
+  updateSubscription: (code, body) => api(`/api/integration/subscriptions/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  setSubscriptionStatus: (code, status) =>
+    api(`/api/integration/subscriptions/${encodeURIComponent(code)}/status`, { method: "POST", body: { status } }),
+  deleteSubscription: (code) => api(`/api/integration/subscriptions/${encodeURIComponent(code)}`, { method: "DELETE" }),
+
+  events: (qs) => api(`/api/integration/events${qs || ""}`),
+  publishEvent: (body) => api("/api/integration/events", { method: "POST", body }),
+  event: (ref) => api(`/api/integration/events/${encodeURIComponent(ref)}`),
+  replayEvent: (ref) => api(`/api/integration/events/${encodeURIComponent(ref)}/replay`, { method: "POST" }),
+  deliveries: (qs) => api(`/api/integration/deliveries${qs || ""}`),
+  retryDelivery: (id) => api(`/api/integration/deliveries/${id}/retry`, { method: "POST" }),
+
+  inboundWebhooks: (qs) => api(`/api/integration/webhooks/inbound${qs || ""}`),
+  createInboundWebhook: (body) => api("/api/integration/webhooks/inbound", { method: "POST", body }),
+  updateInboundWebhook: (code, body) => api(`/api/integration/webhooks/inbound/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  setInboundWebhookStatus: (code, status) =>
+    api(`/api/integration/webhooks/inbound/${encodeURIComponent(code)}/status`, { method: "POST", body: { status } }),
+  deleteInboundWebhook: (code) => api(`/api/integration/webhooks/inbound/${encodeURIComponent(code)}`, { method: "DELETE" }),
+  inboundReceipts: (code, qs) => api(`/api/integration/webhooks/inbound/${encodeURIComponent(code)}/receipts${qs || ""}`),
+
+  outboundWebhooks: (qs) => api(`/api/integration/webhooks/outbound${qs || ""}`),
+  createOutboundWebhook: (body) => api("/api/integration/webhooks/outbound", { method: "POST", body }),
+  updateOutboundWebhook: (code, body) => api(`/api/integration/webhooks/outbound/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  setOutboundWebhookStatus: (code, status, reason) =>
+    api(`/api/integration/webhooks/outbound/${encodeURIComponent(code)}/status`, { method: "POST", body: { status, reason } }),
+  deleteOutboundWebhook: (code) => api(`/api/integration/webhooks/outbound/${encodeURIComponent(code)}`, { method: "DELETE" }),
+  testOutboundWebhook: (code) => api(`/api/integration/webhooks/outbound/${encodeURIComponent(code)}/test`, { method: "POST" }),
+  outboundDeliveries: (code, qs) => api(`/api/integration/webhooks/outbound/${encodeURIComponent(code)}/deliveries${qs || ""}`),
+
+  queues: () => api("/api/integration/queues"),
+  messages: (qs) => api(`/api/integration/messages${qs || ""}`),
+  createMessage: (body) => api("/api/integration/messages", { method: "POST", body }),
+  message: (ref) => api(`/api/integration/messages/${encodeURIComponent(ref)}`),
+  retryMessage: (ref) => api(`/api/integration/messages/${encodeURIComponent(ref)}/retry`, { method: "POST" }),
+  cancelMessage: (ref) => api(`/api/integration/messages/${encodeURIComponent(ref)}/cancel`, { method: "POST" }),
+
+  deadLetterStats: () => api("/api/integration/dead-letters/stats"),
+  deadLetters: (qs) => api(`/api/integration/dead-letters${qs || ""}`),
+  deadLetter: (id) => api(`/api/integration/dead-letters/${id}`),
+  inspectDeadLetter: (id) => api(`/api/integration/dead-letters/${id}/inspect`, { method: "POST" }),
+  retryDeadLetter: (id) => api(`/api/integration/dead-letters/${id}/retry`, { method: "POST" }),
+  resolveDeadLetter: (id, body) => api(`/api/integration/dead-letters/${id}/resolve`, { method: "POST", body: body || {} }),
+  bulkRetryDeadLetters: (ids) => api("/api/integration/dead-letters/bulk-retry", { method: "POST", body: { ids } }),
+
+  transferHandlers: () => api("/api/integration/transfers/handlers"),
+  transfers: (qs) => api(`/api/integration/transfers${qs || ""}`),
+  transfer: (ref) => api(`/api/integration/transfers/${encodeURIComponent(ref)}`),
+  previewImport: (body) => api("/api/integration/transfers/import/preview", { method: "POST", body }),
+  importTransfer: (body) => api("/api/integration/transfers/import", { method: "POST", body }),
+  exportTransfer: (body) => api("/api/integration/transfers/export", { method: "POST", body }),
+  downloadTransfer: (ref) => apiDownload(`/api/integration/transfers/${encodeURIComponent(ref)}/download`),
+  cancelTransfer: (ref) => api(`/api/integration/transfers/${encodeURIComponent(ref)}/cancel`, { method: "POST" }),
+
+  monitoringOverview: (qs) => api(`/api/integration/monitoring/overview${qs || ""}`),
+  monitoringExecutions: (qs) => api(`/api/integration/monitoring/executions${qs || ""}`),
+  monitoringDeliveries: (qs) => api(`/api/integration/monitoring/deliveries${qs || ""}`),
+  monitoringSystems: (qs) => api(`/api/integration/monitoring/systems${qs || ""}`),
+  monitoringUptime: (code, qs) => api(`/api/integration/monitoring/systems/${encodeURIComponent(code)}/uptime${qs || ""}`),
+  runHealthChecks: (body) => api("/api/integration/monitoring/health-checks/run", { method: "POST", body: body || {} }),
+  monitoringApiUsage: (qs) => api(`/api/integration/monitoring/api-usage${qs || ""}`),
+
+  apiCatalog: (qs) => api(`/api/integration/api-catalog${qs || ""}`),
+  apiCatalogEntry: (code) => api(`/api/integration/api-catalog/${encodeURIComponent(code)}`),
+  createApiCatalogEntry: (body) => api("/api/integration/api-catalog", { method: "POST", body }),
+  updateApiCatalogEntry: (code, body) => api(`/api/integration/api-catalog/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  setApiCatalogStatus: (code, status) =>
+    api(`/api/integration/api-catalog/${encodeURIComponent(code)}/status`, { method: "POST", body: { status } }),
+  deleteApiCatalogEntry: (code) => api(`/api/integration/api-catalog/${encodeURIComponent(code)}`, { method: "DELETE" }),
+
+  apiClients: (qs) => api(`/api/integration/api-clients${qs || ""}`),
+  apiClient: (code) => api(`/api/integration/api-clients/${encodeURIComponent(code)}`),
+  createApiClient: (body) => api("/api/integration/api-clients", { method: "POST", body }),
+  updateApiClient: (code, body) => api(`/api/integration/api-clients/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  rotateApiClient: (code) => api(`/api/integration/api-clients/${encodeURIComponent(code)}/rotate`, { method: "POST" }),
+  revokeApiClient: (code) => api(`/api/integration/api-clients/${encodeURIComponent(code)}/revoke`, { method: "POST" }),
+  deleteApiClient: (code) => api(`/api/integration/api-clients/${encodeURIComponent(code)}`, { method: "DELETE" }),
+  apiUsage: (qs) => api(`/api/integration/api-usage${qs || ""}`),
+};
+
 export const lifecycle = {  statuses: (qs) => api(`/api/statuses${qs || ""}`),
   status: (id) => api(`/api/statuses/${id}`),
   createStatus: (body) => api("/api/statuses", { method: "POST", body }),
