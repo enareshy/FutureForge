@@ -89,6 +89,110 @@ All business tables carry `tenant_id` and are scoped through the same tenant fil
 the rest of the platform. Event-type codes are PascalCase domain names; all other codes
 are lowercase and unique.
 
+## Event envelope
+
+Every event is stored and delivered as a single canonical envelope. `buildEnvelope` in
+`validation.js` normalizes user input, applies event-type defaults and produces the
+shape below; the DTO mappers in `repository.js` serialize it for the API.
+
+| Field | Meaning |
+| --- | --- |
+| `event_ref` | Stable public reference (also the delivery/provenance key) |
+| `event_type_code` / `event_version` | Registered type and payload schema version |
+| `source_module` | Publishing module (defaults to the type's `source_module`) |
+| `source_system` | Logical origin system (default `platform`) |
+| `source_object_type` / `source_object_id` / `source_object_revision` | Subject of the event |
+| `actor_id` / `actor_type` | Who or what caused it (`USER`, `SYSTEM`, `SERVICE`, `INTEGRATION`) |
+| `correlation_id` | Groups all events for one business operation |
+| `causation_id` | The event/delivery that directly caused this one |
+| `trace_id` | Distributed trace id |
+| `parent_event_id` | Parent event when an event is derived |
+| `partition_key` | Overrides the default partitioning key for ordering |
+| `ordering_scope` | `none`, `global`, `tenant`, `object` or `partition` |
+| `priority` | `low`, `normal`, `high` or `critical` |
+| `payload` / `payload_schema_version` | Business body validated against the schema |
+| `metadata` | Non-business context (never validated, never used for routing decisions alone) |
+| `security_classification` | `public`, `internal`, `confidential` or `restricted` |
+| `idempotency_key` | Publisher-supplied dedupe key |
+| `occurred_at` | Business occurrence timestamp (defaults to publish time) |
+
+Example envelope:
+
+```json
+{
+  "event_ref": "evt_01HZX8Q2",
+  "event_type_code": "ProductReleased",
+  "event_version": 2,
+  "source_module": "objects",
+  "source_system": "platform",
+  "source_object_type": "product",
+  "source_object_id": "prd_1042",
+  "source_object_revision": "B",
+  "actor_id": "usr_88",
+  "actor_type": "USER",
+  "correlation_id": "corr_release_1042",
+  "causation_id": null,
+  "trace_id": "4f9c1e...",
+  "parent_event_id": null,
+  "partition_key": "prd_1042",
+  "ordering_scope": "object",
+  "priority": "normal",
+  "payload": { "id": "prd_1042", "revision": "B", "status": "Released" },
+  "payload_schema_version": 2,
+  "metadata": { "site": "helix-plant-1" },
+  "security_classification": "internal",
+  "idempotency_key": "release:prd_1042:B",
+  "occurred_at": "2026-09-18T07:38:00.000Z"
+}
+```
+
+The envelope is versioned in the same sense as the payload: `event_version` identifies the
+schema generation, so a consumer can branch on it. Additive, backwards-compatible fields
+keep the same version; breaking changes require a new version.
+
+## Event lifecycle
+
+An event moves through acceptance, routing, fan-out and delivery. The record itself is
+immutable; all state changes happen on outbox, delivery, dead-letter and replay rows.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Accepted: publishEvent validates and inserts record
+    Accepted --> Buffered: outbox row pending
+    Buffered --> Routed: processOutbox fans out to subscriptions
+    Routed --> Pending: delivery created per subscriber
+    Pending --> Processing: consumer claims with lease
+    Processing --> Delivered: handler succeeds
+    Processing --> Pending: retryable error with backoff
+    Pending --> OutOfOrder: ordering gap detected
+    OutOfOrder --> Pending: gap fills or timeout
+    Processing --> DeadLetter: retries exhausted or non-retryable
+    DeadLetter --> Pending: resolve as retry
+    DeadLetter --> Closed: resolve as close
+    Delivered --> Archived: retention archive
+    Delivered --> Purged: retention purge
+    Archived --> [*]
+    Purged --> [*]
+```
+
+- **Accepted / Buffered** — `publishEvent` writes `event_records` and, with `useOutbox`,
+  an `event_outbox` row in the same transaction. A duplicate `idempotency_key` returns the
+  original and never re-enters the pipeline.
+- **Routed** — `processOutbox` claims pending outbox rows and `router.js` matches active
+  subscriptions, creating one `event_deliveries` row per internal subscriber.
+- **Pending / Processing** — consumers claim due deliveries with a visibility lease and
+  invoke the registered handler. A crash or lease expiry returns the row to `pending`.
+- **Delivered** — recorded with attempt history, duration and handler result.
+- **OutOfOrder** — held in `ordering.js` until the missing partition sequence arrives or
+  the timeout elapses.
+- **DeadLetter / Closed** — exhausted or non-retryable failures land in
+  `event_dead_letters`; operators retry or close them.
+- **Archived / Purged** — retention moves expired records to `event_records_archive` or
+  deletes them.
+
+Replay is a parallel path: `replay.js` re-emits historical records as new deliveries with
+a distinct `replay_ref`, without mutating the original record or its state.
+
 ## Event registry and schema management
 
 `ensureDefaultEventTypes` seeds the default catalogue across categories `object`,
@@ -104,6 +208,50 @@ Schemas are versioned in `event_schemas` (JSON-Schema subset). Publishing a new 
 runs `compareSchemas`, which flags breaking changes (`removed_property`, `type_changed`,
 `added_required`) as incompatible; `POST /event-types/:code/compatibility` exposes the
 same check to operators.
+
+## Schema contract
+
+Payload schemas use a deliberately small JSON-Schema subset so validation stays
+provider-independent and dependency-free. Supported keywords:
+
+| Keyword | Behavior |
+| --- | --- |
+| `type` | `object`, `array`, `string`, `number`, `integer`, `boolean`, `null` (or an array of them) |
+| `required` | Property names that must be present and non-null |
+| `properties` | Per-property subschema, applied recursively |
+| `items` | Subschema for every array element |
+| `enum` | Value must deep-equal one of the listed literals |
+| `additionalProperties: false` | Rejects unknown properties |
+
+Contracts:
+
+- A type has a stable `event_type_code`; every edit to the payload shape is published as a
+  new row in `event_schemas` and bumps `event_version`.
+- `publishEvent` validates against the **active** schema for the resolved version before
+  writing the record. A failure raises `400` with the offending JSON path and never
+  reaches the outbox.
+- `POST /event-types/:code/compatibility` compares two versions and returns a verdict
+  (`compatible` or the breaking reasons). Run it before activating a subscriber that
+  depends on a new version.
+- Events with no schema are accepted but treated as opaque payloads; handlers must not
+  assume structure.
+- Schemas are immutable once published. To fix a bad schema, publish a new version rather
+  than editing history.
+
+Well-formed example:
+
+```json
+{
+  "type": "object",
+  "required": ["id", "status"],
+  "properties": {
+    "id": { "type": "string" },
+    "status": { "type": "string", "enum": ["Draft", "Released", "Obsolete"] },
+    "tags": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": true
+}
+```
 
 ## Publishing and the transactional outbox
 
@@ -176,6 +324,58 @@ from the handler registry, invoke it and record an `event_delivery_attempts` row
 - **Retry**: `normalizeRetryPolicy`/`computeBackoffSeconds` drive exponential backoff;
   non-retryable error categories fail fast.
 - **Skip**: `skipDelivery` force-completes a delivery without invoking the handler.
+
+## Creating a handler
+
+A handler is the business action taken for an event. Handlers live in the consuming
+module; the framework only routes to them and guarantees at-least-once delivery.
+
+1. **Register** the handler once at module startup with `registerHandler(code, fn, options)`:
+
+```js
+import { registerHandler } from "../services/events/handlers.js";
+
+registerHandler(
+  "manufacturing.releaseTooling",
+  async ({ db, event, payload, delivery, subscription, worker }) => {
+    await releaseTooling(db, payload.id, { revision: payload.revision });
+    return { released: payload.id };
+  },
+  { description: "Release tooling for a product", module: "manufacturing" }
+);
+```
+
+2. **Subscribe** an event type to the handler (console under **Subscriptions**, or
+   `createSubscription`). A subscription binds `event_type_code` to a `handler` code and
+   an optional JSON filter.
+
+3. **Verify** with `POST /subscriptions/:code/validate` and
+   `POST /subscriptions/:code/test`, then activate it.
+
+Handler context:
+
+| Key | Contents |
+| --- | --- |
+| `db` | Database handle — run all work in the handler's own transaction |
+| `event` | Full envelope, with `payload`/`metadata` already parsed |
+| `payload` | Parsed payload (same object as `event.payload`) |
+| `delivery` | Delivery row: `id`, `event_ref`, `attempts`, `idempotency_key`, `replay_ref` |
+| `subscription` | Matched subscription, with `filter` parsed |
+| `worker` | Worker identity processing the delivery |
+
+Rules:
+
+- **Be idempotent.** Delivery is at-least-once; a handler can run more than once for the
+  same event. Use `delivery.idempotency_key` (or your own natural key) to dedupe.
+- **Throw to retry.** Any thrown error is classified by `error.category`; retryable errors
+  back off and redeliver, non-retryable ones (`validation`, `configuration`,
+  `authorization`) dead-letter immediately. An unknown handler code is a `configuration`
+  error and dead-letters at once.
+- **Keep it short.** Handlers run under a lease timeout; offload long work to a background
+  job rather than blocking the consumer.
+- **Stay best-effort for optional targets.** Bridges to Notifications/Workflow must not
+  fail the delivery when the optional module is unavailable.
+- **Return a small JSON-serializable result.** It is recorded for observability.
 
 ## Dead letters, replay and retention
 
