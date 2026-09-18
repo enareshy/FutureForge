@@ -86,7 +86,8 @@ export function ensureEventFoundation(db) {
   const types = registry.ensureDefaultEventTypes(db);
   const topology = bus.ensureDefaultTopology(db);
   const policies = retention.ensureDefaultRetentionPolicies(db);
-  return { event_types: types, topology, retention_policies: policies };
+  const subscriptionsCreated = subscriptions.ensureDefaultSubscriptions(db);
+  return { event_types: types, topology, retention_policies: policies, subscriptions: subscriptionsCreated };
 }
 
 // Convenience top-level re-exports so business modules can import the primary

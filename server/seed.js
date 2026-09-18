@@ -2521,6 +2521,7 @@ function seedEvents(db) {
       eventTypesRegistry: result.event_types.total,
       eventTopology: result.topology,
       eventRetentionPolicies: result.retention_policies.total,
+      eventSubscriptions: result.subscriptions.total,
     };
   } catch (err) {
     return { eventsSeeded: false, eventsError: err.message };

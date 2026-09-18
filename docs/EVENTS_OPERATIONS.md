@@ -51,9 +51,12 @@ Restart the worker after changing environment variables.
 2. **Publish** — call `Events.publish` from module code inside the business transaction,
    or use **Publish** in the console (`POST /api/events/publish`). The outbox guarantees
    the event is delivered even if the request process restarts.
-3. **Subscribe** — create a subscription with a handler code and an optional JSON filter
-   (event type, tenant, organization, site, module, object, payload/metadata). Validate,
-   test and activate it from **Subscriptions**.
+3. **Subscribe** — event types ship pre-seeded, along with a small set of active default
+   subscriptions (search reindex on lifecycle changes, workflow bindings, analytics, and
+   release-event forwarding to the Integration Hub). Add your own subscription with a
+   handler code and an optional JSON filter (event type, tenant, organization, site,
+   module, object, payload/metadata). Validate, test and activate it from
+   **Subscriptions**.
 4. **Watch deliveries** — **Deliveries** shows pending/failed rows with attempt history.
    Retry or skip individual deliveries; **Dead letters** captures rows that exhausted
    retries.

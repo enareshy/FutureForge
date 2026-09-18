@@ -7,6 +7,7 @@ import { getObjectRow } from "../objects/repository.js";
 import { recordObjectVersion } from "../objects/versions.js";
 import { getStatusRow, legacyForCategory } from "./statuses.js";
 import { hasConditions } from "./validation.js";
+import { emitObjectEvent } from "../events/emit.js";
 
 // Builds the expression context used by lifecycle guards and rules. Guard
 // expressions see the object's attribute payload plus the resolved
@@ -154,6 +155,21 @@ export function applyTransition(db, row, transition, toState, actor, tenantId, i
     },
     { actor, ip }
   );
+  emitObjectEvent(db, next, "LifecycleStateChanged", {
+    source_module: "lifecycle",
+    idempotency_key: `lifecycle:${next.id}:${next.revision}`,
+    payload: {
+      from_state: row.lifecycle_state_id ?? null,
+      to_state: toState.code,
+      from_state_id: row.lifecycle_state_id ?? null,
+      to_state_id: toState.id,
+      from_status: row.status,
+      to_status: legacy,
+      transition: transition?.code ?? null,
+      reason: reason || comments || "",
+      source,
+    },
+  }, actor);
   return next;
 }
 

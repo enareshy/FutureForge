@@ -289,3 +289,104 @@ export function subscriptionStats(db, refValue) {
 export function orderSubscriptions(rows) {
   return [...rows].sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority) || a.id - b.id);
 }
+
+// ── Default subscriptions ───────────────────────────────────────────────────
+// Wires the platform's built-in consumers to the core domain events so the
+// event-driven backbone works out of the box without hard-coded point-to-point
+// calls. Each row is idempotent: existing codes are left untouched, and
+// operators can edit, pause or delete them from the console.
+const DEFAULT_SUBSCRIPTIONS = [
+  {
+    code: "event-search-lifecycle",
+    name: "Search: lifecycle state changes",
+    description: "Reindex the object when its lifecycle state changes.",
+    event_type_code: "LifecycleStateChanged",
+    handler: "search.index",
+    queue_code: "event-consumers",
+    consumer_group: "event-default",
+  },
+  {
+    code: "event-workflow-lifecycle",
+    name: "Workflow: lifecycle state changes",
+    description: "Evaluate workflow bindings when an object changes lifecycle state.",
+    event_type_code: "LifecycleStateChanged",
+    handler: "workflow.trigger",
+    queue_code: "event-consumers",
+    consumer_group: "event-default",
+  },
+  {
+    code: "event-workflow-item-status",
+    name: "Workflow: item status changes",
+    description: "Evaluate workflow bindings when an item status changes.",
+    event_type_code: "ItemStatusChanged",
+    handler: "workflow.trigger",
+    queue_code: "event-consumers",
+    consumer_group: "event-default",
+  },
+  {
+    code: "event-analytics-lifecycle",
+    name: "Analytics: lifecycle state changes",
+    description: "Record lifecycle state changes as analytics facts.",
+    event_type_code: "LifecycleStateChanged",
+    handler: "analytics.record",
+    queue_code: "event-consumers",
+    consumer_group: "event-default",
+  },
+  {
+    code: "event-analytics-workflow-completed",
+    name: "Analytics: workflow completions",
+    description: "Record completed workflows as analytics facts.",
+    event_type_code: "WorkflowCompleted",
+    handler: "analytics.record",
+    queue_code: "event-consumers",
+    consumer_group: "event-default",
+  },
+  {
+    code: "event-integration-product-released",
+    name: "Integration: product released",
+    description: "Forward product release events to the Integration Hub.",
+    event_type_code: "ProductReleased",
+    handler: "integration.forward",
+    queue_code: "event-consumers",
+    consumer_group: "event-default",
+  },
+  {
+    code: "event-integration-bom-released",
+    name: "Integration: BOM released",
+    description: "Forward BOM release events to the Integration Hub.",
+    event_type_code: "BOMReleased",
+    handler: "integration.forward",
+    queue_code: "event-consumers",
+    consumer_group: "event-default",
+  },
+  {
+    code: "event-integration-document-released",
+    name: "Integration: document released",
+    description: "Forward document release events to the Integration Hub.",
+    event_type_code: "DocumentReleased",
+    handler: "integration.forward",
+    queue_code: "event-consumers",
+    consumer_group: "event-default",
+  },
+  {
+    code: "event-integration-change-released",
+    name: "Integration: change released",
+    description: "Forward change release events to the Integration Hub.",
+    event_type_code: "ChangeReleased",
+    handler: "integration.forward",
+    queue_code: "event-consumers",
+    consumer_group: "event-default",
+  },
+];
+
+export function ensureDefaultSubscriptions(db) {
+  let created = 0;
+  for (const definition of DEFAULT_SUBSCRIPTIONS) {
+    if (!getEventTypeRow(db, definition.event_type_code)) continue;
+    if (getSubscriptionRow(db, definition.code)) continue;
+    createSubscription(db, { ...definition, status: "active" }, null, null);
+    created += 1;
+  }
+  return { created, total: DEFAULT_SUBSCRIPTIONS.length };
+}
+

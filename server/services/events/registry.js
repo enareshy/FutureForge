@@ -206,13 +206,43 @@ export function deleteEventType(db, refValue, actor = null) {
 
 export function ensureDefaultEventTypes(db) {
   let created = 0;
+  let repaired = 0;
   for (const entry of SYSTEM_EVENT_TYPES) {
-    if (!getEventTypeRow(db, entry.code)) {
+    const existing = getEventTypeRow(db, entry.code);
+    if (!existing) {
       createEventType(db, { ...entry, system: true }, null, null);
       created += 1;
+      continue;
+    }
+    // A domain module may have auto-registered a catalogue code before the
+    // foundation was installed. The catalogue is authoritative, so repair the
+    // row (system flag + declared metadata) rather than leaving it ad-hoc.
+    if (Number(existing.system) !== 1) {
+      run(
+        db,
+        `UPDATE event_registry SET name = ?, description = ?, category = ?, source_module = ?, security_classification = ?,
+           retention_days = ?, replay_policy = ?, ordering_required = ?, ordering_scope = ?, default_priority = ?,
+           status = 'active', enabled = 1, system = 1, updated_at = ?
+         WHERE id = ?`,
+        [
+          entry.name || entry.code,
+          entry.description || "",
+          normalizeCategory(entry.category),
+          entry.source_module || "",
+          normalizeClassification(entry.security_classification),
+          clampInt(entry.retention_days, 1, 3650, 90),
+          normalizeReplayPolicy(entry.replay_policy),
+          entry.ordering_required ? 1 : 0,
+          normalizeOrderingScope(entry.ordering_scope),
+          normalizePriority(entry.default_priority),
+          nowIso(),
+          existing.id,
+        ]
+      );
+      repaired += 1;
     }
   }
-  return { created, total: SYSTEM_EVENT_TYPES.length };
+  return { created, repaired, total: SYSTEM_EVENT_TYPES.length };
 }
 
 // ── Schema / version registry ───────────────────────────────────────────────

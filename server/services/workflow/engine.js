@@ -10,6 +10,7 @@ import { resolveAssignee } from "./routing.js";
 import { createTask, publicTask } from "./tasks.js";
 import { createApprovalsForNode, publicApproval } from "./approvals.js";
 import { dispatch } from "./notifications.js";
+import { emitDomainEvent } from "../events/emit.js";
 
 // ---------------------------------------------------------------------------
 // Runtime engine
@@ -223,6 +224,31 @@ export function startInstance(db, body = {}, actor = null, tenantId = null, ip =
     });
   });
   const instance = getInstanceRow(db, instanceId);
+  emitDomainEvent(
+    db,
+    {
+      event_type_code: "WorkflowStarted",
+      source_module: "workflow",
+      source_object_type: "workflow_instance",
+      source_object_id: String(instance.id),
+      source_object_revision: instance.version_id ?? null,
+      tenant_id: Number(tenantId),
+      organization_id: instance.organization_id ?? null,
+      correlation_id: body.correlation_id ?? null,
+      payload: {
+        instance_id: instance.id,
+        instance_code: instance.code,
+        definition_id: definition.id,
+        definition_code: definition.code,
+        version_id: versionRow.id,
+        object_id: objectId ?? null,
+        title: instance.title,
+        status: instance.status,
+      },
+      idempotency_key: `workflow:started:${instance.id}`,
+    },
+    actor
+  );
   const startNode = queryOne(db, "SELECT * FROM workflow_nodes WHERE version_id = ? AND type = 'start' ORDER BY id LIMIT 1", [versionRow.id]);
   if (!startNode) throw new HttpError(422, "Workflow version has no start node");
   activateNode(db, instance, startNode, { fromNodeId: null, actor });
@@ -698,6 +724,27 @@ function maybeCompleteInstance(db, instance, { actor = null } = {}) {
       message: "Workflow completed",
       tenantId: instance.tenant_id,
     });
+    emitDomainEvent(
+      db,
+      {
+        event_type_code: "WorkflowCompleted",
+        source_module: "workflow",
+        source_object_type: "workflow_instance",
+        source_object_id: String(instance.id),
+        tenant_id: Number(instance.tenant_id),
+        organization_id: fresh.organization_id ?? null,
+        payload: {
+          instance_id: instance.id,
+          instance_code: fresh.code,
+          definition_id: fresh.definition_id,
+          object_id: fresh.object_id ?? null,
+          title: fresh.title,
+          status: "completed",
+        },
+        idempotency_key: `workflow:completed:${instance.id}`,
+      },
+      actor
+    );
     notifyParent(db, instance.id, "completed", actor);
     return queryOne(db, "SELECT * FROM workflow_instances WHERE id = ?", [instance.id]);
   }

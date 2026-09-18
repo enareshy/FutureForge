@@ -64,6 +64,7 @@ plus granular files.
 | `handlers.js` | Handler registry and built-in bridges (search, notifications, workflow, integration) |
 | `ordering.js` | Per-partition sequence numbers and out-of-order buffering |
 | `publisher.js` | `publishEvent`, batch/async/correlated publish, validation, serialization, routing |
+| `emit.js` | Best-effort domain emitter used by business modules (`emitDomainEvent`, `emitObjectEvent`) |
 | `router.js` | Fan-out from records to deliveries/messages; `enqueueMessage` |
 | `consumer.js` | Delivery claiming, handler invocation, retry/skip, attempt history |
 | `deadletter.js` | Dead-letter capture, inspection and resolution |
@@ -135,6 +136,32 @@ tenant, organization, site, module, object and payload/metadata. `router.js` fan
 stored record out to every matching active subscription, creating `event_deliveries` for
 internal subscribers and `event_messages`-style queue rows where applicable. Filters are
 validated up front and can be exercised with `POST /subscriptions/:code/test`.
+
+`ensureDefaultSubscriptions` wires the platform's built-in consumers to the core domain
+catalogue so the backbone works out of the box (all active, idempotent, editable from the
+console): search reindexes on `LifecycleStateChanged`, workflow bindings are evaluated for
+`LifecycleStateChanged` and `ItemStatusChanged`, analytics records lifecycle/workflow
+events, and release events (`ProductReleased`, `BOMReleased`, `DocumentReleased`,
+`ChangeReleased`) are forwarded to the Integration Hub.
+
+## Domain integration
+
+Business modules publish through `emit.js` rather than calling other modules directly.
+Emission uses the transactional outbox and is best-effort (a framework hiccup never fails
+the business write), matching the platform's existing change-hook philosophy.
+
+| Module | Events published |
+| --- | --- |
+| Objects (`objects/objects.js`) | `ObjectCreated`, `ObjectUpdated`, `ObjectDeleted`, `ItemStatusChanged` |
+| Relationships (`objects/relationships.js`) | `RelationshipCreated`, `RelationshipUpdated`, `RelationshipDeleted` |
+| Lifecycle (`lifecycle/apply.js`) | `LifecycleStateChanged` |
+| Workflow (`workflow/engine.js`) | `WorkflowStarted`, `WorkflowCompleted` |
+
+Consumers remain decoupled: `handlers.js` bridges events to Search (`search.index`),
+Notifications (`notification.dispatch`), Workflow (`workflow.trigger`), the Integration Hub
+(`integration.forward`), Analytics (`analytics.record`) and Audit (`audit.record`). New
+modules publish by calling `emitDomainEvent`/`Events.publish`; no changes to the framework
+are required.
 
 ## Delivery, ordering and idempotency
 
@@ -210,8 +237,12 @@ the shared integration UI primitives (`common.jsx`). `web/src/api.js` exposes th
 
 ## Integration with other modules
 
+- **Objects / Relationships / Lifecycle / Workflow** — publish domain events through
+  `emit.js` (transactional outbox); see "Domain integration" above.
 - **Audit** — `hooks.js` writes `events.*` audit entries.
-- **Notifications / Search / Workflow** — built-in handlers bridge events to these
-  modules through the handler registry (`handlers.js`).
-- **Integration Hub** — `integration.forward` republishes events to external systems.
+- **Notifications / Search / Workflow / Analytics** — built-in handlers bridge events to
+  these modules through the handler registry (`handlers.js`), wired by default
+  subscriptions.
+- **Integration Hub** — `integration.forward` republishes release events to external
+  systems.
 - **Job engine** — all heavy/scheduled work runs as background jobs, never inline.

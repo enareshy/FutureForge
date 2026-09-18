@@ -7,6 +7,7 @@ import { findObjectRow, briefObject } from "./repository.js";
 import { findRelationshipType, publicRelationshipType } from "./relationship-types.js";
 import { RELATIONSHIP_STATUSES, assertValidEdgeValues } from "./validation.js";
 import { emitObjectIndexChange } from "../search/hooks.js";
+import { emitDomainEvent } from "../events/emit.js";
 
 // Relationship engine. Creates, validates and traverses typed edges while
 // enforcing type compatibility, cardinality, tenant isolation and referential
@@ -26,6 +27,35 @@ function emitRelationshipIndex(db, tenantId, ...objectIds) {
       reason: "relationship",
     });
   }
+}
+
+// Publishes a relationship domain event through the Event & Messaging
+// Framework so subscribers react without the object module calling them.
+function emitRelationshipEvent(db, row, eventTypeCode, actor, extra = {}) {
+  if (!row) return null;
+  return emitDomainEvent(
+    db,
+    {
+      event_type_code: eventTypeCode,
+      source_module: "objects",
+      source_object_type: "relationship",
+      source_object_id: String(row.id),
+      source_object_revision: row.sequence ?? null,
+      tenant_id: row.tenant_id ?? null,
+      payload: {
+        relationship_id: row.id,
+        relationship_type: row.type_code ?? null,
+        source_object_id: row.source_object_id ?? null,
+        target_object_id: row.target_object_id ?? null,
+        source_code: row.source_code ?? null,
+        target_code: row.target_code ?? null,
+        status: row.status ?? null,
+        ...extra,
+      },
+      idempotency_key: `relationship:${eventTypeCode}:${row.id}:${row.sequence ?? ""}`,
+    },
+    actor
+  );
 }
 
 const REL_SELECT = `
@@ -275,7 +305,9 @@ export function createRelationship(db, body, actor, tenantId, ip) {
     ip,
   });
   emitRelationshipIndex(db, plan.tenantId, plan.sourceRow.id, plan.targetRow.id);
-  return publicRelationship(getRelationshipRow(db, result.lastInsertRowid));
+  const created = getRelationshipRow(db, result.lastInsertRowid);
+  emitRelationshipEvent(db, created, "RelationshipCreated", actor);
+  return publicRelationship(created);
 }
 
 export function validateRelationship(db, body, tenantId) {
@@ -385,7 +417,9 @@ export function updateRelationship(db, id, body, actor, tenantId, ip) {
     ip,
   });
   emitRelationshipIndex(db, row.tenant_id, row.source_object_id, row.target_object_id);
-  return publicRelationship(getRelationshipRow(db, row.id));
+  const updated = getRelationshipRow(db, row.id);
+  emitRelationshipEvent(db, updated, "RelationshipUpdated", actor, { previous_status: row.status });
+  return publicRelationship(updated);
 }
 
 export function deleteRelationship(db, id, { force = false } = {}, actor, tenantId, ip) {
@@ -415,6 +449,7 @@ export function deleteRelationship(db, id, { force = false } = {}, actor, tenant
     ip,
   });
   emitRelationshipIndex(db, row.tenant_id, row.source_object_id, row.target_object_id);
+  emitRelationshipEvent(db, row, "RelationshipDeleted", actor, { forced: force });
   return { deleted: true, id: row.id };
 }
 

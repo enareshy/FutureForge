@@ -16,6 +16,7 @@ import { safeDeleteReport } from "./references.js";
 import { snapshot, recordObjectVersion } from "./versions.js";
 import { applyInitialLifecycle } from "../lifecycle/engine.js";
 import { emitObjectIndexChange } from "../search/hooks.js";
+import { emitObjectEvent } from "../events/emit.js";
 
 export { recordObjectVersion };
 
@@ -243,6 +244,7 @@ export function createObject(db, body, actor, tenantId, ip) {
     ip,
   });
   emitIndexChange(db, row, "upsert", "object.create");
+  emitObjectEvent(db, row, "ObjectCreated", { correlation_id: body.correlation_id, idempotency_key: `object:create:${row.id}:${row.revision}` }, actor);
   return publicObject(row);
 }
 
@@ -353,6 +355,11 @@ export function updateObject(db, reference, body, actor, tenantId, ip) {
     ip,
   });
   emitIndexChange(db, next, "upsert", "object.update");
+  emitObjectEvent(db, next, body.status && body.status !== row.status ? "ItemStatusChanged" : "ObjectUpdated", {
+    correlation_id: body.correlation_id,
+    idempotency_key: `object:update:${next.id}:${next.revision}`,
+    payload: { previous_status: row.status, changed: Object.keys(body.data ?? body.values ?? body.attributes ?? {}) },
+  }, actor);
   return publicObject(next);
 }
 
@@ -387,6 +394,10 @@ export function setObjectStatus(db, reference, status, actor, tenantId, ip) {
     ip,
   });
   emitIndexChange(db, next, "upsert", "object.status");
+  emitObjectEvent(db, next, "ItemStatusChanged", {
+    idempotency_key: `object:status:${next.id}:${next.revision}`,
+    payload: { from_status: row.status, to_status: next.status },
+  }, actor);
   return publicObject(next);
 }
 
@@ -606,6 +617,10 @@ export function softDeleteObject(db, reference, { force = false, summary } = {},
       ip,
     });
     emitIndexChange(db, next, "delete", "object.delete");
+    emitObjectEvent(db, next, "ObjectDeleted", {
+      idempotency_key: `object:delete:${next.id}:${next.revision}`,
+      payload: { forced: force, cascade: report.cascade.length },
+    }, actor);
     return publicObject(next);
   });
 }
@@ -637,6 +652,10 @@ export function restoreObject(db, reference, actor, tenantId, ip) {
     ip,
   });
   emitIndexChange(db, next, "upsert", "object.restore");
+  emitObjectEvent(db, next, "ObjectUpdated", {
+    idempotency_key: `object:restore:${next.id}:${next.revision}`,
+    payload: { restored: true },
+  }, actor);
   return publicObject(next);
 }
 
