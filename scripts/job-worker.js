@@ -25,6 +25,7 @@ import { registerFileProcessingHandlers, expireUploads, releaseExpiredLocks } fr
 import { registerSearchHandlers, runSearchMaintenance } from "../server/services/search.js";
 import { registerAuditHandlers, runAuditMaintenance } from "../server/services/audit.js";
 import { registerIntegrationHandlers, runIntegrationMaintenance } from "../server/services/integration/jobs.js";
+import { registerEventHandlers, runEventMaintenance } from "../server/services/events/jobs.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -88,6 +89,10 @@ registerAuditHandlers();
 // Integration & API Framework background handlers (message delivery, event
 // fan-out, webhooks, imports/exports, health probes, dead-letter retry).
 registerIntegrationHandlers();
+
+// Event & Messaging Framework background handlers (outbox publish, consumer
+// drain, controlled replay, retention and lease maintenance).
+registerEventHandlers();
 
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
@@ -166,6 +171,27 @@ const integrationMaintenance = setInterval(async () => {
 }, integrationMaintenanceMs);
 integrationMaintenance.unref?.();
 
+// Periodic event housekeeping: converge the transactional outbox and consumer
+// queue, reclaim crashed leases and prune resolved bookkeeping.
+const eventMaintenanceMs = positive(process.env.EVENT_MAINTENANCE_MS, 15000);
+const eventMaintenance = setInterval(async () => {
+  try {
+    const summary = await runEventMaintenance(db);
+    if (summary.outbox.published || summary.deliveries.delivered || summary.deliveries.dead_lettered) {
+      log("info", "Event housekeeping", {
+        outbox_published: summary.outbox.published,
+        delivered: summary.deliveries.delivered,
+        dead_lettered: summary.deliveries.dead_lettered,
+        reclaimed_outbox: summary.reclaimedOutbox.reclaimed,
+        released_deliveries: summary.releasedDeliveries.reclaimed,
+      });
+    }
+  } catch (error) {
+    log("warn", "Event housekeeping failed", { error: error.message });
+  }
+}, eventMaintenanceMs);
+eventMaintenance.unref?.();
+
 const worker = createWorker(db, {
   id: args.id || undefined,
   name: args.name || undefined,
@@ -186,6 +212,7 @@ async function shutdown(signal) {
   clearInterval(searchMaintenance);
   clearInterval(auditMaintenance);
   clearInterval(integrationMaintenance);
+  clearInterval(eventMaintenance);
   log("info", "Worker draining", { signal, drain_ms: drainMs, active_jobs: worker.active.size });
   try {
     await worker.stop({ timeoutMs: drainMs });

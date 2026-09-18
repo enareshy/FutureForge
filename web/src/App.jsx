@@ -47,6 +47,7 @@ import FileAdminPage from "./pages/FileAdminPage.jsx";
 import SearchPage from "./pages/SearchPage.jsx";
 import SearchAdminPage from "./pages/SearchAdminPage.jsx";
 import IntegrationPage from "./pages/IntegrationPage.jsx";
+import EventsPage from "./pages/EventsPage.jsx";
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -226,7 +227,10 @@ const NAV_SECTIONS = [
   {
     key: "integration",
     label: "Integration",
-    items: [{ to: "/integration", label: "Integration hub", platformOrAdmin: true }],
+    items: [
+      { to: "/integration", label: "Integration hub", platformOrAdmin: true },
+      { to: "/events", label: "Event framework", platformOrAdmin: true },
+    ],
   },
   {
     key: "communication",
@@ -439,6 +443,7 @@ export default function App() {
         <Route path="/search" element={<SearchPage />} />
         <Route path="/search/admin" element={<SearchAdminPage />} />
         <Route path="/integration" element={<IntegrationPage />} />
+        <Route path="/events" element={<EventsPage />} />
         <Route path="/jobs" element={<JobsDashboardPage />} />
         <Route path="/jobs/list" element={<JobsPage />} />
         <Route path="/jobs/execution" element={<JobExecutionPage />} />

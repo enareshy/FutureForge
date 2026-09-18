@@ -22,6 +22,7 @@ import * as jobs from "./services/jobs.js";
 import * as jobExecution from "./services/job-execution.js";
 import * as search from "./services/search.js";
 import * as integration from "./services/integration.js";
+import * as events from "./services/events.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -875,6 +876,16 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.integration.transfers", name: "Import & export", parentCode: "iam.integration" },
     { applicationCode: "iam", code: "iam.integration.monitoring", name: "Integration monitoring", parentCode: "iam.integration" },
     { applicationCode: "iam", code: "iam.integration.api", name: "API catalog & clients", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.events", name: "Event & messaging framework", kind: "module" },
+    { applicationCode: "iam", code: "iam.events.registry", name: "Event type & schema registry", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.publish", name: "Event publishing", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.subscriptions", name: "Event subscriptions", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.topology", name: "Topics, queues & consumer groups", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.deliveries", name: "Event deliveries & consumers", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.deadletters", name: "Event dead letters", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.replay", name: "Event replay", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.retention", name: "Event retention", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.monitoring", name: "Event monitoring & traceability", parentCode: "iam.events" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1004,7 +1015,19 @@ function seedMissingCatalog(db) {
     "iam.integration.monitoring",
     "iam.integration.api",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes]) {
+  const eventResourceCodes = [
+    "iam.events",
+    "iam.events.registry",
+    "iam.events.publish",
+    "iam.events.subscriptions",
+    "iam.events.topology",
+    "iam.events.deliveries",
+    "iam.events.deadletters",
+    "iam.events.replay",
+    "iam.events.retention",
+    "iam.events.monitoring",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes, ...eventResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2464,7 +2487,8 @@ export function seedDatabase(db) {
   seedJobEngine(db);
   const searchResult = seedSearch(db);
   const integrationResult = seedIntegration(db);
-  return { ...identity, ...authz, ...searchResult, ...integrationResult };
+  const eventsResult = seedEvents(db);
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult };
 }
 
 function seedSearch(db) {
@@ -2484,6 +2508,22 @@ function seedIntegration(db) {
     return { integrationSeeded: true, eventTypes: result.total };
   } catch (err) {
     return { integrationSeeded: false, integrationError: err.message };
+  }
+}
+
+// Installs the Event & Messaging Framework foundation: the event type catalogue,
+// the default topic/queue/consumer-group topology and default retention policies.
+function seedEvents(db) {
+  try {
+    const result = events.ensureEventFoundation(db);
+    return {
+      eventsSeeded: true,
+      eventTypesRegistry: result.event_types.total,
+      eventTopology: result.topology,
+      eventRetentionPolicies: result.retention_policies.total,
+    };
+  } catch (err) {
+    return { eventsSeeded: false, eventsError: err.message };
   }
 }
 

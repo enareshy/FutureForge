@@ -826,6 +826,9 @@ pre.json {
 }
 textarea { width: 100%; background: #0f1730; border: 1px solid var(--line); border-radius: 10px; color: var(--text); padding: 10px; font: inherit; resize: vertical; }
 
+.checkbox { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.checkbox input { width: auto; padding: 0; }
+
 .badge.draft,
 .badge.enabled,
 .badge.paused,

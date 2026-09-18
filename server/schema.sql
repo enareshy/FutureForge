@@ -3715,3 +3715,443 @@ CREATE TABLE IF NOT EXISTS integration_health_checks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_integration_health_checks_system ON integration_health_checks(system_id, checked_at);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 021_event_messaging_framework
+-- Event & Messaging Framework: registry, schemas, events, transactional outbox,
+-- topics/queues/consumer groups, subscriptions, deliveries, attempts,
+-- idempotency, dead letters, replays and retention policies.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS event_registry (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'domain',
+  source_module TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 1,
+  security_classification TEXT NOT NULL DEFAULT 'internal'
+    CHECK (security_classification IN ('public', 'internal', 'confidential', 'restricted')),
+  retention_days INTEGER NOT NULL DEFAULT 90,
+  replay_policy TEXT NOT NULL DEFAULT 'controlled'
+    CHECK (replay_policy IN ('allowed', 'controlled', 'denied')),
+  ordering_required INTEGER NOT NULL DEFAULT 0 CHECK (ordering_required IN (0, 1)),
+  ordering_scope TEXT NOT NULL DEFAULT 'none'
+    CHECK (ordering_scope IN ('none', 'aggregate', 'object', 'partition', 'global')),
+  default_priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (default_priority IN ('low', 'normal', 'high', 'critical')),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('draft', 'active', 'inactive', 'deprecated', 'retired')),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  system INTEGER NOT NULL DEFAULT 0 CHECK (system IN (0, 1)),
+  schema_json TEXT NOT NULL DEFAULT '{}',
+  example_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_registry_category ON event_registry(category, status);
+CREATE INDEX IF NOT EXISTS idx_event_registry_module ON event_registry(source_module, status);
+CREATE INDEX IF NOT EXISTS idx_event_registry_tenant ON event_registry(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS event_schemas (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type_id INTEGER NOT NULL REFERENCES event_registry(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deprecated', 'retired')),
+  compatibility TEXT NOT NULL DEFAULT 'backward'
+    CHECK (compatibility IN ('none', 'backward', 'forward', 'full')),
+  schema_json TEXT NOT NULL DEFAULT '{}',
+  example_json TEXT NOT NULL DEFAULT '{}',
+  notes TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (event_type_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_schemas_type ON event_schemas(event_type_id, version);
+
+CREATE TABLE IF NOT EXISTS event_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  event_ref TEXT NOT NULL UNIQUE,
+  event_type_code TEXT NOT NULL,
+  event_version INTEGER NOT NULL DEFAULT 1,
+  source_module TEXT NOT NULL DEFAULT '',
+  source_system TEXT NOT NULL DEFAULT 'platform',
+  source_object_type TEXT,
+  source_object_id TEXT,
+  source_object_revision TEXT,
+  actor_id INTEGER,
+  actor_type TEXT NOT NULL DEFAULT 'SYSTEM'
+    CHECK (actor_type IN ('USER', 'SYSTEM', 'INTEGRATION', 'JOB', 'WORKFLOW')),
+  correlation_id TEXT,
+  causation_id TEXT,
+  trace_id TEXT,
+  parent_event_id TEXT,
+  sequence_number INTEGER,
+  partition_key TEXT,
+  priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'critical')),
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  payload_schema_version INTEGER NOT NULL DEFAULT 1,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  security_classification TEXT NOT NULL DEFAULT 'internal'
+    CHECK (security_classification IN ('public', 'internal', 'confidential', 'restricted')),
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('draft', 'queued', 'published', 'processing', 'completed', 'failed', 'archived')),
+  subscriber_count INTEGER NOT NULL DEFAULT 0,
+  delivered_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  idempotency_key TEXT,
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_records_idempotency ON event_records(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_event_records_type_time ON event_records(event_type_code, created_at);
+CREATE INDEX IF NOT EXISTS idx_event_records_tenant_time ON event_records(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_event_records_correlation ON event_records(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_event_records_trace ON event_records(trace_id);
+CREATE INDEX IF NOT EXISTS idx_event_records_partition ON event_records(partition_key, sequence_number);
+CREATE INDEX IF NOT EXISTS idx_event_records_object ON event_records(source_object_type, source_object_id);
+CREATE INDEX IF NOT EXISTS idx_event_records_status ON event_records(status, created_at);
+
+CREATE TABLE IF NOT EXISTS event_records_archive (
+  id INTEGER PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  event_ref TEXT NOT NULL,
+  event_type_code TEXT NOT NULL,
+  event_version INTEGER NOT NULL DEFAULT 1,
+  source_module TEXT NOT NULL DEFAULT '',
+  source_system TEXT NOT NULL DEFAULT 'platform',
+  source_object_type TEXT,
+  source_object_id TEXT,
+  source_object_revision TEXT,
+  actor_id INTEGER,
+  actor_type TEXT NOT NULL DEFAULT 'SYSTEM',
+  correlation_id TEXT,
+  causation_id TEXT,
+  trace_id TEXT,
+  parent_event_id TEXT,
+  sequence_number INTEGER,
+  partition_key TEXT,
+  priority TEXT NOT NULL DEFAULT 'normal',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  payload_schema_version INTEGER NOT NULL DEFAULT 1,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  security_classification TEXT NOT NULL DEFAULT 'internal',
+  status TEXT NOT NULL DEFAULT 'archived',
+  subscriber_count INTEGER NOT NULL DEFAULT 0,
+  delivered_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  idempotency_key TEXT,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  archived_at TEXT NOT NULL DEFAULT (datetime('now')),
+  retention_policy_code TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_records_archive_type ON event_records_archive(event_type_code, created_at);
+CREATE INDEX IF NOT EXISTS idx_event_records_archive_tenant ON event_records_archive(tenant_id, archived_at);
+
+CREATE TABLE IF NOT EXISTS event_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_ref TEXT NOT NULL,
+  event_type_code TEXT NOT NULL,
+  event_version INTEGER NOT NULL DEFAULT 1,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  aggregate_type TEXT,
+  aggregate_id TEXT,
+  correlation_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'publishing', 'published', 'failed', 'dead_letter')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 10,
+  next_retry_at TEXT,
+  locked_by TEXT NOT NULL DEFAULT '',
+  locked_at TEXT,
+  published_at TEXT,
+  last_error TEXT NOT NULL DEFAULT '',
+  error_category TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_outbox_due ON event_outbox(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_event_outbox_event ON event_outbox(event_ref);
+CREATE INDEX IF NOT EXISTS idx_event_outbox_tenant ON event_outbox(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS event_topics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  event_type_code TEXT,
+  partitions INTEGER NOT NULL DEFAULT 1,
+  retention_hours INTEGER NOT NULL DEFAULT 168,
+  max_message_bytes INTEGER NOT NULL DEFAULT 262144,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_topics_tenant ON event_topics(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS event_queues (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  consumer_group TEXT NOT NULL DEFAULT '',
+  max_concurrency INTEGER NOT NULL DEFAULT 4,
+  visibility_timeout_seconds INTEGER NOT NULL DEFAULT 300,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  retention_days INTEGER NOT NULL DEFAULT 30,
+  dead_letter_enabled INTEGER NOT NULL DEFAULT 1 CHECK (dead_letter_enabled IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'paused')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_queues_tenant ON event_queues(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS event_consumer_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  topic_code TEXT NOT NULL DEFAULT '',
+  queue_code TEXT NOT NULL DEFAULT '',
+  partition_strategy TEXT NOT NULL DEFAULT 'key_hash',
+  max_concurrency INTEGER NOT NULL DEFAULT 4,
+  ordering_required INTEGER NOT NULL DEFAULT 0 CHECK (ordering_required IN (0, 1)),
+  members INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_consumer_groups_tenant ON event_consumer_groups(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS event_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  subscriber TEXT NOT NULL,
+  event_type_code TEXT NOT NULL,
+  event_version INTEGER,
+  topic_code TEXT NOT NULL DEFAULT '',
+  queue_code TEXT NOT NULL DEFAULT '',
+  consumer_group TEXT NOT NULL DEFAULT '',
+  handler TEXT NOT NULL DEFAULT '',
+  filter_json TEXT NOT NULL DEFAULT '{}',
+  ordering_required INTEGER NOT NULL DEFAULT 0 CHECK (ordering_required IN (0, 1)),
+  ordering_scope TEXT NOT NULL DEFAULT 'none'
+    CHECK (ordering_scope IN ('none', 'aggregate', 'object', 'partition', 'global')),
+  ordering_timeout_seconds INTEGER NOT NULL DEFAULT 30,
+  retry_policy_json TEXT NOT NULL DEFAULT '{}',
+  dead_letter_policy_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'inactive', 'suspended')),
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_subscriptions_event ON event_subscriptions(event_type_code, status);
+CREATE INDEX IF NOT EXISTS idx_event_subscriptions_tenant ON event_subscriptions(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_event_subscriptions_queue ON event_subscriptions(queue_code, status);
+
+CREATE TABLE IF NOT EXISTS event_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER REFERENCES event_records(id) ON DELETE CASCADE,
+  event_ref TEXT NOT NULL,
+  subscription_id INTEGER REFERENCES event_subscriptions(id) ON DELETE SET NULL,
+  event_type_code TEXT NOT NULL,
+  event_version INTEGER NOT NULL DEFAULT 1,
+  subscriber TEXT NOT NULL DEFAULT '',
+  handler TEXT NOT NULL DEFAULT '',
+  topic_code TEXT NOT NULL DEFAULT '',
+  queue_code TEXT NOT NULL DEFAULT '',
+  consumer_group TEXT NOT NULL DEFAULT '',
+  partition_key TEXT,
+  sequence_number INTEGER,
+  priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'critical')),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'processing', 'delivered', 'retry', 'failed', 'dead_letter', 'skipped', 'duplicate', 'out_of_order', 'cancelled', 'ignored')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  available_at TEXT,
+  next_retry_at TEXT,
+  locked_by TEXT NOT NULL DEFAULT '',
+  locked_at TEXT,
+  visibility_expires_at TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  correlation_id TEXT,
+  causation_id TEXT,
+  trace_id TEXT,
+  idempotency_key TEXT,
+  security_classification TEXT NOT NULL DEFAULT 'internal',
+  last_error TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  error_category TEXT NOT NULL DEFAULT '',
+  last_processing_step TEXT NOT NULL DEFAULT '',
+  delivered_at TEXT,
+  duration_ms INTEGER,
+  replay_ref TEXT,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_deliveries_event_sub
+  ON event_deliveries(event_id, subscription_id) WHERE event_id IS NOT NULL AND replay_ref IS NULL;
+CREATE INDEX IF NOT EXISTS idx_event_deliveries_due ON event_deliveries(status, available_at);
+CREATE INDEX IF NOT EXISTS idx_event_deliveries_queue ON event_deliveries(queue_code, status, available_at);
+CREATE INDEX IF NOT EXISTS idx_event_deliveries_tenant ON event_deliveries(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_event_deliveries_partition ON event_deliveries(partition_key, sequence_number);
+CREATE INDEX IF NOT EXISTS idx_event_deliveries_event_ref ON event_deliveries(event_ref);
+CREATE INDEX IF NOT EXISTS idx_event_deliveries_correlation ON event_deliveries(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_event_deliveries_subscription ON event_deliveries(subscription_id, status);
+CREATE INDEX IF NOT EXISTS idx_event_deliveries_handler ON event_deliveries(handler, updated_at);
+CREATE INDEX IF NOT EXISTS idx_event_deliveries_replay ON event_deliveries(replay_ref);
+
+CREATE TABLE IF NOT EXISTS event_delivery_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  delivery_id INTEGER NOT NULL REFERENCES event_deliveries(id) ON DELETE CASCADE,
+  event_id INTEGER,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'failed',
+  step TEXT NOT NULL DEFAULT '',
+  duration_ms INTEGER,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_category TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_attempts_delivery ON event_delivery_attempts(delivery_id, id);
+
+CREATE TABLE IF NOT EXISTS event_idempotency (
+  key TEXT PRIMARY KEY,
+  delivery_id INTEGER,
+  event_id INTEGER,
+  consumer TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_idempotency_event ON event_idempotency(event_id);
+
+CREATE TABLE IF NOT EXISTS event_dead_letters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER REFERENCES event_records(id) ON DELETE SET NULL,
+  delivery_id INTEGER REFERENCES event_deliveries(id) ON DELETE SET NULL,
+  event_ref TEXT NOT NULL DEFAULT '',
+  event_type_code TEXT NOT NULL,
+  event_version INTEGER NOT NULL DEFAULT 1,
+  subscriber TEXT NOT NULL DEFAULT '',
+  handler TEXT NOT NULL DEFAULT '',
+  subscription_id INTEGER,
+  topic_code TEXT NOT NULL DEFAULT '',
+  queue_code TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT,
+  causation_id TEXT,
+  trace_id TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_category TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  last_processing_step TEXT NOT NULL DEFAULT '',
+  failure_at TEXT NOT NULL DEFAULT (datetime('now')),
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  security_classification TEXT NOT NULL DEFAULT 'internal',
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'retrying', 'resolved', 'ignored')),
+  resolved_by INTEGER,
+  resolved_at TEXT,
+  resolution_reason TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_dead_letters_status ON event_dead_letters(status, failure_at);
+CREATE INDEX IF NOT EXISTS idx_event_dead_letters_tenant ON event_dead_letters(tenant_id, status, failure_at);
+CREATE INDEX IF NOT EXISTS idx_event_dead_letters_delivery ON event_dead_letters(delivery_id);
+CREATE INDEX IF NOT EXISTS idx_event_dead_letters_type ON event_dead_letters(event_type_code, failure_at);
+
+CREATE TABLE IF NOT EXISTS event_replays (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  replay_ref TEXT NOT NULL UNIQUE,
+  scope_type TEXT NOT NULL DEFAULT 'event',
+  criteria_json TEXT NOT NULL DEFAULT '{}',
+  target_subscriptions_json TEXT NOT NULL DEFAULT '[]',
+  dry_run INTEGER NOT NULL DEFAULT 0 CHECK (dry_run IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'validating', 'validated', 'running', 'completed', 'partial', 'failed', 'cancelled')),
+  requested_by INTEGER,
+  requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  finished_at TEXT,
+  total_events INTEGER NOT NULL DEFAULT 0,
+  matched_events INTEGER NOT NULL DEFAULT 0,
+  replayed_events INTEGER NOT NULL DEFAULT 0,
+  failed_events INTEGER NOT NULL DEFAULT 0,
+  skipped_events INTEGER NOT NULL DEFAULT 0,
+  rate_limit_per_second INTEGER NOT NULL DEFAULT 25,
+  error_message TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_replays_status ON event_replays(status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_event_replays_tenant ON event_replays(tenant_id, requested_at);
+
+CREATE TABLE IF NOT EXISTS event_retention_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  event_type_code TEXT,
+  retention_days INTEGER NOT NULL DEFAULT 90,
+  action TEXT NOT NULL DEFAULT 'archive' CHECK (action IN ('delete', 'archive', 'delete_after_archive')),
+  archive_target TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  last_run_at TEXT,
+  last_run_deleted INTEGER NOT NULL DEFAULT 0,
+  last_run_archived INTEGER NOT NULL DEFAULT 0,
+  tenant_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_retention_status ON event_retention_policies(status, event_type_code);
