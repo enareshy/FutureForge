@@ -44,6 +44,8 @@ import MfaPage from "./pages/MfaPage.jsx";
 import FilesPage from "./pages/FilesPage.jsx";
 import FileDetailPage from "./pages/FileDetailPage.jsx";
 import FileAdminPage from "./pages/FileAdminPage.jsx";
+import ContentPage from "./pages/ContentPage.jsx";
+import ContentAdminPage from "./pages/ContentAdminPage.jsx";
 import SearchPage from "./pages/SearchPage.jsx";
 import SearchAdminPage from "./pages/SearchAdminPage.jsx";
 import IntegrationPage from "./pages/IntegrationPage.jsx";
@@ -206,6 +208,8 @@ const PLATFORM_GROUPS = [
     items: [
       { to: "/files", label: "File browser", end: true },
       { to: "/files/admin", label: "File administration", platformOrAdmin: true },
+      { to: "/content", label: "Content library", end: true },
+      { to: "/content/admin", label: "Content administration", platformOrAdmin: true },
     ],
   },
   {
@@ -509,6 +513,8 @@ export default function App() {
         <Route path="/files" element={<FilesPage />} />
         <Route path="/files/admin" element={<FileAdminPage />} />
         <Route path="/files/:ref" element={<FileDetailPage />} />
+        <Route path="/content" element={<ContentPage />} />
+        <Route path="/content/admin" element={<ContentAdminPage />} />
         <Route path="/search" element={<SearchPage />} />
         <Route path="/search/admin" element={<SearchAdminPage />} />
         <Route path="/integration" element={<IntegrationPage />} />

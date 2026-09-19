@@ -37,6 +37,8 @@ import * as versioning from "./services/versioning.js";
 import { createVersioningRouter } from "./services/versioning/router.js";
 import * as reference from "./services/reference.js";
 import { createReferenceRouter } from "./services/reference/router.js";
+import * as content from "./services/content.js";
+import { createContentRouter } from "./services/content/router.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -143,6 +145,11 @@ export function createApp(db) {
     reference.ensureReferenceFoundation(db);
   } catch {
     /* reference data foundation is idempotent and must never block application boot */
+  }
+  try {
+    content.ensureContentFoundation(db);
+  } catch {
+    /* content foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -8994,6 +9001,11 @@ export function createApp(db) {
   const referenceRouter = createReferenceRouter({ express, db, auth, can, wrap });
   app.use("/api/reference-data", referenceRouter);
   app.use("/api/v1/reference-data", referenceRouter);
+
+  // ── File & Content Management Service ─────────────────────────────────────
+  const contentRouter = createContentRouter({ express, db, auth, can, wrap });
+  app.use("/api/content", contentRouter);
+  app.use("/api/v1/content", contentRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

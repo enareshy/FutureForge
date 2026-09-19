@@ -204,6 +204,9 @@ export function migrate(db) {
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("024_reference_data_management");
   db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("025_content_management");
+  db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();
 }

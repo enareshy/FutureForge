@@ -32,6 +32,7 @@ describe("Search & Discovery Framework services", () => {
   test("initializes default searchable object types", () => {
     const codes = search.listObjectTypes(db, { tenantId }).map((type) => type.code);
     assert.deepEqual(codes.sort(), [
+      "content",
       "file",
       "numbering_allocation",
       "object",

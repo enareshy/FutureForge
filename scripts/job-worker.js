@@ -29,6 +29,7 @@ import { registerEventHandlers, runEventMaintenance } from "../server/services/e
 import { registerNumberingHandlers, runNumberingMaintenance } from "../server/services/numbering/jobs.js";
 import { registerVersioningHandlers, runVersioningMaintenance } from "../server/services/versioning/jobs.js";
 import { registerReferenceHandlers } from "../server/services/reference/jobs.js";
+import { registerContentProcessingHandlers, registerContentHandlers, runContentMaintenance } from "../server/services/content.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -109,6 +110,11 @@ registerVersioningHandlers();
 // stale search index convergence).
 registerReferenceHandlers();
 
+// File & Content Management background handlers (security scan, rendition
+// generation, retention evaluation and estate maintenance).
+registerContentProcessingHandlers();
+registerContentHandlers();
+
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
 const fileMaintenanceMs = positive(process.env.FILE_MAINTENANCE_MS, 60000);
@@ -124,6 +130,21 @@ const fileMaintenance = setInterval(async () => {
   }
 }, fileMaintenanceMs);
 fileMaintenance.unref?.();
+
+// Periodic content housekeeping: expire abandoned upload staging, release stale
+// check-out locks, evaluate retention and converge the search index.
+const contentMaintenanceMs = positive(process.env.CONTENT_MAINTENANCE_MS, 60000);
+const contentMaintenance = setInterval(async () => {
+  try {
+    const summary = await runContentMaintenance(db);
+    if (summary.uploads_expired || summary.locks_released || summary.retention_processed || summary.reindexed) {
+      log("info", "Content housekeeping", summary);
+    }
+  } catch (error) {
+    log("warn", "Content housekeeping failed", { error: error.message });
+  }
+}, contentMaintenanceMs);
+contentMaintenance.unref?.();
 
 // Periodic search housekeeping: converge the index queue and prune expired
 // search history / exports.

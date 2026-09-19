@@ -27,6 +27,7 @@ import { withEventSuppression } from "./services/events/emit.js";
 import * as numbering from "./services/numbering.js";
 import * as versioning from "./services/versioning.js";
 import * as reference from "./services/reference.js";
+import * as content from "./services/content.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -928,6 +929,18 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.reference.export", name: "Reference data export", parentCode: "iam.reference" },
     { applicationCode: "iam", code: "iam.reference.resolve", name: "Reference data resolution & validation", parentCode: "iam.reference" },
     { applicationCode: "iam", code: "iam.reference.metrics", name: "Reference data monitoring & metrics", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.content", name: "File & content management service", kind: "module" },
+    { applicationCode: "iam", code: "iam.content.browser", name: "Content browser & search", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.details", name: "Content details, metadata & download", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.uploads", name: "Content uploads", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.versions", name: "Content versions", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.locks", name: "Content check-out/check-in locks", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.associations", name: "Object-content associations", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.renditions", name: "Content renditions & previews", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.processing", name: "Content processing & pipelines", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.security", name: "Content security & quarantine", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.retention", name: "Content retention & legal hold", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.admin", name: "Content administration", parentCode: "iam.content" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1113,7 +1126,21 @@ function seedMissingCatalog(db) {
     "iam.reference.resolve",
     "iam.reference.metrics",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes]) {
+  const contentResourceCodes = [
+    "iam.content",
+    "iam.content.browser",
+    "iam.content.details",
+    "iam.content.uploads",
+    "iam.content.versions",
+    "iam.content.locks",
+    "iam.content.associations",
+    "iam.content.renditions",
+    "iam.content.processing",
+    "iam.content.security",
+    "iam.content.retention",
+    "iam.content.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -1209,6 +1236,16 @@ function reconcileReaderGrants(db) {
     ["iam.reference.versions", ["read"]],
     ["iam.reference.resolve", ["read", "execute"]],
     ["iam.reference.metrics", ["read"]],
+    ["iam.content.browser", ["read"]],
+    ["iam.content.details", ["read"]],
+    ["iam.content.uploads", ["read", "create"]],
+    ["iam.content.versions", ["read"]],
+    ["iam.content.locks", ["read", "execute"]],
+    ["iam.content.associations", ["read"]],
+    ["iam.content.renditions", ["read"]],
+    ["iam.content.processing", ["read"]],
+    ["iam.content.security", ["read"]],
+    ["iam.content.retention", ["read"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -2606,7 +2643,8 @@ export function seedDatabase(db) {
   const numberingResult = withEventSuppression(() => seedNumbering(db));
   const versioningResult = withEventSuppression(() => seedVersioning(db));
   const referenceResult = withEventSuppression(() => seedReference(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult };
+  const contentResult = withEventSuppression(() => seedContent(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult };
 }
 
 function seedSearch(db) {
@@ -2719,6 +2757,18 @@ function seedReference(db) {
     return { referenceSeeded: true, referenceFoundation: foundation.domains?.created ?? 0, referenceSample: sample.items_created ?? 0 };
   } catch (err) {
     return { referenceSeeded: false, referenceError: err.message };
+  }
+}
+
+// Installs the File & Content Management foundation: content event types, search
+// registration and the baseline retention policy set.
+function seedContent(db) {
+  try {
+    const foundation = content.ensureContentFoundation(db);
+    const sample = content.seedContent(db);
+    return { contentSeeded: true, contentEventTypes: foundation.event_types, contentRetentionPolicies: sample.retention_policies };
+  } catch (err) {
+    return { contentSeeded: false, contentError: err.message };
   }
 }
 

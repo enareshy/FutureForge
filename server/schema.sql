@@ -5258,3 +5258,411 @@ CREATE TABLE IF NOT EXISTS reference_cache_epoch (
   updated_at TEXT
 );
 INSERT OR IGNORE INTO reference_cache_epoch (id, epoch) VALUES (1, 0);
+
+-- ── File & Content Management Service ────────────────────────────────────────
+-- Generic, object-type-agnostic binary content capability. Business objects own
+-- meaning/metadata/lifecycle/revision; this module owns physical content, its
+-- versions, storage references, security scanning, quarantining, renditions and
+-- retention. Binary bytes live only in the pluggable storage provider; these
+-- tables hold metadata, checksums and opaque storage keys.
+
+CREATE TABLE IF NOT EXISTS content (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content_id TEXT NOT NULL UNIQUE,
+  content_key TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  plant_id INTEGER,
+  site_id INTEGER,
+  department_id INTEGER,
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  versioning_revision_id INTEGER,
+  version_id TEXT,
+  content_type TEXT NOT NULL DEFAULT 'file',
+  content_role TEXT NOT NULL DEFAULT 'NATIVE',
+  is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
+  file_name TEXT NOT NULL,
+  original_file_name TEXT NOT NULL DEFAULT '',
+  file_extension TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  file_size INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  checksum_algorithm TEXT NOT NULL DEFAULT 'sha256',
+  storage_provider TEXT NOT NULL DEFAULT '',
+  storage_key TEXT NOT NULL DEFAULT '',
+  storage_bucket TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending_security'
+    CHECK (status IN ('initiated', 'pending_security', 'scanning', 'processing', 'available',
+      'locked', 'superseded', 'quarantined', 'archived', 'retained', 'deleted', 'failed')),
+  security_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (security_status IN ('pending', 'scanning', 'clean', 'infected', 'failed', 'unknown')),
+  processing_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (processing_status IN ('pending', 'processing', 'ready', 'partial', 'failed')),
+  current_version_id INTEGER,
+  version_count INTEGER NOT NULL DEFAULT 0,
+  quarantine_reason TEXT NOT NULL DEFAULT '',
+  dedupe_of_content_id INTEGER REFERENCES content(id) ON DELETE SET NULL,
+  security_classification TEXT NOT NULL DEFAULT 'internal'
+    CHECK (security_classification IN ('public', 'internal', 'confidential', 'restricted')),
+  description TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  deleted_at TEXT,
+  deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_tenant ON content(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_content_object ON content(tenant_id, object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_content_status ON content(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_content_security ON content(tenant_id, security_status);
+CREATE INDEX IF NOT EXISTS idx_content_role ON content(content_role);
+CREATE INDEX IF NOT EXISTS idx_content_checksum ON content(checksum, file_size);
+CREATE INDEX IF NOT EXISTS idx_content_deleted ON content(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_content_storage ON content(storage_provider, storage_key);
+
+-- Immutable content version chain. Historical versions are never overwritten.
+CREATE TABLE IF NOT EXISTS content_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+  tenant_id INTEGER REFERENCES organizations(id),
+  version_number INTEGER NOT NULL,
+  version_label TEXT NOT NULL DEFAULT '',
+  is_current INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
+  previous_version_id INTEGER REFERENCES content_versions(id),
+  file_name TEXT NOT NULL DEFAULT '',
+  original_file_name TEXT NOT NULL DEFAULT '',
+  file_extension TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  file_size INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  checksum_algorithm TEXT NOT NULL DEFAULT 'sha256',
+  storage_provider TEXT NOT NULL DEFAULT '',
+  storage_key TEXT NOT NULL DEFAULT '',
+  storage_bucket TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'available'
+    CHECK (status IN ('pending_security', 'scanning', 'processing', 'available', 'quarantined', 'failed', 'deleted')),
+  security_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (security_status IN ('pending', 'scanning', 'clean', 'infected', 'failed', 'unknown')),
+  checkin_comment TEXT NOT NULL DEFAULT '',
+  restored_from_version_id INTEGER REFERENCES content_versions(id),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  deleted_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (content_id, version_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_versions_content ON content_versions(content_id, version_number);
+CREATE INDEX IF NOT EXISTS idx_content_versions_current ON content_versions(content_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_content_versions_checksum ON content_versions(checksum);
+
+-- Generic Object ↔ Content association. Not document-specific: any object type
+-- (part, CAD model, BOM, change, requirement, workflow task, ...) can own roles.
+CREATE TABLE IF NOT EXISTS content_associations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  association_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  object_name TEXT NOT NULL DEFAULT '',
+  versioning_revision_id INTEGER,
+  version_id TEXT,
+  content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+  content_role TEXT NOT NULL DEFAULT 'ATTACHMENT',
+  is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'superseded', 'deleted')),
+  effective_from TEXT,
+  effective_to TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  deleted_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_content_assoc_unique
+  ON content_associations(tenant_id, object_type, object_id, content_id, content_role)
+  WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_content_assoc_object ON content_associations(tenant_id, object_type, object_id, status);
+CREATE INDEX IF NOT EXISTS idx_content_assoc_content ON content_associations(content_id, status);
+CREATE INDEX IF NOT EXISTS idx_content_assoc_primary ON content_associations(tenant_id, object_type, object_id, is_primary);
+
+-- Upload sessions (single, multipart/chunked, resumable). The upload id is the
+-- client-facing handle; staging/storage keys stay server-side and opaque.
+CREATE TABLE IF NOT EXISTS content_upload_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  upload_id TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  versioning_revision_id INTEGER,
+  version_id TEXT,
+  content_role TEXT NOT NULL DEFAULT 'NATIVE',
+  file_name TEXT NOT NULL DEFAULT '',
+  original_file_name TEXT NOT NULL DEFAULT '',
+  file_extension TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  expected_size INTEGER NOT NULL DEFAULT 0,
+  received_size INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  checksum_algorithm TEXT NOT NULL DEFAULT 'sha256',
+  declared_checksum TEXT NOT NULL DEFAULT '',
+  security_classification TEXT NOT NULL DEFAULT 'internal',
+  status TEXT NOT NULL DEFAULT 'initiated'
+    CHECK (status IN ('initiated', 'uploading', 'uploaded', 'scanning', 'processing', 'completed',
+      'failed', 'cancelled', 'expired')),
+  chunk_size INTEGER NOT NULL DEFAULT 0,
+  total_chunks INTEGER NOT NULL DEFAULT 0,
+  received_chunks INTEGER NOT NULL DEFAULT 0,
+  staging_key TEXT NOT NULL DEFAULT '',
+  storage_provider TEXT NOT NULL DEFAULT '',
+  storage_key TEXT NOT NULL DEFAULT '',
+  storage_bucket TEXT NOT NULL DEFAULT '',
+  content_id INTEGER REFERENCES content(id) ON DELETE SET NULL,
+  error_message TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  idempotency_key TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  expires_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_uploads_tenant ON content_upload_sessions(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_content_uploads_expiry ON content_upload_sessions(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_content_uploads_content ON content_upload_sessions(content_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_content_uploads_idem
+  ON content_upload_sessions(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS content_upload_parts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES content_upload_sessions(id) ON DELETE CASCADE,
+  part_number INTEGER NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  staging_key TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (session_id, part_number)
+);
+
+-- Check-out/check-in locks. Partial unique index enforces a single active lock.
+CREATE TABLE IF NOT EXISTS content_locks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+  tenant_id INTEGER REFERENCES organizations(id),
+  lock_token TEXT NOT NULL UNIQUE,
+  lock_type TEXT NOT NULL DEFAULT 'exclusive' CHECK (lock_type IN ('exclusive', 'shared')),
+  locked_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  locked_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_activity_at TEXT,
+  expires_at TEXT,
+  released_at TEXT,
+  released_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  force_released INTEGER NOT NULL DEFAULT 0 CHECK (force_released IN (0, 1)),
+  release_reason TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_content_locks_active
+  ON content_locks(content_id) WHERE released_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_content_locks_owner ON content_locks(locked_by, released_at);
+CREATE INDEX IF NOT EXISTS idx_content_locks_expiry ON content_locks(expires_at, released_at);
+
+-- Renditions (PDF, JT, preview, thumbnail, ...). Framework-derived derivatives.
+CREATE TABLE IF NOT EXISTS content_renditions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rendition_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+  source_content_id INTEGER REFERENCES content(id) ON DELETE SET NULL,
+  source_version_id INTEGER REFERENCES content_versions(id) ON DELETE SET NULL,
+  rendition_type TEXT NOT NULL,
+  file_name TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  file_size INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  checksum_algorithm TEXT NOT NULL DEFAULT 'sha256',
+  storage_provider TEXT NOT NULL DEFAULT '',
+  storage_key TEXT NOT NULL DEFAULT '',
+  storage_bucket TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'requested'
+    CHECK (status IN ('requested', 'processing', 'available', 'failed', 'skipped', 'outdated', 'cancelled')),
+  generator TEXT NOT NULL DEFAULT '',
+  generator_version TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  UNIQUE (content_id, source_version_id, rendition_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_renditions_content ON content_renditions(content_id, status);
+CREATE INDEX IF NOT EXISTS idx_content_renditions_type ON content_renditions(rendition_type, status);
+
+CREATE TABLE IF NOT EXISTS content_processing_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER REFERENCES organizations(id),
+  content_id INTEGER REFERENCES content(id) ON DELETE CASCADE,
+  version_id INTEGER REFERENCES content_versions(id) ON DELETE SET NULL,
+  rendition_id INTEGER REFERENCES content_renditions(id) ON DELETE SET NULL,
+  job_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+  priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  error_message TEXT NOT NULL DEFAULT '',
+  scheduled_at TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_jobs_content ON content_processing_jobs(content_id, job_type);
+CREATE INDEX IF NOT EXISTS idx_content_jobs_status ON content_processing_jobs(status, scheduled_at);
+
+CREATE TABLE IF NOT EXISTS content_security_scans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER REFERENCES organizations(id),
+  content_id INTEGER REFERENCES content(id) ON DELETE CASCADE,
+  version_id INTEGER REFERENCES content_versions(id) ON DELETE SET NULL,
+  scan_type TEXT NOT NULL DEFAULT 'upload',
+  scanner TEXT NOT NULL DEFAULT '',
+  engine_version TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'scanning', 'clean', 'infected', 'failed', 'unknown')),
+  result TEXT NOT NULL DEFAULT '',
+  signature TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  scanned_bytes INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_scans_content ON content_security_scans(content_id, status);
+CREATE INDEX IF NOT EXISTS idx_content_scans_status ON content_security_scans(status, created_at);
+
+CREATE TABLE IF NOT EXISTS content_retention_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER REFERENCES organizations(id),
+  policy_code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  retention_days INTEGER NOT NULL DEFAULT 0,
+  retention_start_basis TEXT NOT NULL DEFAULT 'created'
+    CHECK (retention_start_basis IN ('created', 'modified', 'superseded', 'release')),
+  disposition TEXT NOT NULL DEFAULT 'review' CHECK (disposition IN ('review', 'archive', 'purge')),
+  applies_to_role TEXT NOT NULL DEFAULT '',
+  applies_to_object_type TEXT NOT NULL DEFAULT '',
+  applies_to_classification TEXT NOT NULL DEFAULT '',
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_content_retention_policy_code
+  ON content_retention_policies(COALESCE(tenant_id, 0), policy_code);
+
+CREATE TABLE IF NOT EXISTS content_retention_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER REFERENCES organizations(id),
+  content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+  policy_id INTEGER REFERENCES content_retention_policies(id) ON DELETE SET NULL,
+  retention_start TEXT,
+  retention_end TEXT,
+  disposition TEXT NOT NULL DEFAULT 'review',
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'expired', 'eligible', 'archived', 'purged', 'released')),
+  legal_hold INTEGER NOT NULL DEFAULT 0 CHECK (legal_hold IN (0, 1)),
+  evaluated_at TEXT,
+  notes TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (content_id, policy_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_retention_content ON content_retention_records(content_id, status);
+CREATE INDEX IF NOT EXISTS idx_content_retention_end ON content_retention_records(status, retention_end);
+
+CREATE TABLE IF NOT EXISTS content_legal_holds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER REFERENCES organizations(id),
+  content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL DEFAULT '',
+  case_ref TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released')),
+  applied_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+  released_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  released_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_content_legal_holds_active
+  ON content_legal_holds(content_id) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_content_legal_holds_content ON content_legal_holds(content_id, status);
+
+CREATE TABLE IF NOT EXISTS content_storage_references (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER REFERENCES organizations(id),
+  content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+  version_id INTEGER REFERENCES content_versions(id) ON DELETE SET NULL,
+  storage_provider TEXT NOT NULL DEFAULT '',
+  storage_key TEXT NOT NULL,
+  storage_bucket TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  checksum_algorithm TEXT NOT NULL DEFAULT 'sha256',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released', 'orphaned', 'deleted')),
+  last_verified_at TEXT,
+  verified_checksum TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (storage_provider, storage_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_storage_content ON content_storage_references(content_id, status);
+CREATE INDEX IF NOT EXISTS idx_content_storage_key ON content_storage_references(storage_key);
+
+-- Module outbox mirroring the platform Event & Messaging framework.
+CREATE TABLE IF NOT EXISTS content_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  content_id INTEGER REFERENCES content(id) ON DELETE SET NULL,
+  version_id INTEGER,
+  rendition_id INTEGER,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  actor_id INTEGER,
+  correlation_id TEXT NOT NULL DEFAULT '',
+  idempotency_key TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'recorded',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_events_content ON content_events(content_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_content_events_type ON content_events(event_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_content_events_tenant ON content_events(tenant_id, created_at);

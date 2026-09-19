@@ -692,6 +692,101 @@ export const files = {
     api(`/api/files/${encodeURIComponent(ref)}/lock/force-release`, { method: "POST", body: body || {} }),
 };
 
+export const content = {
+  meta: () => api("/api/content/meta"),
+  health: () => api("/api/content/health"),
+  metrics: (qs) => api(`/api/content/metrics${qs || ""}`),
+  storageSummary: (qs) => api(`/api/content/storage/summary${qs || ""}`),
+
+  list: (qs) => api(`/api/content${qs || ""}`),
+  facets: (qs) => api(`/api/content/facets${qs || ""}`),
+  upload: (name, blob, contentType = "application/octet-stream", extra = {}) => {
+    const params = new URLSearchParams({ name });
+    if (extra.objectType) params.set("objectType", extra.objectType);
+    if (extra.objectId) params.set("objectId", extra.objectId);
+    if (extra.contentRole) params.set("contentRole", extra.contentRole);
+    if (extra.description) params.set("description", extra.description);
+    return apiUpload(`/api/content?${params.toString()}`, { method: "POST", body: blob, contentType });
+  },
+
+  get: (ref) => api(`/api/content/${encodeURIComponent(ref)}`),
+  update: (ref, body) => api(`/api/content/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  remove: (ref, body) => api(`/api/content/${encodeURIComponent(ref)}`, { method: "DELETE", body: body || {} }),
+  restore: (ref) => api(`/api/content/${encodeURIComponent(ref)}/restore`, { method: "POST", body: {} }),
+  downloadInfo: (ref, qs) => api(`/api/content/${encodeURIComponent(ref)}/download${qs || ""}`),
+  versionDownloadInfo: (ref, version, qs) =>
+    api(`/api/content/${encodeURIComponent(ref)}/versions/${encodeURIComponent(version)}/download${qs || ""}`),
+
+  versions: (ref, qs) => api(`/api/content/${encodeURIComponent(ref)}/versions${qs || ""}`),
+  restoreVersion: (ref, body) =>
+    api(`/api/content/${encodeURIComponent(ref)}/versions`, { method: "POST", body: body || {} }),
+
+  renditions: (ref, qs) => api(`/api/content/${encodeURIComponent(ref)}/renditions${qs || ""}`),
+  requestRendition: (ref, body) =>
+    api(`/api/content/${encodeURIComponent(ref)}/renditions`, { method: "POST", body: body || {} }),
+  renditionDownload: (ref, renditionRef, qs) =>
+    api(`/api/content/${encodeURIComponent(ref)}/renditions/${encodeURIComponent(renditionRef)}/download${qs || ""}`),
+
+  processing: (ref) => api(`/api/content/${encodeURIComponent(ref)}/processing`),
+  requeueProcessing: (ref, body) =>
+    api(`/api/content/${encodeURIComponent(ref)}/processing`, { method: "POST", body: body || {} }),
+  processingJobs: (qs) => api(`/api/content/processing-jobs${qs || ""}`),
+
+  security: (ref, qs) => api(`/api/content/${encodeURIComponent(ref)}/security${qs || ""}`),
+  quarantine: (ref, body) =>
+    api(`/api/content/${encodeURIComponent(ref)}/quarantine`, { method: "POST", body: body || {} }),
+  releaseQuarantine: (ref, body) =>
+    api(`/api/content/${encodeURIComponent(ref)}/release-quarantine`, { method: "POST", body: body || {} }),
+
+  lifecycle: (ref, body) =>
+    api(`/api/content/${encodeURIComponent(ref)}/lifecycle`, { method: "POST", body: body || {} }),
+  archive: (ref, body) =>
+    api(`/api/content/${encodeURIComponent(ref)}/archive`, { method: "POST", body: body || {} }),
+
+  lock: (ref) => api(`/api/content/${encodeURIComponent(ref)}/lock`),
+  locks: (qs) => api(`/api/content/locks${qs || ""}`),
+  checkout: (ref, body) => api(`/api/content/${encodeURIComponent(ref)}/checkout`, { method: "POST", body: body || {} }),
+  checkin: (ref, body) => api(`/api/content/${encodeURIComponent(ref)}/checkin`, { method: "POST", body: body || {} }),
+  unlock: (ref, body) => api(`/api/content/${encodeURIComponent(ref)}/unlock`, { method: "POST", body: body || {} }),
+
+  associations: (qs) => api(`/api/content/associations${qs || ""}`),
+  association: (ref) => api(`/api/content/associations/${encodeURIComponent(ref)}`),
+  createAssociation: (body) => api("/api/content/associations", { method: "POST", body }),
+  updateAssociation: (ref, body) =>
+    api(`/api/content/associations/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  removeAssociation: (ref) => api(`/api/content/associations/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  setPrimaryAssociation: (ref) =>
+    api(`/api/content/associations/${encodeURIComponent(ref)}/primary`, { method: "POST", body: {} }),
+  objectContent: (objectType, objectId, qs) =>
+    api(`/api/content/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/content${qs || ""}`),
+  contentAssociations: (ref, qs) => api(`/api/content/${encodeURIComponent(ref)}/associations${qs || ""}`),
+  contentEvents: (ref, qs) => api(`/api/content/${encodeURIComponent(ref)}/events${qs || ""}`),
+  contentRetention: (ref) => api(`/api/content/${encodeURIComponent(ref)}/retention`),
+
+  uploads: (qs) => api(`/api/content/uploads${qs || ""}`),
+  uploadSession: (id) => api(`/api/content/uploads/${encodeURIComponent(id)}`),
+  initiateUpload: (body) => api("/api/content/uploads", { method: "POST", body }),
+  appendPart: (id, partNumber, blob) =>
+    apiUpload(`/api/content/uploads/${encodeURIComponent(id)}/parts/${partNumber}`, { method: "PUT", body: blob }),
+  completeUpload: (id, body) =>
+    api(`/api/content/uploads/${encodeURIComponent(id)}/complete`, { method: "POST", body: body || {} }),
+  completeUploadBuffer: (id, buffer, contentType = "application/octet-stream") =>
+    apiUpload(`/api/content/uploads/${encodeURIComponent(id)}/complete`, { method: "POST", body: buffer, contentType }),
+  abortUpload: (id, body) =>
+    api(`/api/content/uploads/${encodeURIComponent(id)}/abort`, { method: "POST", body: body || {} }),
+
+  retentionPolicies: (qs) => api(`/api/content/retention-policies${qs || ""}`),
+  retentionPolicy: (ref) => api(`/api/content/retention-policies/${encodeURIComponent(ref)}`),
+  createRetentionPolicy: (body) => api("/api/content/retention-policies", { method: "POST", body }),
+  updateRetentionPolicy: (ref, body) =>
+    api(`/api/content/retention-policies/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+
+  applyLegalHold: (ref, body) =>
+    api(`/api/content/${encodeURIComponent(ref)}/legal-hold`, { method: "POST", body: body || {} }),
+  releaseLegalHold: (ref, body) =>
+    api(`/api/content/${encodeURIComponent(ref)}/legal-hold/release`, { method: "POST", body: body || {} }),
+};
+
 export const search = {
   meta: () => api("/api/search/meta"),
   query: (qs) => api(`/api/search${qs || ""}`),
