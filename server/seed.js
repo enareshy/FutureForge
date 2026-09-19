@@ -26,6 +26,7 @@ import * as events from "./services/events.js";
 import { withEventSuppression } from "./services/events/emit.js";
 import * as numbering from "./services/numbering.js";
 import * as versioning from "./services/versioning.js";
+import * as reference from "./services/reference.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -911,6 +912,22 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.versioning.configurations", name: "Configuration context management", parentCode: "iam.versioning" },
     { applicationCode: "iam", code: "iam.versioning.policies", name: "Resolution policy administration", parentCode: "iam.versioning" },
     { applicationCode: "iam", code: "iam.versioning.metrics", name: "Versioning monitoring & metrics", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.reference", name: "Enterprise reference data management", kind: "module" },
+    { applicationCode: "iam", code: "iam.reference.domains", name: "Reference domains & ownership", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.items", name: "Reference data items & lifecycle", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.codes", name: "Reference codes", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.aliases", name: "Reference aliases", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.translations", name: "Reference translations", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.hierarchy", name: "Reference hierarchy", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.relationships", name: "Reference relationships", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.scopes", name: "Reference scope policies", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.versions", name: "Reference data versions", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.approvals", name: "Reference approvals", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.governance", name: "Reference governance & change requests", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.import", name: "Reference data import", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.export", name: "Reference data export", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.resolve", name: "Reference data resolution & validation", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.metrics", name: "Reference data monitoring & metrics", parentCode: "iam.reference" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1078,7 +1095,25 @@ function seedMissingCatalog(db) {
     "iam.versioning.policies",
     "iam.versioning.metrics",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes]) {
+  const referenceResourceCodes = [
+    "iam.reference",
+    "iam.reference.domains",
+    "iam.reference.items",
+    "iam.reference.codes",
+    "iam.reference.aliases",
+    "iam.reference.translations",
+    "iam.reference.hierarchy",
+    "iam.reference.relationships",
+    "iam.reference.scopes",
+    "iam.reference.versions",
+    "iam.reference.approvals",
+    "iam.reference.governance",
+    "iam.reference.import",
+    "iam.reference.export",
+    "iam.reference.resolve",
+    "iam.reference.metrics",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -1163,6 +1198,17 @@ function reconcileReaderGrants(db) {
     ["iam.versioning.variants", ["read"]],
     ["iam.versioning.configurations", ["read"]],
     ["iam.versioning.metrics", ["read"]],
+    ["iam.reference.domains", ["read"]],
+    ["iam.reference.items", ["read"]],
+    ["iam.reference.codes", ["read"]],
+    ["iam.reference.aliases", ["read"]],
+    ["iam.reference.translations", ["read"]],
+    ["iam.reference.hierarchy", ["read"]],
+    ["iam.reference.relationships", ["read"]],
+    ["iam.reference.scopes", ["read"]],
+    ["iam.reference.versions", ["read"]],
+    ["iam.reference.resolve", ["read", "execute"]],
+    ["iam.reference.metrics", ["read"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -2559,7 +2605,8 @@ export function seedDatabase(db) {
   const eventsResult = seedEvents(db);
   const numberingResult = withEventSuppression(() => seedNumbering(db));
   const versioningResult = withEventSuppression(() => seedVersioning(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult };
+  const referenceResult = withEventSuppression(() => seedReference(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult };
 }
 
 function seedSearch(db) {
@@ -2659,6 +2706,19 @@ function seedVersioning(db) {
     return { versioningSeeded: true, ...foundation, sample };
   } catch (err) {
     return { versioningSeeded: false, versioningError: err.message };
+  }
+}
+
+// Installs the Enterprise Reference Data Management foundation: the canonical
+// domain catalogue (UoM, currency, country, ...), default governance policies,
+// scope precedence and a demonstration set of governed master values.
+function seedReference(db) {
+  try {
+    const foundation = reference.ensureReferenceFoundation(db);
+    const sample = reference.seedReference(db);
+    return { referenceSeeded: true, referenceFoundation: foundation.domains?.created ?? 0, referenceSample: sample.items_created ?? 0 };
+  } catch (err) {
+    return { referenceSeeded: false, referenceError: err.message };
   }
 }
 

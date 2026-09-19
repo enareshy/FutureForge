@@ -4842,3 +4842,419 @@ CREATE TABLE IF NOT EXISTS versioning_cache_epoch (
   updated_at TEXT
 );
 INSERT OR IGNORE INTO versioning_cache_epoch (id, epoch) VALUES (1, 0);
+
+-- ── Enterprise Reference Data Management (ERDM) ────────────────────────────
+-- Governed, reusable enterprise master/reference values. Distinct from
+-- Metadata LOVs: reference data carries governance, ownership, lifecycle,
+-- effective dating, versioning, scope, translation, alias and auditability.
+-- Business modules consume these tables only through the Reference Data API/SDK.
+
+CREATE TABLE IF NOT EXISTS reference_domains (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  domain_ref TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'general',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'inactive', 'retired')),
+  scope_type TEXT NOT NULL DEFAULT 'GLOBAL'
+    CHECK (scope_type IN ('GLOBAL', 'TENANT', 'ORGANIZATION', 'COMPANY', 'BUSINESS_UNIT', 'PLANT', 'SITE')),
+  owner_user_id INTEGER REFERENCES users(id),
+  owner_group_id INTEGER REFERENCES groups(id),
+  owner_label TEXT NOT NULL DEFAULT '',
+  business_owner TEXT NOT NULL DEFAULT '',
+  technical_owner TEXT NOT NULL DEFAULT '',
+  steward_user_id INTEGER REFERENCES users(id),
+  steward_group_id INTEGER REFERENCES groups(id),
+  steward_label TEXT NOT NULL DEFAULT '',
+  default_language TEXT NOT NULL DEFAULT 'en',
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  current_governance_version INTEGER NOT NULL DEFAULT 1,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  updated_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reference_domains_code
+  ON reference_domains(COALESCE(tenant_id, 0), code);
+CREATE INDEX IF NOT EXISTS idx_reference_domains_status ON reference_domains(status, tenant_id);
+CREATE INDEX IF NOT EXISTS idx_reference_domains_scope ON reference_domains(scope_type, tenant_id);
+
+-- Versioned governance policy. Behaviour is configuration, not code: approval,
+-- translation, hierarchy, code reuse, effective dating and lifecycle.
+CREATE TABLE IF NOT EXISTS reference_governance_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded')),
+  approval_required INTEGER NOT NULL DEFAULT 0 CHECK (approval_required IN (0, 1)),
+  translation_required INTEGER NOT NULL DEFAULT 0 CHECK (translation_required IN (0, 1)),
+  alias_enabled INTEGER NOT NULL DEFAULT 1 CHECK (alias_enabled IN (0, 1)),
+  hierarchy_enabled INTEGER NOT NULL DEFAULT 0 CHECK (hierarchy_enabled IN (0, 1)),
+  effective_dating_enabled INTEGER NOT NULL DEFAULT 1 CHECK (effective_dating_enabled IN (0, 1)),
+  versioning_enabled INTEGER NOT NULL DEFAULT 1 CHECK (versioning_enabled IN (0, 1)),
+  code_reuse_policy TEXT NOT NULL DEFAULT 'never_reuse'
+    CHECK (code_reuse_policy IN ('never_reuse', 'reuse_after_retirement', 'always_reuse')),
+  code_case_sensitive INTEGER NOT NULL DEFAULT 1 CHECK (code_case_sensitive IN (0, 1)),
+  code_pattern TEXT NOT NULL DEFAULT '',
+  default_language TEXT NOT NULL DEFAULT 'en',
+  lifecycle_json TEXT NOT NULL DEFAULT '["draft","submitted","under_review","approved","active","inactive","retired"]',
+  approval_policy_json TEXT NOT NULL DEFAULT '{}',
+  versioning_policy_json TEXT NOT NULL DEFAULT '{}',
+  effective_date_policy_json TEXT NOT NULL DEFAULT '{}',
+  workflow_definition_code TEXT NOT NULL DEFAULT '',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reference_governance_unique
+  ON reference_governance_policies(domain_id, version);
+CREATE INDEX IF NOT EXISTS idx_reference_governance_active
+  ON reference_governance_policies(domain_id, status);
+
+-- Generic reference item. Domain-specific fields live in attributes_json; the
+-- core never grows domain-specific columns.
+CREATE TABLE IF NOT EXISTS reference_data_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_ref TEXT NOT NULL UNIQUE,
+  domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'submitted', 'under_review', 'approved', 'active', 'inactive', 'retired', 'rejected', 'returned')),
+  lifecycle_state TEXT NOT NULL DEFAULT 'draft',
+  scope_type TEXT NOT NULL DEFAULT 'GLOBAL'
+    CHECK (scope_type IN ('GLOBAL', 'TENANT', 'ORGANIZATION', 'COMPANY', 'BUSINESS_UNIT', 'PLANT', 'SITE')),
+  scope_key TEXT NOT NULL DEFAULT 'GLOBAL',
+  is_global INTEGER NOT NULL DEFAULT 1 CHECK (is_global IN (0, 1)),
+  effective_from TEXT,
+  effective_to TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  current_version_number INTEGER NOT NULL DEFAULT 1,
+  parent_id INTEGER REFERENCES reference_data_items(id) ON DELETE SET NULL,
+  hierarchy_path TEXT NOT NULL DEFAULT '',
+  hierarchy_level INTEGER NOT NULL DEFAULT 0,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  owner_user_id INTEGER REFERENCES users(id),
+  steward_user_id INTEGER REFERENCES users(id),
+  owner_label TEXT NOT NULL DEFAULT '',
+  steward_label TEXT NOT NULL DEFAULT '',
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  versioning_revision_id INTEGER,
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  company_id INTEGER REFERENCES organizations(id),
+  business_unit_id INTEGER REFERENCES organizations(id),
+  plant_id INTEGER REFERENCES organizations(id),
+  site_id INTEGER REFERENCES organizations(id),
+  submitted_at TEXT,
+  approved_at TEXT,
+  activated_at TEXT,
+  inactivated_at TEXT,
+  retired_at TEXT,
+  created_by INTEGER REFERENCES users(id),
+  updated_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reference_items_code
+  ON reference_data_items(domain_id, scope_key, code);
+CREATE INDEX IF NOT EXISTS idx_reference_items_domain ON reference_data_items(domain_id, status, code);
+CREATE INDEX IF NOT EXISTS idx_reference_items_scope ON reference_data_items(scope_key, status);
+CREATE INDEX IF NOT EXISTS idx_reference_items_effective ON reference_data_items(effective_from, effective_to);
+CREATE INDEX IF NOT EXISTS idx_reference_items_parent ON reference_data_items(parent_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_reference_items_tenant ON reference_data_items(tenant_id, domain_id);
+CREATE INDEX IF NOT EXISTS idx_reference_items_revision ON reference_data_items(versioning_revision_id);
+
+-- Immutable version snapshots. Governed history is never overwritten.
+CREATE TABLE IF NOT EXISTS reference_data_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  version_ref TEXT NOT NULL UNIQUE,
+  item_id INTEGER NOT NULL REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  version_number INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'submitted', 'under_review', 'approved', 'active', 'inactive', 'retired', 'superseded', 'rejected', 'returned')),
+  change_summary TEXT NOT NULL DEFAULT '',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  effective_from TEXT,
+  effective_to TEXT,
+  versioning_revision_id INTEGER,
+  owner_label TEXT NOT NULL DEFAULT '',
+  steward_label TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER,
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (item_id, version_number)
+);
+CREATE INDEX IF NOT EXISTS idx_reference_versions_item ON reference_data_versions(item_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS idx_reference_versions_domain ON reference_data_versions(domain_id, status);
+CREATE INDEX IF NOT EXISTS idx_reference_versions_revision ON reference_data_versions(versioning_revision_id);
+
+-- First-class codes: primary, external, legacy, deprecated and replacement
+-- mappings. Retirement history is retained so a code is never silently reused.
+CREATE TABLE IF NOT EXISTS reference_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code_ref TEXT NOT NULL UNIQUE,
+  item_id INTEGER NOT NULL REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  code_type TEXT NOT NULL DEFAULT 'primary'
+    CHECK (code_type IN ('primary', 'external', 'legacy', 'deprecated', 'replacement')),
+  code_system TEXT NOT NULL DEFAULT '',
+  external_system TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL DEFAULT '',
+  is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
+  case_sensitive INTEGER NOT NULL DEFAULT 1 CHECK (case_sensitive IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'deprecated', 'retired')),
+  effective_from TEXT,
+  effective_to TEXT,
+  replacement_item_id INTEGER REFERENCES reference_data_items(id) ON DELETE SET NULL,
+  description TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_reference_codes_lookup ON reference_codes(domain_id, code, status);
+CREATE INDEX IF NOT EXISTS idx_reference_codes_item ON reference_codes(item_id, code_type);
+CREATE INDEX IF NOT EXISTS idx_reference_codes_system ON reference_codes(code_system, external_system, code);
+
+CREATE TABLE IF NOT EXISTS reference_aliases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alias_ref TEXT NOT NULL UNIQUE,
+  item_id INTEGER NOT NULL REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  alias TEXT NOT NULL,
+  alias_type TEXT NOT NULL DEFAULT 'synonym'
+    CHECK (alias_type IN ('synonym', 'abbreviation', 'translation', 'external', 'legacy', 'search')),
+  language TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  scope_key TEXT NOT NULL DEFAULT 'GLOBAL',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  effective_from TEXT,
+  effective_to TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (item_id, language, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_reference_aliases_lookup ON reference_aliases(domain_id, alias);
+CREATE INDEX IF NOT EXISTS idx_reference_aliases_item ON reference_aliases(item_id, status);
+
+CREATE TABLE IF NOT EXISTS reference_translations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  translation_ref TEXT NOT NULL UNIQUE,
+  item_id INTEGER NOT NULL REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  language TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'active', 'inactive')),
+  source TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (item_id, language)
+);
+CREATE INDEX IF NOT EXISTS idx_reference_translations_lookup ON reference_translations(domain_id, language, status);
+CREATE INDEX IF NOT EXISTS idx_reference_translations_item ON reference_translations(item_id);
+
+-- Hierarchy edges (authoritative for ordering and relationship type; the item's
+-- parent_id/hierarchy_path are maintained as a fast read projection).
+CREATE TABLE IF NOT EXISTS reference_hierarchy (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  edge_ref TEXT NOT NULL UNIQUE,
+  domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  parent_id INTEGER NOT NULL REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  child_id INTEGER NOT NULL REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  relationship_type TEXT NOT NULL DEFAULT 'parent_child'
+    CHECK (relationship_type IN ('parent_child', 'component', 'classification', 'grouping')),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  effective_from TEXT,
+  effective_to TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (parent_id, child_id, relationship_type)
+);
+CREATE INDEX IF NOT EXISTS idx_reference_hierarchy_parent ON reference_hierarchy(parent_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_reference_hierarchy_child ON reference_hierarchy(child_id);
+CREATE INDEX IF NOT EXISTS idx_reference_hierarchy_domain ON reference_hierarchy(domain_id, status);
+
+-- Generic cross-domain relationships (Country -> Currency, Plant -> Plant Type).
+CREATE TABLE IF NOT EXISTS reference_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  relationship_ref TEXT NOT NULL UNIQUE,
+  source_item_id INTEGER NOT NULL REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  target_item_id INTEGER NOT NULL REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  source_domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  target_domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  relationship_type TEXT NOT NULL,
+  scope_key TEXT NOT NULL DEFAULT 'GLOBAL',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  effective_from TEXT,
+  effective_to TEXT,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (source_item_id, target_item_id, relationship_type)
+);
+CREATE INDEX IF NOT EXISTS idx_reference_relationships_source ON reference_relationships(source_item_id, relationship_type);
+CREATE INDEX IF NOT EXISTS idx_reference_relationships_target ON reference_relationships(target_item_id, relationship_type);
+CREATE INDEX IF NOT EXISTS idx_reference_relationships_domain ON reference_relationships(source_domain_id, target_domain_id, status);
+
+-- Configurable scope precedence (PLANT -> ORGANIZATION -> TENANT -> GLOBAL by
+-- default). Resolution never silently returns conflicting values.
+CREATE TABLE IF NOT EXISTS reference_scope_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_ref TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  precedence_json TEXT NOT NULL DEFAULT '["PLANT","ORGANIZATION","TENANT","GLOBAL"]',
+  allow_global_fallback INTEGER NOT NULL DEFAULT 1 CHECK (allow_global_fallback IN (0, 1)),
+  conflict_strategy TEXT NOT NULL DEFAULT 'error' CHECK (conflict_strategy IN ('error', 'highest_precedence', 'latest_version')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_reference_scope_policies_default ON reference_scope_policies(is_default, tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS reference_approvals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  approval_ref TEXT NOT NULL UNIQUE,
+  item_id INTEGER NOT NULL REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  version_id INTEGER REFERENCES reference_data_versions(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'submitted'
+    CHECK (status IN ('submitted', 'under_review', 'approved', 'rejected', 'returned', 'cancelled')),
+  required_approvals INTEGER NOT NULL DEFAULT 1,
+  approval_count INTEGER NOT NULL DEFAULT 0,
+  submitted_by INTEGER REFERENCES users(id),
+  submitted_at TEXT,
+  decided_by INTEGER REFERENCES users(id),
+  decided_at TEXT,
+  decision_reason TEXT NOT NULL DEFAULT '',
+  workflow_instance_id INTEGER,
+  workflow_definition_code TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_reference_approvals_item ON reference_approvals(item_id, status);
+CREATE INDEX IF NOT EXISTS idx_reference_approvals_domain ON reference_approvals(domain_id, status);
+CREATE INDEX IF NOT EXISTS idx_reference_approvals_assignee ON reference_approvals(decided_by, status);
+
+CREATE TABLE IF NOT EXISTS reference_ownership_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  domain_id INTEGER NOT NULL REFERENCES reference_domains(id) ON DELETE CASCADE,
+  item_id INTEGER REFERENCES reference_data_items(id) ON DELETE CASCADE,
+  field TEXT NOT NULL,
+  old_value TEXT NOT NULL DEFAULT '',
+  new_value TEXT NOT NULL DEFAULT '',
+  changed_by INTEGER REFERENCES users(id),
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_reference_ownership_domain ON reference_ownership_history(domain_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_reference_ownership_item ON reference_ownership_history(item_id, created_at);
+
+CREATE TABLE IF NOT EXISTS reference_change_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  change_ref TEXT NOT NULL UNIQUE,
+  domain_id INTEGER REFERENCES reference_domains(id) ON DELETE SET NULL,
+  item_id INTEGER REFERENCES reference_data_items(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  change_type TEXT NOT NULL DEFAULT 'update'
+    CHECK (change_type IN ('create', 'update', 'retire', 'governance', 'import')),
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'submitted', 'under_review', 'approved', 'rejected', 'applied', 'cancelled')),
+  requested_by INTEGER REFERENCES users(id),
+  assigned_to INTEGER REFERENCES users(id),
+  approval_id INTEGER REFERENCES reference_approvals(id) ON DELETE SET NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  requested_at TEXT,
+  decided_at TEXT NOT NULL DEFAULT '',
+  decision_reason TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_reference_change_requests_status ON reference_change_requests(status, domain_id);
+CREATE INDEX IF NOT EXISTS idx_reference_change_requests_item ON reference_change_requests(item_id);
+
+CREATE TABLE IF NOT EXISTS reference_imports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  import_ref TEXT NOT NULL UNIQUE,
+  domain_id INTEGER REFERENCES reference_domains(id) ON DELETE SET NULL,
+  format TEXT NOT NULL DEFAULT 'json' CHECK (format IN ('json', 'csv', 'tsv', 'excel')),
+  filename TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'uploaded'
+    CHECK (status IN ('uploaded', 'validated', 'previewed', 'failed', 'approved', 'committed', 'cancelled')),
+  total_rows INTEGER NOT NULL DEFAULT 0,
+  valid_rows INTEGER NOT NULL DEFAULT 0,
+  invalid_rows INTEGER NOT NULL DEFAULT 0,
+  error_json TEXT NOT NULL DEFAULT '[]',
+  preview_json TEXT NOT NULL DEFAULT '[]',
+  options_json TEXT NOT NULL DEFAULT '{}',
+  workflow_instance_id INTEGER,
+  created_by INTEGER REFERENCES users(id),
+  tenant_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  committed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reference_imports_domain ON reference_imports(domain_id, status);
+CREATE INDEX IF NOT EXISTS idx_reference_imports_tenant ON reference_imports(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS reference_exports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  export_ref TEXT NOT NULL UNIQUE,
+  domain_id INTEGER REFERENCES reference_domains(id) ON DELETE SET NULL,
+  format TEXT NOT NULL DEFAULT 'json' CHECK (format IN ('json', 'csv', 'tsv')),
+  status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('queued', 'ready', 'expired', 'failed')),
+  filters_json TEXT NOT NULL DEFAULT '{}',
+  row_count INTEGER NOT NULL DEFAULT 0,
+  content TEXT NOT NULL DEFAULT '',
+  requested_by INTEGER REFERENCES users(id),
+  tenant_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reference_exports_domain ON reference_exports(domain_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_reference_exports_tenant ON reference_exports(tenant_id, created_at);
+
+-- Cache epoch: bumping invalidates the per-tenant reference-data read cache
+-- without a network round trip after any governed mutation.
+CREATE TABLE IF NOT EXISTS reference_cache_epoch (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  epoch INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT
+);
+INSERT OR IGNORE INTO reference_cache_epoch (id, epoch) VALUES (1, 0);

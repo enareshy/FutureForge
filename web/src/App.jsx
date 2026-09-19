@@ -50,6 +50,7 @@ import IntegrationPage from "./pages/IntegrationPage.jsx";
 import EventsPage from "./pages/EventsPage.jsx";
 import NumberingPage from "./pages/NumberingPage.jsx";
 import VersioningPage from "./pages/VersioningPage.jsx";
+import ReferenceDataPage from "./pages/ReferenceDataPage.jsx";
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -237,6 +238,11 @@ const PLATFORM_GROUPS = [
     key: "versioning",
     label: "Versioning",
     items: [{ to: "/versioning", label: "Effectivity & versioning", platformOrAdmin: true }],
+  },
+  {
+    key: "reference",
+    label: "Reference data",
+    items: [{ to: "/reference-data", label: "Enterprise reference data", platformOrAdmin: true }],
   },
   {
     key: "communication",
@@ -509,6 +515,7 @@ export default function App() {
         <Route path="/events" element={<EventsPage />} />
         <Route path="/numbering" element={<NumberingPage />} />
         <Route path="/versioning" element={<VersioningPage />} />
+        <Route path="/reference-data" element={<ReferenceDataPage />} />
         <Route path="/jobs" element={<JobsDashboardPage />} />
         <Route path="/jobs/list" element={<JobsPage />} />
         <Route path="/jobs/execution" element={<JobExecutionPage />} />

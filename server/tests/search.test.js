@@ -35,6 +35,7 @@ describe("Search & Discovery Framework services", () => {
       "file",
       "numbering_allocation",
       "object",
+      "reference_item",
       "versioning_baseline",
       "versioning_revision",
       "versioning_snapshot",

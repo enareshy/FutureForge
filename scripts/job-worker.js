@@ -28,6 +28,7 @@ import { registerIntegrationHandlers, runIntegrationMaintenance } from "../serve
 import { registerEventHandlers, runEventMaintenance } from "../server/services/events/jobs.js";
 import { registerNumberingHandlers, runNumberingMaintenance } from "../server/services/numbering/jobs.js";
 import { registerVersioningHandlers, runVersioningMaintenance } from "../server/services/versioning/jobs.js";
+import { registerReferenceHandlers } from "../server/services/reference/jobs.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -103,6 +104,10 @@ registerNumberingHandlers();
 // Effectivity & Versioning Kernel background handlers (effectivity expiry and
 // resolution bookkeeping convergence).
 registerVersioningHandlers();
+
+// Enterprise Reference Data Management background handlers (export pruning and
+// stale search index convergence).
+registerReferenceHandlers();
 
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.

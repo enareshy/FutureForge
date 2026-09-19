@@ -35,6 +35,8 @@ import * as events from "./services/events.js";
 import * as numbering from "./services/numbering.js";
 import * as versioning from "./services/versioning.js";
 import { createVersioningRouter } from "./services/versioning/router.js";
+import * as reference from "./services/reference.js";
+import { createReferenceRouter } from "./services/reference/router.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -136,6 +138,11 @@ export function createApp(db) {
     versioning.ensureVersioningFoundation(db);
   } catch {
     /* versioning foundation is idempotent and must never block application boot */
+  }
+  try {
+    reference.ensureReferenceFoundation(db);
+  } catch {
+    /* reference data foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -8982,6 +8989,11 @@ export function createApp(db) {
   app.use("/api/versioning", versioningRouter);
   app.use("/api/v1/versioning", versioningRouter);
   app.use("/api/v1", versioningRouter);
+
+  // ── Enterprise Reference Data Management ──────────────────────────────────
+  const referenceRouter = createReferenceRouter({ express, db, auth, can, wrap });
+  app.use("/api/reference-data", referenceRouter);
+  app.use("/api/v1/reference-data", referenceRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

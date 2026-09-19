@@ -1151,3 +1151,94 @@ export const versioning = {
   dashboard: (qs) => api(`/api/versioning/dashboard${qs || ""}`),
   healthReady: () => api("/api/versioning/health/ready"),
 };
+
+export const referenceData = {
+  meta: () => api("/api/reference-data/meta"),
+
+  domains: (qs) => api(`/api/reference-data/domains${qs || ""}`),
+  domain: (ref) => api(`/api/reference-data/domains/${encodeURIComponent(ref)}`),
+  createDomain: (body) => api("/api/reference-data/domains", { method: "POST", body }),
+  updateDomain: (ref, body) => api(`/api/reference-data/domains/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setDomainStatus: (ref, status) =>
+    api(`/api/reference-data/domains/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  domainGovernance: (ref) => api(`/api/reference-data/domains/${encodeURIComponent(ref)}/governance`),
+  publishGovernance: (ref, body) =>
+    api(`/api/reference-data/domains/${encodeURIComponent(ref)}/governance`, { method: "POST", body }),
+  ownershipHistory: (ref, qs) => api(`/api/reference-data/domains/${encodeURIComponent(ref)}/ownership-history${qs || ""}`),
+  domainTree: (ref, qs) => api(`/api/reference-data/domains/${encodeURIComponent(ref)}/tree${qs || ""}`),
+  reindexDomain: (ref) => api(`/api/reference-data/domains/${encodeURIComponent(ref)}/reindex`, { method: "POST" }),
+
+  items: (qs) => api(`/api/reference-data/items${qs || ""}`),
+  item: (ref) => api(`/api/reference-data/items/${encodeURIComponent(ref)}`),
+  createItem: (body) => api("/api/reference-data/items", { method: "POST", body }),
+  updateItem: (ref, body) => api(`/api/reference-data/items/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteItem: (ref) => api(`/api/reference-data/items/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  setItemStatus: (ref, status, extra) =>
+    api(`/api/reference-data/items/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status, ...(extra || {}) } }),
+  submitItem: (ref) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/submit`, { method: "POST" }),
+  approveItem: (ref) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/approve`, { method: "POST" }),
+  activateItem: (ref) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/activate`, { method: "POST" }),
+  inactivateItem: (ref) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/inactivate`, { method: "POST" }),
+  retireItem: (ref) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/retire`, { method: "POST" }),
+  rejectItem: (ref) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/reject`, { method: "POST" }),
+  itemVersions: (ref, qs) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/versions${qs || ""}`),
+  itemRelationships: (ref, qs) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/relationships${qs || ""}`),
+  itemCodes: (ref, qs) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/codes${qs || ""}`),
+  createItemCode: (ref, body) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/codes`, { method: "POST", body }),
+  itemAliases: (ref, qs) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/aliases${qs || ""}`),
+  createItemAlias: (ref, body) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/aliases`, { method: "POST", body }),
+  itemTranslations: (ref, qs) => api(`/api/reference-data/items/${encodeURIComponent(ref)}/translations${qs || ""}`),
+  createItemTranslation: (ref, body) =>
+    api(`/api/reference-data/items/${encodeURIComponent(ref)}/translations`, { method: "POST", body }),
+
+  hierarchy: (qs) => api(`/api/reference-data/hierarchy${qs || ""}`),
+  createEdge: (body) => api("/api/reference-data/hierarchy", { method: "POST", body }),
+  deleteEdge: (ref) => api(`/api/reference-data/hierarchy/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  relationships: (qs) => api(`/api/reference-data/relationships${qs || ""}`),
+  createRelationship: (body) => api("/api/reference-data/relationships", { method: "POST", body }),
+  deleteRelationship: (ref) => api(`/api/reference-data/relationships/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  versions: (ref) => api(`/api/reference-data/versions/${encodeURIComponent(ref)}`),
+  compareVersions: (ref, other) =>
+    api(`/api/reference-data/versions/${encodeURIComponent(ref)}/compare/${encodeURIComponent(other)}`),
+
+  scopePolicies: (qs) => api(`/api/reference-data/scope-policies${qs || ""}`),
+  scopePolicy: (ref) => api(`/api/reference-data/scope-policies/${encodeURIComponent(ref)}`),
+  createScopePolicy: (body) => api("/api/reference-data/scope-policies", { method: "POST", body }),
+  updateScopePolicy: (ref, body) =>
+    api(`/api/reference-data/scope-policies/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteScopePolicy: (ref) => api(`/api/reference-data/scope-policies/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  resolve: (body) => api("/api/reference-data/resolve", { method: "POST", body }),
+  resolveBulk: (body) => api("/api/reference-data/resolve/bulk", { method: "POST", body }),
+  lookup: (body) => api("/api/reference-data/lookup", { method: "POST", body }),
+  validate: (body) => api("/api/reference-data/validate", { method: "POST", body }),
+  values: (qs) => api(`/api/reference-data/values${qs || ""}`),
+  search: (qs) => api(`/api/reference-data/search${qs || ""}`),
+
+  approvals: (qs) => api(`/api/reference-data/approvals${qs || ""}`),
+  approval: (ref) => api(`/api/reference-data/approvals/${encodeURIComponent(ref)}`),
+  submitApproval: (ref, body) =>
+    api(`/api/reference-data/items/${encodeURIComponent(ref)}/approvals`, { method: "POST", body: body || {} }),
+  decideApproval: (ref, body) =>
+    api(`/api/reference-data/approvals/${encodeURIComponent(ref)}/decide`, { method: "POST", body }),
+
+  changeRequests: (qs) => api(`/api/reference-data/change-requests${qs || ""}`),
+  createChangeRequest: (body) => api("/api/reference-data/change-requests", { method: "POST", body }),
+  updateChangeRequest: (ref, body) =>
+    api(`/api/reference-data/change-requests/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+
+  imports: (qs) => api(`/api/reference-data/imports${qs || ""}`),
+  import: (ref) => api(`/api/reference-data/imports/${encodeURIComponent(ref)}`),
+  createImport: (body) => api("/api/reference-data/imports", { method: "POST", body }),
+  commitImport: (ref, body) => api(`/api/reference-data/imports/${encodeURIComponent(ref)}/commit`, { method: "POST", body: body || {} }),
+  exports: (qs) => api(`/api/reference-data/exports${qs || ""}`),
+  exportRecord: (ref) => api(`/api/reference-data/exports/${encodeURIComponent(ref)}`),
+  createExport: (body) => api("/api/reference-data/exports", { method: "POST", body }),
+
+  metrics: (qs) => api(`/api/reference-data/metrics${qs || ""}`),
+  dashboard: (qs) => api(`/api/reference-data/dashboard${qs || ""}`),
+  healthReady: () => api("/api/reference-data/health/ready"),
+  healthLive: () => api("/api/reference-data/health/live"),
+};
