@@ -9,11 +9,12 @@ export function setToken(token) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
-export async function api(path, { method = "GET", body } = {}) {
+export async function api(path, { method = "GET", body, headers: extraHeaders } = {}) {
   const headers = { Accept: "application/json" };
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (extraHeaders) Object.assign(headers, extraHeaders);
   const res = await fetch(path, {
     method,
     headers,
@@ -1007,3 +1008,146 @@ export const lifecycle = {  statuses: (qs) => api(`/api/statuses${qs || ""}`),
   createReleaseRule: (body) => api("/api/release-rules", { method: "POST", body }),
 };
 
+
+export const numbering = {
+  meta: () => api("/api/numbering/meta"),
+
+  objectTypes: (qs) => api(`/api/numbering/object-types${qs || ""}`),
+  createObjectType: (body) => api("/api/numbering/object-types", { method: "POST", body }),
+  setObjectTypeStatus: (code, body) =>
+    api(`/api/numbering/object-types/${encodeURIComponent(code)}/status`, { method: "POST", body }),
+
+  scopes: () => api("/api/numbering/scopes"),
+  tokens: () => api("/api/numbering/tokens"),
+  createToken: (body) => api("/api/numbering/tokens", { method: "POST", body }),
+
+  schemes: (qs) => api(`/api/numbering/schemes${qs || ""}`),
+  scheme: (ref) => api(`/api/numbering/schemes/${encodeURIComponent(ref)}`),
+  createScheme: (body) => api("/api/numbering/schemes", { method: "POST", body }),
+  updateScheme: (ref, body) => api(`/api/numbering/schemes/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  deleteScheme: (ref) => api(`/api/numbering/schemes/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  schemeVersions: (ref) => api(`/api/numbering/schemes/${encodeURIComponent(ref)}/versions`),
+  validateScheme: (ref) => api(`/api/numbering/schemes/${encodeURIComponent(ref)}/validate`, { method: "POST" }),
+  cloneScheme: (ref, body) => api(`/api/numbering/schemes/${encodeURIComponent(ref)}/clone`, { method: "POST", body: body || {} }),
+  activateScheme: (ref) => api(`/api/numbering/schemes/${encodeURIComponent(ref)}/activate`, { method: "POST" }),
+  deactivateScheme: (ref) => api(`/api/numbering/schemes/${encodeURIComponent(ref)}/deactivate`, { method: "POST" }),
+  retireScheme: (ref) => api(`/api/numbering/schemes/${encodeURIComponent(ref)}/retire`, { method: "POST" }),
+
+  generate: (body, idempotencyKey) =>
+    api("/api/numbering/generate", { method: "POST", body, headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }),
+  reserve: (body, idempotencyKey) =>
+    api("/api/numbering/reserve", { method: "POST", body, headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }),
+  preview: (body) => api("/api/numbering/preview", { method: "POST", body }),
+  validateIdentifier: (body) => api("/api/numbering/validate", { method: "POST", body }),
+
+  allocations: (qs) => api(`/api/numbering/allocations${qs || ""}`),
+  allocation: (ref) => api(`/api/numbering/allocations/${encodeURIComponent(ref)}`),
+  consumeAllocation: (ref, body) =>
+    api(`/api/numbering/allocations/${encodeURIComponent(ref)}/consume`, { method: "POST", body: body || {} }),
+  releaseAllocation: (ref, body) =>
+    api(`/api/numbering/allocations/${encodeURIComponent(ref)}/release`, { method: "POST", body: body || {} }),
+  cancelAllocation: (ref, body) =>
+    api(`/api/numbering/allocations/${encodeURIComponent(ref)}/cancel`, { method: "POST", body: body || {} }),
+
+  sequences: (qs) => api(`/api/numbering/sequences${qs || ""}`),
+  sequence: (id) => api(`/api/numbering/sequences/${encodeURIComponent(id)}`),
+  resetSequence: (id, body) => api(`/api/numbering/sequences/${encodeURIComponent(id)}/reset`, { method: "POST", body: body || {} }),
+
+  metrics: () => api("/api/numbering/metrics"),
+  dashboard: (qs) => api(`/api/numbering/dashboard${qs || ""}`),
+  health: () => api("/api/numbering/health"),
+  expireReservations: (body) => api("/api/numbering/maintenance/expire", { method: "POST", body: body || {} }),
+};
+
+
+export const versioning = {
+  meta: () => api("/api/versioning/meta"),
+  effectivityTypes: (qs) => api(`/api/versioning/effectivity-types${qs || ""}`),
+
+  revisions: (qs) => api(`/api/versioning/revisions${qs || ""}`),
+  createRevision: (body) => api("/api/versioning/revisions", { method: "POST", body }),
+  revision: (ref, qs) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}${qs || ""}`),
+  updateRevision: (ref, body) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteRevision: (ref) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  activateRevision: (ref) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}/activate`, { method: "POST" }),
+  supersedeRevision: (ref) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}/supersede`, { method: "POST" }),
+  retireRevision: (ref) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}/retire`, { method: "POST" }),
+  setDefaultRevision: (ref) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}/default`, { method: "POST" }),
+  revisionHistory: (ref, qs) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}/history${qs || ""}`),
+  compareRevisions: (ref, other) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}/compare/${encodeURIComponent(other)}`),
+  revisionRelationships: (ref, qs) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}/relationships${qs || ""}`),
+  createRevisionRelationship: (ref, body) =>
+    api(`/api/versioning/revisions/${encodeURIComponent(ref)}/relationships`, { method: "POST", body }),
+  deleteRevisionRelationship: (ref, id) =>
+    api(`/api/versioning/revisions/${encodeURIComponent(ref)}/relationships/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  versions: (ref, qs) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}/versions${qs || ""}`),
+  createVersion: (ref, body) => api(`/api/versioning/revisions/${encodeURIComponent(ref)}/versions`, { method: "POST", body }),
+  version: (ref) => api(`/api/versioning/versions/${encodeURIComponent(ref)}`),
+  updateVersion: (ref, body) => api(`/api/versioning/versions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteVersion: (ref) => api(`/api/versioning/versions/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  activateVersion: (ref) => api(`/api/versioning/versions/${encodeURIComponent(ref)}/activate`, { method: "POST" }),
+  supersedeVersion: (ref) => api(`/api/versioning/versions/${encodeURIComponent(ref)}/supersede`, { method: "POST" }),
+  setDefaultVersion: (ref) => api(`/api/versioning/versions/${encodeURIComponent(ref)}/default`, { method: "POST" }),
+  compareVersions: (ref, other) => api(`/api/versioning/versions/${encodeURIComponent(ref)}/compare/${encodeURIComponent(other)}`),
+
+  effectivities: (qs) => api(`/api/versioning/effectivities${qs || ""}`),
+  createEffectivity: (body) => api("/api/versioning/effectivities", { method: "POST", body }),
+  effectivity: (ref) => api(`/api/versioning/effectivities/${encodeURIComponent(ref)}`),
+  updateEffectivity: (ref, body) => api(`/api/versioning/effectivities/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteEffectivity: (ref) => api(`/api/versioning/effectivities/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  effectivityAssignments: (ref, qs) => api(`/api/versioning/effectivities/${encodeURIComponent(ref)}/assignments${qs || ""}`),
+  createAssignment: (ref, body) =>
+    api(`/api/versioning/effectivities/${encodeURIComponent(ref)}/assignments`, { method: "POST", body }),
+  assignments: (qs) => api(`/api/versioning/assignments${qs || ""}`),
+  deleteAssignment: (ref) => api(`/api/versioning/assignments/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  inspectEffectivity: (qs) => api(`/api/versioning/effectivity/inspect${qs || ""}`),
+
+  resolve: (body) => api("/api/versioning/effectivity/resolve", { method: "POST", body }),
+  resolveBulk: (body) => api("/api/versioning/effectivity/resolve/bulk", { method: "POST", body }),
+  validateEffectivity: (body) => api("/api/versioning/effectivity/validate", { method: "POST", body }),
+
+  policies: (qs) => api(`/api/versioning/resolution-policies${qs || ""}`),
+  createPolicy: (body) => api("/api/versioning/resolution-policies", { method: "POST", body }),
+  policy: (ref) => api(`/api/versioning/resolution-policies/${encodeURIComponent(ref)}`),
+  updatePolicy: (ref, body) => api(`/api/versioning/resolution-policies/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deletePolicy: (ref) => api(`/api/versioning/resolution-policies/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  baselines: (qs) => api(`/api/versioning/baselines${qs || ""}`),
+  createBaseline: (body) => api("/api/versioning/baselines", { method: "POST", body }),
+  baseline: (ref) => api(`/api/versioning/baselines/${encodeURIComponent(ref)}`),
+  deleteBaseline: (ref) => api(`/api/versioning/baselines/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  addBaselineObjects: (ref, body) => api(`/api/versioning/baselines/${encodeURIComponent(ref)}/objects`, { method: "POST", body }),
+  removeBaselineObject: (ref, objectType, objectId) =>
+    api(`/api/versioning/baselines/${encodeURIComponent(ref)}/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`, { method: "DELETE" }),
+  freezeBaseline: (ref) => api(`/api/versioning/baselines/${encodeURIComponent(ref)}/freeze`, { method: "POST" }),
+  compareBaselines: (ref, other) => api(`/api/versioning/baselines/${encodeURIComponent(ref)}/compare/${encodeURIComponent(other)}`),
+  restoreBaseline: (ref) => api(`/api/versioning/baselines/${encodeURIComponent(ref)}/restore`),
+
+  snapshots: (qs) => api(`/api/versioning/snapshots${qs || ""}`),
+  createSnapshot: (body) => api("/api/versioning/snapshots", { method: "POST", body }),
+  snapshot: (ref) => api(`/api/versioning/snapshots/${encodeURIComponent(ref)}`),
+  deleteSnapshot: (ref) => api(`/api/versioning/snapshots/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  archiveSnapshot: (ref) => api(`/api/versioning/snapshots/${encodeURIComponent(ref)}/archive`, { method: "POST" }),
+  compareSnapshots: (ref, other) => api(`/api/versioning/snapshots/${encodeURIComponent(ref)}/compare/${encodeURIComponent(other)}`),
+  reconstructSnapshot: (ref) => api(`/api/versioning/snapshots/${encodeURIComponent(ref)}/reconstruct`),
+
+  variants: (qs) => api(`/api/versioning/variants${qs || ""}`),
+  createVariant: (body) => api("/api/versioning/variants", { method: "POST", body }),
+  variant: (ref) => api(`/api/versioning/variants/${encodeURIComponent(ref)}`),
+  updateVariant: (ref, body) => api(`/api/versioning/variants/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  addVariantOption: (ref, body) => api(`/api/versioning/variants/${encodeURIComponent(ref)}/options`, { method: "POST", body }),
+  addVariantRule: (ref, body) => api(`/api/versioning/variants/${encodeURIComponent(ref)}/rules`, { method: "POST", body }),
+  evaluateVariant: (ref, body) => api(`/api/versioning/variants/${encodeURIComponent(ref)}/evaluate`, { method: "POST", body }),
+  variantHistory: (ref, qs) => api(`/api/versioning/variants/${encodeURIComponent(ref)}/history${qs || ""}`),
+
+  contexts: (qs) => api(`/api/versioning/configuration-contexts${qs || ""}`),
+  createContext: (body) => api("/api/versioning/configuration-contexts", { method: "POST", body }),
+  context: (ref) => api(`/api/versioning/configuration-contexts/${encodeURIComponent(ref)}`),
+  updateContext: (ref, body) => api(`/api/versioning/configuration-contexts/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteContext: (ref) => api(`/api/versioning/configuration-contexts/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  metrics: (qs) => api(`/api/versioning/metrics${qs || ""}`),
+  dashboard: (qs) => api(`/api/versioning/dashboard${qs || ""}`),
+  healthReady: () => api("/api/versioning/health/ready"),
+};

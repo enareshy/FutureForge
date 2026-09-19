@@ -4155,3 +4155,690 @@ CREATE TABLE IF NOT EXISTS event_retention_policies (
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_retention_status ON event_retention_policies(status, event_type_code);
+
+-- ── Enterprise Numbering & Identifier Service ───────────────────────────────
+-- A shared platform capability. Business modules never own numbering state:
+-- they resolve a scheme, request an identifier and consume it through this
+-- service. All counters, patterns, scopes and history live here.
+
+-- Registry of object types that can receive enterprise identifiers. Seeded
+-- with the standard set but fully extensible by administrators.
+CREATE TABLE IF NOT EXISTS numbering_object_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  module TEXT NOT NULL DEFAULT '',
+  classification TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_numbering_object_types_code
+  ON numbering_object_types(COALESCE(tenant_id, 0), code);
+CREATE INDEX IF NOT EXISTS idx_numbering_object_types_status
+  ON numbering_object_types(status, tenant_id);
+
+-- Token registry. The pattern engine resolves tokens through this table so new
+-- tokens can be registered without rewriting the engine.
+CREATE TABLE IF NOT EXISTS numbering_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  resolver TEXT NOT NULL,
+  example TEXT NOT NULL DEFAULT '',
+  requires_permission TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  is_system INTEGER NOT NULL DEFAULT 1 CHECK (is_system IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_numbering_tokens_status ON numbering_tokens(status, code);
+
+-- Registry of scope dimensions an administrator can attach to a scheme or a
+-- sequence. Informational for the UI and validation; resolution is deterministic.
+CREATE TABLE IF NOT EXISTS numbering_scopes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  scope_type TEXT NOT NULL DEFAULT 'custom',
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Numbering scheme. Only one applicable default scheme is selected for a given
+-- scope; resolution is deterministic and refuses ambiguity.
+CREATE TABLE IF NOT EXISTS numbering_schemes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  object_type_code TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'inactive', 'retired')),
+  current_version INTEGER NOT NULL DEFAULT 1,
+  pattern TEXT NOT NULL DEFAULT '{TYPE}-{YYYY}-{SEQ}',
+  prefix TEXT NOT NULL DEFAULT '',
+  suffix TEXT NOT NULL DEFAULT '',
+  scope_type TEXT NOT NULL DEFAULT 'global'
+    CHECK (scope_type IN ('global', 'tenant', 'organization', 'company', 'plant', 'site', 'classification', 'object_type', 'custom')),
+  number_reuse_policy TEXT NOT NULL DEFAULT 'never_reuse'
+    CHECK (number_reuse_policy IN ('never_reuse', 'reuse_after_release', 'reuse_after_expiration', 'custom')),
+  numbering_mode TEXT NOT NULL DEFAULT 'automatic'
+    CHECK (numbering_mode IN ('automatic', 'manual', 'automatic_with_manual_override', 'manual_required')),
+  manual_policy TEXT NOT NULL DEFAULT 'disabled'
+    CHECK (manual_policy IN ('disabled', 'allowed', 'approval_required', 'mandatory')),
+  manual_pattern TEXT NOT NULL DEFAULT '',
+  manual_allowed_chars TEXT NOT NULL DEFAULT '',
+  manual_min_length INTEGER NOT NULL DEFAULT 0,
+  manual_max_length INTEGER NOT NULL DEFAULT 0,
+  min_length INTEGER NOT NULL DEFAULT 0,
+  max_length INTEGER NOT NULL DEFAULT 64,
+  start_value INTEGER NOT NULL DEFAULT 1,
+  min_value INTEGER NOT NULL DEFAULT 1,
+  max_value INTEGER NOT NULL DEFAULT 999999999999,
+  increment INTEGER NOT NULL DEFAULT 1,
+  padding INTEGER NOT NULL DEFAULT 6,
+  reset_policy TEXT NOT NULL DEFAULT 'never'
+    CHECK (reset_policy IN ('never', 'daily', 'monthly', 'yearly', 'fiscal_year')),
+  sequence_scope TEXT NOT NULL DEFAULT 'scheme'
+    CHECK (sequence_scope IN ('global', 'tenant', 'organization', 'company', 'plant', 'site', 'object_type', 'classification', 'scheme', 'custom')),
+  reservation_timeout_seconds INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER NOT NULL DEFAULT 100,
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+  effective_from TEXT,
+  effective_to TEXT,
+  organization_id INTEGER REFERENCES organizations(id),
+  plant_id INTEGER REFERENCES organizations(id),
+  site_id INTEGER REFERENCES organizations(id),
+  classification TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER REFERENCES organizations(id),
+  created_by INTEGER REFERENCES users(id),
+  updated_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_numbering_schemes_code
+  ON numbering_schemes(COALESCE(tenant_id, 0), code);
+CREATE INDEX IF NOT EXISTS idx_numbering_schemes_resolution
+  ON numbering_schemes(object_type_code, status, priority);
+CREATE INDEX IF NOT EXISTS idx_numbering_schemes_scope
+  ON numbering_schemes(tenant_id, organization_id, plant_id, site_id);
+CREATE INDEX IF NOT EXISTS idx_numbering_schemes_effective
+  ON numbering_schemes(effective_from, effective_to);
+
+-- Immutable version snapshots. Historical allocations retain the scheme version
+-- that generated them so an activation can never make history ambiguous.
+CREATE TABLE IF NOT EXISTS numbering_scheme_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scheme_id INTEGER NOT NULL REFERENCES numbering_schemes(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'active', 'superseded', 'retired')),
+  config_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  effective_from TEXT,
+  effective_to TEXT,
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_numbering_scheme_versions_unique
+  ON numbering_scheme_versions(scheme_id, version);
+CREATE INDEX IF NOT EXISTS idx_numbering_scheme_versions_status
+  ON numbering_scheme_versions(scheme_id, status);
+
+-- Sequence counter. `current_value` is the last allocated value; the next
+-- allocation is `current_value + increment`. Compound unique key on
+-- (scheme, scope, period) makes cross-instance allocation safe.
+CREATE TABLE IF NOT EXISTS numbering_sequences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scheme_id INTEGER NOT NULL REFERENCES numbering_schemes(id) ON DELETE CASCADE,
+  scheme_version INTEGER NOT NULL DEFAULT 1,
+  scope_key TEXT NOT NULL DEFAULT 'global',
+  period_key TEXT NOT NULL DEFAULT '',
+  reset_policy TEXT NOT NULL DEFAULT 'never'
+    CHECK (reset_policy IN ('never', 'daily', 'monthly', 'yearly', 'fiscal_year')),
+  start_value INTEGER NOT NULL DEFAULT 1,
+  current_value INTEGER NOT NULL DEFAULT 1,
+  min_value INTEGER NOT NULL DEFAULT 1,
+  max_value INTEGER NOT NULL DEFAULT 999999999999,
+  increment INTEGER NOT NULL DEFAULT 1,
+  padding INTEGER NOT NULL DEFAULT 6,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'exhausted', 'retired')),
+  allocated_count INTEGER NOT NULL DEFAULT 0,
+  last_reset_at TEXT,
+  last_allocated_at TEXT,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  classification TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_numbering_sequences_scope
+  ON numbering_sequences(scheme_id, scope_key, period_key);
+CREATE INDEX IF NOT EXISTS idx_numbering_sequences_status
+  ON numbering_sequences(status, tenant_id);
+CREATE INDEX IF NOT EXISTS idx_numbering_sequences_scope_lookup
+  ON numbering_sequences(scope_key, tenant_id);
+
+-- Allocation / reservation / history record. Append-oriented: status columns
+-- move forward and are never rewritten in place, and the uniqueness_key makes
+-- duplicate numbers impossible within a scope at the database level.
+CREATE TABLE IF NOT EXISTS numbering_allocations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  allocation_ref TEXT NOT NULL UNIQUE,
+  number TEXT NOT NULL,
+  uniqueness_key TEXT NOT NULL,
+  object_type_code TEXT NOT NULL,
+  object_id TEXT,
+  object_ref TEXT NOT NULL DEFAULT '',
+  scheme_id INTEGER REFERENCES numbering_schemes(id) ON DELETE SET NULL,
+  scheme_version INTEGER NOT NULL DEFAULT 1,
+  sequence_id INTEGER REFERENCES numbering_sequences(id) ON DELETE SET NULL,
+  sequence_value INTEGER,
+  is_manual INTEGER NOT NULL DEFAULT 0 CHECK (is_manual IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'allocated'
+    CHECK (status IN ('allocated', 'reserved', 'consumed', 'released', 'expired', 'cancelled')),
+  scope_key TEXT NOT NULL DEFAULT 'global',
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  classification TEXT NOT NULL DEFAULT '',
+  number_reuse_policy TEXT NOT NULL DEFAULT 'never_reuse',
+  reusable INTEGER NOT NULL DEFAULT 0 CHECK (reusable IN (0, 1)),
+  requested_by INTEGER REFERENCES users(id),
+  requested_by_name TEXT NOT NULL DEFAULT '',
+  consumed_by INTEGER REFERENCES users(id),
+  consumed_by_name TEXT NOT NULL DEFAULT '',
+  requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+  reserved_at TEXT,
+  expires_at TEXT,
+  consumed_at TEXT,
+  released_at TEXT,
+  cancelled_at TEXT,
+  reason TEXT NOT NULL DEFAULT '',
+  source_application TEXT NOT NULL DEFAULT '',
+  request_id TEXT,
+  correlation_id TEXT,
+  idempotency_key TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_numbering_allocations_number
+  ON numbering_allocations(uniqueness_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_numbering_allocations_idempotency
+  ON numbering_allocations(COALESCE(tenant_id, 0), idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_numbering_allocations_history
+  ON numbering_allocations(tenant_id, requested_at);
+CREATE INDEX IF NOT EXISTS idx_numbering_allocations_object
+  ON numbering_allocations(object_type_code, object_id);
+CREATE INDEX IF NOT EXISTS idx_numbering_allocations_status
+  ON numbering_allocations(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_numbering_allocations_scheme
+  ON numbering_allocations(scheme_id, requested_at);
+CREATE INDEX IF NOT EXISTS idx_numbering_allocations_scope
+  ON numbering_allocations(scope_key, requested_at);
+CREATE INDEX IF NOT EXISTS idx_numbering_allocations_reusable
+  ON numbering_allocations(reusable, object_type_code, status);
+CREATE INDEX IF NOT EXISTS idx_numbering_allocations_correlation
+  ON numbering_allocations(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_numbering_allocations_ref
+  ON numbering_allocations(allocation_ref);
+
+-- Idempotency records. Stored per tenant and unique per key so a retried
+-- allocation returns the original result instead of burning another number.
+CREATE TABLE IF NOT EXISTS numbering_idempotency (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idempotency_key TEXT NOT NULL,
+  tenant_id INTEGER,
+  operation TEXT NOT NULL DEFAULT 'generate',
+  request_hash TEXT NOT NULL DEFAULT '',
+  allocation_id INTEGER REFERENCES numbering_allocations(id) ON DELETE SET NULL,
+  response_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_numbering_idempotency_key
+  ON numbering_idempotency(COALESCE(tenant_id, 0), idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_numbering_idempotency_expiry
+  ON numbering_idempotency(expires_at);
+
+-- ============================================================================
+-- Effectivity & Versioning Kernel (P0 platform capability)
+--
+-- The single source of truth for revision, version, effectivity, baseline,
+-- snapshot, variant, configuration-context and as-of resolution across every
+-- enterprise object. Business modules (PDM, BOM, MBOM, BOP, Manufacturing,
+-- Change, Requirements, Documents, Product Configuration) consume this kernel
+-- and never implement their own revision/effectivity logic.
+-- ============================================================================
+
+-- Extensible effectivity dimension registry. Declares the supported effectivity
+-- types so new dimensions can be introduced as data, not kernel redesigns.
+CREATE TABLE IF NOT EXISTS versioning_effectivity_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  dimension TEXT NOT NULL,
+  value_mode TEXT NOT NULL DEFAULT 'structured'
+    CHECK (value_mode IN ('date_range', 'serial_range', 'list', 'scalar', 'boolean', 'reference')),
+  description TEXT NOT NULL DEFAULT '',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  system INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_effectivity_types_dimension
+  ON versioning_effectivity_types(dimension, status);
+
+-- Revisions: a controlled evolution of an enterprise object.
+CREATE TABLE IF NOT EXISTS versioning_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  revision_ref TEXT NOT NULL UNIQUE,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  revision_code TEXT NOT NULL,
+  revision_sequence INTEGER NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'active', 'superseded', 'retired', 'archived')),
+  lifecycle_state TEXT NOT NULL DEFAULT 'draft',
+  is_default INTEGER NOT NULL DEFAULT 0,
+  released_at TEXT,
+  superseded_at TEXT,
+  effective_from TEXT,
+  effective_to TEXT,
+  revision_metadata_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  site_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER,
+  updated_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (object_type, object_id, revision_code)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_revisions_object
+  ON versioning_revisions(object_type, object_id, revision_sequence);
+CREATE INDEX IF NOT EXISTS idx_versioning_revisions_status
+  ON versioning_revisions(status, object_type);
+CREATE INDEX IF NOT EXISTS idx_versioning_revisions_tenant
+  ON versioning_revisions(tenant_id, object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_versioning_revisions_effective
+  ON versioning_revisions(effective_from, effective_to);
+
+-- Versions: independent evolution inside a revision where required.
+CREATE TABLE IF NOT EXISTS versioning_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  version_ref TEXT NOT NULL UNIQUE,
+  revision_id INTEGER NOT NULL REFERENCES versioning_revisions(id) ON DELETE CASCADE,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  version_number TEXT NOT NULL,
+  version_sequence INTEGER NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'active', 'superseded', 'retired', 'archived')),
+  lifecycle_state TEXT NOT NULL DEFAULT 'draft',
+  is_default INTEGER NOT NULL DEFAULT 0,
+  released_at TEXT,
+  superseded_at TEXT,
+  effective_from TEXT,
+  effective_to TEXT,
+  version_metadata_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER,
+  updated_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (revision_id, version_number)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_versions_revision
+  ON versioning_versions(revision_id, version_sequence);
+CREATE INDEX IF NOT EXISTS idx_versioning_versions_object
+  ON versioning_versions(object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_versioning_versions_status
+  ON versioning_versions(status);
+
+-- Revision-to-revision effectivity relationships.
+CREATE TABLE IF NOT EXISTS versioning_revision_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_revision_id INTEGER NOT NULL REFERENCES versioning_revisions(id) ON DELETE CASCADE,
+  to_revision_id INTEGER NOT NULL REFERENCES versioning_revisions(id) ON DELETE CASCADE,
+  relationship_type TEXT NOT NULL
+    CHECK (relationship_type IN ('supersedes', 'effective_after', 'effective_before', 'applicable_with', 'derived_from')),
+  description TEXT NOT NULL DEFAULT '',
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (from_revision_id, to_revision_id, relationship_type)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_revision_rel_from ON versioning_revision_relationships(from_revision_id, relationship_type);
+CREATE INDEX IF NOT EXISTS idx_versioning_revision_rel_to ON versioning_revision_relationships(to_revision_id, relationship_type);
+
+-- Variants and variant options.
+CREATE TABLE IF NOT EXISTS versioning_variants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  variant_ref TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  parent_id INTEGER REFERENCES versioning_variants(id) ON DELETE SET NULL,
+  object_type TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  is_default INTEGER NOT NULL DEFAULT 0,
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  tenant_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER,
+  updated_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_variants_parent ON versioning_variants(parent_id);
+CREATE INDEX IF NOT EXISTS idx_versioning_variants_object ON versioning_variants(object_type, status);
+
+CREATE TABLE IF NOT EXISTS versioning_variant_options (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  variant_id INTEGER NOT NULL REFERENCES versioning_variants(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (variant_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_variant_options_variant ON versioning_variant_options(variant_id, sequence);
+
+CREATE TABLE IF NOT EXISTS versioning_variant_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  variant_id INTEGER NOT NULL REFERENCES versioning_variants(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  rule_type TEXT NOT NULL DEFAULT 'applicability'
+    CHECK (rule_type IN ('inclusion', 'exclusion', 'constraint', 'applicability')),
+  expression_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (variant_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_variant_rules_variant ON versioning_variant_rules(variant_id, rule_type);
+
+-- Reusable configuration contexts shared by BOM, PDM, Manufacturing, Change,
+-- Product Configuration, reporting, search and AI services.
+CREATE TABLE IF NOT EXISTS versioning_configuration_contexts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  context_ref TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  configuration_version TEXT NOT NULL DEFAULT '1',
+  variant_id INTEGER REFERENCES versioning_variants(id) ON DELETE SET NULL,
+  model_id TEXT,
+  plant_id INTEGER,
+  site_id INTEGER,
+  organization_id INTEGER,
+  revision_id INTEGER REFERENCES versioning_revisions(id) ON DELETE SET NULL,
+  as_of_date TEXT,
+  serial_number TEXT,
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER,
+  updated_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_config_contexts_variant ON versioning_configuration_contexts(variant_id);
+CREATE INDEX IF NOT EXISTS idx_versioning_config_contexts_tenant ON versioning_configuration_contexts(tenant_id, status);
+
+-- Reusable effectivity definitions (ranges + structured values).
+CREATE TABLE IF NOT EXISTS versioning_effectivity_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_ref TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  type_code TEXT NOT NULL,
+  dimension TEXT NOT NULL,
+  effective_from TEXT,
+  effective_to TEXT,
+  boundary TEXT NOT NULL DEFAULT 'inclusive' CHECK (boundary IN ('inclusive', 'exclusive')),
+  serial_from TEXT,
+  serial_to TEXT,
+  serial_mode TEXT NOT NULL DEFAULT 'numeric' CHECK (serial_mode IN ('numeric', 'alphanumeric')),
+  revision_id INTEGER REFERENCES versioning_revisions(id) ON DELETE SET NULL,
+  configuration_context_id INTEGER REFERENCES versioning_configuration_contexts(id) ON DELETE SET NULL,
+  include_json TEXT NOT NULL DEFAULT '[]',
+  exclude_json TEXT NOT NULL DEFAULT '[]',
+  priority INTEGER NOT NULL DEFAULT 100,
+  overlap_allowed INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER,
+  updated_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_effectivity_defs_type ON versioning_effectivity_definitions(type_code, status);
+CREATE INDEX IF NOT EXISTS idx_versioning_effectivity_defs_dates ON versioning_effectivity_definitions(effective_from, effective_to);
+CREATE INDEX IF NOT EXISTS idx_versioning_effectivity_defs_serial ON versioning_effectivity_definitions(serial_from, serial_to);
+CREATE INDEX IF NOT EXISTS idx_versioning_effectivity_defs_tenant ON versioning_effectivity_definitions(tenant_id, status);
+
+-- Structured effectivity values (model lists, plant lists, variant applicability,
+-- inclusion/exclusion operators). Keeping values in rows avoids hard-coding any
+-- single product's rule shape into the kernel.
+CREATE TABLE IF NOT EXISTS versioning_effectivity_values (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES versioning_effectivity_definitions(id) ON DELETE CASCADE,
+  dimension TEXT NOT NULL,
+  value TEXT NOT NULL,
+  operator TEXT NOT NULL DEFAULT 'include' CHECK (operator IN ('include', 'exclude')),
+  value_type TEXT NOT NULL DEFAULT 'string',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, dimension, operator, value)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_effectivity_values_lookup ON versioning_effectivity_values(dimension, value);
+
+-- Effectivity assignments link a reusable definition to a concrete target
+-- (object / revision / version).
+CREATE TABLE IF NOT EXISTS versioning_effectivity_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  assignment_ref TEXT NOT NULL UNIQUE,
+  definition_id INTEGER NOT NULL REFERENCES versioning_effectivity_definitions(id) ON DELETE CASCADE,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  revision_id INTEGER REFERENCES versioning_revisions(id) ON DELETE CASCADE,
+  version_id INTEGER REFERENCES versioning_versions(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'primary' CHECK (role IN ('primary', 'override', 'exclusion')),
+  precedence INTEGER NOT NULL DEFAULT 100,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_versioning_effectivity_assign_unique
+  ON versioning_effectivity_assignments(definition_id, object_type, object_id, COALESCE(revision_id, 0), COALESCE(version_id, 0));
+CREATE INDEX IF NOT EXISTS idx_versioning_effectivity_assign_target
+  ON versioning_effectivity_assignments(object_type, object_id, status);
+CREATE INDEX IF NOT EXISTS idx_versioning_effectivity_assign_revision
+  ON versioning_effectivity_assignments(revision_id, status);
+
+-- Configurable, deterministic resolution policies. Precedence and conflict
+-- handling live in configuration rather than scattered code.
+CREATE TABLE IF NOT EXISTS versioning_resolution_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  precedence_json TEXT NOT NULL DEFAULT '["configuration","revision","serial","model","plant","unit","date","default"]',
+  boundary TEXT NOT NULL DEFAULT 'inclusive' CHECK (boundary IN ('inclusive', 'exclusive')),
+  ambiguity_strategy TEXT NOT NULL DEFAULT 'error'
+    CHECK (ambiguity_strategy IN ('error', 'priority', 'latest_revision')),
+  allow_overlap INTEGER NOT NULL DEFAULT 0,
+  fallback_to_default INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  is_default INTEGER NOT NULL DEFAULT 0,
+  tenant_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER,
+  updated_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_resolution_policies_default ON versioning_resolution_policies(is_default, status);
+
+-- Resolution audit + metrics feed. Every resolve call records a row.
+CREATE TABLE IF NOT EXISTS versioning_resolution_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  result_ref TEXT NOT NULL UNIQUE,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  policy_code TEXT,
+  context_hash TEXT NOT NULL DEFAULT '',
+  context_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL
+    CHECK (status IN ('RESOLVED', 'AMBIGUOUS', 'NOT_FOUND', 'INVALID_CONTEXT', 'CONFLICT')),
+  revision_id INTEGER,
+  version_id INTEGER,
+  resolution_reason TEXT NOT NULL DEFAULT '',
+  candidate_scores_json TEXT NOT NULL DEFAULT '[]',
+  message TEXT NOT NULL DEFAULT '',
+  duration_ms REAL NOT NULL DEFAULT 0,
+  resolved_by INTEGER,
+  tenant_id INTEGER,
+  request_id TEXT,
+  correlation_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_resolution_results_object
+  ON versioning_resolution_results(object_type, object_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_versioning_resolution_results_status
+  ON versioning_resolution_results(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_versioning_resolution_results_tenant
+  ON versioning_resolution_results(tenant_id, created_at);
+
+-- Baselines: frozen logical state of selected enterprise data.
+CREATE TABLE IF NOT EXISTS versioning_baselines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  baseline_ref TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  owner_id INTEGER,
+  owner_name TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'frozen', 'retired')),
+  context_json TEXT NOT NULL DEFAULT '{}',
+  object_count INTEGER NOT NULL DEFAULT 0,
+  locked INTEGER NOT NULL DEFAULT 0,
+  frozen_at TEXT,
+  frozen_by INTEGER,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER,
+  updated_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_baselines_status ON versioning_baselines(status, tenant_id);
+
+CREATE TABLE IF NOT EXISTS versioning_baseline_objects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  baseline_id INTEGER NOT NULL REFERENCES versioning_baselines(id) ON DELETE CASCADE,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  revision_id INTEGER,
+  version_id INTEGER,
+  revision_code TEXT NOT NULL DEFAULT '',
+  version_number TEXT NOT NULL DEFAULT '',
+  resolution_status TEXT NOT NULL DEFAULT 'RESOLVED',
+  resolution_reason TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (baseline_id, object_type, object_id)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_baseline_objects_object ON versioning_baseline_objects(object_type, object_id);
+
+-- Historical snapshots: immutable resolved state at a point in time/context.
+CREATE TABLE IF NOT EXISTS versioning_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_ref TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  context_json TEXT NOT NULL DEFAULT '{}',
+  object_count INTEGER NOT NULL DEFAULT 0,
+  content_hash TEXT NOT NULL DEFAULT '',
+  parent_snapshot_id INTEGER REFERENCES versioning_snapshots(id) ON DELETE SET NULL,
+  tenant_id INTEGER,
+  organization_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_snapshots_tenant ON versioning_snapshots(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS versioning_snapshot_objects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_id INTEGER NOT NULL REFERENCES versioning_snapshots(id) ON DELETE CASCADE,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  revision_id INTEGER,
+  version_id INTEGER,
+  revision_code TEXT NOT NULL DEFAULT '',
+  version_number TEXT NOT NULL DEFAULT '',
+  resolution_status TEXT NOT NULL DEFAULT 'RESOLVED',
+  resolution_reason TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (snapshot_id, object_type, object_id)
+);
+CREATE INDEX IF NOT EXISTS idx_versioning_snapshot_objects_object ON versioning_snapshot_objects(object_type, object_id);
+
+-- Cache epoch: bumping this invalidates the in-process resolution cache after any
+-- kernel mutation without a network round trip.
+CREATE TABLE IF NOT EXISTS versioning_cache_epoch (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  epoch INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT
+);
+INSERT OR IGNORE INTO versioning_cache_epoch (id, epoch) VALUES (1, 0);

@@ -12,11 +12,30 @@
 import { publishEvent } from "./publisher.js";
 import { log } from "./hooks.js";
 
+// Demo/bootstrap seeding performs many writes that are not real business
+// changes. Suppressing their domain events keeps the transactional outbox free
+// of seed noise and avoids flooding the outbox publisher on a fresh install.
+let suppressionDepth = 0;
+
+export function withEventSuppression(fn) {
+  suppressionDepth += 1;
+  try {
+    return fn();
+  } finally {
+    suppressionDepth -= 1;
+  }
+}
+
+export function eventsSuppressed() {
+  return suppressionDepth > 0;
+}
+
 function typeCodeOf(input) {
   return input.event_type_code || input.eventTypeCode || input.event_type || input.eventType || null;
 }
 
 export function emitDomainEvent(db, input = {}, actor = null, options = {}) {
+  if (suppressionDepth > 0) return null;
   const eventTypeCode = typeCodeOf(input);
   if (!eventTypeCode) {
     log("warn", "event.domain.emit_skipped", { reason: "missing_event_type" });

@@ -26,6 +26,8 @@ import { registerSearchHandlers, runSearchMaintenance } from "../server/services
 import { registerAuditHandlers, runAuditMaintenance } from "../server/services/audit.js";
 import { registerIntegrationHandlers, runIntegrationMaintenance } from "../server/services/integration/jobs.js";
 import { registerEventHandlers, runEventMaintenance } from "../server/services/events/jobs.js";
+import { registerNumberingHandlers, runNumberingMaintenance } from "../server/services/numbering/jobs.js";
+import { registerVersioningHandlers, runVersioningMaintenance } from "../server/services/versioning/jobs.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -93,6 +95,14 @@ registerIntegrationHandlers();
 // Event & Messaging Framework background handlers (outbox publish, consumer
 // drain, controlled replay, retention and lease maintenance).
 registerEventHandlers();
+
+// Numbering Service background handlers (reservation expiry and idempotency
+// bookkeeping convergence).
+registerNumberingHandlers();
+
+// Effectivity & Versioning Kernel background handlers (effectivity expiry and
+// resolution bookkeeping convergence).
+registerVersioningHandlers();
 
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
@@ -192,6 +202,42 @@ const eventMaintenance = setInterval(async () => {
 }, eventMaintenanceMs);
 eventMaintenance.unref?.();
 
+// Periodic numbering housekeeping: expire reservations that outlived their
+// timeout and prune stale idempotency records so replays stay bounded.
+const numberingMaintenanceMs = positive(process.env.NUMBERING_MAINTENANCE_MS, 30000);
+const numberingMaintenance = setInterval(() => {
+  try {
+    const summary = runNumberingMaintenance(db);
+    if (summary.expired_reservations || summary.idempotency_pruned) {
+      log("info", "Numbering housekeeping", {
+        expired_reservations: summary.expired_reservations,
+        idempotency_pruned: summary.idempotency_pruned,
+      });
+    }
+  } catch (error) {
+    log("warn", "Numbering housekeeping failed", { error: error.message });
+  }
+}, numberingMaintenanceMs);
+numberingMaintenance.unref?.();
+
+// Periodic versioning housekeeping: emit EffectivityExpired for ranges that
+// ended and prune resolution bookkeeping.
+const versioningMaintenanceMs = positive(process.env.VERSIONING_MAINTENANCE_MS, 30000);
+const versioningMaintenance = setInterval(() => {
+  try {
+    const summary = runVersioningMaintenance(db);
+    if (summary.expired_effectivities || summary.resolution_results_pruned) {
+      log("info", "Versioning housekeeping", {
+        expired_effectivities: summary.expired_effectivities,
+        resolution_results_pruned: summary.resolution_results_pruned,
+      });
+    }
+  } catch (error) {
+    log("warn", "Versioning housekeeping failed", { error: error.message });
+  }
+}, versioningMaintenanceMs);
+versioningMaintenance.unref?.();
+
 const worker = createWorker(db, {
   id: args.id || undefined,
   name: args.name || undefined,
@@ -213,6 +259,7 @@ async function shutdown(signal) {
   clearInterval(auditMaintenance);
   clearInterval(integrationMaintenance);
   clearInterval(eventMaintenance);
+  clearInterval(numberingMaintenance);
   log("info", "Worker draining", { signal, drain_ms: drainMs, active_jobs: worker.active.size });
   try {
     await worker.stop({ timeoutMs: drainMs });

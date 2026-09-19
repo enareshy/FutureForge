@@ -32,6 +32,9 @@ import * as files from "./services/files.js";
 import * as search from "./services/search.js";
 import * as integration from "./services/integration.js";
 import * as events from "./services/events.js";
+import * as numbering from "./services/numbering.js";
+import * as versioning from "./services/versioning.js";
+import { createVersioningRouter } from "./services/versioning/router.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -124,6 +127,16 @@ export function createApp(db) {
   providers.ensureDefaultProviders(db);
   config.ensureDefinitions(db);
   tenants.stampTenantIds(db);
+  try {
+    numbering.ensureNumberingFoundation(db);
+  } catch {
+    /* numbering foundation is idempotent and must never block application boot */
+  }
+  try {
+    versioning.ensureVersioningFoundation(db);
+  } catch {
+    /* versioning foundation is idempotent and must never block application boot */
+  }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     next();
@@ -8604,6 +8617,372 @@ export function createApp(db) {
   app.use("/api/events", eventsRouter);
   app.use("/api/v1/events", eventsRouter);
 
+  // ── Enterprise Numbering & Identifier Service ─────────────────────────────
+  const numberingTenant = (req) => req.tenantId ?? null;
+  const canNumbering = (action) => can("iam.numbering", action);
+  const canNumberingSchemes = (action) => can("iam.numbering.schemes", action);
+  const canNumberingObjectTypes = (action) => can("iam.numbering.objecttypes", action);
+  const canNumberingSequences = (action) => can("iam.numbering.sequences", action);
+  const canNumberingAllocations = (action) => can("iam.numbering.allocations", action);
+  const canNumberingGenerate = (action) => can("iam.numbering.generate", action);
+  const canNumberingReserve = (action) => can("iam.numbering.reserve", action);
+  const canNumberingConsume = (action) => can("iam.numbering.consume", action);
+  const canNumberingRelease = (action) => can("iam.numbering.release", action);
+  const canNumberingManual = (action) => can("iam.numbering.manual", action);
+  const canNumberingMetrics = (action) => can("iam.numbering.metrics", action);
+  const manualGuard = (req, res, next) => {
+    const wantsManual =
+      req.body?.manualNumber !== undefined ||
+      req.body?.manual_number !== undefined ||
+      req.body?.number !== undefined ||
+      req.body?.preferredNumber !== undefined;
+    if (!wantsManual) return next();
+    return canNumberingManual("create")(req, res, next);
+  };
+  const idempotencyKeyOf = (req) =>
+    req.get("Idempotency-Key") || req.get("idempotency-key") || req.body?.idempotencyKey || null;
+
+  const numberingRouter = express.Router();
+
+  numberingRouter.get(
+    "/meta",
+    auth,
+    canNumbering("read"),
+    wrap((_req, res) => {
+      res.json({
+        ...numbering.Validation.vocabulary(),
+        tokens: numbering.Tokens.listTokens(db),
+        scopes: numbering.Foundation.DEFAULT_SCOPES,
+      });
+    })
+  );
+
+  numberingRouter.get(
+    "/object-types",
+    auth,
+    canNumberingObjectTypes("read"),
+    wrap((req, res) => {
+      res.json({
+        items: numbering.Foundation.listObjectTypes(db, {
+          tenantId: numberingTenant(req),
+          status: req.query.status || undefined,
+        }),
+      });
+    })
+  );
+  numberingRouter.post(
+    "/object-types",
+    auth,
+    canNumberingObjectTypes("create"),
+    wrap((req, res) => {
+      res.status(201).json(numbering.Foundation.createObjectType(db, req.body || {}, req.actor, numberingTenant(req), req.ip));
+    })
+  );
+  numberingRouter.post(
+    "/object-types/:code/status",
+    auth,
+    canNumberingObjectTypes("update"),
+    wrap((req, res) => {
+      res.json(numbering.Foundation.setObjectTypeStatus(db, req.params.code, req.body?.status, req.actor, req.ip));
+    })
+  );
+
+  numberingRouter.get(
+    "/scopes",
+    auth,
+    canNumbering("read"),
+    wrap((_req, res) => {
+      res.json({ items: numbering.Scopes.listScopes(db) });
+    })
+  );
+  numberingRouter.get(
+    "/tokens",
+    auth,
+    canNumbering("read"),
+    wrap((_req, res) => {
+      res.json({ items: numbering.Tokens.listTokens(db) });
+    })
+  );
+  numberingRouter.post(
+    "/tokens",
+    auth,
+    canNumberingSchemes("create"),
+    wrap((req, res) => {
+      res.status(201).json(numbering.Tokens.createToken(db, req.body || {}));
+    })
+  );
+
+  // ── Schemes ────────────────────────────────────────────────────────────────
+  numberingRouter.get(
+    "/schemes",
+    auth,
+    canNumberingSchemes("read"),
+    wrap((req, res) => {
+      res.json(numbering.Schemes.listSchemes(db, { ...req.query, tenantId: numberingTenant(req) }));
+    })
+  );
+  numberingRouter.post(
+    "/schemes",
+    auth,
+    canNumberingSchemes("create"),
+    wrap((req, res) => {
+      const scheme = numbering.Schemes.createScheme(db, req.body || {}, req.actor, numberingTenant(req), req.ip);
+      res.status(201).json(scheme);
+    })
+  );
+  numberingRouter.get(
+    "/schemes/:ref",
+    auth,
+    canNumberingSchemes("read"),
+    wrap((req, res) => {
+      res.json(numbering.Schemes.getScheme(db, req.params.ref));
+    })
+  );
+  const updateSchemeHandler = wrap((req, res) => {
+    res.json(numbering.Schemes.updateScheme(db, req.params.ref, req.body || {}, req.actor, req.ip));
+  });
+  numberingRouter.put("/schemes/:ref", auth, canNumberingSchemes("update"), updateSchemeHandler);
+  numberingRouter.patch("/schemes/:ref", auth, canNumberingSchemes("update"), updateSchemeHandler);
+  numberingRouter.delete(
+    "/schemes/:ref",
+    auth,
+    canNumberingSchemes("delete"),
+    wrap((req, res) => {
+      res.json(numbering.Schemes.deleteScheme(db, req.params.ref, req.actor, req.ip));
+    })
+  );
+  numberingRouter.get(
+    "/schemes/:ref/versions",
+    auth,
+    canNumberingSchemes("read"),
+    wrap((req, res) => {
+      const scheme = numbering.Schemes.getScheme(db, req.params.ref, { includeVersions: false });
+      res.json({ items: numbering.Schemes.listVersions(db, scheme.id) });
+    })
+  );
+  numberingRouter.post(
+    "/schemes/:ref/validate",
+    auth,
+    canNumberingSchemes("read"),
+    wrap((req, res) => {
+      res.json(numbering.Schemes.validateScheme(db, req.params.ref));
+    })
+  );
+  numberingRouter.post(
+    "/schemes/:ref/clone",
+    auth,
+    canNumberingSchemes("create"),
+    wrap((req, res) => {
+      res.status(201).json(numbering.Schemes.cloneScheme(db, req.params.ref, req.body || {}, req.actor, numberingTenant(req), req.ip));
+    })
+  );
+  const schemeStatusHandler = (status) =>
+    wrap((req, res) => {
+      res.json(numbering.Schemes.setSchemeStatus(db, req.params.ref, status, req.actor, req.ip));
+    });
+  numberingRouter.post("/schemes/:ref/activate", auth, canNumberingSchemes("execute"), schemeStatusHandler("active"));
+  numberingRouter.post("/schemes/:ref/deactivate", auth, canNumberingSchemes("execute"), schemeStatusHandler("inactive"));
+  numberingRouter.post("/schemes/:ref/retire", auth, canNumberingSchemes("execute"), schemeStatusHandler("retired"));
+
+  // ── Generation ─────────────────────────────────────────────────────────────
+  numberingRouter.post(
+    "/generate",
+    auth,
+    canNumberingGenerate("create"),
+    manualGuard,
+    wrap((req, res) => {
+      const allocation = numbering.Allocations.generateNumber(db, req.body || {}, req.actor, {
+        tenantId: numberingTenant(req),
+        ip: req.ip,
+        idempotencyKey: idempotencyKeyOf(req),
+      });
+      res.status(201).json(allocation);
+    })
+  );
+  numberingRouter.post(
+    "/reserve",
+    auth,
+    canNumberingReserve("create"),
+    manualGuard,
+    wrap((req, res) => {
+      const allocation = numbering.Allocations.generateNumber(
+        db,
+        { ...(req.body || {}), reserve: true },
+        req.actor,
+        { tenantId: numberingTenant(req), ip: req.ip, idempotencyKey: idempotencyKeyOf(req) }
+      );
+      res.status(201).json(allocation);
+    })
+  );
+  numberingRouter.post(
+    "/preview",
+    auth,
+    canNumberingGenerate("read"),
+    wrap((req, res) => {
+      res.json(numbering.Allocations.previewNumber(db, req.body || {}, { tenantId: numberingTenant(req) }));
+    })
+  );
+  numberingRouter.post(
+    "/validate",
+    auth,
+    canNumberingGenerate("read"),
+    wrap((req, res) => {
+      res.json(numbering.Allocations.validateIdentifier(db, req.body || {}, { tenantId: numberingTenant(req) }));
+    })
+  );
+
+  // ── Allocations ────────────────────────────────────────────────────────────
+  numberingRouter.get(
+    "/allocations",
+    auth,
+    canNumberingAllocations("read"),
+    wrap((req, res) => {
+      const query = numbering.Validation.normalizeAllocationQuery(req.query || {});
+      res.json(numbering.Allocations.listAllocations(db, { ...query, tenantId: numberingTenant(req) }));
+    })
+  );
+  numberingRouter.get(
+    "/allocations/:ref",
+    auth,
+    canNumberingAllocations("read"),
+    wrap((req, res) => {
+      res.json(numbering.Allocations.getAllocation(db, req.params.ref));
+    })
+  );
+  numberingRouter.post(
+    "/allocations/:ref/consume",
+    auth,
+    canNumberingConsume("execute"),
+    wrap((req, res) => {
+      res.json(
+        numbering.Allocations.consumeNumber(db, req.params.ref, req.body || {}, req.actor, {
+          tenantId: numberingTenant(req),
+          ip: req.ip,
+        })
+      );
+    })
+  );
+  numberingRouter.post(
+    "/allocations/:ref/release",
+    auth,
+    canNumberingRelease("execute"),
+    wrap((req, res) => {
+      res.json(
+        numbering.Allocations.releaseNumber(db, req.params.ref, req.body || {}, req.actor, {
+          tenantId: numberingTenant(req),
+          ip: req.ip,
+        })
+      );
+    })
+  );
+  numberingRouter.post(
+    "/allocations/:ref/cancel",
+    auth,
+    canNumberingRelease("execute"),
+    wrap((req, res) => {
+      res.json(
+        numbering.Allocations.cancelNumber(db, req.params.ref, req.body || {}, req.actor, {
+          tenantId: numberingTenant(req),
+          ip: req.ip,
+        })
+      );
+    })
+  );
+
+  // ── Sequences ──────────────────────────────────────────────────────────────
+  numberingRouter.get(
+    "/sequences",
+    auth,
+    canNumberingSequences("read"),
+    wrap((req, res) => {
+      res.json(
+        numbering.Sequences.listSequences(db, {
+          schemeId: req.query.schemeId || req.query.scheme_id,
+          scopeKey: req.query.scopeKey || req.query.scope_key,
+          status: req.query.status,
+          objectType: req.query.objectType || req.query.object_type,
+          tenantId: numberingTenant(req),
+          page: req.query.page,
+          pageSize: req.query.pageSize || req.query.page_size,
+        })
+      );
+    })
+  );
+  numberingRouter.get(
+    "/sequences/:id",
+    auth,
+    canNumberingSequences("read"),
+    wrap((req, res) => {
+      const sequence = numbering.Sequences.publicSequence(db, numbering.Sequences.getSequenceRow(db, req.params.id));
+      if (!sequence) throw new HttpError(404, "Numbering sequence not found");
+      res.json(sequence);
+    })
+  );
+  numberingRouter.post(
+    "/sequences/:id/reset",
+    auth,
+    canNumberingSequences("execute"),
+    wrap((req, res) => {
+      res.json(numbering.Sequences.resetSequence(db, req.params.id, req.body || {}, req.actor, req.ip));
+    })
+  );
+
+  // ── Monitoring ─────────────────────────────────────────────────────────────
+  numberingRouter.get(
+    "/metrics",
+    auth,
+    canNumberingMetrics("read"),
+    wrap((req, res) => {
+      res.json({
+        ...numbering.Allocations.metricsSnapshot(db, { tenantId: numberingTenant(req) }),
+        generation_latency: numbering.Metrics.generationLatency(db, { tenantId: numberingTenant(req) }),
+      });
+    })
+  );
+  numberingRouter.get(
+    "/dashboard",
+    auth,
+    canNumberingMetrics("read"),
+    wrap((req, res) => {
+      res.json(
+        numbering.Metrics.dashboardSummary(db, {
+          tenantId: numberingTenant(req),
+          from: req.query.from,
+          to: req.query.to,
+        })
+      );
+    })
+  );
+  numberingRouter.post(
+    "/maintenance/expire",
+    auth,
+    canNumberingSequences("execute"),
+    wrap((req, res) => {
+      res.json(numbering.Allocations.expireReservations(db, { limit: Number(req.body?.limit) || 200 }));
+    })
+  );
+  numberingRouter.get(
+    "/health",
+    wrap((req, res) => {
+      const health = numbering.Metrics.healthCheck(db, { tenantId: numberingTenant(req) });
+      res.status(health.healthy ? 200 : 503).json(health);
+    })
+  );
+  numberingRouter.get("/health/live", wrap((_req, res) => res.json({ status: "ok", live: true })));
+  numberingRouter.get("/health/ready", (req, res) => {
+    const health = numbering.Metrics.healthCheck(db, { tenantId: numberingTenant(req) });
+    res.status(health.ready ? 200 : 503).json(health);
+  });
+
+  app.use("/api/numbering", numberingRouter);
+  app.use("/api/v1/numbering", numberingRouter);
+
+  // ── Enterprise Effectivity & Versioning Kernel ────────────────────────────
+  const versioningRouter = createVersioningRouter({ express, db, auth, can, wrap });
+  app.use("/api/versioning", versioningRouter);
+  app.use("/api/v1/versioning", versioningRouter);
+  app.use("/api/v1", versioningRouter);
+
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);
 
@@ -8618,7 +8997,9 @@ export function createApp(db) {
 
   app.use((err, _req, res, _next) => {
     if (err instanceof HttpError) {
-      return res.status(err.status).json({ error: err.message, details: err.details });
+      const payload = { error: err.message, details: err.details };
+      if (err.code) payload.code = err.code;
+      return res.status(err.status).json(payload);
     }
     if (err.type === "entity.parse.failed") {
       return res.status(400).json({ error: "Invalid JSON" });

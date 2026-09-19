@@ -23,6 +23,9 @@ import * as jobExecution from "./services/job-execution.js";
 import * as search from "./services/search.js";
 import * as integration from "./services/integration.js";
 import * as events from "./services/events.js";
+import { withEventSuppression } from "./services/events/emit.js";
+import * as numbering from "./services/numbering.js";
+import * as versioning from "./services/versioning.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -886,6 +889,28 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.events.replay", name: "Event replay", parentCode: "iam.events" },
     { applicationCode: "iam", code: "iam.events.retention", name: "Event retention", parentCode: "iam.events" },
     { applicationCode: "iam", code: "iam.events.monitoring", name: "Event monitoring & traceability", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.numbering", name: "Numbering & identifier service", kind: "module" },
+    { applicationCode: "iam", code: "iam.numbering.schemes", name: "Numbering scheme administration", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.objecttypes", name: "Numbering object types", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.sequences", name: "Sequence administration & reset", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.allocations", name: "Allocation history & export", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.generate", name: "Generate & preview identifiers", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.reserve", name: "Reserve identifiers", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.consume", name: "Consume identifiers", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.release", name: "Release & cancel identifiers", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.manual", name: "Manual numbering", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.metrics", name: "Numbering monitoring & metrics", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.versioning", name: "Effectivity & versioning kernel", kind: "module" },
+    { applicationCode: "iam", code: "iam.versioning.revisions", name: "Revision management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.versions", name: "Version management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.effectivities", name: "Effectivity definitions & assignments", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.resolve", name: "As-of effectivity resolution", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.baselines", name: "Baseline management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.snapshots", name: "Historical snapshots", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.variants", name: "Variant & option management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.configurations", name: "Configuration context management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.policies", name: "Resolution policy administration", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.metrics", name: "Versioning monitoring & metrics", parentCode: "iam.versioning" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1027,7 +1052,33 @@ function seedMissingCatalog(db) {
     "iam.events.retention",
     "iam.events.monitoring",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes, ...eventResourceCodes]) {
+  const numberingResourceCodes = [
+    "iam.numbering",
+    "iam.numbering.schemes",
+    "iam.numbering.objecttypes",
+    "iam.numbering.sequences",
+    "iam.numbering.allocations",
+    "iam.numbering.generate",
+    "iam.numbering.reserve",
+    "iam.numbering.consume",
+    "iam.numbering.release",
+    "iam.numbering.manual",
+    "iam.numbering.metrics",
+  ];
+  const versioningResourceCodes = [
+    "iam.versioning",
+    "iam.versioning.revisions",
+    "iam.versioning.versions",
+    "iam.versioning.effectivities",
+    "iam.versioning.resolve",
+    "iam.versioning.baselines",
+    "iam.versioning.snapshots",
+    "iam.versioning.variants",
+    "iam.versioning.configurations",
+    "iam.versioning.policies",
+    "iam.versioning.metrics",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -1094,6 +1145,24 @@ function reconcileReaderGrants(db) {
     ["iam.search.saved", ["read", "create", "update", "delete"]],
     ["iam.search.history", ["read", "delete"]],
     ["iam.search.export", ["read", "create"]],
+    ["iam.numbering.generate", ["read", "create"]],
+    ["iam.numbering.reserve", ["read", "create"]],
+    ["iam.numbering.consume", ["execute"]],
+    ["iam.numbering.release", ["execute"]],
+    ["iam.numbering.schemes", ["read"]],
+    ["iam.numbering.allocations", ["read"]],
+    ["iam.numbering.sequences", ["read"]],
+    ["iam.numbering.objecttypes", ["read"]],
+    ["iam.numbering.metrics", ["read"]],
+    ["iam.versioning.revisions", ["read"]],
+    ["iam.versioning.versions", ["read"]],
+    ["iam.versioning.effectivities", ["read"]],
+    ["iam.versioning.resolve", ["read", "execute"]],
+    ["iam.versioning.baselines", ["read"]],
+    ["iam.versioning.snapshots", ["read"]],
+    ["iam.versioning.variants", ["read"]],
+    ["iam.versioning.configurations", ["read"]],
+    ["iam.versioning.metrics", ["read"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -2488,7 +2557,9 @@ export function seedDatabase(db) {
   const searchResult = seedSearch(db);
   const integrationResult = seedIntegration(db);
   const eventsResult = seedEvents(db);
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult };
+  const numberingResult = withEventSuppression(() => seedNumbering(db));
+  const versioningResult = withEventSuppression(() => seedVersioning(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult };
 }
 
 function seedSearch(db) {
@@ -2525,6 +2596,69 @@ function seedEvents(db) {
     };
   } catch (err) {
     return { eventsSeeded: false, eventsError: err.message };
+  }
+}
+
+// Installs the Numbering & Identifier Service foundation: object types, token
+// catalogue, scope registry, event types, search resolver and a set of example
+// schemes that demonstrate the standard enterprise identifier patterns.
+function seedNumbering(db) {
+  try {
+    const foundation = numbering.ensureNumberingFoundation(db);
+    const schemes = seedNumberingSchemes(db);
+    return { numberingSeeded: true, ...foundation, schemes };
+  } catch (err) {
+    return { numberingSeeded: false, numberingError: err.message };
+  }
+}
+
+function seedNumberingSchemes(db) {
+  const helixes = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const tenantId = helixes?.id ?? null;
+  const admin = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin'");
+  const actor = admin ? { id: admin.id, username: admin.username } : null;
+  const definitions = [
+    { code: "PART_STANDARD", name: "Part standard", object_type_code: "PART", pattern: "{TYPE}-{YYYY}-{SEQ}", padding: 6, reset_policy: "yearly", is_default: true, priority: 100 },
+    { code: "PRODUCT_STANDARD", name: "Product standard", object_type_code: "PRODUCT", pattern: "{TYPE}-{SEQ}", padding: 6, is_default: true, priority: 100 },
+    { code: "DOCUMENT_CONTROLLED", name: "Controlled document", object_type_code: "DOCUMENT", pattern: "{TYPE}-{YYYY}-{SEQ}", padding: 5, reset_policy: "yearly", sequence_scope: "organization", is_default: true, priority: 100 },
+    { code: "BOM_STANDARD", name: "BOM standard", object_type_code: "BOM", pattern: "{TYPE}-{YYYY}-{SEQ}", padding: 6, reset_policy: "yearly", is_default: true, priority: 100 },
+    { code: "DRAWING_STANDARD", name: "Drawing standard", object_type_code: "DRAWING", pattern: "{TYPE}-{YY}-{SEQ}", padding: 5, is_default: true, priority: 100 },
+    { code: "SPECIFICATION_STANDARD", name: "Specification standard", object_type_code: "SPECIFICATION", pattern: "{TYPE}-{SEQ}", padding: 5, is_default: true, priority: 100 },
+    { code: "CHANGE_REQUEST", name: "Engineering change", object_type_code: "CHANGE", pattern: "ECN-{YYYY}-{SEQ}", padding: 4, reset_policy: "yearly", is_default: true, priority: 100 },
+    { code: "SUPPLIER_STANDARD", name: "Supplier standard", object_type_code: "SUPPLIER", pattern: "{TYPE}-{SEQ}", padding: 5, is_default: true, priority: 100 },
+    { code: "CUSTOMER_STANDARD", name: "Customer standard", object_type_code: "CUSTOMER", pattern: "{TYPE}-{SEQ}", padding: 5, is_default: true, priority: 100 },
+    { code: "MATERIAL_STANDARD", name: "Material standard", object_type_code: "MATERIAL", pattern: "{TYPE}-{SEQ}", padding: 6, is_default: true, priority: 100 },
+  ];
+  let created = 0;
+  const codes = [];
+  for (const def of definitions) {
+    const existing = queryOne(
+      db,
+      "SELECT id FROM numbering_schemes WHERE code = ? AND COALESCE(tenant_id, 0) = COALESCE(?, 0)",
+      [def.code, tenantId]
+    );
+    if (existing) continue;
+    try {
+      numbering.Schemes.createScheme(db, { ...def, status: "active" }, actor, tenantId, "seed");
+      created += 1;
+      codes.push(def.code);
+    } catch {
+      /* a missing object type in an older database must not fail seeding */
+    }
+  }
+  return { created, codes };
+}
+
+// Installs the Effectivity & Versioning Kernel foundation: effectivity types,
+// the default resolution policy, event types, search registrations and a small
+// set of demonstration objects covering date/serial/plant/model effectivity.
+function seedVersioning(db) {
+  try {
+    const foundation = versioning.ensureVersioningFoundation(db);
+    const sample = versioning.seedVersioning(db);
+    return { versioningSeeded: true, ...foundation, sample };
+  } catch (err) {
+    return { versioningSeeded: false, versioningError: err.message };
   }
 }
 

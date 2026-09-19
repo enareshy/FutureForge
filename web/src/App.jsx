@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { getToken, iam, setToken } from "./api.js";
 import UsersPage from "./pages/UsersPage.jsx";
@@ -48,6 +48,8 @@ import SearchPage from "./pages/SearchPage.jsx";
 import SearchAdminPage from "./pages/SearchAdminPage.jsx";
 import IntegrationPage from "./pages/IntegrationPage.jsx";
 import EventsPage from "./pages/EventsPage.jsx";
+import NumberingPage from "./pages/NumberingPage.jsx";
+import VersioningPage from "./pages/VersioningPage.jsx";
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -139,7 +141,9 @@ function Login({ onLogin }) {
   );
 }
 
-const NAV_SECTIONS = [
+// Everything that is not personal workspace lives under the Platform menu,
+// grouped by domain. "My Data" stays a top-level section of its own.
+const PLATFORM_GROUPS = [
   {
     key: "overview",
     label: "",
@@ -196,14 +200,6 @@ const NAV_SECTIONS = [
     ],
   },
   {
-    key: "objects",
-    label: "My Data",
-    items: [
-      { to: "/objects", label: "Business objects" },
-      { to: "/workflows", label: "My tasks & approvals", end: true },
-    ],
-  },
-  {
     key: "documents",
     label: "Documents",
     items: [
@@ -233,6 +229,16 @@ const NAV_SECTIONS = [
     ],
   },
   {
+    key: "numbering",
+    label: "Identifiers",
+    items: [{ to: "/numbering", label: "Numbering service", platformOrAdmin: true }],
+  },
+  {
+    key: "versioning",
+    label: "Versioning",
+    items: [{ to: "/versioning", label: "Effectivity & versioning", platformOrAdmin: true }],
+  },
+  {
     key: "communication",
     label: "Communication",
     items: [
@@ -257,6 +263,22 @@ const NAV_SECTIONS = [
   },
 ];
 
+const NAV_SECTIONS = [
+  {
+    key: "mydata",
+    label: "My Data",
+    items: [
+      { to: "/objects", label: "Business objects" },
+      { to: "/workflows", label: "My tasks & approvals", end: true },
+    ],
+  },
+  {
+    key: "platform",
+    label: "Platform",
+    groups: PLATFORM_GROUPS,
+  },
+];
+
 function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
   const location = useLocation();
   const roles = access?.roles || [];
@@ -272,14 +294,35 @@ function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
   const isActive = (item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to);
 
-  const [open, setOpen] = useState(() => new Set(["overview"]));
+  const [open, setOpen] = useState(() => new Set(["mydata", "platform", "overview"]));
+  const mainRef = useRef(null);
+
+  const visibleGroups = (section) =>
+    (section.groups || [])
+      .map((group) => ({ ...group, items: group.items.filter(visible) }))
+      .filter((group) => group.items.length);
+
   useEffect(() => {
-    const activeSection = NAV_SECTIONS.find((section) =>
-      section.items.some((item) => visible(item) && isActive(item))
-    );
-    if (activeSection) setOpen((prev) => (prev.has(activeSection.key) ? prev : new Set([...prev, activeSection.key])));
+    const next = new Set();
+    NAV_SECTIONS.forEach((section) => {
+      const leafActive = (section.items || []).filter(visible).some(isActive);
+      const groupsActive = (section.groups || []).some((group) =>
+        group.items.filter(visible).some(isActive)
+      );
+      if (leafActive || groupsActive) {
+        next.add(section.key);
+        (section.groups || []).forEach((group) => {
+          if (group.items.filter(visible).some(isActive)) next.add(group.key);
+        });
+      }
+    });
+    if (next.size) setOpen((prev) => new Set([...prev, ...next]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, canPlatform, canMetadata]);
+
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0 });
+  }, [location.pathname]);
 
   const toggle = (key) =>
     setOpen((prev) => {
@@ -303,19 +346,9 @@ function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
         ) : null}
         <div className="nav-scroll">
           {NAV_SECTIONS.map((section) => {
-            const items = section.items.filter(visible);
-            if (!items.length) return null;
-            if (!section.label) {
-              return (
-                <div className="nav-section plain" key={section.key}>
-                  {items.map((item) => (
-                    <NavLink key={item.to} to={item.to} end={item.end}>
-                      {item.label}
-                    </NavLink>
-                  ))}
-                </div>
-              );
-            }
+            const items = (section.items || []).filter(visible);
+            const groups = visibleGroups(section);
+            if (!items.length && !groups.length) return null;
             const expanded = open.has(section.key);
             return (
               <div className={`nav-section ${expanded ? "open" : ""}`} key={section.key}>
@@ -330,18 +363,48 @@ function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
                         {item.label}
                       </NavLink>
                     ))}
+                    {groups.map((group) => {
+                      if (!group.label) {
+                        return (
+                          <div className="nav-group plain" key={group.key}>
+                            {group.items.map((item) => (
+                              <NavLink key={item.to} to={item.to} end={item.end}>
+                                {item.label}
+                              </NavLink>
+                            ))}
+                          </div>
+                        );
+                      }
+                      const groupExpanded = open.has(group.key);
+                      return (
+                        <div className={`nav-group ${groupExpanded ? "open" : ""}`} key={group.key}>
+                          <button type="button" className="nav-group-head" onClick={() => toggle(group.key)}>
+                            <span className="caret">{groupExpanded ? "▾" : "▸"}</span>
+                            {group.label}
+                          </button>
+                          {groupExpanded ? (
+                            <div className="nav-group-body">
+                              {group.items.map((item) => (
+                                <NavLink key={item.to} to={item.to} end={item.end}>
+                                  {item.label}
+                                </NavLink>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : null}
               </div>
             );
           })}
         </div>
-        <div className="spacer" />
         <NotificationBell />
         <div className="mono">{me.display_name}</div>
         <button className="btn ghost" onClick={onLogout}>Sign out</button>
       </aside>
-      <main className="main">{children}</main>
+      <main className="main" ref={mainRef}>{children}</main>
     </div>
   );
 }
@@ -444,6 +507,8 @@ export default function App() {
         <Route path="/search/admin" element={<SearchAdminPage />} />
         <Route path="/integration" element={<IntegrationPage />} />
         <Route path="/events" element={<EventsPage />} />
+        <Route path="/numbering" element={<NumberingPage />} />
+        <Route path="/versioning" element={<VersioningPage />} />
         <Route path="/jobs" element={<JobsDashboardPage />} />
         <Route path="/jobs/list" element={<JobsPage />} />
         <Route path="/jobs/execution" element={<JobExecutionPage />} />

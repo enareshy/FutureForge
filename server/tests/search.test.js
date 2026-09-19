@@ -31,7 +31,14 @@ describe("Search & Discovery Framework services", () => {
 
   test("initializes default searchable object types", () => {
     const codes = search.listObjectTypes(db, { tenantId }).map((type) => type.code);
-    assert.deepEqual(codes.sort(), ["file", "object"]);
+    assert.deepEqual(codes.sort(), [
+      "file",
+      "numbering_allocation",
+      "object",
+      "versioning_baseline",
+      "versioning_revision",
+      "versioning_snapshot",
+    ]);
   });
 
   test("indexes business objects and returns ranked results", () => {
