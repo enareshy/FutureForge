@@ -14,6 +14,10 @@ import {
   DEFAULT_PROVIDER,
 } from "./provider.js";
 import { filterAuthorizedDocuments, createDecisionCache } from "./authorization.js";
+import { buildSearchSecurityPredicate } from "../security/row-security.js";
+import { maskDocumentsByType } from "../security/index.js";
+import { buildSecurityContext } from "../security/context.js";
+import { listFieldRules } from "../security/repository.js";
 import {
   searchableObjectTypeCodes,
   searchableObjectTypes,
@@ -222,6 +226,19 @@ export function runSearch(db, input, actor, options = {}) {
   const terms = norm.highlight_terms.length ? norm.highlight_terms : tokenize(norm.text);
   const decisionCache = createDecisionCache();
 
+  // Centralized row level security predicate. When an object type opts into
+  // entitlement/policy enforcement (or has explicit rules) the predicate is
+  // pushed to the data layer so unauthorized rows are never fetched.
+  const securityContext = buildSecurityContext(db, actor, {
+    tenantId,
+    organizationId: norm.organization_id ?? actor?.organization_id,
+    correlationId: options.correlationId,
+    ip: options.ip,
+  });
+  const securityPredicate = allowedTypes.length
+    ? buildSearchSecurityPredicate(db, securityContext, allowedTypes, options.action || "read")
+    : { enforced: false, sql: null, params: [] };
+
   let rows = [];
   let providerTotal = 0;
   if (allowedTypes.length) {
@@ -231,6 +248,7 @@ export function runSearch(db, input, actor, options = {}) {
       scope: norm.scope,
       organizationIds: scopeInfo.organizationIds,
       maxResults: Number(config.max_results) || 500,
+      securityPredicate: securityPredicate.enforced ? securityPredicate : null,
     });
     rows = result.rows;
     providerTotal = result.total;
@@ -265,19 +283,28 @@ export function runSearch(db, input, actor, options = {}) {
   const total = rows.length < maxResults ? authorized.length : Math.min(providerTotal, maxResults);
   const offset = (norm.page - 1) * norm.page_size;
   const pageRows = authorized.slice(offset, offset + norm.page_size);
-  const items = pageRows.map((row) => {
+  let items = pageRows.map((row) => {
     const doc = publicIndexedDocument(row);
     return norm.highlight ? applyHighlights(doc, terms) : doc;
   });
 
+  // Field level security & masking run server-side on the DTOs so protected
+  // fields never leave the platform, including through search results.
+  items = maskDocumentsByType(db, actor, items, {
+    action: options.action || "read",
+    options: { tenantId, context: securityContext },
+  });
+
   let facets = null;
   if (norm.include_facets) {
+    const blockedFields = blockedFacetFields(db, tenantId, allowedTypes);
     facets = getFacetsForQuery(db, norm, authorized, {
       allowedTypes,
       tenantId,
       scope: norm.scope,
       organizationIds: scopeInfo.organizationIds,
       requested: norm.facet_fields,
+      blockedFields,
     });
   }
 
@@ -314,7 +341,7 @@ export function runSearch(db, input, actor, options = {}) {
   };
 }
 
-function resolveFacetFields(db, tenantId, requested) {
+function resolveFacetFields(db, tenantId, requested, blockedFields = new Set()) {
   const registrations = searchableObjectTypes(db, tenantId);
   const configured = new Set();
   for (const reg of registrations) {
@@ -328,15 +355,30 @@ function resolveFacetFields(db, tenantId, requested) {
     "classification",
     "tags",
     ...configured,
-  ];
+  ].filter((field) => !blockedFields.has(field));
   if (requested?.length) return requested.filter((field) => available.includes(field));
-  return ["object_type", "status", "classification", "tags"];
+  return ["object_type", "status", "classification", "tags"].filter((field) => !blockedFields.has(field));
+}
+
+// Any field with a deny/hide rule must never appear in facets, because facet
+// counts would otherwise disclose protected values.
+function blockedFacetFields(db, tenantId, objectTypes) {
+  const blocked = new Set();
+  for (const objectType of objectTypes) {
+    for (const rule of listFieldRules(db, tenantId, { object_type: objectType })) {
+      if (rule.status === "active" && (rule.effect === "deny" || rule.effect === "hide")) {
+        blocked.add(rule.field_name);
+        blocked.add(String(rule.field_name).split(".").pop());
+      }
+    }
+  }
+  return blocked;
 }
 
 // Facets are computed from the already authorisation-filtered document set so
 // that counts can never reveal objects the caller cannot read.
 function getFacetsForQuery(db, norm, authorizedRows, context) {
-  const fields = resolveFacetFields(db, context.tenantId, context.requested);
+  const fields = resolveFacetFields(db, context.tenantId, context.requested, context.blockedFields);
   return computeFacetsFromDocuments(authorizedRows, fields);
 }
 

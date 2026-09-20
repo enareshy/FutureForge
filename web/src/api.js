@@ -887,6 +887,66 @@ export const searchFoundation = {
   metrics: () => api("/api/v1/search/metrics"),
 };
 
+export const security = {
+  vocabulary: () => api("/api/v1/security/vocabulary"),
+  overview: () => api("/api/v1/security/overview"),
+  invalidate: (scope) => api("/api/v1/security/cache/invalidate", { method: "POST", body: { scope } }),
+
+  objectTypes: (qs) => api(`/api/v1/security/object-types${qs || ""}`),
+  registerObjectType: (body) => api("/api/v1/security/object-types", { method: "POST", body }),
+  updateObjectType: (objectType, body) =>
+    api(`/api/v1/security/object-types/${encodeURIComponent(objectType)}`, { method: "PUT", body }),
+  setObjectTypeStatus: (objectType, status) =>
+    api(`/api/v1/security/object-types/${encodeURIComponent(objectType)}/status`, {
+      method: "POST",
+      body: { status },
+    }),
+
+  policies: (qs) => api(`/api/v1/security/policies${qs || ""}`),
+  policy: (id) => api(`/api/v1/security/policies/${id}`),
+  createPolicy: (body) => api("/api/v1/security/policies", { method: "POST", body }),
+  updatePolicy: (id, body) => api(`/api/v1/security/policies/${id}`, { method: "PUT", body }),
+  setPolicyStatus: (id, status) =>
+    api(`/api/v1/security/policies/${id}/status`, { method: "POST", body: { status } }),
+
+  entitlements: (qs) => api(`/api/v1/security/entitlements${qs || ""}`),
+  createEntitlement: (body) => api("/api/v1/security/entitlements", { method: "POST", body }),
+  updateEntitlement: (id, body) => api(`/api/v1/security/entitlements/${id}`, { method: "PUT", body }),
+  setEntitlementStatus: (id, status) =>
+    api(`/api/v1/security/entitlements/${id}/status`, { method: "POST", body: { status } }),
+
+  fieldRules: (qs) => api(`/api/v1/security/field-rules${qs || ""}`),
+  createFieldRule: (body) => api("/api/v1/security/field-rules", { method: "POST", body }),
+  updateFieldRule: (id, body) => api(`/api/v1/security/field-rules/${id}`, { method: "PUT", body }),
+  setFieldRuleStatus: (id, status) =>
+    api(`/api/v1/security/field-rules/${id}/status`, { method: "POST", body: { status } }),
+
+  maskingRules: (qs) => api(`/api/v1/security/masking-rules${qs || ""}`),
+  createMaskingRule: (body) => api("/api/v1/security/masking-rules", { method: "POST", body }),
+  setMaskingRuleStatus: (id, status) =>
+    api(`/api/v1/security/masking-rules/${id}/status`, { method: "POST", body: { status } }),
+
+  classificationRules: (qs) => api(`/api/v1/security/classification-rules${qs || ""}`),
+  createClassificationRule: (body) => api("/api/v1/security/classification-rules", { method: "POST", body }),
+  setClassificationRuleStatus: (id, status) =>
+    api(`/api/v1/security/classification-rules/${id}/status`, { method: "POST", body: { status } }),
+
+  organizationRules: (qs) => api(`/api/v1/security/organization-rules${qs || ""}`),
+  createOrganizationRule: (body) => api("/api/v1/security/organization-rules", { method: "POST", body }),
+  setOrganizationRuleStatus: (id, status) =>
+    api(`/api/v1/security/organization-rules/${id}/status`, { method: "POST", body: { status } }),
+
+  plantRules: (qs) => api(`/api/v1/security/plant-rules${qs || ""}`),
+  createPlantRule: (body) => api("/api/v1/security/plant-rules", { method: "POST", body }),
+  setPlantRuleStatus: (id, status) =>
+    api(`/api/v1/security/plant-rules/${id}/status`, { method: "POST", body: { status } }),
+
+  decisions: (qs) => api(`/api/v1/security/decisions${qs || ""}`),
+  context: (userId, qs) => api(`/api/v1/security/context/${userId}${qs || ""}`),
+  evaluate: (body) => api("/api/v1/security/evaluate", { method: "POST", body }),
+  evaluateBatch: (body) => api("/api/v1/security/evaluate/batch", { method: "POST", body }),
+};
+
 export const integration = {
   meta: () => api("/api/integration/meta"),
 

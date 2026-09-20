@@ -5746,3 +5746,267 @@ CREATE TABLE IF NOT EXISTS content_events (
 CREATE INDEX IF NOT EXISTS idx_content_events_content ON content_events(content_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_content_events_type ON content_events(event_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_content_events_tenant ON content_events(tenant_id, created_at);
+
+-- ===========================================================================
+-- P0 Data Security & Entitlement Model
+-- A single centralized authorization model: RBAC + object/field/row/organization/
+-- plant/classification security + masking, with an ABAC-ready policy engine.
+-- Business modules register object types here and never implement their own
+-- authorization engine.
+-- ===========================================================================
+
+-- Registration per object type. `enforcement` decides how aggressively the
+-- centralized engine filters rows: tenant isolation always applies.
+CREATE TABLE IF NOT EXISTS security_object_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  enforcement TEXT NOT NULL DEFAULT 'tenant' CHECK (enforcement IN ('tenant', 'entitlement', 'policy')),
+  permission_resource TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_object_types_tenant ON security_object_types(tenant_id, enforcement);
+
+-- Security policies: the ABAC-ready rule container. A policy targets a subject
+-- and an action on an object type, optionally guarded by attribute conditions.
+CREATE TABLE IF NOT EXISTS security_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'general',
+  scope TEXT NOT NULL DEFAULT 'object_type' CHECK (scope IN ('tenant', 'organization', 'plant', 'object_type', 'object', 'classification', 'attribute')),
+  subject_type TEXT NOT NULL DEFAULT 'everyone' CHECK (subject_type IN ('user', 'group', 'role', 'organization', 'everyone')),
+  subject_id INTEGER NOT NULL DEFAULT 0,
+  resource_type TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+  priority INTEGER NOT NULL DEFAULT 100,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'inactive')),
+  version INTEGER NOT NULL DEFAULT 1,
+  condition_json TEXT NOT NULL DEFAULT '',
+  valid_from TEXT,
+  valid_to TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_policies_lookup ON security_policies(tenant_id, status, resource_type, action);
+CREATE INDEX IF NOT EXISTS idx_security_policies_subject ON security_policies(tenant_id, subject_type, subject_id);
+
+-- Normalized rules attached to a policy (conditions, actions, masking actions).
+CREATE TABLE IF NOT EXISTS security_policy_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_id INTEGER NOT NULL REFERENCES security_policies(id) ON DELETE CASCADE,
+  rule_type TEXT NOT NULL DEFAULT 'condition' CHECK (rule_type IN ('condition', 'action', 'masking')),
+  field TEXT NOT NULL DEFAULT '',
+  operator TEXT NOT NULL DEFAULT 'eq',
+  value_json TEXT NOT NULL DEFAULT '',
+  effect TEXT NOT NULL DEFAULT 'allow' CHECK (effect IN ('allow', 'deny')),
+  masking_strategy TEXT NOT NULL DEFAULT '',
+  config_json TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_policy_rules_policy ON security_policy_rules(policy_id, sort_order);
+
+-- Explicit entitlements at object type or single-object granularity.
+CREATE TABLE IF NOT EXISTS security_entitlements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  subject_type TEXT NOT NULL DEFAULT 'everyone' CHECK (subject_type IN ('user', 'group', 'role', 'organization', 'everyone')),
+  subject_id INTEGER NOT NULL DEFAULT 0,
+  resource_type TEXT NOT NULL DEFAULT '',
+  resource_id TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT 'read',
+  effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+  scope TEXT NOT NULL DEFAULT 'object_type' CHECK (scope IN ('tenant', 'organization', 'plant', 'object_type', 'object', 'classification', 'attribute')),
+  classification TEXT NOT NULL DEFAULT '',
+  priority INTEGER NOT NULL DEFAULT 100,
+  condition_json TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  valid_from TEXT,
+  valid_to TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, subject_type, subject_id, resource_type, resource_id, action, scope, effect)
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_entitlements_lookup ON security_entitlements(tenant_id, status, resource_type, action);
+CREATE INDEX IF NOT EXISTS idx_security_entitlements_subject ON security_entitlements(tenant_id, subject_type, subject_id);
+
+-- Field level security. Effects: allow (default), deny (never visible),
+-- mask (visible but transformed), hide (removed from the payload).
+CREATE TABLE IF NOT EXISTS security_field_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  field_name TEXT NOT NULL,
+  action TEXT NOT NULL DEFAULT 'read',
+  subject_type TEXT NOT NULL DEFAULT 'everyone' CHECK (subject_type IN ('user', 'group', 'role', 'organization', 'everyone')),
+  subject_id INTEGER NOT NULL DEFAULT 0,
+  effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny', 'mask', 'hide')),
+  masking_strategy TEXT NOT NULL DEFAULT '',
+  masking_config_json TEXT NOT NULL DEFAULT '',
+  classification TEXT NOT NULL DEFAULT '',
+  priority INTEGER NOT NULL DEFAULT 100,
+  condition_json TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type, field_name, action, subject_type, subject_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_field_rules_lookup ON security_field_rules(tenant_id, object_type, field_name, action);
+
+-- Classification security. Rules are matched by classification (public,
+-- internal, confidential, restricted) and can be scoped to an object type.
+CREATE TABLE IF NOT EXISTS security_classification_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  classification TEXT NOT NULL,
+  subject_type TEXT NOT NULL DEFAULT 'everyone' CHECK (subject_type IN ('user', 'group', 'role', 'organization', 'everyone')),
+  subject_id INTEGER NOT NULL DEFAULT 0,
+  action TEXT NOT NULL DEFAULT 'read',
+  resource_type TEXT NOT NULL DEFAULT '',
+  effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+  priority INTEGER NOT NULL DEFAULT 100,
+  condition_json TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, subject_type, subject_id, classification, action, resource_type, effect)
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_classification_rules_lookup ON security_classification_rules(tenant_id, classification, action);
+
+-- Organization scoped security (own / descendants / specific / cross).
+CREATE TABLE IF NOT EXISTS security_organization_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  subject_type TEXT NOT NULL DEFAULT 'everyone' CHECK (subject_type IN ('user', 'group', 'role', 'organization', 'everyone')),
+  subject_id INTEGER NOT NULL DEFAULT 0,
+  resource_type TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT 'read',
+  organization_id INTEGER NOT NULL REFERENCES organizations(id),
+  scope_mode TEXT NOT NULL DEFAULT 'self_and_descendants' CHECK (scope_mode IN ('own', 'self_and_descendants', 'specific', 'include_descendants', 'cross')),
+  include_descendants INTEGER NOT NULL DEFAULT 1,
+  effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+  priority INTEGER NOT NULL DEFAULT 100,
+  condition_json TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, subject_type, subject_id, resource_type, action, organization_id, effect)
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_org_rules_lookup ON security_organization_rules(tenant_id, resource_type, action);
+
+-- Plant scoped security.
+CREATE TABLE IF NOT EXISTS security_plant_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  subject_type TEXT NOT NULL DEFAULT 'everyone' CHECK (subject_type IN ('user', 'group', 'role', 'organization', 'everyone')),
+  subject_id INTEGER NOT NULL DEFAULT 0,
+  resource_type TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT 'read',
+  plant_id INTEGER NOT NULL REFERENCES organizations(id),
+  include_descendants INTEGER NOT NULL DEFAULT 0,
+  effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+  priority INTEGER NOT NULL DEFAULT 100,
+  condition_json TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, subject_type, subject_id, resource_type, action, plant_id, effect)
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_plant_rules_lookup ON security_plant_rules(tenant_id, resource_type, action);
+
+-- Reusable named masking configurations referenced by field rules / policies.
+CREATE TABLE IF NOT EXISTS security_masking_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL DEFAULT '',
+  field_name TEXT NOT NULL DEFAULT '',
+  classification TEXT NOT NULL DEFAULT '',
+  strategy TEXT NOT NULL CHECK (strategy IN ('HIDE', 'NULL', 'PARTIAL', 'REDACT', 'HASH', 'FIXED_MASK', 'CUSTOM')),
+  config_json TEXT NOT NULL DEFAULT '',
+  priority INTEGER NOT NULL DEFAULT 100,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_masking_rules_lookup ON security_masking_rules(tenant_id, object_type, field_name);
+
+-- Optional decision journal for the authorization debugger and monitoring.
+CREATE TABLE IF NOT EXISTS security_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL DEFAULT 0,
+  user_id INTEGER,
+  subject_type TEXT NOT NULL DEFAULT 'user',
+  subject_id INTEGER NOT NULL DEFAULT 0,
+  action TEXT NOT NULL DEFAULT 'read',
+  resource_type TEXT NOT NULL DEFAULT '',
+  resource_id TEXT NOT NULL DEFAULT '',
+  decision TEXT NOT NULL DEFAULT 'deny',
+  reason TEXT NOT NULL DEFAULT 'DEFAULT_DENY',
+  allowed INTEGER NOT NULL DEFAULT 0,
+  organization_id INTEGER,
+  plant_id INTEGER,
+  classification TEXT NOT NULL DEFAULT '',
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  cached INTEGER NOT NULL DEFAULT 0,
+  correlation_id TEXT NOT NULL DEFAULT '',
+  steps_json TEXT NOT NULL DEFAULT '[]',
+  context_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_decisions_lookup ON security_decisions(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_security_decisions_subject ON security_decisions(tenant_id, user_id, created_at);
+
+-- Cache invalidation epochs. Bumping the epoch invalidates in-process caches
+-- without touching every business module.
+CREATE TABLE IF NOT EXISTS security_cache_epoch (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL DEFAULT 0,
+  scope TEXT NOT NULL DEFAULT 'all',
+  epoch INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, scope)
+);

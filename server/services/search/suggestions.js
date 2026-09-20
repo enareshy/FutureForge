@@ -7,6 +7,8 @@ import { searchableObjectTypes, searchableObjectTypeCodes } from "./registry.js"
 import { normalizeSearchQuery, highlightText } from "./query.js";
 import { listSearchHistory } from "./history.js";
 import { normalizeText } from "./validation.js";
+import { buildSecurityContext } from "../security/context.js";
+import { buildSearchSecurityPredicate } from "../security/row-security.js";
 
 function collectTags(db, where, params, term, limit) {
   const rows = queryAll(
@@ -53,6 +55,18 @@ export function getSuggestions(db, input = {}, actor, options = {}) {
     suggestions.push(item);
   };
 
+  // Row level security applies to suggestions too so denied rows never leak
+  // titles or tags through autocomplete.
+  const securityContext = buildSecurityContext(db, actor, {
+    tenantId,
+    organizationId: actor?.organization_id,
+    correlationId: options.correlationId,
+    ip: options.ip,
+  });
+  const securityPredicate = requestedTypes.length
+    ? buildSearchSecurityPredicate(db, securityContext, requestedTypes, options.action || "read")
+    : { enforced: false, sql: null, params: [] };
+
   for (const entry of listSearchHistory(db, {
     tenantId,
     actorId: actor?.id,
@@ -75,13 +89,19 @@ export function getSuggestions(db, input = {}, actor, options = {}) {
         tenantId,
         scope: "tenant",
         limit,
+        securityPredicate: securityPredicate.enforced ? securityPredicate : null,
       });
       for (const row of rows) {
         push({ text: row.value, type: "title", object_type: row.object_type, count: row.count });
       }
     }
-    const where = "i.tenant_id = ?";
-    for (const tag of collectTags(db, where, [tenantId], term, limit)) push(tag);
+    let where = "i.tenant_id = ?";
+    let whereParams = [tenantId];
+    if (securityPredicate.enforced) {
+      where += ` AND (${securityPredicate.sql})`;
+      whereParams = [...whereParams, ...securityPredicate.params];
+    }
+    for (const tag of collectTags(db, where, whereParams, term, limit)) push(tag);
   }
 
   const items = suggestions.slice(0, limit).map((item) => ({

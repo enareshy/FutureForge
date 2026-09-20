@@ -30,6 +30,8 @@ import * as lifecycle from "./services/lifecycle.js";
 import * as workflow from "./services/workflow.js";
 import * as files from "./services/files.js";
 import * as search from "./services/search.js";
+import * as security from "./services/security/admin.js";
+import { ensureSecurityFoundation } from "./services/security/foundation.js";
 import * as integration from "./services/integration.js";
 import * as events from "./services/events.js";
 import * as numbering from "./services/numbering.js";
@@ -150,6 +152,11 @@ export function createApp(db) {
     content.ensureContentFoundation(db);
   } catch {
     /* content foundation is idempotent and must never block application boot */
+  }
+  try {
+    ensureSecurityFoundation(db);
+  } catch {
+    /* security foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -7191,6 +7198,415 @@ export function createApp(db) {
     wrap((req, res) => {
       res.json(search.getMetrics(db, req.actor, { tenantId: v1SearchTenant(req) }));
     })
+  );
+
+  // ── Data Security & Entitlement Model (versioned API, /api/v1/security) ───
+  // Centralized RBAC + object/field/row/organization/plant/classification
+  // security + masking with an ABAC-ready policy engine.
+  const securityTenant = (req) => req.tenantId ?? req.actor?.tenant_id ?? 0;
+
+  app.get(
+    "/api/v1/security/vocabulary",
+    auth,
+    can("iam.security.console", "read"),
+    wrap((_req, res) => res.json(security.securityVocabulary()))
+  );
+
+  app.get(
+    "/api/v1/security/overview",
+    auth,
+    can("iam.security.console", "read"),
+    wrap((req, res) => res.json(security.securityOverview(db, securityTenant(req))))
+  );
+
+  app.post(
+    "/api/v1/security/cache/invalidate",
+    auth,
+    can("iam.security.console", "execute"),
+    wrap((req, res) => {
+      security.invalidateSecurity(db, securityTenant(req), req.body?.scope || "all");
+      res.json({ ok: true });
+    })
+  );
+
+  // Object type registration
+  app.get(
+    "/api/v1/security/object-types",
+    auth,
+    can("iam.security.objecttypes", "read"),
+    wrap((req, res) => res.json(security.listSecurityObjectTypes(db, securityTenant(req), req.query || {})))
+  );
+  app.post(
+    "/api/v1/security/object-types",
+    auth,
+    can("iam.security.objecttypes", "create"),
+    wrap((req, res) =>
+      res
+        .status(201)
+        .json(security.registerSecurityObjectType(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    )
+  );
+  app.put(
+    "/api/v1/security/object-types/:objectType",
+    auth,
+    can("iam.security.objecttypes", "update"),
+    wrap((req, res) =>
+      res.json(
+        security.updateSecurityObjectType(
+          db,
+          securityTenant(req),
+          req.params.objectType,
+          req.body || {},
+          req.actor,
+          clientIp(req)
+        )
+      )
+    )
+  );
+  app.post(
+    "/api/v1/security/object-types/:objectType/status",
+    auth,
+    can("iam.security.objecttypes", "update"),
+    wrap((req, res) =>
+      res.json(
+        security.setSecurityObjectTypeStatus(
+          db,
+          securityTenant(req),
+          req.params.objectType,
+          req.body?.status,
+          req.actor,
+          clientIp(req)
+        )
+      )
+    )
+  );
+
+  // Policies
+  app.get(
+    "/api/v1/security/policies",
+    auth,
+    can("iam.security.policies", "read"),
+    wrap((req, res) => res.json(security.listSecurityPolicies(db, securityTenant(req), req.query || {})))
+  );
+  app.get(
+    "/api/v1/security/policies/:id",
+    auth,
+    can("iam.security.policies", "read"),
+    wrap((req, res) => res.json(security.getSecurityPolicy(db, securityTenant(req), req.params.id)))
+  );
+  app.post(
+    "/api/v1/security/policies",
+    auth,
+    can("iam.security.policies", "create"),
+    wrap((req, res) =>
+      res.status(201).json(security.createSecurityPolicy(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    )
+  );
+  app.put(
+    "/api/v1/security/policies/:id",
+    auth,
+    can("iam.security.policies", "update"),
+    wrap((req, res) =>
+      res.json(security.updateSecurityPolicy(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
+    )
+  );
+  app.post(
+    "/api/v1/security/policies/:id/status",
+    auth,
+    can("iam.security.policies", "update"),
+    wrap((req, res) =>
+      res.json(security.setSecurityPolicyStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
+    )
+  );
+
+  // Entitlements
+  app.get(
+    "/api/v1/security/entitlements",
+    auth,
+    can("iam.security.entitlements", "read"),
+    wrap((req, res) => res.json(security.listSecurityEntitlements(db, securityTenant(req), req.query || {})))
+  );
+  app.post(
+    "/api/v1/security/entitlements",
+    auth,
+    can("iam.security.entitlements", "create"),
+    wrap((req, res) =>
+      res.status(201).json(security.createSecurityEntitlement(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    )
+  );
+  app.put(
+    "/api/v1/security/entitlements/:id",
+    auth,
+    can("iam.security.entitlements", "update"),
+    wrap((req, res) =>
+      res.json(security.updateSecurityEntitlement(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
+    )
+  );
+  app.post(
+    "/api/v1/security/entitlements/:id/status",
+    auth,
+    can("iam.security.entitlements", "update"),
+    wrap((req, res) =>
+      res.json(security.setSecurityEntitlementStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
+    )
+  );
+
+  // Field security & masking
+  app.get(
+    "/api/v1/security/field-rules",
+    auth,
+    can("iam.security.fields", "read"),
+    wrap((req, res) => res.json(security.listSecurityFieldRules(db, securityTenant(req), req.query || {})))
+  );
+  app.post(
+    "/api/v1/security/field-rules",
+    auth,
+    can("iam.security.fields", "create"),
+    wrap((req, res) =>
+      res.status(201).json(security.createSecurityFieldRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    )
+  );
+  app.put(
+    "/api/v1/security/field-rules/:id",
+    auth,
+    can("iam.security.fields", "update"),
+    wrap((req, res) =>
+      res.json(security.updateSecurityFieldRule(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
+    )
+  );
+  app.post(
+    "/api/v1/security/field-rules/:id/status",
+    auth,
+    can("iam.security.fields", "update"),
+    wrap((req, res) =>
+      res.json(security.setSecurityFieldRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
+    )
+  );
+  app.get(
+    "/api/v1/security/masking-rules",
+    auth,
+    can("iam.security.fields", "read"),
+    wrap((req, res) => res.json(security.listSecurityMaskingRules(db, securityTenant(req), req.query || {})))
+  );
+  app.post(
+    "/api/v1/security/masking-rules",
+    auth,
+    can("iam.security.fields", "create"),
+    wrap((req, res) =>
+      res.status(201).json(security.createSecurityMaskingRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    )
+  );
+  app.post(
+    "/api/v1/security/masking-rules/:id/status",
+    auth,
+    can("iam.security.fields", "update"),
+    wrap((req, res) =>
+      res.json(security.setSecurityMaskingRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
+    )
+  );
+
+  // Classification security
+  app.get(
+    "/api/v1/security/classification-rules",
+    auth,
+    can("iam.security.classifications", "read"),
+    wrap((req, res) => res.json(security.listSecurityClassificationRules(db, securityTenant(req), req.query || {})))
+  );
+  app.post(
+    "/api/v1/security/classification-rules",
+    auth,
+    can("iam.security.classifications", "create"),
+    wrap((req, res) =>
+      res
+        .status(201)
+        .json(security.createSecurityClassificationRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    )
+  );
+  app.post(
+    "/api/v1/security/classification-rules/:id/status",
+    auth,
+    can("iam.security.classifications", "update"),
+    wrap((req, res) =>
+      res.json(
+        security.setSecurityClassificationRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req))
+      )
+    )
+  );
+
+  // Organization & plant security
+  app.get(
+    "/api/v1/security/organization-rules",
+    auth,
+    can("iam.security.organizations", "read"),
+    wrap((req, res) => res.json(security.listSecurityOrganizationRules(db, securityTenant(req), req.query || {})))
+  );
+  app.post(
+    "/api/v1/security/organization-rules",
+    auth,
+    can("iam.security.organizations", "create"),
+    wrap((req, res) =>
+      res
+        .status(201)
+        .json(security.createSecurityOrganizationRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    )
+  );
+  app.post(
+    "/api/v1/security/organization-rules/:id/status",
+    auth,
+    can("iam.security.organizations", "update"),
+    wrap((req, res) =>
+      res.json(
+        security.setSecurityOrganizationRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req))
+      )
+    )
+  );
+  app.get(
+    "/api/v1/security/plant-rules",
+    auth,
+    can("iam.security.organizations", "read"),
+    wrap((req, res) => res.json(security.listSecurityPlantRules(db, securityTenant(req), req.query || {})))
+  );
+  app.post(
+    "/api/v1/security/plant-rules",
+    auth,
+    can("iam.security.organizations", "create"),
+    wrap((req, res) =>
+      res.status(201).json(security.createSecurityPlantRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    )
+  );
+  app.post(
+    "/api/v1/security/plant-rules/:id/status",
+    auth,
+    can("iam.security.organizations", "update"),
+    wrap((req, res) =>
+      res.json(
+        security.setSecurityPlantRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req))
+      )
+    )
+  );
+
+  // Authorization debugger
+  app.get(
+    "/api/v1/security/decisions",
+    auth,
+    can("iam.security.decisions", "read"),
+    wrap((req, res) => res.json(security.listSecurityDecisions(db, securityTenant(req), req.query || {})))
+  );
+  app.get(
+    "/api/v1/security/context/:userId",
+    auth,
+    can("iam.security.decisions", "read"),
+    wrap((req, res) =>
+      res.json(security.effectiveSecurityContext(db, securityTenant(req), req.params.userId, { organizationId: req.query.organization_id }))
+    )
+  );
+  app.post(
+    "/api/v1/security/evaluate",
+    auth,
+    can("iam.security.decisions", "read"),
+    wrap((req, res) =>
+      res.json(security.explainAuthorization(db, req.actor, securityTenant(req), req.body || {}, { ip: clientIp(req), correlationId: req.correlationId }))
+    )
+  );
+  // Batch evaluation reuses the same deterministic engine; order is preserved.
+  app.post(
+    "/api/v1/security/evaluate/batch",
+    auth,
+    can("iam.security.decisions", "read"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const requests = Array.isArray(body.requests) ? body.requests : Array.isArray(body) ? body : [];
+      res.json(
+        security.explainAuthorizationBatch(
+          db,
+          req.actor,
+          securityTenant(req),
+          { requests },
+          { ip: clientIp(req), correlationId: req.correlationId }
+        )
+      );
+    })
+  );
+
+  // Canonical authorization surface (spec §16). Both delegate to the same
+  // centralized engine so there is exactly one decision path.
+  const subjectIdFrom = (body) => {
+    const subject = body?.subject;
+    if (subject && typeof subject === "object") return subject.id ?? subject.user_id ?? subject.userId ?? null;
+    return subject ?? body?.user_id ?? body?.userId ?? null;
+  };
+  const authorizationInput = (body = {}, subjectId) => ({
+    ...body,
+    user_id: subjectId ?? undefined,
+    action: body.action ?? "read",
+    resource_type: body.resource?.type ?? body.resource_type ?? body.object_type,
+    resource_id: body.resource?.id ?? body.resource_id ?? null,
+    organization_id: body.resource?.organizationId ?? body.organization_id,
+    plant_id: body.resource?.plantId ?? body.plant_id,
+    classification: body.resource?.classification ?? body.classification,
+  });
+  app.post(
+    "/api/v1/authorization/check",
+    auth,
+    can("iam.security.decisions", "read"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      res.json(
+        security.explainAuthorization(
+          db,
+          req.actor,
+          securityTenant(req),
+          authorizationInput(body, subjectIdFrom(body)),
+          { ip: clientIp(req), correlationId: req.correlationId }
+        )
+      );
+    })
+  );
+  app.post(
+    "/api/v1/authorization/batch-check",
+    auth,
+    can("iam.security.decisions", "read"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      const requests = (Array.isArray(body.requests) ? body.requests : []).map((request) =>
+        authorizationInput(request, subjectIdFrom(request))
+      );
+      res.json(
+        security.explainAuthorizationBatch(
+          db,
+          req.actor,
+          securityTenant(req),
+          { requests },
+          { ip: clientIp(req), correlationId: req.correlationId }
+        )
+      );
+    })
+  );
+
+  // Canonical entitlement aliases (spec §16) backed by the same service.
+  app.get(
+    "/api/v1/entitlements",
+    auth,
+    can("iam.security.entitlements", "read"),
+    wrap((req, res) => res.json(security.listSecurityEntitlements(db, securityTenant(req), req.query || {})))
+  );
+  app.post(
+    "/api/v1/entitlements",
+    auth,
+    can("iam.security.entitlements", "create"),
+    wrap((req, res) =>
+      res
+        .status(201)
+        .json(security.createSecurityEntitlement(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    )
+  );
+  app.put(
+    "/api/v1/entitlements/:id",
+    auth,
+    can("iam.security.entitlements", "update"),
+    wrap((req, res) =>
+      res.json(security.updateSecurityEntitlement(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
+    )
   );
 
   // ── Integration & API Framework ───────────────────────────────────────────

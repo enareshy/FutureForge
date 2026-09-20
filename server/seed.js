@@ -868,6 +868,15 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.search.indexes", name: "Search index administration", parentCode: "iam.search" },
     { applicationCode: "iam", code: "iam.search.configuration", name: "Search configuration", parentCode: "iam.search" },
     { applicationCode: "iam", code: "iam.search.export", name: "Search result exports", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.security", name: "Data security & entitlements", kind: "module" },
+    { applicationCode: "iam", code: "iam.security.console", name: "Security console & overview", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.policies", name: "Security policy administration", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.entitlements", name: "Entitlement administration", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.fields", name: "Field security & masking", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.classifications", name: "Classification security", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.organizations", name: "Organization & plant security", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.objecttypes", name: "Security object type registration", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.decisions", name: "Authorization decision inspector", parentCode: "iam.security" },
     { applicationCode: "iam", code: "iam.integration", name: "Integration & API framework", kind: "module" },
     { applicationCode: "iam", code: "iam.integration.systems", name: "External systems & credentials", parentCode: "iam.integration" },
     { applicationCode: "iam", code: "iam.integration.endpoints", name: "Integration endpoints", parentCode: "iam.integration" },
@@ -1055,6 +1064,16 @@ function seedMissingCatalog(db) {
     "iam.search.configuration",
     "iam.search.export",
   ];
+  const securityResourceCodes = [
+    "iam.security.console",
+    "iam.security.policies",
+    "iam.security.entitlements",
+    "iam.security.fields",
+    "iam.security.classifications",
+    "iam.security.organizations",
+    "iam.security.objecttypes",
+    "iam.security.decisions",
+  ];
   const integrationResourceCodes = [
     "iam.integration",
     "iam.integration.systems",
@@ -1140,7 +1159,7 @@ function seedMissingCatalog(db) {
     "iam.content.retention",
     "iam.content.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes]) {
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);

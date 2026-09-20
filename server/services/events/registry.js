@@ -60,6 +60,7 @@ export const SYSTEM_EVENT_TYPES = [
   { code: "UserCreated", category: "user", source_module: "iam", description: "A user account was created." },
   { code: "UserUpdated", category: "user", source_module: "iam", description: "A user account was updated." },
   { code: "SecurityAccessDenied", category: "security", source_module: "iam", description: "An access attempt was denied.", security_classification: "confidential", replay_policy: "denied" },
+  { code: "SecurityPolicyChanged", category: "security", source_module: "iam", description: "A security policy, entitlement or rule changed.", security_classification: "confidential" },
   { code: "IntegrationExecutionCompleted", category: "integration", source_module: "integration", description: "An integration execution completed." },
   { code: "AnalyticsMetricRecorded", category: "analytics", source_module: "analytics", description: "An analytics metric was recorded." },
 ];

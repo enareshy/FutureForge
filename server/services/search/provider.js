@@ -235,7 +235,7 @@ function compileRelatedTo(rel, state) {
   return `EXISTS (${sql})`;
 }
 
-export function compileWhere(query, { allowedTypes, tenantId, scope, organizationIds } = {}) {
+export function compileWhere(query, { allowedTypes, tenantId, scope, organizationIds, securityPredicate } = {}) {
   const state = { params: [], count: 0, tenantId };
   const clauses = [];
 
@@ -254,6 +254,13 @@ export function compileWhere(query, { allowedTypes, tenantId, scope, organizatio
       clauses.push(`i.organization_id IN (${ids.map(() => "?").join(", ")})`);
       state.params.push(...ids.map(Number));
     }
+  }
+
+  // Centralized data-security row predicate. Applied at the data layer so
+  // unauthorized rows never influence counts, facets or pagination.
+  if (securityPredicate && securityPredicate.sql) {
+    clauses.push(securityPredicate.sql);
+    state.params.push(...(securityPredicate.params || []));
   }
 
   if (Array.isArray(allowedTypes)) {

@@ -12,6 +12,7 @@ import AuditPage from "./pages/AuditPage.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
 import PermissionsPage from "./pages/PermissionsPage.jsx";
 import AuthorizationPage from "./pages/AuthorizationPage.jsx";
+import SecurityModelPage from "./pages/SecurityModelPage.jsx";
 import OrganizationsPage from "./pages/OrganizationsPage.jsx";
 import OrganizationDetailPage from "./pages/OrganizationDetailPage.jsx";
 import PlatformPage from "./pages/PlatformPage.jsx";
@@ -179,6 +180,7 @@ const PLATFORM_GROUPS = [
       { to: "/roles", label: "Roles" },
       { to: "/permissions", label: "Permissions" },
       { to: "/authorization", label: "Authorization" },
+      { to: "/security", label: "Data security", platformOrAdmin: true },
     ],
   },
   {
@@ -494,6 +496,7 @@ export default function App() {
         <Route path="/roles/:id" element={<RoleDetailPage />} />
         <Route path="/permissions" element={<PermissionsPage />} />
         <Route path="/authorization" element={<AuthorizationPage />} />
+        <Route path="/security" element={<SecurityModelPage />} />
         <Route path="/policy" element={<PolicyPage />} />
         <Route path="/authentication" element={<AuthenticationPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
