@@ -206,6 +206,46 @@ export function migrate(db) {
   db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("025_content_management");
+  // Search Foundation (canonical model): explicit field definitions, provider
+  // configuration and richer searchable-object metadata. Additive only.
+  for (const [column, ddl] of [
+    ["index_name", "index_name TEXT NOT NULL DEFAULT ''"],
+    ["identifier_field", "identifier_field TEXT NOT NULL DEFAULT 'id'"],
+    ["searchable_fields_json", "searchable_fields_json TEXT NOT NULL DEFAULT '[]'"],
+    ["sortable_fields_json", "sortable_fields_json TEXT NOT NULL DEFAULT '[]'"],
+    ["facetable_fields_json", "facetable_fields_json TEXT NOT NULL DEFAULT '[]'"],
+    ["display_fields_json", "display_fields_json TEXT NOT NULL DEFAULT '[]'"],
+    ["relationship_fields_json", "relationship_fields_json TEXT NOT NULL DEFAULT '[]'"],
+    ["security_policy", "security_policy TEXT NOT NULL DEFAULT 'tenant'"],
+    ["indexing_strategy", "indexing_strategy TEXT NOT NULL DEFAULT 'event'"],
+  ]) {
+    ensureColumn(db, "search_object_types", column, ddl);
+  }
+  ensureColumn(db, "search_index", "site_id", "site_id INTEGER REFERENCES organizations(id)");
+  ensureColumn(db, "search_index", "external_reference", "external_reference TEXT NOT NULL DEFAULT ''");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_search_index_site ON search_index(tenant_id, site_id)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_search_index_external ON search_index(tenant_id, external_reference)");
+  db.exec(`CREATE TABLE IF NOT EXISTS search_extracted_text (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    content_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'content',
+    language TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '',
+    text_length INTEGER NOT NULL DEFAULT 0,
+    checksum TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, object_type, object_id, content_id)
+  )`);
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_search_extracted_object ON search_extracted_text(tenant_id, object_type, object_id)"
+  );
+  db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("026_search_foundation");
   db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();

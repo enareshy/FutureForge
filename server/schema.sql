@@ -2864,6 +2864,15 @@ CREATE TABLE IF NOT EXISTS search_object_types (
   facet_attributes_json TEXT NOT NULL DEFAULT '[]',
   filter_attributes_json TEXT NOT NULL DEFAULT '[]',
   relationship_types_json TEXT NOT NULL DEFAULT '[]',
+  index_name TEXT NOT NULL DEFAULT '',
+  identifier_field TEXT NOT NULL DEFAULT 'id',
+  searchable_fields_json TEXT NOT NULL DEFAULT '[]',
+  sortable_fields_json TEXT NOT NULL DEFAULT '[]',
+  facetable_fields_json TEXT NOT NULL DEFAULT '[]',
+  display_fields_json TEXT NOT NULL DEFAULT '[]',
+  relationship_fields_json TEXT NOT NULL DEFAULT '[]',
+  security_policy TEXT NOT NULL DEFAULT 'tenant',
+  indexing_strategy TEXT NOT NULL DEFAULT 'event',
   permission_resource TEXT NOT NULL DEFAULT '',
   permission_action TEXT NOT NULL DEFAULT 'read',
   sensitivity TEXT NOT NULL DEFAULT 'internal' CHECK (sensitivity IN ('public', 'internal', 'confidential', 'restricted')),
@@ -2877,11 +2886,57 @@ CREATE TABLE IF NOT EXISTS search_object_types (
 
 CREATE INDEX IF NOT EXISTS idx_search_object_types_tenant ON search_object_types(tenant_id, status, display_order);
 
+-- Explicit per-object-type field definitions. Fields are never indexed by
+-- default: administrators/module owners opt each field in and declare how it
+-- may be searched, filtered, sorted and faceted. Provider-agnostic metadata.
+CREATE TABLE IF NOT EXISTS search_field_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  field TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  data_type TEXT NOT NULL DEFAULT 'string'
+    CHECK (data_type IN ('string', 'text', 'number', 'boolean', 'date', 'datetime', 'enum', 'reference', 'array', 'object')),
+  searchable INTEGER NOT NULL DEFAULT 1,
+  filterable INTEGER NOT NULL DEFAULT 0,
+  sortable INTEGER NOT NULL DEFAULT 0,
+  facetable INTEGER NOT NULL DEFAULT 0,
+  full_text INTEGER NOT NULL DEFAULT 0,
+  exact_match INTEGER NOT NULL DEFAULT 1,
+  wildcard INTEGER NOT NULL DEFAULT 1,
+  boost REAL NOT NULL DEFAULT 1,
+  analyzer TEXT NOT NULL DEFAULT 'standard',
+  security_sensitive INTEGER NOT NULL DEFAULT 0,
+  indexed INTEGER NOT NULL DEFAULT 1,
+  display_order INTEGER NOT NULL DEFAULT 100,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type, field)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_field_defs_type ON search_field_definitions(tenant_id, object_type, display_order);
+
+-- Per-tenant search provider selection. Business modules never choose a
+-- provider; they call the Search API and the configured provider is resolved
+-- transparently. Migrating SQLite -> OpenSearch is a configuration change.
+CREATE TABLE IF NOT EXISTS search_provider_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL UNIQUE REFERENCES organizations(id),
+  provider TEXT NOT NULL DEFAULT 'sqlite',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  index_name TEXT NOT NULL DEFAULT 'enterprise',
+  settings_json TEXT NOT NULL DEFAULT '{}',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Denormalised search index documents. One row per indexed object per tenant.
 CREATE TABLE IF NOT EXISTS search_index (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tenant_id INTEGER NOT NULL REFERENCES organizations(id),
   organization_id INTEGER REFERENCES organizations(id),
+  site_id INTEGER REFERENCES organizations(id),
   object_type TEXT NOT NULL,
   object_id TEXT NOT NULL,
   object_uuid TEXT,
@@ -2890,6 +2945,7 @@ CREATE TABLE IF NOT EXISTS search_index (
   subtitle TEXT NOT NULL DEFAULT '',
   summary TEXT NOT NULL DEFAULT '',
   searchable_text TEXT NOT NULL DEFAULT '',
+  external_reference TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'active',
   lifecycle_state TEXT NOT NULL DEFAULT '',
   owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -2940,6 +2996,30 @@ CREATE TABLE IF NOT EXISTS search_index_status (
 
 CREATE INDEX IF NOT EXISTS idx_search_index_status_pending ON search_index_status(status, available_at);
 CREATE INDEX IF NOT EXISTS idx_search_index_status_tenant ON search_index_status(tenant_id, status, updated_at);
+
+-- Extracted, indexable text for content-backed objects. Binary payloads never
+-- enter the search index: the File & Content Management service (or a
+-- registered text extractor) pushes plain text here through an integration
+-- contract, and indexing merges it into the document's searchable text.
+CREATE TABLE IF NOT EXISTS search_extracted_text (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  content_id TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'content',
+  language TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL DEFAULT '',
+  text_length INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type, object_id, content_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_extracted_object
+  ON search_extracted_text(tenant_id, object_type, object_id);
+
 
 -- Saved searches (personal and shared).
 CREATE TABLE IF NOT EXISTS search_saved_searches (

@@ -6785,6 +6785,414 @@ export function createApp(db) {
     })
   );
 
+  // ── Search & Discovery (versioned canonical API, /api/v1/search) ──────────
+  // Provider-independent Enterprise Search Foundation surface. The canonical
+  // contract never exposes SQLite/provider syntax to callers.
+  const v1SearchTenant = (req) => searchTenant(req);
+  const v1SearchInput = (req) => (req.method === "GET" ? { ...req.query } : { ...(req.body || {}) });
+
+  app.get(
+    "/api/v1/search/meta",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.getMeta(db, req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
+  app.post(
+    "/api/v1/search",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.searchObjects(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
+  app.post(
+    "/api/v1/search/parse",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.parseQuery(req.body || {}));
+    })
+  );
+
+  app.post(
+    "/api/v1/search/count",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.countObjects(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
+  app.post(
+    "/api/v1/search/bulk",
+    auth,
+    can("iam.search.advanced", "read"),
+    wrap((req, res) => {
+      res.json(search.bulkSearch(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/v1/search/objects",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(
+        search.listSearchObjects(db, req.actor, {
+          tenantId: v1SearchTenant(req),
+          includeDisabled: req.query.include_disabled === "true",
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/v1/search/objects/:objectType",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.getSearchObject(db, req.params.objectType, req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/v1/search/facets",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.getObjectFacets(db, v1SearchInput(req), req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/v1/search/suggestions",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(search.getObjectSuggestions(db, v1SearchInput(req), req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/v1/search/history",
+    auth,
+    can("iam.search.history", "read"),
+    wrap((req, res) => {
+      res.json(
+        search.getHistory(db, req.actor, {
+          tenantId: v1SearchTenant(req),
+          limit: req.query.limit,
+          q: req.query.q,
+        })
+      );
+    })
+  );
+
+  app.delete(
+    "/api/v1/search/history",
+    auth,
+    can("iam.search.history", "delete"),
+    wrap((req, res) => {
+      res.json(
+        search.clearHistory(db, req.actor, {
+          tenantId: v1SearchTenant(req),
+          all: req.query.all === "true",
+        })
+      );
+    })
+  );
+
+  app.delete(
+    "/api/v1/search/history/:id",
+    auth,
+    can("iam.search.history", "delete"),
+    wrap((req, res) => {
+      res.json(search.removeHistoryEntry(db, req.params.id, req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
+  app.get(
+    "/api/v1/search/saved",
+    auth,
+    can("iam.search.saved", "read"),
+    wrap((req, res) => {
+      res.json(
+        search.listSaved(db, req.actor, {
+          tenantId: v1SearchTenant(req),
+          includeShared: req.query.include_shared !== "false",
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/v1/search/saved",
+    auth,
+    can("iam.search.saved", "create"),
+    wrap((req, res) => {
+      res.status(201).json(
+        search.createSaved(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req), ip: clientIp(req) })
+      );
+    })
+  );
+
+  app.get(
+    "/api/v1/search/saved/:reference",
+    auth,
+    can("iam.search.saved", "read"),
+    wrap((req, res) => {
+      res.json(search.getSaved(db, req.params.reference, req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
+  app.put(
+    "/api/v1/search/saved/:reference",
+    auth,
+    can("iam.search.saved", "update"),
+    wrap((req, res) => {
+      res.json(
+        search.updateSaved(db, req.params.reference, req.body || {}, req.actor, {
+          tenantId: v1SearchTenant(req),
+          ip: clientIp(req),
+        })
+      );
+    })
+  );
+
+  app.delete(
+    "/api/v1/search/saved/:reference",
+    auth,
+    can("iam.search.saved", "delete"),
+    wrap((req, res) => {
+      res.json(
+        search.removeSaved(db, req.params.reference, req.actor, {
+          tenantId: v1SearchTenant(req),
+          ip: clientIp(req),
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/v1/search/saved/:reference/execute",
+    auth,
+    can("iam.search.saved", "read"),
+    wrap((req, res) => {
+      res.json(
+        search.runSaved(db, req.params.reference, req.body || {}, req.actor, {
+          tenantId: v1SearchTenant(req),
+          ip: clientIp(req),
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/v1/search/index",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      res.json(
+        search.indexDocuments(db, req.body || {}, req.actor, {
+          tenantId: v1SearchTenant(req),
+          ip: clientIp(req),
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/v1/search/index/rebuild",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      const body = req.body || {};
+      if (body.async === true) {
+        const job = jobs.submitJob(
+          db,
+          {
+            job_type_code: "SEARCH_REINDEX",
+            name: "Rebuild search index",
+            tenant_id: v1SearchTenant(req),
+            input: {
+              tenant_id: v1SearchTenant(req),
+              scope: body.scope,
+              object_type: body.object_type || body.objectType,
+              object_id: body.object_id || body.objectId,
+              organization_id: body.organization_id || body.organizationId,
+              limit: body.limit,
+            },
+            source_module: "search",
+          },
+          { actor: req.actor, ip: clientIp(req) }
+        );
+        return res.status(202).json({ queued: true, job_ref: job.job_ref, job });
+      }
+      res.json(
+        search.rebuildIndex(db, body, req.actor, {
+          tenantId: v1SearchTenant(req),
+          ip: clientIp(req),
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/v1/search/index/status",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((req, res) => {
+      res.json(
+        search.getIndexStatus(db, req.actor, {
+          tenantId: v1SearchTenant(req),
+          limit: req.query.limit,
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/v1/search/index/jobs",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((req, res) => {
+      res.json(
+        jobs.listJobs(
+          db,
+          { job_type_code: "SEARCH_REINDEX", status: req.query.status, limit: req.query.limit },
+          v1SearchTenant(req)
+        )
+      );
+    })
+  );
+
+  app.post(
+    "/api/v1/search/index/retry-failed",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      res.json(
+        search.retryFailedIndexing(db, req.actor, {
+          tenantId: v1SearchTenant(req),
+          includeDeadLetter: req.body?.include_dead_letter === true,
+          ip: clientIp(req),
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/v1/search/fields",
+    auth,
+    can("iam.search.configuration", "read"),
+    wrap((req, res) => {
+      res.json(
+        search.listFields(db, req.actor, {
+          tenantId: v1SearchTenant(req),
+          objectType: req.query.object_type || req.query.objectType,
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/v1/search/fields",
+    auth,
+    can("iam.search.configuration", "update"),
+    wrap((req, res) => {
+      res
+        .status(201)
+        .json(
+          search.createField(db, req.body || {}, req.actor, {
+            tenantId: v1SearchTenant(req),
+            ip: clientIp(req),
+          })
+        );
+    })
+  );
+
+  app.delete(
+    "/api/v1/search/fields/:objectType/:field",
+    auth,
+    can("iam.search.configuration", "update"),
+    wrap((req, res) => {
+      res.json(
+        search.removeField(db, req.params.objectType, req.params.field, req.actor, {
+          tenantId: v1SearchTenant(req),
+          ip: clientIp(req),
+        })
+      );
+    })
+  );
+
+  app.post(
+    "/api/v1/search/content-text",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      res
+        .status(201)
+        .json(
+          search.putObjectExtractedText(db, req.body || {}, req.actor, {
+            tenantId: v1SearchTenant(req),
+            ip: clientIp(req),
+          })
+        );
+    })
+  );
+
+  app.get(
+    "/api/v1/search/content-text",
+    auth,
+    can("iam.search.global", "read"),
+    wrap((req, res) => {
+      res.json(
+        search.getObjectExtractedText(db, req.actor, {
+          tenantId: v1SearchTenant(req),
+          objectType: req.query.object_type || req.query.objectType,
+          objectId: req.query.object_id || req.query.objectId,
+          limit: req.query.limit,
+        })
+      );
+    })
+  );
+
+  app.delete(
+    "/api/v1/search/content-text",
+    auth,
+    can("iam.search.indexes", "execute"),
+    wrap((req, res) => {
+      res.json(
+        search.removeObjectExtractedText(db, req.body || {}, req.actor, {
+          tenantId: v1SearchTenant(req),
+          ip: clientIp(req),
+        })
+      );
+    })
+  );
+
+  app.get(
+    "/api/v1/search/health",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((_req, res) => {
+      res.json(search.getHealth(db));
+    })
+  );
+
+  app.get(
+    "/api/v1/search/metrics",
+    auth,
+    can("iam.search.indexes", "read"),
+    wrap((req, res) => {
+      res.json(search.getMetrics(db, req.actor, { tenantId: v1SearchTenant(req) }));
+    })
+  );
+
   // ── Integration & API Framework ───────────────────────────────────────────
   const integrationTenant = (req) => req.tenantId ?? null;
   const canIntegrations = (action) => can("iam.integration", action);

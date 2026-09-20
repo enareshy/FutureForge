@@ -47,6 +47,7 @@ import FileAdminPage from "./pages/FileAdminPage.jsx";
 import ContentPage from "./pages/ContentPage.jsx";
 import ContentAdminPage from "./pages/ContentAdminPage.jsx";
 import SearchPage from "./pages/SearchPage.jsx";
+import SearchFoundationPage from "./pages/SearchFoundationPage.jsx";
 import SearchAdminPage from "./pages/SearchAdminPage.jsx";
 import IntegrationPage from "./pages/IntegrationPage.jsx";
 import EventsPage from "./pages/EventsPage.jsx";
@@ -217,6 +218,7 @@ const PLATFORM_GROUPS = [
     label: "Search",
     items: [
       { to: "/search", label: "Search & Discovery", end: true },
+      { to: "/search/foundation", label: "Enterprise search" },
       { to: "/search/admin", label: "Search administration", platformOrAdmin: true },
     ],
   },
@@ -516,6 +518,7 @@ export default function App() {
         <Route path="/content" element={<ContentPage />} />
         <Route path="/content/admin" element={<ContentAdminPage />} />
         <Route path="/search" element={<SearchPage />} />
+        <Route path="/search/foundation" element={<SearchFoundationPage />} />
         <Route path="/search/admin" element={<SearchAdminPage />} />
         <Route path="/integration" element={<IntegrationPage />} />
         <Route path="/events" element={<EventsPage />} />

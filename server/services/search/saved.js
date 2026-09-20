@@ -5,7 +5,16 @@ import { HttpError } from "../../validation.js";
 import { writeAudit } from "../audit.js";
 import { publicSavedSearch, savedSearchRow, safeParse } from "./repository.js";
 import { SHARING_SCOPES } from "./validation.js";
+import { SearchError, SEARCH_ERROR_CODES } from "./errors.js";
 import { runSearch } from "./query.js";
+
+function notFound() {
+  return new SearchError(SEARCH_ERROR_CODES.SAVED_SEARCH_NOT_FOUND, "Saved search not found");
+}
+
+function accessDenied(message = "Saved search is not shared with you") {
+  return new SearchError(SEARCH_ERROR_CODES.SAVED_SEARCH_ACCESS_DENIED, message);
+}
 
 function canAccess(row, actor, tenantId) {
   if (!row) return false;
@@ -29,8 +38,8 @@ export function listSavedSearches(db, { tenantId, actorId, includeShared = true 
 
 export function getSavedSearch(db, reference, actor, tenantId) {
   const row = savedSearchRow(db, reference, tenantId);
-  if (!row) throw new HttpError(404, "Saved search not found");
-  if (!canAccess(row, actor, tenantId)) throw new HttpError(403, "Saved search is not shared with you");
+  if (!row) throw notFound();
+  if (!canAccess(row, actor, tenantId)) throw accessDenied();
   return publicSavedSearch(row);
 }
 
@@ -78,9 +87,9 @@ export function createSavedSearch(db, input = {}, actor, tenantId, ip) {
 
 export function updateSavedSearch(db, reference, patch = {}, actor, tenantId, ip) {
   const row = savedSearchRow(db, reference, tenantId);
-  if (!row) throw new HttpError(404, "Saved search not found");
+  if (!row) throw notFound();
   if (row.owner_id !== null && row.owner_id !== actor?.id) {
-    throw new HttpError(403, "Only the owner can modify this saved search");
+    throw accessDenied("Only the owner can modify this saved search");
   }
   const fields = [];
   const params = [];
@@ -123,9 +132,9 @@ export function updateSavedSearch(db, reference, patch = {}, actor, tenantId, ip
 
 export function deleteSavedSearch(db, reference, actor, tenantId, ip) {
   const row = savedSearchRow(db, reference, tenantId);
-  if (!row) throw new HttpError(404, "Saved search not found");
+  if (!row) throw notFound();
   if (row.owner_id !== null && row.owner_id !== actor?.id) {
-    throw new HttpError(403, "Only the owner can delete this saved search");
+    throw accessDenied("Only the owner can delete this saved search");
   }
   run(db, "DELETE FROM search_saved_searches WHERE id = ?", [row.id]);
   writeAudit(db, {
@@ -141,8 +150,8 @@ export function deleteSavedSearch(db, reference, actor, tenantId, ip) {
 
 export function runSavedSearch(db, reference, input = {}, actor, tenantId, ip) {
   const row = savedSearchRow(db, reference, tenantId);
-  if (!row) throw new HttpError(404, "Saved search not found");
-  if (!canAccess(row, actor, tenantId)) throw new HttpError(403, "Saved search is not shared with you");
+  if (!row) throw notFound();
+  if (!canAccess(row, actor, tenantId)) throw accessDenied();
   const savedQuery = safeParse(row.query_json, {});
   const merged = {
     ...savedQuery,

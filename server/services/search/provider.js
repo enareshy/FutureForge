@@ -6,6 +6,7 @@ import { queryAll, queryOne } from "../../db.js";
 import { HttpError } from "../../validation.js";
 import {
   FILTERABLE_COLUMNS,
+  SPECIAL_COLUMNS,
   ATTRIBUTE_PREFIX,
   assertFilterOperator,
   assertConditionOperator,
@@ -14,6 +15,15 @@ import {
   normalizeText,
   tokenize,
 } from "./validation.js";
+import { publicIndexedDocument } from "./repository.js";
+import {
+  applyIndexChange,
+  deleteIndexRow,
+  indexingStatus,
+  reindexTenant,
+  reindexType,
+  upsertIndexRow,
+} from "./indexing.js";
 
 const providers = new Map();
 export const DEFAULT_PROVIDER = "relational";
@@ -39,12 +49,13 @@ export function listSearchProviders() {
   }));
 }
 
-const NUMERIC_COLUMNS = new Set(["owner_id", "organization_id", "tenant_id"]);
+const NUMERIC_COLUMNS = new Set(["owner_id", "organization_id", "tenant_id", "site_id"]);
 
 function columnExpression(field) {
   if (typeof field !== "string" || !field) {
     throw new HttpError(400, "Each filter needs a field");
   }
+  if (SPECIAL_COLUMNS[field]) return SPECIAL_COLUMNS[field];
   if (field.startsWith(ATTRIBUTE_PREFIX)) {
     const name = field.slice(ATTRIBUTE_PREFIX.length);
     if (!/^[A-Za-z0-9_. -]+$/.test(name)) {
@@ -107,6 +118,13 @@ function compileFilter(filter, state) {
       return push(`lower(${expr}) LIKE ?`, [`${normalizeText(value)}%`]);
     case "ends_with":
       return push(`lower(${expr}) LIKE ?`, [`%${normalizeText(value)}`]);
+    case "wildcard": {
+      const pattern = String(value ?? "")
+        .replace(/[%_\\]/g, (ch) => `\\${ch}`)
+        .replace(/\*/g, "%")
+        .replace(/\?/g, "_");
+      return push(`lower(${expr}) LIKE ? ESCAPE '\\'`, [normalizeText(pattern)]);
+    }
     case "in": {
       const list = Array.isArray(value) ? value : [value];
       if (!list.length) return "0 = 1";
@@ -122,6 +140,10 @@ function compileFilter(filter, state) {
       if (list.length !== 2) throw new HttpError(400, "between expects a two-element array");
       return push(`${expr} BETWEEN ? AND ?`, [coerce(list[0]), coerce(list[1])]);
     }
+    case "is_null":
+      return `${expr} IS NULL`;
+    case "is_not_null":
+      return `${expr} IS NOT NULL`;
     case "exists":
       return `(${expr} IS NOT NULL AND ${expr} != '')`;
     case "not_exists":
@@ -147,7 +169,9 @@ function compileCondition(node, state, depth = 0) {
     for (const child of node.conditions) children.push(compileCondition(child, state, depth + 1));
   }
   if (!children.length) return "1 = 1";
-  return `(${children.join(operator === "or" ? " OR " : " AND ")})`;
+  const joined = children.join(operator === "or" ? " OR " : " AND ");
+  if (operator === "not") return `NOT (${joined})`;
+  return `(${joined})`;
 }
 
 function compileTags(tags, state) {
@@ -301,9 +325,98 @@ const SORT_SQL = {
   relevance: "i.updated_at DESC, i.id DESC",
 };
 
+function compileSort(query) {
+  const sorts = Array.isArray(query.sorts) ? query.sorts.filter((entry) => entry?.field) : [];
+  if (!sorts.length) return SORT_SQL[query.sort] || SORT_SQL.relevance;
+  const parts = sorts.map((entry) => {
+    const direction = String(entry.direction).toUpperCase() === "DESC" ? "DESC" : "ASC";
+    return `${columnExpression(entry.field)} ${direction}`;
+  });
+  parts.push("i.id DESC");
+  return parts.join(", ");
+}
+
+// Normalises a canonical index document (camelCase / spec shape) into the
+// internal denormalised document consumed by the index writer.
+export function normalizeIndexDocument(input = {}) {
+  const tenantId = input.tenantId ?? input.tenant_id;
+  const objectType = input.objectType ?? input.object_type;
+  const objectId = input.objectId ?? input.object_id;
+  if (tenantId === undefined || tenantId === null) throw new HttpError(400, "A tenantId is required to index a document");
+  if (!objectType || !objectId) throw new HttpError(400, "objectType and objectId are required to index a document");
+  const attributes = input.attributes && typeof input.attributes === "object" ? input.attributes : {};
+  const tags = Array.isArray(input.tags) ? input.tags : [];
+  const summary = input.description ?? input.summary ?? "";
+  const searchableText =
+    input.searchableText ??
+    input.searchable_text ??
+    [input.code, input.title, input.name, summary, tags.join(" "), JSON.stringify(attributes)]
+      .filter((part) => part !== undefined && part !== null && String(part).trim() !== "")
+      .join(" \n ")
+      .toLowerCase();
+  return {
+    tenantId: Number(tenantId),
+    organizationId: input.organizationId ?? input.organization_id ?? null,
+    siteId: input.siteId ?? input.site_id ?? null,
+    objectType: String(objectType),
+    objectId: String(objectId),
+    objectUuid: input.objectUuid ?? input.object_uuid ?? null,
+    code: input.code || "",
+    title: input.title ?? input.name ?? "",
+    subtitle: input.subtitle || "",
+    summary: String(summary || ""),
+    searchableText,
+    externalReference: input.externalReference ?? input.external_reference ?? input.external_ref ?? "",
+    status: input.status || "active",
+    lifecycleState: input.lifecycleState ?? input.lifecycle_state ?? "",
+    ownerId: input.ownerId ?? input.owner_id ?? null,
+    ownerName: input.ownerName ?? input.owner_name ?? "",
+    classification: input.classification || "internal",
+    tags,
+    attributes,
+    relationships: Array.isArray(input.relationships) ? input.relationships : [],
+    revisions: input.versionId ?? input.revisions ?? "",
+    sourceRevision: input.revisionId ?? input.sourceRevision ?? input.source_revision ?? null,
+    scoreWeight: Number(input.scoreWeight ?? input.score_weight ?? 1),
+  };
+}
+
+export const SEARCH_PROVIDER_METHODS = ["search", "index", "bulkIndex", "update", "delete", "rebuild", "health"];
+
+export function assertSearchProvider(provider, name = "provider") {
+  const missing = SEARCH_PROVIDER_METHODS.filter((method) => typeof provider?.[method] !== "function");
+  if (missing.length) {
+    throw new Error(`Search ${name} is missing required method(s): ${missing.join(", ")}`);
+  }
+  return provider;
+}
+
+function providerIndex(db, document) {
+  const doc = normalizeIndexDocument(document);
+  upsertIndexRow(db, doc);
+  return publicIndexedDocument(indexRowOf(db, doc.tenantId, doc.objectType, doc.objectId));
+}
+
+function indexRowOf(db, tenantId, objectType, objectId) {
+  return queryOne(
+    db,
+    "SELECT * FROM search_index WHERE tenant_id = ? AND object_type = ? AND object_id = ?",
+    [Number(tenantId), String(objectType), String(objectId)]
+  );
+}
+
 export const relationalProvider = {
   name: DEFAULT_PROVIDER,
-  capabilities: { full_text: true, attributes: true, facets: true, relationships: true, highlighting: "client" },
+  capabilities: {
+    full_text: true,
+    attributes: true,
+    facets: true,
+    relationships: true,
+    sorting: true,
+    pagination: true,
+    highlighting: "client",
+    lifecycle: true,
+  },
   search(db, query, context = {}) {
     const compiled = compileWhere(query, context);
     const countRow = queryOne(
@@ -311,7 +424,7 @@ export const relationalProvider = {
       `SELECT COUNT(*) AS total FROM search_index i WHERE ${compiled.where}`,
       compiled.params
     );
-    const orderBy = SORT_SQL[query.sort] || SORT_SQL.relevance;
+    const orderBy = compileSort(query);
     const limit = Math.max(1, Math.min(Number(context.maxResults) || 500, 5000));
     const rows = queryAll(
       db,
@@ -347,7 +460,60 @@ export const relationalProvider = {
     );
     return titles;
   },
+  // Index lifecycle. These methods are what makes the provider replaceable: a
+  // future OpenSearch provider implements the same seven methods.
+  index(db, document) {
+    return providerIndex(db, document);
+  },
+  bulkIndex(db, documents = []) {
+    const items = Array.isArray(documents) ? documents : [];
+    const indexed = [];
+    for (const document of items) indexed.push(providerIndex(db, document));
+    return { indexed: indexed.length, documents: indexed };
+  },
+  update(db, document) {
+    return providerIndex(db, document);
+  },
+  delete(db, reference, context = {}) {
+    if (reference && typeof reference === "object") {
+      const tenantId = reference.tenantId ?? reference.tenant_id;
+      const objectType = reference.objectType ?? reference.object_type;
+      const objectId = reference.objectId ?? reference.object_id;
+      deleteIndexRow(db, Number(tenantId), objectType, objectId);
+      return { deleted: true, objectType, objectId };
+    }
+    const [objectType, objectId] = String(reference).split(":");
+    const tenantId = context.tenantId ?? context.tenant_id;
+    if (!tenantId) throw new HttpError(400, "tenantId is required to delete an indexed document");
+    deleteIndexRow(db, Number(tenantId), objectType, objectId);
+    return { deleted: true, objectType, objectId };
+  },
+  rebuild(db, options = {}) {
+    const tenantId = options.tenantId ?? options.tenant_id;
+    if (!tenantId) throw new HttpError(400, "tenantId is required to rebuild an index");
+    const objectType = options.objectType ?? options.object_type;
+    if (objectType) {
+      return reindexType(db, { tenantId, objectType, limit: options.limit }, options.actor ?? null, options.ip ?? null);
+    }
+    return reindexTenant(db, { tenantId, limit: options.limit }, options.actor ?? null, options.ip ?? null);
+  },
+  health(db, options = {}) {
+    const status = indexingStatus(db, { tenantId: options.tenantId ?? options.tenant_id });
+    return {
+      status: "up",
+      provider: DEFAULT_PROVIDER,
+      capabilities: relationalProvider.capabilities,
+      documents: status.documents_total,
+      queue: status.queue,
+      lastIndexedAt: status.last_indexed_at,
+    };
+  },
 };
+
+// The relational provider is also exposed under the `sqlite` name used by the
+// spec's initial implementation; both names resolve to the same engine.
+registerSearchProvider("sqlite", relationalProvider);
+registerSearchProvider(DEFAULT_PROVIDER, relationalProvider);
 
 const ATTRIBUTE_FACETS = new Set(["tags"]);
 
@@ -392,4 +558,5 @@ function facetForField(db, field, compiled) {
   };
 }
 
-registerSearchProvider(DEFAULT_PROVIDER, relationalProvider);
+export { compileSort, columnExpression };
+

@@ -3,7 +3,7 @@ import { HttpError } from "../../validation.js";
 
 export const SEARCH_SCOPES = ["tenant", "organization", "global"];
 export const SEARCH_STRATEGIES = ["standard", "advanced", "full_text", "attribute", "type", "relationship"];
-export const SEARCH_SORTS = ["relevance", "modified", "created", "title", "type", "owner"];
+export const SEARCH_SORTS = ["relevance", "modified", "created", "title", "type", "owner", "custom"];
 export const OBJECT_TYPE_STATUSES = ["active", "disabled", "draft"];
 export const SENSITIVITIES = ["public", "internal", "confidential", "restricted"];
 export const INDEX_OPERATIONS = ["upsert", "delete"];
@@ -11,7 +11,7 @@ export const QUEUE_STATUSES = ["pending", "processing", "succeeded", "failed", "
 export const EXPORT_FORMATS = ["json", "csv"];
 export const EXPORT_STATUSES = ["pending", "processing", "completed", "failed", "expired"];
 export const SHARING_SCOPES = ["private", "organization", "tenant"];
-export const CONDITION_OPERATORS = ["and", "or"];
+export const CONDITION_OPERATORS = ["and", "or", "not"];
 export const FILTER_OPERATORS = [
   "eq",
   "ne",
@@ -23,15 +23,20 @@ export const FILTER_OPERATORS = [
   "not_contains",
   "starts_with",
   "ends_with",
+  "wildcard",
   "in",
   "not_in",
   "between",
+  "is_null",
+  "is_not_null",
   "exists",
   "not_exists",
 ];
 
 // Index columns a structured filter may target directly. Attribute filters use
 // the reserved `attribute.<name>` prefix and are matched against attributes_json.
+// The pseudo-columns `_text`, `_title`, `_code` target the full-text body and
+// the primary display fields respectively.
 export const FILTERABLE_COLUMNS = [
   "object_type",
   "object_id",
@@ -43,8 +48,20 @@ export const FILTERABLE_COLUMNS = [
   "owner_name",
   "classification",
   "organization_id",
+  "site_id",
   "tenant_id",
+  "external_reference",
+  "created_at",
+  "updated_at",
+  "source_revision",
+  "revisions",
 ];
+
+export const SPECIAL_COLUMNS = {
+  _text: "i.searchable_text",
+  _title: "i.title",
+  _code: "i.code",
+};
 
 export const FACET_FIELDS = [
   "object_type",

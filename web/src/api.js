@@ -842,6 +842,51 @@ export const search = {
   health: () => api("/api/search/health"),
 };
 
+// Enterprise Search Foundation (canonical, provider-independent /api/v1/search).
+export const searchFoundation = {
+  meta: () => api("/api/v1/search/meta"),
+  search: (body) => api("/api/v1/search", { method: "POST", body }),
+  count: (body) => api("/api/v1/search/count", { method: "POST", body }),
+  parse: (body) => api("/api/v1/search/parse", { method: "POST", body }),
+  bulk: (body) => api("/api/v1/search/bulk", { method: "POST", body }),
+
+  objects: (qs) => api(`/api/v1/search/objects${qs || ""}`),
+  object: (code) => api(`/api/v1/search/objects/${encodeURIComponent(code)}`),
+  facets: (qs) => api(`/api/v1/search/facets${qs || ""}`),
+  suggestions: (qs) => api(`/api/v1/search/suggestions${qs || ""}`),
+
+  history: (qs) => api(`/api/v1/search/history${qs || ""}`),
+  clearHistory: (all) => api(`/api/v1/search/history${all ? "?all=true" : ""}`, { method: "DELETE" }),
+  deleteHistory: (id) => api(`/api/v1/search/history/${id}`, { method: "DELETE" }),
+
+  saved: () => api("/api/v1/search/saved"),
+  savedSearch: (reference) => api(`/api/v1/search/saved/${encodeURIComponent(reference)}`),
+  createSaved: (body) => api("/api/v1/search/saved", { method: "POST", body }),
+  updateSaved: (reference, body) =>
+    api(`/api/v1/search/saved/${encodeURIComponent(reference)}`, { method: "PUT", body }),
+  deleteSaved: (reference) => api(`/api/v1/search/saved/${encodeURIComponent(reference)}`, { method: "DELETE" }),
+  runSaved: (reference, body) =>
+    api(`/api/v1/search/saved/${encodeURIComponent(reference)}/execute`, { method: "POST", body: body || {} }),
+
+  index: (body) => api("/api/v1/search/index", { method: "POST", body }),
+  rebuild: (body) => api("/api/v1/search/index/rebuild", { method: "POST", body }),
+  indexStatus: (qs) => api(`/api/v1/search/index/status${qs || ""}`),
+  indexJobs: (qs) => api(`/api/v1/search/index/jobs${qs || ""}`),
+  retryFailed: (body) => api("/api/v1/search/index/retry-failed", { method: "POST", body: body || {} }),
+
+  fields: (qs) => api(`/api/v1/search/fields${qs || ""}`),
+  createField: (body) => api("/api/v1/search/fields", { method: "POST", body }),
+  deleteField: (objectType, field) =>
+    api(`/api/v1/search/fields/${encodeURIComponent(objectType)}/${encodeURIComponent(field)}`, { method: "DELETE" }),
+
+  contentText: (qs) => api(`/api/v1/search/content-text${qs || ""}`),
+  putContentText: (body) => api("/api/v1/search/content-text", { method: "POST", body }),
+  deleteContentText: (body) => api("/api/v1/search/content-text", { method: "DELETE", body }),
+
+  health: () => api("/api/v1/search/health"),
+  metrics: () => api("/api/v1/search/metrics"),
+};
+
 export const integration = {
   meta: () => api("/api/integration/meta"),
 

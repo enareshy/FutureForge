@@ -20,6 +20,88 @@ export * as SearchExportService from "./search/exports.js";
 export * as SearchConfigurationService from "./search/config.js";
 export * as SearchProviderService from "./search/provider.js";
 export * as SearchMetricsService from "./search/metrics.js";
+// Enterprise Search Foundation (canonical, provider-independent layer).
+export * as SearchCanonical from "./search/canonical.js";
+export * as SearchParser from "./search/parser.js";
+export * as SearchFields from "./search/fields.js";
+export * as SearchErrors from "./search/errors.js";
+export * as SearchExtensions from "./search/extensions.js";
+export * as SearchExtractedText from "./search/extracted-text.js";
+export * as SearchV1 from "./search/v1.js";
+export {
+  searchObjects,
+  countObjects,
+  bulkSearch,
+  parseQuery,
+  listSearchObjects,
+  getSearchObject,
+  listFields,
+  createField,
+  removeField,
+  getObjectFacets,
+  getObjectSuggestions,
+  listSaved,
+  getSaved,
+  createSaved,
+  updateSaved,
+  removeSaved,
+  runSaved,
+  getHistory,
+  removeHistoryEntry,
+  clearHistory,
+  indexDocuments,
+  rebuildIndex,
+  getIndexStatus,
+  retryFailedIndexing,
+  putObjectExtractedText,
+  getObjectExtractedText,
+  removeObjectExtractedText,
+  getMetrics,
+  getHealth,
+  getMeta,
+} from "./search/v1.js";
+export {
+  SEARCH_ERROR_CODES,
+  SearchError,
+} from "./search/errors.js";
+export {
+  SEARCH_OPERATORS,
+  SEARCH_EXTENDED_OPERATORS,
+  SEARCH_DATA_TYPES,
+  normalizeCanonicalQuery,
+  toInternalQuery,
+  toCanonicalResult,
+} from "./search/canonical.js";
+export {
+  parseSearchText,
+  parseSearchQuery,
+} from "./search/parser.js";
+export {
+  listFieldDefinitions,
+  upsertFieldDefinition,
+  deleteFieldDefinition,
+  canonicalFieldCatalog,
+  validateCanonicalQuery,
+} from "./search/fields.js";
+export {
+  registerRankingStrategy,
+  getRankingStrategy,
+  listRankingStrategies,
+  registerSemanticSearchProvider,
+  getSemanticSearchProvider,
+  listSemanticSearchProviders,
+  registerEffectivityResolver,
+  getEffectivityResolver,
+  listEffectivityResolvers,
+  applyEffectivity,
+} from "./search/extensions.js";
+export {
+  putExtractedText,
+  listExtractedText,
+  extractedTextFor,
+  deleteExtractedText,
+} from "./search/extracted-text.js";
+export { reindexOrganization } from "./search/indexing.js";
 
 export {
   vocabulary,

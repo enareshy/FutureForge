@@ -33,6 +33,12 @@ import {
   FILTERABLE_COLUMNS,
   ATTRIBUTE_PREFIX,
 } from "./validation.js";
+import { computeFacetsFromDocuments } from "./canonical.js";
+import {
+  applyEffectivity,
+  rankRows,
+  registerRankingStrategy,
+} from "./extensions.js";
 import { recordSearchHistory } from "./history.js";
 
 function firstDefined(...values) {
@@ -40,6 +46,16 @@ function firstDefined(...values) {
     if (value !== undefined && value !== null && value !== "") return value;
   }
   return undefined;
+}
+
+function normalizeSorts(input) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((entry) => entry && typeof entry === "object" && entry.field)
+    .map((entry) => ({
+      field: String(entry.field),
+      direction: String(entry.direction || "ASC").toUpperCase() === "DESC" ? "DESC" : "ASC",
+    }));
 }
 
 export function normalizeSearchQuery(input = {}, context = {}) {
@@ -74,6 +90,9 @@ export function normalizeSearchQuery(input = {}, context = {}) {
     relationship: input.relationship && typeof input.relationship === "object" ? input.relationship : null,
     related_to: input.related_to ?? input.relatedTo ?? null,
     sort,
+    sorts: normalizeSorts(input.sorts ?? input.sort_entries),
+    highlight_terms: normalizeObjectTypes(input.highlight_terms),
+    effectivity: input.effectivity && typeof input.effectivity === "object" ? input.effectivity : null,
     page: clampPage(firstDefined(input.page, 1)),
     page_size: clampPageSize(firstDefined(input.page_size, input.pageSize), Number(config.page_size) || 20),
     highlight: input.highlight === undefined ? config.highlight !== false : Boolean(input.highlight),
@@ -118,6 +137,11 @@ export function scoreDocument(row, terms) {
   const weight = Number(row.score_weight) || 1;
   return score * weight + recencyScore(row.updated_at);
 }
+
+// Default ranking strategies. Alternative strategies can be registered without
+// touching this module or any business module.
+registerRankingStrategy("text", (row, terms) => scoreDocument(row, terms), { replace: true });
+registerRankingStrategy("recency", (row) => recencyScore(row.updated_at), { replace: true });
 
 function escapeHtml(value) {
   return String(value)
@@ -195,7 +219,7 @@ export function runSearch(db, input, actor, options = {}) {
     : availableTypes;
 
   const provider = getSearchProvider(options.provider || DEFAULT_PROVIDER);
-  const terms = tokenize(norm.text);
+  const terms = norm.highlight_terms.length ? norm.highlight_terms : tokenize(norm.text);
   const decisionCache = createDecisionCache();
 
   let rows = [];
@@ -221,12 +245,20 @@ export function runSearch(db, input, actor, options = {}) {
     });
   }
 
-  if (norm.sort === "relevance") {
-    authorized = [...authorized].sort((a, b) => {
-      const diff = scoreDocument(b, terms) - scoreDocument(a, terms);
-      if (diff !== 0) return diff;
-      return String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+  // Effectivity-aware applicability is applied after authorisation so counts,
+  // facets and highlights only ever reflect applicable + authorized objects.
+  if (norm.effectivity) {
+    authorized = applyEffectivity(db, {
+      tenantId,
+      effectivity: norm.effectivity,
+      rows: authorized,
+      objectTypes: allowedTypes,
+      actor,
     });
+  }
+
+  if (norm.sort === "relevance" && !norm.sorts.length) {
+    authorized = rankRows(authorized, terms, { strategy: config.ranking_strategy || "text" });
   }
 
   const maxResults = Number(config.max_results) || 500;
@@ -240,7 +272,7 @@ export function runSearch(db, input, actor, options = {}) {
 
   let facets = null;
   if (norm.include_facets) {
-    facets = getFacetsForQuery(db, provider, norm, {
+    facets = getFacetsForQuery(db, norm, authorized, {
       allowedTypes,
       tenantId,
       scope: norm.scope,
@@ -282,8 +314,8 @@ export function runSearch(db, input, actor, options = {}) {
   };
 }
 
-function getFacetsForQuery(db, provider, norm, context) {
-  const registrations = searchableObjectTypes(db, context.tenantId);
+function resolveFacetFields(db, tenantId, requested) {
+  const registrations = searchableObjectTypes(db, tenantId);
   const configured = new Set();
   for (const reg of registrations) {
     for (const field of reg.facet_attributes || []) configured.add(field);
@@ -297,11 +329,15 @@ function getFacetsForQuery(db, provider, norm, context) {
     "tags",
     ...configured,
   ];
-  const requested = context.requested?.length
-    ? context.requested.filter((field) => available.includes(field))
-    : ["object_type", "status", "classification", "tags"];
-  if (typeof provider.facets !== "function") return null;
-  return provider.facets(db, norm, requested, context);
+  if (requested?.length) return requested.filter((field) => available.includes(field));
+  return ["object_type", "status", "classification", "tags"];
+}
+
+// Facets are computed from the already authorisation-filtered document set so
+// that counts can never reveal objects the caller cannot read.
+function getFacetsForQuery(db, norm, authorizedRows, context) {
+  const fields = resolveFacetFields(db, context.tenantId, context.requested);
+  return computeFacetsFromDocuments(authorizedRows, fields);
 }
 
 export function search(db, input, actor, options = {}) {
@@ -351,24 +387,12 @@ export function searchByRelationship(db, relatedTo, input, actor, options = {}) 
 export function getFacets(db, input, actor, options = {}) {
   const tenantId = Number(options.tenantId ?? actor?.tenant_id ?? 0);
   const config = getConfiguration(db, tenantId);
-  const norm = normalizeSearchQuery(input, { config });
-  const scopeInfo = resolveScope(db, actor, norm.scope, norm.organization_id);
-  norm.scope = scopeInfo.scope;
-  const availableTypes = searchableObjectTypeCodes(db, tenantId);
-  const allowedTypes = norm.object_types.length
-    ? norm.object_types.filter((code) => availableTypes.includes(code))
-    : availableTypes;
-  const provider = getSearchProvider(options.provider || DEFAULT_PROVIDER);
-  if (!allowedTypes.length || typeof provider.facets !== "function") return { facets: [] };
-  return {
-    facets: getFacetsForQuery(db, provider, norm, {
-      allowedTypes,
-      tenantId,
-      scope: norm.scope,
-      organizationIds: scopeInfo.organizationIds,
-      requested: norm.facet_fields,
-    }),
-  };
+  const norm = normalizeSearchQuery({ ...input, include_facets: true }, { config });
+  const result = runSearch(db, { ...norm, include_facets: true }, actor, {
+    ...options,
+    recordHistory: false,
+  });
+  return { facets: result.facets || [] };
 }
 
 export function auditSearch(db, actor, details, ip) {

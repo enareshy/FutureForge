@@ -3,6 +3,7 @@
 // drains the durable change queue with retry / dead-letter handling.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { writeAudit } from "../audit.js";
+import { HttpError } from "../../validation.js";
 import {
   getSourceResolver,
   listSourceResolvers,
@@ -14,6 +15,7 @@ import {
   publicIndexStatus,
   objectTypeRow,
 } from "./repository.js";
+import { extractedTextFor, purgeExtractedText } from "./extracted-text.js";
 import { toSqlDateTime } from "./validation.js";
 
 const BACKOFF_SECONDS = [15, 60, 300, 900, 3600];
@@ -26,7 +28,13 @@ function backoffIso(attempts) {
 export function buildDocument(db, objectType, objectId, context = {}) {
   const resolver = getSourceResolver(objectType);
   if (!resolver) return null;
-  return resolver.resolve(db, objectId, context);
+  const doc = resolver.resolve(db, objectId, context);
+  if (!doc) return null;
+  const extracted = extractedTextFor(db, doc.tenantId, doc.objectType, doc.objectId);
+  if (extracted) {
+    doc.searchableText = [doc.searchableText || "", extracted].filter(Boolean).join(" \n ");
+  }
+  return doc;
 }
 
 function replaceRelationships(db, doc) {
@@ -63,19 +71,21 @@ export function upsertIndexRow(db, doc) {
   run(
     db,
     `INSERT INTO search_index
-       (tenant_id, organization_id, object_type, object_id, object_uuid, code, title, subtitle,
-        summary, searchable_text, status, lifecycle_state, owner_id, owner_name, classification,
+       (tenant_id, organization_id, site_id, object_type, object_id, object_uuid, code, title, subtitle,
+        summary, searchable_text, external_reference, status, lifecycle_state, owner_id, owner_name, classification,
         tags_json, attributes_json, relationships_json, revisions, source_revision, score_weight,
         indexed_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(tenant_id, object_type, object_id) DO UPDATE SET
        organization_id = excluded.organization_id,
+       site_id = excluded.site_id,
        object_uuid = excluded.object_uuid,
        code = excluded.code,
        title = excluded.title,
        subtitle = excluded.subtitle,
        summary = excluded.summary,
        searchable_text = excluded.searchable_text,
+       external_reference = excluded.external_reference,
        status = excluded.status,
        lifecycle_state = excluded.lifecycle_state,
        owner_id = excluded.owner_id,
@@ -92,6 +102,7 @@ export function upsertIndexRow(db, doc) {
     [
       Number(doc.tenantId),
       doc.organizationId ?? null,
+      doc.siteId ?? null,
       String(doc.objectType),
       String(doc.objectId),
       doc.objectUuid ?? null,
@@ -100,6 +111,7 @@ export function upsertIndexRow(db, doc) {
       doc.subtitle || "",
       doc.summary || "",
       doc.searchableText || "",
+      doc.externalReference || "",
       doc.status || "active",
       doc.lifecycleState || "",
       doc.ownerId ?? null,
@@ -131,6 +143,7 @@ export function deleteIndexRow(db, tenantId, objectType, objectId) {
     String(objectType),
     String(objectId),
   ]);
+  purgeExtractedText(db, tenantId, objectType, objectId);
 }
 
 // Applies a single change. Returns a public document or null when the source
@@ -414,6 +427,60 @@ export function reindexTenant(db, { tenantId, limit = 10000 }, actor, ip) {
     summary.failed += result.failed;
     summary.types.push({ object_type: code, ...result });
   }
+  return summary;
+}
+
+// Reindexes only the objects belonging to one organization. Enumerates source
+// rows per type, resolves each document and indexes it when its
+// organizationId matches. Root-tenant documents without an organization are
+// intentionally skipped.
+export function reindexOrganization(db, { tenantId, organizationId, limit = 10000 }, actor, ip) {
+  if (!organizationId) {
+    throw new HttpError(400, "organizationId is required");
+  }
+  const org = Number(organizationId);
+  const summary = { indexed: 0, skipped: 0, failed: 0, types: [] };
+  for (const code of listSourceResolvers()) {
+    if (!objectTypeRow(db, code, tenantId)) continue;
+    const resolver = getSourceResolver(code);
+    const remaining = limit - summary.indexed - summary.failed;
+    if (remaining <= 0) break;
+    let afterId = 0;
+    const typeSummary = { object_type: code, indexed: 0, skipped: 0, failed: 0 };
+    while (typeSummary.indexed + typeSummary.skipped + typeSummary.failed < remaining) {
+      const batchSize = Math.min(200, remaining - typeSummary.indexed - typeSummary.skipped - typeSummary.failed);
+      const ids = resolver.listIds(db, { tenantId, afterId, limit: batchSize });
+      if (!ids.length) break;
+      for (const row of ids) {
+        afterId = Math.max(afterId, Number(row.id));
+        const doc = buildDocument(db, code, row.id, { tenantId });
+        if (!doc) continue;
+        if (Number(doc.organizationId) !== org) {
+          typeSummary.skipped += 1;
+          summary.skipped += 1;
+          continue;
+        }
+        try {
+          upsertIndexRow(db, doc);
+          typeSummary.indexed += 1;
+          summary.indexed += 1;
+        } catch {
+          typeSummary.failed += 1;
+          summary.failed += 1;
+        }
+      }
+      if (ids.length < batchSize) break;
+    }
+    summary.types.push(typeSummary);
+  }
+  writeAudit(db, {
+    actor,
+    action: "search.index.reindex_organization",
+    resourceType: "search_index",
+    resourceId: String(org),
+    details: { tenant_id: tenantId, organization_id: org, ...summary },
+    ip,
+  });
   return summary;
 }
 

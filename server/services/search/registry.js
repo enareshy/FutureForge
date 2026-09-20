@@ -8,6 +8,7 @@ import { registerBuiltinSources } from "./sources.js";
 import { OBJECT_TYPE_STATUSES, isValidIdentifier } from "./validation.js";
 import { ensureConfiguration, getConfiguration } from "./config.js";
 import { searchState, setRegisteredObjectTypes, setSearchEnabled } from "./state.js";
+import { seedFieldDefinitionsForType, ensureDefaultFieldDefinitions, invalidateFieldCatalog } from "./fields.js";
 
 function normalizeList(input, fallback = []) {
   if (input === undefined) return fallback;
@@ -54,6 +55,23 @@ export function registerObjectType(db, input = {}, actor, tenantId, ip) {
     facet_attributes: normalizeList(input.facet_attributes ?? input.facetAttributes, []),
     filter_attributes: normalizeList(input.filter_attributes ?? input.filterAttributes, []),
     relationship_types: normalizeList(input.relationship_types ?? input.relationshipTypes, []),
+    index_name: String(input.index_name ?? input.indexName ?? ""),
+    identifier_field: String(input.identifier_field ?? input.identifierField ?? "id"),
+    searchable_fields: normalizeList(input.searchable_fields ?? input.searchableFields, []),
+    sortable_fields: normalizeList(input.sortable_fields ?? input.sortableFields, []),
+    facetable_fields: normalizeList(input.facetable_fields ?? input.facetableFields, []),
+    display_fields: normalizeList(input.display_fields ?? input.displayFields, []),
+    relationship_fields: normalizeList(input.relationship_fields ?? input.relationshipFields, []),
+    security_policy: ["tenant", "organization", "site", "object", "public"].includes(
+      input.security_policy ?? input.securityPolicy
+    )
+      ? input.security_policy ?? input.securityPolicy
+      : "tenant",
+    indexing_strategy: ["event", "manual", "scheduled", "none"].includes(
+      input.indexing_strategy ?? input.indexingStrategy
+    )
+      ? input.indexing_strategy ?? input.indexingStrategy
+      : "event",
     permission_resource: String(input.permission_resource ?? input.permissionResource ?? ""),
     permission_action: String(input.permission_action ?? input.permissionAction ?? "read"),
     sensitivity: ["public", "internal", "confidential", "restricted"].includes(input.sensitivity)
@@ -69,7 +87,10 @@ export function registerObjectType(db, input = {}, actor, tenantId, ip) {
          name = ?, description = ?, source_module = ?, source_table = ?, key_column = ?,
          title_attribute = ?, subtitle_attribute = ?, summary_attribute = ?,
          body_attributes_json = ?, facet_attributes_json = ?, filter_attributes_json = ?,
-         relationship_types_json = ?, permission_resource = ?, permission_action = ?,
+         relationship_types_json = ?, index_name = ?, identifier_field = ?,
+         searchable_fields_json = ?, sortable_fields_json = ?, facetable_fields_json = ?,
+         display_fields_json = ?, relationship_fields_json = ?, security_policy = ?,
+         indexing_strategy = ?, permission_resource = ?, permission_action = ?,
          sensitivity = ?, display_order = ?, status = ?, updated_at = ?
        WHERE tenant_id = ? AND code = ?`,
       [
@@ -85,6 +106,15 @@ export function registerObjectType(db, input = {}, actor, tenantId, ip) {
         JSON.stringify(values.facet_attributes),
         JSON.stringify(values.filter_attributes),
         JSON.stringify(values.relationship_types),
+        values.index_name,
+        values.identifier_field,
+        JSON.stringify(values.searchable_fields),
+        JSON.stringify(values.sortable_fields),
+        JSON.stringify(values.facetable_fields),
+        JSON.stringify(values.display_fields),
+        JSON.stringify(values.relationship_fields),
+        values.security_policy,
+        values.indexing_strategy,
         values.permission_resource,
         values.permission_action,
         values.sensitivity,
@@ -102,9 +132,12 @@ export function registerObjectType(db, input = {}, actor, tenantId, ip) {
          (tenant_id, code, name, description, source_module, source_table, key_column,
           title_attribute, subtitle_attribute, summary_attribute, body_attributes_json,
           facet_attributes_json, filter_attributes_json, relationship_types_json,
+          index_name, identifier_field, searchable_fields_json, sortable_fields_json,
+          facetable_fields_json, display_fields_json, relationship_fields_json,
+          security_policy, indexing_strategy,
           permission_resource, permission_action, sensitivity, display_order, status,
           registered_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         Number(tenantId),
         code,
@@ -120,6 +153,15 @@ export function registerObjectType(db, input = {}, actor, tenantId, ip) {
         JSON.stringify(values.facet_attributes),
         JSON.stringify(values.filter_attributes),
         JSON.stringify(values.relationship_types),
+        values.index_name,
+        values.identifier_field,
+        JSON.stringify(values.searchable_fields),
+        JSON.stringify(values.sortable_fields),
+        JSON.stringify(values.facetable_fields),
+        JSON.stringify(values.display_fields),
+        JSON.stringify(values.relationship_fields),
+        values.security_policy,
+        values.indexing_strategy,
         values.permission_resource,
         values.permission_action,
         values.sensitivity,
@@ -140,7 +182,9 @@ export function registerObjectType(db, input = {}, actor, tenantId, ip) {
     ip,
   });
   refreshState(db);
-  return getObjectType(db, code, tenantId);
+  const finalized = getObjectType(db, code, tenantId);
+  seedFieldDefinitionsForType(db, tenantId, finalized);
+  return finalized;
 }
 
 export function updateObjectType(db, code, patch = {}, actor, tenantId, ip) {
@@ -184,6 +228,8 @@ export function deleteObjectType(db, code, actor, tenantId, ip) {
     code,
   ]);
   run(db, "DELETE FROM search_index_status WHERE tenant_id = ? AND object_type = ?", [Number(tenantId), code]);
+  run(db, "DELETE FROM search_field_definitions WHERE tenant_id = ? AND object_type = ?", [Number(tenantId), code]);
+  invalidateFieldCatalog(tenantId);
   writeAudit(db, {
     actor,
     action: "search.object_type.delete",
@@ -266,6 +312,7 @@ export function refreshState(db) {
 export function initializeSearch(db) {
   registerBuiltinSources();
   ensureDefaultRegistrations(db);
+  ensureDefaultFieldDefinitions(db);
   const codes = refreshState(db);
   return { enabled: searchState.enabled, object_types: codes };
 }
