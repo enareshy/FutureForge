@@ -6010,3 +6010,428 @@ CREATE TABLE IF NOT EXISTS security_cache_epoch (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (tenant_id, scope)
 );
+
+-- ============================================================================
+-- P1 Data Governance & Data Quality
+--
+-- Centralized, reusable platform capability: business modules register their
+-- data definitions (domains, objects, attributes), governance policies and
+-- quality rules; this service owns evaluation, scoring, duplicate detection,
+-- exceptions, remediation and history. Nothing here duplicates IAM, security,
+-- events, audit, notifications, jobs or search.
+-- ============================================================================
+
+-- Governance domains: hierarchical containers for governed data.
+CREATE TABLE IF NOT EXISTS dg_domains (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  domain_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  parent_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'general',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'inactive', 'retired')),
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  owner_group_id INTEGER,
+  owner_organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  owner_role_id INTEGER,
+  secondary_owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_group_id INTEGER,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_domains_tenant ON dg_domains(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_dg_domains_parent ON dg_domains(parent_id);
+
+-- Ownership & stewardship assignments. A subject is accountable for a scope
+-- (domain, object type or attribute); relationship is owner or steward.
+CREATE TABLE IF NOT EXISTS dg_ownership (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE CASCADE,
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('domain', 'object', 'attribute')),
+  scope_ref TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL DEFAULT '',
+  attribute_name TEXT NOT NULL DEFAULT '',
+  relationship TEXT NOT NULL CHECK (relationship IN ('owner', 'steward')),
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('user', 'group', 'organization', 'role')),
+  subject_id INTEGER,
+  is_primary INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_ownership_domain ON dg_ownership(tenant_id, domain_id, relationship);
+CREATE INDEX IF NOT EXISTS idx_dg_ownership_scope ON dg_ownership(tenant_id, scope_type, object_type, attribute_name);
+CREATE INDEX IF NOT EXISTS idx_dg_ownership_subject ON dg_ownership(tenant_id, subject_type, subject_id);
+
+-- Governed object/attribute catalogue registered by business modules.
+CREATE TABLE IF NOT EXISTS dg_catalog_objects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  object_type TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  source_adapter TEXT NOT NULL DEFAULT 'platform.objects',
+  event_trigger INTEGER NOT NULL DEFAULT 1,
+  schedule TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_catalog_objects_domain ON dg_catalog_objects(tenant_id, domain_id, status);
+
+CREATE TABLE IF NOT EXISTS dg_catalog_attributes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_id INTEGER REFERENCES dg_catalog_objects(id) ON DELETE CASCADE,
+  attribute_name TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  data_type TEXT NOT NULL DEFAULT 'string',
+  is_required INTEGER NOT NULL DEFAULT 0,
+  reference_domain TEXT NOT NULL DEFAULT '',
+  enum_values_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_id, attribute_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_catalog_attributes_object ON dg_catalog_attributes(tenant_id, object_id);
+
+-- Data policies (versioned). The live row carries the pointer to the active
+-- version; each version stores an immutable snapshot of scope + rule set.
+CREATE TABLE IF NOT EXISTS dg_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL DEFAULT '',
+  severity TEXT NOT NULL DEFAULT 'warning',
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'suspended', 'retired')),
+  effective_from TEXT,
+  effective_to TEXT,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  current_version INTEGER NOT NULL DEFAULT 1,
+  attributes_json TEXT NOT NULL DEFAULT '[]',
+  rule_set_json TEXT NOT NULL DEFAULT '[]',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_policies_scope ON dg_policies(tenant_id, object_type, status);
+
+CREATE TABLE IF NOT EXISTS dg_policy_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_id INTEGER NOT NULL REFERENCES dg_policies(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'suspended', 'retired')),
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (policy_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_policy_versions ON dg_policy_versions(tenant_id, policy_id, version);
+
+-- Data quality rules (versioned) + the pluggable evaluation contract.
+CREATE TABLE IF NOT EXISTS dg_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  policy_id INTEGER REFERENCES dg_policies(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL DEFAULT '',
+  attribute_name TEXT NOT NULL DEFAULT '',
+  rule_type TEXT NOT NULL,
+  dimension TEXT NOT NULL DEFAULT 'validity',
+  expression_json TEXT NOT NULL DEFAULT '{}',
+  severity TEXT NOT NULL DEFAULT 'warning',
+  weight REAL NOT NULL DEFAULT 1,
+  threshold_json TEXT NOT NULL DEFAULT '{}',
+  execution_mode TEXT NOT NULL DEFAULT 'SYNC',
+  effective_from TEXT,
+  effective_to TEXT,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'inactive', 'retired')),
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  current_version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_rules_scope ON dg_rules(tenant_id, object_type, status);
+CREATE INDEX IF NOT EXISTS idx_dg_rules_dimension ON dg_rules(tenant_id, dimension, status);
+
+CREATE TABLE IF NOT EXISTS dg_rule_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_id INTEGER NOT NULL REFERENCES dg_rules(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (rule_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_rule_versions ON dg_rule_versions(tenant_id, rule_id, version);
+
+-- Configurable quality dimensions and tenant scoring/threshold settings.
+CREATE TABLE IF NOT EXISTS dg_dimensions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  weight REAL NOT NULL DEFAULT 1,
+  display_order INTEGER NOT NULL DEFAULT 100,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS dg_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+-- Quality results (historical) and the violations that produced them.
+CREATE TABLE IF NOT EXISTS dg_quality_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  result_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  plant_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  object_name TEXT NOT NULL DEFAULT '',
+  overall_score REAL,
+  quality_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+  dimensions_json TEXT NOT NULL DEFAULT '{}',
+  evaluation_version INTEGER NOT NULL DEFAULT 1,
+  rule_count INTEGER NOT NULL DEFAULT 0,
+  violation_count INTEGER NOT NULL DEFAULT 0,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  triggered_by TEXT NOT NULL DEFAULT 'manual',
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  evaluated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_results_object ON dg_quality_results(tenant_id, object_type, object_id, evaluated_at);
+CREATE INDEX IF NOT EXISTS idx_dg_results_current ON dg_quality_results(tenant_id, is_current, quality_status);
+CREATE INDEX IF NOT EXISTS idx_dg_results_domain ON dg_quality_results(tenant_id, domain_id, evaluated_at);
+CREATE INDEX IF NOT EXISTS idx_dg_results_score ON dg_quality_results(tenant_id, overall_score);
+
+CREATE TABLE IF NOT EXISTS dg_quality_violations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  result_id INTEGER REFERENCES dg_quality_results(id) ON DELETE CASCADE,
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  rule_id INTEGER REFERENCES dg_rules(id) ON DELETE SET NULL,
+  rule_code TEXT NOT NULL DEFAULT '',
+  attribute_name TEXT NOT NULL DEFAULT '',
+  dimension TEXT NOT NULL DEFAULT 'validity',
+  severity TEXT NOT NULL DEFAULT 'warning',
+  message TEXT NOT NULL DEFAULT '',
+  detected_value TEXT NOT NULL DEFAULT '',
+  expected_value TEXT NOT NULL DEFAULT '',
+  is_current INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_violations_object ON dg_quality_violations(tenant_id, object_type, object_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_dg_violations_rule ON dg_quality_violations(tenant_id, rule_id);
+CREATE INDEX IF NOT EXISTS idx_dg_violations_dimension ON dg_quality_violations(tenant_id, dimension);
+
+-- Exception management lifecycle + comments.
+CREATE TABLE IF NOT EXISTS dg_quality_exceptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  exception_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  plant_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  attribute_name TEXT NOT NULL DEFAULT '',
+  rule_id INTEGER REFERENCES dg_rules(id) ON DELETE SET NULL,
+  rule_code TEXT NOT NULL DEFAULT '',
+  dimension TEXT NOT NULL DEFAULT 'validity',
+  severity TEXT NOT NULL DEFAULT 'warning',
+  priority TEXT NOT NULL DEFAULT 'normal',
+  description TEXT NOT NULL DEFAULT '',
+  detected_value TEXT NOT NULL DEFAULT '',
+  expected_value TEXT NOT NULL DEFAULT '',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  assignee_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  assignee_group_id INTEGER,
+  assignee_organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'OPEN',
+  sla_hours INTEGER,
+  due_date TEXT,
+  escalation_level INTEGER NOT NULL DEFAULT 0,
+  escalated_at TEXT,
+  resolution TEXT NOT NULL DEFAULT '',
+  resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  resolved_at TEXT,
+  verified_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  verified_at TEXT,
+  closed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  closed_at TEXT,
+  waived_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  waived_at TEXT,
+  waiver_reason TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_exceptions_status ON dg_quality_exceptions(tenant_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_dg_exceptions_object ON dg_quality_exceptions(tenant_id, object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_dg_exceptions_assignee ON dg_quality_exceptions(tenant_id, assignee_user_id, status);
+CREATE INDEX IF NOT EXISTS idx_dg_exceptions_due ON dg_quality_exceptions(tenant_id, due_date, status);
+CREATE INDEX IF NOT EXISTS idx_dg_exceptions_domain ON dg_quality_exceptions(tenant_id, domain_id, status);
+
+CREATE TABLE IF NOT EXISTS dg_exception_comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  exception_id INTEGER NOT NULL REFERENCES dg_quality_exceptions(id) ON DELETE CASCADE,
+  author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  comment TEXT NOT NULL DEFAULT '',
+  status_change TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_exception_comments ON dg_exception_comments(tenant_id, exception_id, created_at);
+
+-- Duplicate detection: match rules (configuration) and candidate findings.
+CREATE TABLE IF NOT EXISTS dg_duplicate_match_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL DEFAULT '',
+  attributes_json TEXT NOT NULL DEFAULT '[]',
+  strategy TEXT NOT NULL DEFAULT 'normalized',
+  threshold REAL NOT NULL DEFAULT 1,
+  normalization_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_dup_rules_object ON dg_duplicate_match_rules(tenant_id, object_type, status);
+
+CREATE TABLE IF NOT EXISTS dg_duplicate_candidates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  matched_object_id TEXT NOT NULL DEFAULT '',
+  matched_object_name TEXT NOT NULL DEFAULT '',
+  match_rule_id INTEGER REFERENCES dg_duplicate_match_rules(id) ON DELETE SET NULL,
+  strategy TEXT NOT NULL DEFAULT 'normalized',
+  score REAL NOT NULL DEFAULT 1,
+  match_type TEXT NOT NULL DEFAULT 'POTENTIAL',
+  status TEXT NOT NULL DEFAULT 'OPEN',
+  resolution TEXT NOT NULL DEFAULT '',
+  resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  resolved_at TEXT,
+  detected_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type, object_id, matched_object_id, match_rule_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_dup_candidates_object ON dg_duplicate_candidates(tenant_id, object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_dg_dup_candidates_status ON dg_duplicate_candidates(tenant_id, status, detected_at);
+
+-- Remediation actions with before/after values and approval trail.
+CREATE TABLE IF NOT EXISTS dg_remediations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  exception_id INTEGER REFERENCES dg_quality_exceptions(id) ON DELETE SET NULL,
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  action_type TEXT NOT NULL DEFAULT 'SET_ATTRIBUTE',
+  attribute_name TEXT NOT NULL DEFAULT '',
+  before_value TEXT NOT NULL DEFAULT '',
+  after_value TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'applied',
+  message TEXT NOT NULL DEFAULT '',
+  requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  executed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  executed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_remediations_object ON dg_remediations(tenant_id, object_type, object_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_dg_remediations_exception ON dg_remediations(tenant_id, exception_id);
+
+-- Quality job tracking (batch / scheduled / event-driven runs).
+CREATE TABLE IF NOT EXISTS dg_quality_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  mode TEXT NOT NULL DEFAULT 'BATCH',
+  scope_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'pending',
+  job_ref TEXT NOT NULL DEFAULT '',
+  stats_json TEXT NOT NULL DEFAULT '{}',
+  submitted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_quality_jobs_tenant ON dg_quality_jobs(tenant_id, status, created_at);

@@ -1442,3 +1442,89 @@ export const referenceData = {
   healthReady: () => api("/api/reference-data/health/ready"),
   healthLive: () => api("/api/reference-data/health/live"),
 };
+
+export const dataGovernance = {
+  meta: () => api("/api/v1/data-governance/meta"),
+  health: () => api("/api/v1/data-governance/health"),
+  metrics: () => api("/api/v1/data-governance/metrics"),
+
+  domains: (qs) => api(`/api/v1/data-governance/domains${qs || ""}`),
+  domainTree: (qs) => api(`/api/v1/data-governance/domains/tree${qs || ""}`),
+  domain: (ref) => api(`/api/v1/data-governance/domains/${encodeURIComponent(ref)}`),
+  createDomain: (body) => api("/api/v1/data-governance/domains", { method: "POST", body }),
+  updateDomain: (ref, body) => api(`/api/v1/data-governance/domains/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setDomainStatus: (ref, status) =>
+    api(`/api/v1/data-governance/domains/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+
+  catalog: (qs) => api(`/api/v1/data-governance/catalog${qs || ""}`),
+  catalogEntry: (ref) => api(`/api/v1/data-governance/catalog/${encodeURIComponent(ref)}`),
+  registerCatalog: (body) => api("/api/v1/data-governance/catalog", { method: "POST", body }),
+  updateCatalog: (ref, body) => api(`/api/v1/data-governance/catalog/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  attributes: (ref) => api(`/api/v1/data-governance/catalog/${encodeURIComponent(ref)}/attributes`),
+  registerAttribute: (ref, body) =>
+    api(`/api/v1/data-governance/catalog/${encodeURIComponent(ref)}/attributes`, { method: "POST", body }),
+
+  ownership: (qs) => api(`/api/v1/data-governance/ownership${qs || ""}`),
+  createOwnership: (body) => api("/api/v1/data-governance/ownership", { method: "POST", body }),
+  resolveOwnership: (body) => api("/api/v1/data-governance/ownership/resolve", { method: "POST", body }),
+
+  policies: (qs) => api(`/api/v1/data-governance/policies${qs || ""}`),
+  policy: (ref) => api(`/api/v1/data-governance/policies/${encodeURIComponent(ref)}`),
+  createPolicy: (body) => api("/api/v1/data-governance/policies", { method: "POST", body }),
+  updatePolicy: (ref, body) => api(`/api/v1/data-governance/policies/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setPolicyStatus: (ref, status) =>
+    api(`/api/v1/data-governance/policies/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+
+  configuration: () => api("/api/v1/data-governance/configuration"),
+  setConfiguration: (body) => api("/api/v1/data-governance/configuration", { method: "PUT", body }),
+  dimensions: () => api("/api/v1/data-governance/dimensions"),
+  jobs: (qs) => api(`/api/v1/data-governance/jobs${qs || ""}`),
+  submitEvaluation: (body) => api("/api/v1/data-governance/jobs/evaluate", { method: "POST", body }),
+  submitDuplicateScan: (body) => api("/api/v1/data-governance/jobs/duplicates", { method: "POST", body }),
+};
+
+export const dataQuality = {
+  meta: () => api("/api/v1/data-quality/meta"),
+
+  rules: (qs) => api(`/api/v1/data-quality/rules${qs || ""}`),
+  rule: (ref) => api(`/api/v1/data-quality/rules/${encodeURIComponent(ref)}`),
+  createRule: (body) => api("/api/v1/data-quality/rules", { method: "POST", body }),
+  updateRule: (ref, body) => api(`/api/v1/data-quality/rules/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  validateRule: (body) => api("/api/v1/data-quality/rules/validate", { method: "POST", body }),
+  setRuleStatus: (ref, status) =>
+    api(`/api/v1/data-quality/rules/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+
+  evaluate: (body) => api("/api/v1/data-quality/evaluate", { method: "POST", body }),
+  evaluateBatch: (body) => api("/api/v1/data-quality/evaluate/batch", { method: "POST", body }),
+
+  results: (qs) => api(`/api/v1/data-quality/results${qs || ""}`),
+  result: (objectType, objectId) =>
+    api(`/api/v1/data-quality/results/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`),
+  violations: (qs) => api(`/api/v1/data-quality/violations${qs || ""}`),
+  scores: () => api("/api/v1/data-quality/scores"),
+  domainScores: (qs) => api(`/api/v1/data-quality/scores/domains${qs || ""}`),
+  typeScores: (qs) => api(`/api/v1/data-quality/scores/object-types${qs || ""}`),
+  trend: (qs) => api(`/api/v1/data-quality/scores/trend${qs || ""}`),
+
+  exceptions: (qs) => api(`/api/v1/data-quality/exceptions${qs || ""}`),
+  exceptionSummary: () => api("/api/v1/data-quality/exceptions/summary"),
+  exception: (ref) => api(`/api/v1/data-quality/exceptions/${encodeURIComponent(ref)}`),
+  updateException: (ref, body) =>
+    api(`/api/v1/data-quality/exceptions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  createException: (body) => api("/api/v1/data-quality/exceptions", { method: "POST", body }),
+  assignException: (ref, body) =>
+    api(`/api/v1/data-quality/exceptions/${encodeURIComponent(ref)}/assign`, { method: "POST", body }),
+  setExceptionStatus: (ref, status, extra) =>
+    api(`/api/v1/data-quality/exceptions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status, ...(extra || {}) } }),
+
+  matchRules: (qs) => api(`/api/v1/data-quality/duplicates/match-rules${qs || ""}`),
+  createMatchRule: (body) => api("/api/v1/data-quality/duplicates/match-rules", { method: "POST", body }),
+  candidates: (qs) => api(`/api/v1/data-quality/duplicates/candidates${qs || ""}`),
+  resolveCandidate: (ref, body) =>
+    api(`/api/v1/data-quality/duplicates/candidates/${encodeURIComponent(ref)}/resolve`, { method: "POST", body }),
+  detectDuplicates: (body) => api("/api/v1/data-quality/duplicates/detect", { method: "POST", body }),
+  duplicateSummary: () => api("/api/v1/data-quality/duplicates/summary"),
+
+  remediations: (qs) => api(`/api/v1/data-quality/remediations${qs || ""}`),
+  applyRemediation: (body) => api("/api/v1/data-quality/remediations", { method: "POST", body }),
+};

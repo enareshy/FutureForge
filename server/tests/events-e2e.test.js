@@ -136,6 +136,9 @@ describe("event framework end-to-end delivery", () => {
   });
 
   test("an outbox event survives a broker outage and publishes after recovery", async () => {
+    // Drain events queued by earlier setup (for example event-driven quality
+    // evaluation) so this test isolates the durability of its own event.
+    await events.Outbox.processOutbox(db, { limit: 500 });
     const published = events.publishEvent(db, { event_type_code: "WidgetBroker", payload: { n: 1 } }, actor);
     const failingRoute = async () => {
       const error = new Error("ECONNREFUSED broker unavailable");

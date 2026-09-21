@@ -41,6 +41,9 @@ import * as reference from "./services/reference.js";
 import { createReferenceRouter } from "./services/reference/router.js";
 import * as content from "./services/content.js";
 import { createContentRouter } from "./services/content/router.js";
+import * as dataGovernance from "./services/data-governance/index.js";
+import { createDataGovernanceRouter } from "./services/data-governance/router-data-governance.js";
+import { createDataQualityRouter } from "./services/data-governance/router-data-quality.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -157,6 +160,11 @@ export function createApp(db) {
     ensureSecurityFoundation(db);
   } catch {
     /* security foundation is idempotent and must never block application boot */
+  }
+  try {
+    dataGovernance.ensureDataGovernanceFoundation(db);
+  } catch {
+    /* data governance foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -9830,6 +9838,14 @@ export function createApp(db) {
   const contentRouter = createContentRouter({ express, db, auth, can, wrap });
   app.use("/api/content", contentRouter);
   app.use("/api/v1/content", contentRouter);
+
+  // ── Data Governance & Data Quality ────────────────────────────────────────
+  const dataGovernanceRouter = createDataGovernanceRouter({ express, db, auth, can, wrap });
+  const dataQualityRouter = createDataQualityRouter({ express, db, auth, can, wrap });
+  app.use("/api/data-governance", dataGovernanceRouter);
+  app.use("/api/v1/data-governance", dataGovernanceRouter);
+  app.use("/api/data-quality", dataQualityRouter);
+  app.use("/api/v1/data-quality", dataQualityRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

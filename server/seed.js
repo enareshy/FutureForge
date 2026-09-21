@@ -28,6 +28,7 @@ import * as numbering from "./services/numbering.js";
 import * as versioning from "./services/versioning.js";
 import * as reference from "./services/reference.js";
 import * as content from "./services/content.js";
+import * as dataGovernance from "./services/data-governance/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -950,6 +951,22 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.content.security", name: "Content security & quarantine", parentCode: "iam.content" },
     { applicationCode: "iam", code: "iam.content.retention", name: "Content retention & legal hold", parentCode: "iam.content" },
     { applicationCode: "iam", code: "iam.content.admin", name: "Content administration", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.data_governance", name: "Data governance & data quality service", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_governance.domains", name: "Data domains & hierarchy", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.catalog", name: "Data catalogue & attributes", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.ownership", name: "Ownership & stewardship", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.policies", name: "Governance policies & lifecycle", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.configuration", name: "Governance configuration & scoring", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.dimensions", name: "Quality dimensions & scoring bands", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.jobs", name: "Governance & quality background jobs", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.metrics", name: "Governance metrics & health", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_quality", name: "Data quality rules & evaluation", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_quality.rules", name: "Quality rules & validation", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.evaluation", name: "Quality evaluation & execution modes", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.results", name: "Quality results, scores & dashboards", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.exceptions", name: "Quality exceptions & workflow", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.duplicates", name: "Duplicate detection", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.remediation", name: "Quality remediation", parentCode: "iam.data_quality" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1159,7 +1176,25 @@ function seedMissingCatalog(db) {
     "iam.content.retention",
     "iam.content.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes]) {
+  const dataGovernanceResourceCodes = [
+    "iam.data_governance",
+    "iam.data_governance.domains",
+    "iam.data_governance.catalog",
+    "iam.data_governance.ownership",
+    "iam.data_governance.policies",
+    "iam.data_governance.configuration",
+    "iam.data_governance.dimensions",
+    "iam.data_governance.jobs",
+    "iam.data_governance.metrics",
+    "iam.data_quality",
+    "iam.data_quality.rules",
+    "iam.data_quality.evaluation",
+    "iam.data_quality.results",
+    "iam.data_quality.exceptions",
+    "iam.data_quality.duplicates",
+    "iam.data_quality.remediation",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -1265,6 +1300,22 @@ function reconcileReaderGrants(db) {
     ["iam.content.processing", ["read"]],
     ["iam.content.security", ["read"]],
     ["iam.content.retention", ["read"]],
+    ["iam.data_governance", ["read"]],
+    ["iam.data_governance.domains", ["read"]],
+    ["iam.data_governance.catalog", ["read"]],
+    ["iam.data_governance.ownership", ["read"]],
+    ["iam.data_governance.policies", ["read"]],
+    ["iam.data_governance.configuration", ["read"]],
+    ["iam.data_governance.dimensions", ["read"]],
+    ["iam.data_governance.jobs", ["read", "execute"]],
+    ["iam.data_governance.metrics", ["read"]],
+    ["iam.data_quality", ["read"]],
+    ["iam.data_quality.rules", ["read"]],
+    ["iam.data_quality.evaluation", ["read", "execute"]],
+    ["iam.data_quality.results", ["read"]],
+    ["iam.data_quality.exceptions", ["read", "create", "update", "execute"]],
+    ["iam.data_quality.duplicates", ["read", "execute"]],
+    ["iam.data_quality.remediation", ["read", "execute"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -2663,7 +2714,20 @@ export function seedDatabase(db) {
   const versioningResult = withEventSuppression(() => seedVersioning(db));
   const referenceResult = withEventSuppression(() => seedReference(db));
   const contentResult = withEventSuppression(() => seedContent(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult };
+  const dataGovernanceResult = withEventSuppression(() => seedDataGovernance(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult };
+}
+
+// Installs the centralized Data Governance & Data Quality foundation (default
+// dimensions, scoring bands, event types, job handlers, search registrations)
+// plus a small demo estate so dashboards are not empty on a fresh install.
+function seedDataGovernance(db) {
+  try {
+    const result = dataGovernance.ensureDataGovernanceSeed(db);
+    return { dataGovernanceSeeded: true, ...result };
+  } catch (err) {
+    return { dataGovernanceSeeded: false, dataGovernanceError: err.message };
+  }
 }
 
 function seedSearch(db) {

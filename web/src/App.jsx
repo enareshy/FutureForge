@@ -13,6 +13,7 @@ import DashboardPage from "./pages/DashboardPage.jsx";
 import PermissionsPage from "./pages/PermissionsPage.jsx";
 import AuthorizationPage from "./pages/AuthorizationPage.jsx";
 import SecurityModelPage from "./pages/SecurityModelPage.jsx";
+import DataGovernancePage from "./pages/DataGovernancePage.jsx";
 import OrganizationsPage from "./pages/OrganizationsPage.jsx";
 import OrganizationDetailPage from "./pages/OrganizationDetailPage.jsx";
 import PlatformPage from "./pages/PlatformPage.jsx";
@@ -251,6 +252,11 @@ const PLATFORM_GROUPS = [
     key: "reference",
     label: "Reference data",
     items: [{ to: "/reference-data", label: "Enterprise reference data", platformOrAdmin: true }],
+  },
+  {
+    key: "governance",
+    label: "Data governance",
+    items: [{ to: "/data-governance", label: "Governance & quality", platformOrAdmin: true }],
   },
   {
     key: "communication",
@@ -497,6 +503,7 @@ export default function App() {
         <Route path="/permissions" element={<PermissionsPage />} />
         <Route path="/authorization" element={<AuthorizationPage />} />
         <Route path="/security" element={<SecurityModelPage />} />
+        <Route path="/data-governance" element={<DataGovernancePage />} />
         <Route path="/policy" element={<PolicyPage />} />
         <Route path="/authentication" element={<AuthenticationPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
