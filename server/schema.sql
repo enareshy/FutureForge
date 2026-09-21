@@ -6435,3 +6435,457 @@ CREATE TABLE IF NOT EXISTS dg_quality_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dg_quality_jobs_tenant ON dg_quality_jobs(tenant_id, status, created_at);
+
+-- ============================================================================
+-- Data Catalog & Business Glossary (migration 029)
+--
+-- Centralized governance metadata layer: catalog entries (domains, objects,
+-- attributes, terms, sources, consumers), the business glossary, mappings,
+-- lineage, classifications, ownership and metadata versioning. It REFERENCES
+-- the centralized domain model (dg_domains) and reuses IAM, security, search,
+-- events, audit, jobs, notifications, workflow and the data quality engine.
+-- It never stores the underlying business data.
+-- ============================================================================
+
+-- Unified registry of every catalog asset. Type-specific tables hold the
+-- detail; this registry powers the unified catalog list, classification,
+-- ownership and lineage so those features do not need N joins per asset type.
+CREATE TABLE IF NOT EXISTS dc_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  entry_type TEXT NOT NULL CHECK (entry_type IN ('DOMAIN', 'OBJECT', 'ATTRIBUTE', 'BUSINESS_TERM', 'SOURCE', 'CONSUMER', 'CLASSIFICATION', 'LINEAGE')),
+  subject_table TEXT NOT NULL DEFAULT '',
+  subject_id INTEGER,
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  source_id INTEGER,
+  code TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  display_name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  classification TEXT NOT NULL DEFAULT 'internal',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  owner_group_id INTEGER,
+  steward_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_group_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'deprecated', 'retired')),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, entry_type, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_entries_tenant ON dc_entries(tenant_id, entry_type, status);
+CREATE INDEX IF NOT EXISTS idx_dc_entries_domain ON dc_entries(tenant_id, domain_id);
+CREATE INDEX IF NOT EXISTS idx_dc_entries_subject ON dc_entries(tenant_id, subject_table, subject_id);
+CREATE INDEX IF NOT EXISTS idx_dc_entries_classification ON dc_entries(tenant_id, classification);
+
+-- Catalog metadata version history. Every governance mutation appends a
+-- snapshot; current state lives on the entry row, history is never overwritten.
+CREATE TABLE IF NOT EXISTS dc_metadata_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entry_id INTEGER NOT NULL REFERENCES dc_entries(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (entry_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_metadata_versions_entry ON dc_metadata_versions(tenant_id, entry_id, version);
+
+-- Catalog data objects: metadata about an enterprise object type. The catalog
+-- references existing business objects (target_object_type/target_object_ref);
+-- it does not duplicate their storage.
+CREATE TABLE IF NOT EXISTS dc_catalog_objects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  object_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entry_id INTEGER REFERENCES dc_entries(id) ON DELETE CASCADE,
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  object_type TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL DEFAULT '',
+  source_id INTEGER,
+  classification TEXT NOT NULL DEFAULT 'internal',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'deprecated', 'retired')),
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_catalog_objects_domain ON dc_catalog_objects(tenant_id, domain_id, status);
+CREATE INDEX IF NOT EXISTS idx_dc_catalog_objects_ref ON dc_catalog_objects(tenant_id, object_ref);
+
+CREATE TABLE IF NOT EXISTS dc_catalog_attributes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attribute_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entry_id INTEGER REFERENCES dc_entries(id) ON DELETE CASCADE,
+  object_id INTEGER NOT NULL REFERENCES dc_catalog_objects(id) ON DELETE CASCADE,
+  attribute_name TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  data_type TEXT NOT NULL DEFAULT 'string',
+  mandatory INTEGER NOT NULL DEFAULT 0,
+  business_definition TEXT NOT NULL DEFAULT '',
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  source_id INTEGER,
+  classification TEXT NOT NULL DEFAULT 'internal',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'deprecated', 'retired')),
+  version INTEGER NOT NULL DEFAULT 1,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_id, attribute_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_catalog_attributes_object ON dc_catalog_attributes(tenant_id, object_id, status);
+CREATE INDEX IF NOT EXISTS idx_dc_catalog_attributes_ref ON dc_catalog_attributes(tenant_id, attribute_ref);
+
+-- Business glossary: terms are business concepts, not technical objects.
+CREATE TABLE IF NOT EXISTS dc_business_terms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  term_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entry_id INTEGER REFERENCES dc_entries(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  preferred_name TEXT NOT NULL DEFAULT '',
+  definition TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  domain_id INTEGER REFERENCES dg_domains(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'in_review', 'approved', 'active', 'deprecated', 'retired')),
+  approval_status TEXT NOT NULL DEFAULT 'pending' CHECK (approval_status IN ('pending', 'in_review', 'approved', 'rejected')),
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  owner_group_id INTEGER,
+  steward_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_group_id INTEGER,
+  classification TEXT NOT NULL DEFAULT 'internal',
+  version INTEGER NOT NULL DEFAULT 1,
+  workflow_instance_id INTEGER,
+  submitted_at TEXT,
+  approved_at TEXT,
+  approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_business_terms_domain ON dc_business_terms(tenant_id, domain_id, status);
+CREATE INDEX IF NOT EXISTS idx_dc_business_terms_status ON dc_business_terms(tenant_id, status, approval_status);
+
+CREATE TABLE IF NOT EXISTS dc_term_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  term_id INTEGER NOT NULL REFERENCES dc_business_terms(id) ON DELETE CASCADE,
+  definition_type TEXT NOT NULL CHECK (definition_type IN ('BUSINESS', 'TECHNICAL', 'OPERATIONAL', 'CALCULATION')),
+  definition TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (term_id, definition_type)
+);
+
+CREATE TABLE IF NOT EXISTS dc_term_synonyms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  term_id INTEGER NOT NULL REFERENCES dc_business_terms(id) ON DELETE CASCADE,
+  synonym TEXT NOT NULL,
+  synonym_type TEXT NOT NULL DEFAULT 'SYNONYM' CHECK (synonym_type IN ('SYNONYM', 'ABBREVIATION', 'ACRONYM', 'ALIAS', 'DEPRECATED')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (term_id, synonym)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_term_synonyms_term ON dc_term_synonyms(tenant_id, term_id);
+
+CREATE TABLE IF NOT EXISTS dc_term_relations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  term_id INTEGER NOT NULL REFERENCES dc_business_terms(id) ON DELETE CASCADE,
+  related_term_id INTEGER NOT NULL REFERENCES dc_business_terms(id) ON DELETE CASCADE,
+  relationship_type TEXT NOT NULL CHECK (relationship_type IN ('RELATED_TO', 'BROADER_THAN', 'NARROWER_THAN', 'SYNONYM_OF', 'ABBREVIATION_OF', 'CONTAINS', 'DERIVED_FROM')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (term_id, related_term_id, relationship_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_term_relations_term ON dc_term_relations(tenant_id, term_id);
+
+-- Many-to-many mappings from terms to catalog objects, attributes, domains,
+-- sources and consumers.
+CREATE TABLE IF NOT EXISTS dc_term_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  term_id INTEGER NOT NULL REFERENCES dc_business_terms(id) ON DELETE CASCADE,
+  target_type TEXT NOT NULL CHECK (target_type IN ('OBJECT', 'ATTRIBUTE', 'DOMAIN', 'SOURCE', 'CONSUMER')),
+  target_id INTEGER NOT NULL,
+  target_ref TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (term_id, target_type, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_term_mappings_target ON dc_term_mappings(tenant_id, target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_dc_term_mappings_term ON dc_term_mappings(tenant_id, term_id);
+
+-- Configurable catalog relationship types (data-driven, not hard-coded).
+CREATE TABLE IF NOT EXISTS dc_relationship_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  source_entry_type TEXT NOT NULL DEFAULT '',
+  target_entry_type TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS dc_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  relationship_type_id INTEGER NOT NULL REFERENCES dc_relationship_types(id) ON DELETE CASCADE,
+  from_entry_id INTEGER NOT NULL REFERENCES dc_entries(id) ON DELETE CASCADE,
+  to_entry_id INTEGER NOT NULL REFERENCES dc_entries(id) ON DELETE CASCADE,
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, relationship_type_id, from_entry_id, to_entry_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_relationships_from ON dc_relationships(tenant_id, from_entry_id);
+CREATE INDEX IF NOT EXISTS idx_dc_relationships_to ON dc_relationships(tenant_id, to_entry_id);
+
+-- Data sources. Credentials are NEVER stored here; connection_reference points
+-- at the Integration/API credential model.
+CREATE TABLE IF NOT EXISTS dc_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entry_id INTEGER REFERENCES dc_entries(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  source_type TEXT NOT NULL DEFAULT 'APPLICATION' CHECK (source_type IN ('APPLICATION', 'DATABASE', 'API', 'FILE', 'DATA_LAKE', 'DATA_WAREHOUSE', 'EXTERNAL_SYSTEM')),
+  description TEXT NOT NULL DEFAULT '',
+  system TEXT NOT NULL DEFAULT '',
+  connection_reference TEXT NOT NULL DEFAULT '',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  classification TEXT NOT NULL DEFAULT 'internal',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'deprecated', 'retired')),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_sources_type ON dc_sources(tenant_id, source_type, status);
+
+-- Source-to-target object mappings. The catalog stores the metadata; the
+-- Integration Framework owns any actual transformation.
+CREATE TABLE IF NOT EXISTS dc_source_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  source_id INTEGER NOT NULL REFERENCES dc_sources(id) ON DELETE CASCADE,
+  source_object_type TEXT NOT NULL DEFAULT '',
+  source_object_ref TEXT NOT NULL DEFAULT '',
+  target_entry_id INTEGER REFERENCES dc_entries(id) ON DELETE CASCADE,
+  mapping_type TEXT NOT NULL DEFAULT 'SOURCE_TO_OBJECT' CHECK (mapping_type IN ('SOURCE_TO_OBJECT', 'OBJECT_TO_CONSUMER', 'RENAME', 'TRANSFORM', 'ENRICH', 'AGGREGATE', 'SPLIT', 'MERGE')),
+  transformation_reference TEXT NOT NULL DEFAULT '',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'deprecated', 'retired')),
+  effective_date TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_source_mappings_source ON dc_source_mappings(tenant_id, source_id);
+CREATE INDEX IF NOT EXISTS idx_dc_source_mappings_target ON dc_source_mappings(tenant_id, target_entry_id);
+
+-- Data consumers (systems, services and people that read catalog data).
+CREATE TABLE IF NOT EXISTS dc_consumers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  consumer_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entry_id INTEGER REFERENCES dc_entries(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  consumer_type TEXT NOT NULL DEFAULT 'APPLICATION',
+  description TEXT NOT NULL DEFAULT '',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  purpose TEXT NOT NULL DEFAULT '',
+  frequency TEXT NOT NULL DEFAULT '',
+  classification TEXT NOT NULL DEFAULT 'internal',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'deprecated', 'retired')),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_consumers_type ON dc_consumers(tenant_id, consumer_type, status);
+
+CREATE TABLE IF NOT EXISTS dc_consumer_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  consumer_id INTEGER NOT NULL REFERENCES dc_consumers(id) ON DELETE CASCADE,
+  object_id INTEGER REFERENCES dc_catalog_objects(id) ON DELETE CASCADE,
+  attribute_id INTEGER REFERENCES dc_catalog_attributes(id) ON DELETE CASCADE,
+  purpose TEXT NOT NULL DEFAULT '',
+  frequency TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_consumer_mappings_consumer ON dc_consumer_mappings(tenant_id, consumer_id);
+CREATE INDEX IF NOT EXISTS idx_dc_consumer_mappings_object ON dc_consumer_mappings(tenant_id, object_id);
+
+-- Metadata-level lineage. Endpoints are typed subjects (entry refs or external
+-- object refs). The catalog stores metadata only; Integration can publish
+-- lineage events. Traversal is bounded by depth and node limits.
+CREATE TABLE IF NOT EXISTS dc_lineage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  from_type TEXT NOT NULL,
+  from_id TEXT NOT NULL,
+  from_ref TEXT NOT NULL DEFAULT '',
+  to_type TEXT NOT NULL,
+  to_id TEXT NOT NULL,
+  to_ref TEXT NOT NULL DEFAULT '',
+  relationship_type TEXT NOT NULL CHECK (relationship_type IN ('SOURCE_OF', 'DERIVED_FROM', 'TRANSFORMED_FROM', 'SENT_TO', 'CONSUMED_BY', 'COPIED_TO', 'AGGREGATED_FROM')),
+  transformation_reference TEXT NOT NULL DEFAULT '',
+  job_ref TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  effective_from TEXT,
+  effective_to TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, from_type, from_id, to_type, to_id, relationship_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_lineage_from ON dc_lineage(tenant_id, from_type, from_id);
+CREATE INDEX IF NOT EXISTS idx_dc_lineage_to ON dc_lineage(tenant_id, to_type, to_id);
+
+-- Catalog classifications: business categories optionally bound to a security
+-- classification from the P0 Data Security model.
+CREATE TABLE IF NOT EXISTS dc_classifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  classification_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'business',
+  security_classification TEXT NOT NULL DEFAULT 'internal' CHECK (security_classification IN ('public', 'internal', 'confidential', 'restricted')),
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS dc_classification_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entry_id INTEGER NOT NULL REFERENCES dc_entries(id) ON DELETE CASCADE,
+  classification_id INTEGER REFERENCES dc_classifications(id) ON DELETE SET NULL,
+  classification_code TEXT NOT NULL DEFAULT '',
+  security_classification TEXT NOT NULL DEFAULT 'internal',
+  assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, entry_id, classification_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_classification_assignments_entry ON dc_classification_assignments(tenant_id, entry_id);
+
+-- Ownership & stewardship. Four kinds per the spec: Data Owner, Data Steward,
+-- Technical Owner, Business Owner. Subjects are IAM principals or org units.
+CREATE TABLE IF NOT EXISTS dc_ownership (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entry_id INTEGER NOT NULL REFERENCES dc_entries(id) ON DELETE CASCADE,
+  relationship TEXT NOT NULL CHECK (relationship IN ('owner', 'steward')),
+  ownership_kind TEXT NOT NULL DEFAULT 'DATA_OWNER' CHECK (ownership_kind IN ('DATA_OWNER', 'DATA_STEWARD', 'TECHNICAL_OWNER', 'BUSINESS_OWNER')),
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('user', 'group', 'role', 'organization')),
+  subject_id INTEGER,
+  is_primary INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_ownership_entry ON dc_ownership(tenant_id, entry_id, relationship);
+CREATE INDEX IF NOT EXISTS idx_dc_ownership_subject ON dc_ownership(tenant_id, subject_type, subject_id);
+
+-- Controlled metadata import runs (CSV / JSON / XLSX via Integration transfers).
+CREATE TABLE IF NOT EXISTS dc_import_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  resource_type TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT 'csv',
+  status TEXT NOT NULL DEFAULT 'pending',
+  dry_run INTEGER NOT NULL DEFAULT 0,
+  stats_json TEXT NOT NULL DEFAULT '{}',
+  errors_json TEXT NOT NULL DEFAULT '[]',
+  transfer_ref TEXT NOT NULL DEFAULT '',
+  job_ref TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_import_runs_tenant ON dc_import_runs(tenant_id, status, created_at);
+
+-- Tenant-scoped catalog configuration. Values are data so traversal bounds,
+-- import batch sizes and approval requirements can change without a deployment.
+CREATE TABLE IF NOT EXISTS dc_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_configuration_tenant ON dc_configuration(tenant_id, key);

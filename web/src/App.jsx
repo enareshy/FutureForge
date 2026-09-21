@@ -14,6 +14,8 @@ import PermissionsPage from "./pages/PermissionsPage.jsx";
 import AuthorizationPage from "./pages/AuthorizationPage.jsx";
 import SecurityModelPage from "./pages/SecurityModelPage.jsx";
 import DataGovernancePage from "./pages/DataGovernancePage.jsx";
+import DataCatalogPage from "./pages/DataCatalogPage.jsx";
+import GlossaryPage from "./pages/GlossaryPage.jsx";
 import OrganizationsPage from "./pages/OrganizationsPage.jsx";
 import OrganizationDetailPage from "./pages/OrganizationDetailPage.jsx";
 import PlatformPage from "./pages/PlatformPage.jsx";
@@ -257,6 +259,14 @@ const PLATFORM_GROUPS = [
     key: "governance",
     label: "Data governance",
     items: [{ to: "/data-governance", label: "Governance & quality", platformOrAdmin: true }],
+  },
+  {
+    key: "catalog",
+    label: "Data catalog",
+    items: [
+      { to: "/data-catalog", label: "Catalog registry", platformOrAdmin: true },
+      { to: "/glossary", label: "Business glossary", platformOrAdmin: true },
+    ],
   },
   {
     key: "communication",
@@ -504,6 +514,8 @@ export default function App() {
         <Route path="/authorization" element={<AuthorizationPage />} />
         <Route path="/security" element={<SecurityModelPage />} />
         <Route path="/data-governance" element={<DataGovernancePage />} />
+        <Route path="/data-catalog" element={<DataCatalogPage />} />
+        <Route path="/glossary" element={<GlossaryPage />} />
         <Route path="/policy" element={<PolicyPage />} />
         <Route path="/authentication" element={<AuthenticationPage />} />
         <Route path="/sessions" element={<SessionsPage />} />

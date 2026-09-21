@@ -44,6 +44,9 @@ import { createContentRouter } from "./services/content/router.js";
 import * as dataGovernance from "./services/data-governance/index.js";
 import { createDataGovernanceRouter } from "./services/data-governance/router-data-governance.js";
 import { createDataQualityRouter } from "./services/data-governance/router-data-quality.js";
+import * as dataCatalog from "./services/data-catalog/index.js";
+import { createDataCatalogRouter } from "./services/data-catalog/router-data-catalog.js";
+import { createGlossaryRouter } from "./services/data-catalog/router-glossary.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -165,6 +168,11 @@ export function createApp(db) {
     dataGovernance.ensureDataGovernanceFoundation(db);
   } catch {
     /* data governance foundation is idempotent and must never block application boot */
+  }
+  try {
+    dataCatalog.ensureDataCatalogFoundation(db);
+  } catch {
+    /* data catalog foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -9846,6 +9854,16 @@ export function createApp(db) {
   app.use("/api/v1/data-governance", dataGovernanceRouter);
   app.use("/api/data-quality", dataQualityRouter);
   app.use("/api/v1/data-quality", dataQualityRouter);
+
+  // ── Data Catalog & Business Glossary ──────────────────────────────────────
+  const dataCatalogRouter = createDataCatalogRouter({ express, db, auth, can, wrap });
+  const glossaryRouter = createGlossaryRouter({ express, db, auth, can, wrap });
+  app.use("/api/data-catalog", dataCatalogRouter);
+  app.use("/api/v1/data-catalog", dataCatalogRouter);
+  app.use("/api/catalog", dataCatalogRouter);
+  app.use("/api/v1/catalog", dataCatalogRouter);
+  app.use("/api/glossary", glossaryRouter);
+  app.use("/api/v1/glossary", glossaryRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

@@ -31,6 +31,7 @@ import { registerVersioningHandlers, runVersioningMaintenance } from "../server/
 import { registerReferenceHandlers } from "../server/services/reference/jobs.js";
 import { registerContentProcessingHandlers, registerContentHandlers, runContentMaintenance } from "../server/services/content.js";
 import { registerDataGovernanceHandlers, runGovernanceMaintenance } from "../server/services/data-governance/index.js";
+import { registerCatalogHandlers, runCatalogMaintenance } from "../server/services/data-catalog/index.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -120,6 +121,10 @@ registerContentHandlers();
 // evaluation, duplicate scans and governance housekeeping).
 registerDataGovernanceHandlers();
 
+// Data Catalog & Business Glossary background handlers (metadata import/export,
+// lineage convergence and search reindex).
+registerCatalogHandlers();
+
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
 const fileMaintenanceMs = positive(process.env.FILE_MAINTENANCE_MS, 60000);
@@ -168,6 +173,25 @@ const governanceMaintenance = setInterval(() => {
   }
 }, governanceMaintenanceMs);
 governanceMaintenance.unref?.();
+
+// Periodic data catalog housekeeping: converge lineage metadata so expired
+// effectivities retire and edges orphaned by retired entries are pruned.
+const catalogMaintenanceMs = positive(process.env.CATALOG_MAINTENANCE_MS, 60000);
+const catalogMaintenance = setInterval(() => {
+  try {
+    const summary = runCatalogMaintenance(db);
+    if (summary.deactivated || summary.pruned) {
+      log("info", "Data catalog housekeeping", {
+        tenants: summary.tenants,
+        deactivated: summary.deactivated,
+        pruned: summary.pruned,
+      });
+    }
+  } catch (error) {
+    log("warn", "Data catalog housekeeping failed", { error: error.message });
+  }
+}, catalogMaintenanceMs);
+catalogMaintenance.unref?.();
 
 // Periodic search housekeeping: converge the index queue and prune expired
 // search history / exports.
@@ -310,6 +334,7 @@ async function shutdown(signal) {
   clearInterval(eventMaintenance);
   clearInterval(numberingMaintenance);
   clearInterval(governanceMaintenance);
+  clearInterval(catalogMaintenance);
   log("info", "Worker draining", { signal, drain_ms: drainMs, active_jobs: worker.active.size });
   try {
     await worker.stop({ timeoutMs: drainMs });

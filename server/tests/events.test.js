@@ -26,7 +26,7 @@ describe("event & messaging framework services", () => {
     assert.ok(first.event_types.total >= 30);
     assert.equal(second.event_types.created, 0, "foundation install is idempotent");
 
-    const types = events.Registry.listEventTypes(db, { pageSize: 100 });
+    const types = events.Registry.listEventTypes(db, { pageSize: 500 });
     assert.ok(types.total >= 30);
     assert.ok(types.items.some((t) => t.code === "ProductCreated" && t.category === "product"));
     assert.ok(types.items.some((t) => t.code === "SecurityAccessDenied" && t.replay_policy === "denied"));

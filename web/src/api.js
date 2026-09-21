@@ -1528,3 +1528,145 @@ export const dataQuality = {
   remediations: (qs) => api(`/api/v1/data-quality/remediations${qs || ""}`),
   applyRemediation: (body) => api("/api/v1/data-quality/remediations", { method: "POST", body }),
 };
+
+export const dataCatalog = {
+  meta: () => api("/api/v1/data-catalog/meta"),
+  health: () => api("/api/v1/data-catalog/health"),
+  metrics: () => api("/api/v1/data-catalog/metrics"),
+
+  entries: (qs) => api(`/api/v1/data-catalog/entries${qs || ""}`),
+  entry: (ref) => api(`/api/v1/data-catalog/entries/${encodeURIComponent(ref)}`),
+  entryVersions: (ref) => api(`/api/v1/data-catalog/entries/${encodeURIComponent(ref)}/versions`),
+  setEntryStatus: (ref, status) =>
+    api(`/api/v1/data-catalog/entries/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+
+  objects: (qs) => api(`/api/v1/data-catalog/objects${qs || ""}`),
+  object: (ref) => api(`/api/v1/data-catalog/objects/${encodeURIComponent(ref)}`),
+  createObject: (body) => api("/api/v1/data-catalog/objects", { method: "POST", body }),
+  updateObject: (ref, body) => api(`/api/v1/data-catalog/objects/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setObjectStatus: (ref, status) =>
+    api(`/api/v1/data-catalog/objects/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+
+  attributes: (ref, qs) => api(`/api/v1/data-catalog/objects/${encodeURIComponent(ref)}/attributes${qs || ""}`),
+  attribute: (ref) => api(`/api/v1/data-catalog/attributes/${encodeURIComponent(ref)}`),
+  createAttribute: (ref, body) =>
+    api(`/api/v1/data-catalog/objects/${encodeURIComponent(ref)}/attributes`, { method: "POST", body }),
+  updateAttribute: (ref, body) =>
+    api(`/api/v1/data-catalog/attributes/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setAttributeStatus: (ref, status) =>
+    api(`/api/v1/data-catalog/attributes/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+
+  sources: (qs) => api(`/api/v1/data-catalog/sources${qs || ""}`),
+  source: (ref) => api(`/api/v1/data-catalog/sources/${encodeURIComponent(ref)}`),
+  createSource: (body) => api("/api/v1/data-catalog/sources", { method: "POST", body }),
+  updateSource: (ref, body) => api(`/api/v1/data-catalog/sources/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setSourceStatus: (ref, status) =>
+    api(`/api/v1/data-catalog/sources/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  sourceMappings: (ref, qs) => api(`/api/v1/data-catalog/sources/${encodeURIComponent(ref)}/mappings${qs || ""}`),
+  createSourceMapping: (ref, body) =>
+    api(`/api/v1/data-catalog/sources/${encodeURIComponent(ref)}/mappings`, { method: "POST", body }),
+  updateSourceMapping: (id, body) =>
+    api(`/api/v1/data-catalog/source-mappings/${encodeURIComponent(id)}`, { method: "PATCH", body }),
+  removeSourceMapping: (id) =>
+    api(`/api/v1/data-catalog/source-mappings/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  consumers: (qs) => api(`/api/v1/data-catalog/consumers${qs || ""}`),
+  consumer: (ref) => api(`/api/v1/data-catalog/consumers/${encodeURIComponent(ref)}`),
+  createConsumer: (body) => api("/api/v1/data-catalog/consumers", { method: "POST", body }),
+  updateConsumer: (ref, body) =>
+    api(`/api/v1/data-catalog/consumers/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setConsumerStatus: (ref, status) =>
+    api(`/api/v1/data-catalog/consumers/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  consumerMappings: (ref, qs) => api(`/api/v1/data-catalog/consumers/${encodeURIComponent(ref)}/mappings${qs || ""}`),
+  createConsumerMapping: (ref, body) =>
+    api(`/api/v1/data-catalog/consumers/${encodeURIComponent(ref)}/mappings`, { method: "POST", body }),
+  updateConsumerMapping: (id, body) =>
+    api(`/api/v1/data-catalog/consumer-mappings/${encodeURIComponent(id)}`, { method: "PATCH", body }),
+  removeConsumerMapping: (id) =>
+    api(`/api/v1/data-catalog/consumer-mappings/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  lineage: (qs) => api(`/api/v1/data-catalog/lineage${qs || ""}`),
+  lineageGraph: (qs) => api(`/api/v1/data-catalog/lineage/graph${qs || ""}`),
+  lineageImpact: (qs) => api(`/api/v1/data-catalog/lineage/impact${qs || ""}`),
+  createLineage: (body) => api("/api/v1/data-catalog/lineage", { method: "POST", body }),
+  updateLineage: (id, body) => api(`/api/v1/data-catalog/lineage/${encodeURIComponent(id)}`, { method: "PATCH", body }),
+  removeLineage: (id) => api(`/api/v1/data-catalog/lineage/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  runLineageMaintenance: () => api("/api/v1/data-catalog/lineage/maintenance", { method: "POST" }),
+
+  relationshipTypes: (qs) => api(`/api/v1/data-catalog/relationship-types${qs || ""}`),
+  createRelationshipType: (body) => api("/api/v1/data-catalog/relationship-types", { method: "POST", body }),
+  updateRelationshipType: (ref, body) =>
+    api(`/api/v1/data-catalog/relationship-types/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  relationships: (qs) => api(`/api/v1/data-catalog/relationships${qs || ""}`),
+  createRelationship: (body) => api("/api/v1/data-catalog/relationships", { method: "POST", body }),
+  updateRelationship: (id, body) =>
+    api(`/api/v1/data-catalog/relationships/${encodeURIComponent(id)}`, { method: "PATCH", body }),
+  removeRelationship: (id) => api(`/api/v1/data-catalog/relationships/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  classifications: (qs) => api(`/api/v1/data-catalog/classifications${qs || ""}`),
+  createClassification: (body) => api("/api/v1/data-catalog/classifications", { method: "POST", body }),
+  updateClassification: (ref, body) =>
+    api(`/api/v1/data-catalog/classifications/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setClassificationStatus: (ref, status) =>
+    api(`/api/v1/data-catalog/classifications/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  classificationAssignments: (qs) => api(`/api/v1/data-catalog/classification-assignments${qs || ""}`),
+
+  ownership: (qs) => api(`/api/v1/data-catalog/ownership${qs || ""}`),
+  createOwnership: (body) => api("/api/v1/data-catalog/ownership", { method: "POST", body }),
+  updateOwnership: (id, body) => api(`/api/v1/data-catalog/ownership/${encodeURIComponent(id)}`, { method: "PATCH", body }),
+  removeOwnership: (id) => api(`/api/v1/data-catalog/ownership/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  ownershipGaps: (qs) => api(`/api/v1/data-catalog/ownership/gaps${qs || ""}`),
+  resolveOwnership: (qs) => api(`/api/v1/data-catalog/ownership/resolve${qs || ""}`),
+
+  configuration: () => api("/api/v1/data-catalog/configuration"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/data-catalog/configuration/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  importRuns: (qs) => api(`/api/v1/data-catalog/import-runs${qs || ""}`),
+  importRun: (id) => api(`/api/v1/data-catalog/import-runs/${encodeURIComponent(id)}`),
+  importCatalog: (body) => api("/api/v1/data-catalog/import", { method: "POST", body }),
+  exportCatalog: (qs) => api(`/api/v1/data-catalog/export${qs || ""}`),
+  submitImport: (body) => api("/api/v1/data-catalog/import/submit", { method: "POST", body }),
+  submitExport: (body) => api("/api/v1/data-catalog/export/submit", { method: "POST", body }),
+  submitReindex: (body) => api("/api/v1/data-catalog/reindex", { method: "POST", body }),
+};
+
+export const glossary = {
+  meta: () => api("/api/v1/glossary/meta"),
+  metrics: () => api("/api/v1/glossary/metrics"),
+
+  terms: (qs) => api(`/api/v1/glossary/terms${qs || ""}`),
+  term: (ref) => api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}`),
+  createTerm: (body) => api("/api/v1/glossary/terms", { method: "POST", body }),
+  updateTerm: (ref, body) => api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  exportTerms: () => api("/api/v1/glossary/terms/export"),
+
+  submitTerm: (ref, body) => api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/submit`, { method: "POST", body }),
+  approveTerm: (ref, body) => api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/approve`, { method: "POST", body }),
+  rejectTerm: (ref, body) => api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/reject`, { method: "POST", body }),
+  setTermStatus: (ref, status) =>
+    api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+
+  definitions: (ref) => api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/definitions`),
+  upsertDefinition: (ref, type, body) =>
+    api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/definitions/${encodeURIComponent(type)}`, { method: "PUT", body }),
+  removeDefinition: (ref, type) =>
+    api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/definitions/${encodeURIComponent(type)}`, { method: "DELETE" }),
+
+  synonyms: (ref) => api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/synonyms`),
+  addSynonym: (ref, body) =>
+    api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/synonyms`, { method: "POST", body }),
+  removeSynonym: (ref, synonym) =>
+    api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/synonyms/${encodeURIComponent(synonym)}`, { method: "DELETE" }),
+
+  relations: (ref) => api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/relations`),
+  addRelation: (ref, body) =>
+    api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/relations`, { method: "POST", body }),
+  removeRelation: (id) => api(`/api/v1/glossary/term-relations/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  mappings: (ref) => api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/mappings`),
+  addMapping: (ref, body) =>
+    api(`/api/v1/glossary/terms/${encodeURIComponent(ref)}/mappings`, { method: "POST", body }),
+  removeMapping: (id) => api(`/api/v1/glossary/term-mappings/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  termsForTarget: (qs) => api(`/api/v1/glossary/term-mappings${qs || ""}`),
+};

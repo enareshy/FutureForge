@@ -29,6 +29,7 @@ import * as versioning from "./services/versioning.js";
 import * as reference from "./services/reference.js";
 import * as content from "./services/content.js";
 import * as dataGovernance from "./services/data-governance/index.js";
+import * as dataCatalog from "./services/data-catalog/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -967,6 +968,24 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.data_quality.exceptions", name: "Quality exceptions & workflow", parentCode: "iam.data_quality" },
     { applicationCode: "iam", code: "iam.data_quality.duplicates", name: "Duplicate detection", parentCode: "iam.data_quality" },
     { applicationCode: "iam", code: "iam.data_quality.remediation", name: "Quality remediation", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_catalog", name: "Data catalog & business glossary service", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_catalog.overview", name: "Unified catalog registry & overview", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.domains", name: "Catalog domains", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.objects", name: "Catalog data objects", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.attributes", name: "Catalog attributes", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.glossary", name: "Business glossary", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.terms", name: "Business terms & definitions", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.sources", name: "Data sources", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.consumers", name: "Data consumers", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.mappings", name: "Source & consumer mappings", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.lineage", name: "Data lineage & impact analysis", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.relationships", name: "Catalog relationships", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.classifications", name: "Catalog classifications", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.ownership", name: "Catalog ownership & stewardship", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.import_export", name: "Catalog metadata import & export", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.admin", name: "Catalog administration & configuration", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.jobs", name: "Catalog background jobs", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.metrics", name: "Catalog metrics & health", parentCode: "iam.data_catalog" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1194,7 +1213,27 @@ function seedMissingCatalog(db) {
     "iam.data_quality.duplicates",
     "iam.data_quality.remediation",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes]) {
+  const dataCatalogResourceCodes = [
+    "iam.data_catalog",
+    "iam.data_catalog.overview",
+    "iam.data_catalog.domains",
+    "iam.data_catalog.objects",
+    "iam.data_catalog.attributes",
+    "iam.data_catalog.glossary",
+    "iam.data_catalog.terms",
+    "iam.data_catalog.sources",
+    "iam.data_catalog.consumers",
+    "iam.data_catalog.mappings",
+    "iam.data_catalog.lineage",
+    "iam.data_catalog.relationships",
+    "iam.data_catalog.classifications",
+    "iam.data_catalog.ownership",
+    "iam.data_catalog.import_export",
+    "iam.data_catalog.admin",
+    "iam.data_catalog.jobs",
+    "iam.data_catalog.metrics",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2715,7 +2754,8 @@ export function seedDatabase(db) {
   const referenceResult = withEventSuppression(() => seedReference(db));
   const contentResult = withEventSuppression(() => seedContent(db));
   const dataGovernanceResult = withEventSuppression(() => seedDataGovernance(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult };
+  const dataCatalogResult = withEventSuppression(() => seedDataCatalog(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult };
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -2727,6 +2767,18 @@ function seedDataGovernance(db) {
     return { dataGovernanceSeeded: true, ...result };
   } catch (err) {
     return { dataGovernanceSeeded: false, dataGovernanceError: err.message };
+  }
+}
+
+// Installs the centralized Data Catalog & Business Glossary foundation (default
+// relationship types, event types, job handlers, search registrations) plus a
+// small demo estate so catalog dashboards are not empty on a fresh install.
+function seedDataCatalog(db) {
+  try {
+    const result = dataCatalog.ensureDataCatalogSeed(db);
+    return { dataCatalogSeeded: true, ...result };
+  } catch (err) {
+    return { dataCatalogSeeded: false, dataCatalogError: err.message };
   }
 }
 
