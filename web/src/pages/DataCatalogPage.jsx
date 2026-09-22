@@ -159,9 +159,9 @@ export default function DataCatalogPage() {
 
       {error ? <div className="error">{error}</div> : null}
 
-      <div className="chips" style={{ marginBottom: 12 }}>
+      <div className="tabs">
         {TABS.map((entry) => (
-          <button key={entry.key} className={`chip link-btn${tab === entry.key ? " active" : ""}`} onClick={() => setTab(entry.key)}>
+          <button key={entry.key} type="button" className={`tab ${tab === entry.key ? "active" : ""}`} onClick={() => setTab(entry.key)}>
             {entry.label}
           </button>
         ))}

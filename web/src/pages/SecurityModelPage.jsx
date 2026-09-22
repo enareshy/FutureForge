@@ -250,11 +250,12 @@ export default function SecurityModelPage() {
 
       {error ? <div className="error">{error}</div> : null}
 
-      <div className="chips" style={{ marginBottom: 12 }}>
+      <div className="tabs">
         {TABS.map((entry) => (
           <button
             key={entry.key}
-            className={`chip link-btn${tab === entry.key ? " active" : ""}`}
+            type="button"
+            className={`tab ${tab === entry.key ? "active" : ""}`}
             onClick={() => setTab(entry.key)}
           >
             {entry.label}
