@@ -424,7 +424,7 @@ export async function runImportJob(db, { jobId, params = {}, actor = null, ip = 
       } else if (result.status === "SKIPPED") {
         counters.skipped += 1;
         batchCounters.skipped += 1;
-      } else if (result.status === "ERROR") {
+      } else if (result.status === "ERROR" || result.error?.code === "DUPLICATE") {
         counters.rejected += 1;
         batchCounters.rejected += 1;
       } else {
@@ -635,8 +635,8 @@ export async function validateImport(db, tenantId, definition, params = {}, acto
     }
     const transformed = Engines.applyDefinitionTransformations(definition.transformations || [], mapped, { lookup: lookupResolver });
     const ruleResult = Engines.evaluateRules(definition.validation_rules || [], transformed, { lookupResolver });
-    if (schema.fields.length) {
-      const schemaCheck = Engines.validateTargetRecord(schema, transformed, { strict: Boolean(definition.validation?.strict_schema) });
+    if (definition.validation?.strict_schema && schema.fields.length) {
+      const schemaCheck = Engines.validateTargetRecord(schema, transformed, { strict: false });
       ruleResult.errors.push(...schemaCheck.errors);
       ruleResult.warnings.push(...schemaCheck.warnings);
     }

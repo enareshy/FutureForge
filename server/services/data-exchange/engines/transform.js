@@ -142,7 +142,7 @@ registerTransformationHandler("LOWERCASE", (value) => (value === null || value =
 registerTransformationHandler("SUBSTRING", (value, config) => String(value ?? "").slice(Number(config.start || 0), config.length !== undefined ? Number(config.start || 0) + Number(config.length) : undefined));
 registerTransformationHandler("REPLACE", (value, config) => String(value ?? "").split(String(config.find ?? config.from ?? "")).join(String(config.replace ?? config.to ?? "")));
 registerTransformationHandler("CONCAT", (value, config, ctx) => {
-  const parts = Array.isArray(config.fields || config.fields_json || config.parts) ? config.fields || config.parts : [];
+  const parts = [config.fields, config.fields_json, config.parts].find((candidate) => Array.isArray(candidate)) || [];
   const separator = String(config.separator ?? "");
   const evaluated = parts.map((part) => (typeof part === "string" && /[({]/.test(part) ? resolveValueExpression(part, { ...ctx.record, value }) : part));
   return evaluated.map((entry) => (entry === null || entry === undefined ? "" : String(entry))).join(separator);

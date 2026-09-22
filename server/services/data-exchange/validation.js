@@ -43,6 +43,7 @@ import {
   invalidMapping,
   invalidValidation,
   invalidTransformation,
+  invalidExpression,
   invalidMode,
   invalidDuplicateStrategy,
   invalidConnector,

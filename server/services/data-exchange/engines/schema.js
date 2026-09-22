@@ -78,18 +78,21 @@ function normalizeSchemaFields(fields) {
 }
 
 // Validates a mapped record against the target schema. `strict` rejects unknown
-// fields; the default records them as warnings so a feed can evolve.
+// fields; the default records them as warnings so a feed can evolve. Target
+// schemas address attributes by dotted path (e.g. `part.number`), while mapped
+// records may be nested objects, so the record is flattened first.
 export function validateTargetRecord(schema, record, { strict = false } = {}) {
   const errors = [];
   const warnings = [];
+  const flat = flattenRecord(record);
   const fields = new Map((schema?.fields || []).map((field) => [field.name, field]));
   for (const name of schema?.required_fields || []) {
-    const value = record?.[name];
+    const value = flat[name];
     if (value === null || value === undefined || value === "") {
       errors.push({ code: "required", field: name, message: `${name} is required` });
     }
   }
-  for (const [name, value] of Object.entries(record || {})) {
+  for (const [name, value] of Object.entries(flat)) {
     const field = fields.get(name);
     if (!field) {
       const entry = { code: "unknown_field", field: name, message: `Unknown target field "${name}"` };
@@ -102,6 +105,19 @@ export function validateTargetRecord(schema, record, { strict = false } = {}) {
     if (mismatch) errors.push({ code: "type_mismatch", field: name, message: `${name} ${mismatch}` });
   }
   return { valid: errors.length === 0, errors, warnings };
+}
+
+// Flattens nested objects into dotted keys so schema paths match mapped records.
+function flattenRecord(record, prefix = "", out = {}) {
+  for (const [key, value] of Object.entries(record || {})) {
+    const name = prefix ? `${prefix}.${key}` : key;
+    if (value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date)) {
+      flattenRecord(value, name, out);
+    } else {
+      out[name] = value;
+    }
+  }
+  return out;
 }
 
 function typeMismatch(dataType, value) {

@@ -49,9 +49,10 @@ export function createLookupResolver({ staticMaps = {}, cacheSize = 5000 } = {})
     const cacheKey = `${sourceCode}:${value}`;
     if (cache.has(cacheKey)) return cache.get(cacheKey);
     const resolved = source.resolver(value, config);
+    const effective = resolved ?? config.default ?? value;
     if (cache.size >= cacheSize) cache.clear();
-    cache.set(cacheKey, resolved);
-    return resolved ?? config.default ?? value;
+    cache.set(cacheKey, effective);
+    return effective;
   };
 }
 

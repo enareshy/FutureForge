@@ -237,7 +237,7 @@ export function registerBuiltinConnectors() {
     });
   }
 
-  return { registered: 9 };
+  return { registered: 12 };
 }
 
 function requireConnectorForFormat(format) {
