@@ -2,6 +2,7 @@ import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { HttpError, pagination } from "../../validation.js";
 import { writeAudit } from "../audit.js";
 import { CATALOG_JOB_TYPES } from "../data-catalog/constants.js";
+import { LIFECYCLE_JOB_TYPES } from "../data-lifecycle/constants.js";
 import {
   assertJobTypeCode,
   assertPriority,
@@ -381,6 +382,7 @@ const DEFAULT_TYPES = [
     default_priority: "low",
   },
   ...CATALOG_JOB_TYPES,
+  ...LIFECYCLE_JOB_TYPES,
 ];
 
 export function publicJobType(row) {

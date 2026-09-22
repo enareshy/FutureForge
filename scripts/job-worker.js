@@ -32,6 +32,7 @@ import { registerReferenceHandlers } from "../server/services/reference/jobs.js"
 import { registerContentProcessingHandlers, registerContentHandlers, runContentMaintenance } from "../server/services/content.js";
 import { registerDataGovernanceHandlers, runGovernanceMaintenance } from "../server/services/data-governance/index.js";
 import { registerCatalogHandlers, runCatalogMaintenance } from "../server/services/data-catalog/index.js";
+import { registerLifecycleHandlers, runLifecycleMaintenance } from "../server/services/data-lifecycle/index.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -125,6 +126,10 @@ registerDataGovernanceHandlers();
 // lineage convergence and search reindex).
 registerCatalogHandlers();
 
+// Data Lifecycle & Archival background handlers (eligibility evaluation,
+// archive/cold-storage/restore/purge/recovery batches and housekeeping).
+registerLifecycleHandlers();
+
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
 const fileMaintenanceMs = positive(process.env.FILE_MAINTENANCE_MS, 60000);
@@ -192,6 +197,27 @@ const catalogMaintenance = setInterval(() => {
   }
 }, catalogMaintenanceMs);
 catalogMaintenance.unref?.();
+
+// Periodic data lifecycle housekeeping: expire legal holds, converge retention
+// dates for stale objects and reconcile archive integrity.
+const lifecycleMaintenanceMs = positive(process.env.LIFECYCLE_MAINTENANCE_MS, 60000);
+const lifecycleMaintenance = setInterval(async () => {
+  try {
+    const summary = await runLifecycleMaintenance(db);
+    if (summary.expired_holds || summary.retention_recomputed || summary.archive_failures) {
+      log("info", "Data lifecycle housekeeping", {
+        tenants: summary.tenants,
+        expired_holds: summary.expired_holds,
+        retention_recomputed: summary.retention_recomputed,
+        archives_verified: summary.archives_verified,
+        archive_failures: summary.archive_failures,
+      });
+    }
+  } catch (error) {
+    log("warn", "Data lifecycle housekeeping failed", { error: error.message });
+  }
+}, lifecycleMaintenanceMs);
+lifecycleMaintenance.unref?.();
 
 // Periodic search housekeeping: converge the index queue and prune expired
 // search history / exports.
@@ -335,6 +361,7 @@ async function shutdown(signal) {
   clearInterval(numberingMaintenance);
   clearInterval(governanceMaintenance);
   clearInterval(catalogMaintenance);
+  clearInterval(lifecycleMaintenance);
   log("info", "Worker draining", { signal, drain_ms: drainMs, active_jobs: worker.active.size });
   try {
     await worker.stop({ timeoutMs: drainMs });

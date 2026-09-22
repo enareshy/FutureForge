@@ -1670,3 +1670,114 @@ export const glossary = {
   removeMapping: (id) => api(`/api/v1/glossary/term-mappings/${encodeURIComponent(id)}`, { method: "DELETE" }),
   termsForTarget: (qs) => api(`/api/v1/glossary/term-mappings${qs || ""}`),
 };
+
+export const dataLifecycle = {
+  meta: () => api("/api/v1/lifecycle/meta"),
+  health: () => api("/api/v1/lifecycle/health"),
+  metrics: () => api("/api/v1/lifecycle/metrics"),
+  providers: () => api("/api/v1/lifecycle/providers"),
+
+  states: (qs) => api(`/api/v1/lifecycle/states${qs || ""}`),
+  state: (code) => api(`/api/v1/lifecycle/states/${encodeURIComponent(code)}`),
+  createState: (body) => api("/api/v1/lifecycle/states", { method: "POST", body }),
+  updateState: (code, body) => api(`/api/v1/lifecycle/states/${encodeURIComponent(code)}`, { method: "PATCH", body }),
+  stateTransitions: (code) => api(`/api/v1/lifecycle/states/${encodeURIComponent(code)}/transitions`),
+  transitions: (qs) => api(`/api/v1/lifecycle/transitions${qs || ""}`),
+  createTransition: (body) => api("/api/v1/lifecycle/transitions", { method: "POST", body }),
+  setTransitionStatus: (id, status) =>
+    api(`/api/v1/lifecycle/transitions/${encodeURIComponent(id)}/status`, { method: "POST", body: { status } }),
+
+  tiers: () => api("/api/v1/lifecycle/tiers"),
+  setTier: (stateCode, dataTier, description) =>
+    api(`/api/v1/lifecycle/tiers/${encodeURIComponent(stateCode)}`, { method: "PUT", body: { data_tier: dataTier, description } }),
+
+  policies: (qs) => api(`/api/v1/lifecycle/policies${qs || ""}`),
+  policy: (ref) => api(`/api/v1/lifecycle/policies/${encodeURIComponent(ref)}`),
+  createPolicy: (body) => api("/api/v1/lifecycle/policies", { method: "POST", body }),
+  updatePolicy: (ref, body) => api(`/api/v1/lifecycle/policies/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setPolicyStatus: (ref, status) =>
+    api(`/api/v1/lifecycle/policies/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  policyVersions: (ref) => api(`/api/v1/lifecycle/policies/${encodeURIComponent(ref)}/versions`),
+  resolvePolicy: (body) => api("/api/v1/lifecycle/policies/resolve", { method: "POST", body }),
+
+  objects: (qs) => api(`/api/v1/lifecycle/objects${qs || ""}`),
+  object: (objectType, objectId) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`),
+  registerObject: (body) => api("/api/v1/lifecycle/objects", { method: "POST", body }),
+  objectSnapshot: (objectType, objectId) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/snapshot`),
+  objectHistory: (objectType, objectId, qs) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/history${qs || ""}`),
+  objectDependencies: (objectType, objectId) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/dependencies`),
+  objectEligibility: (objectType, objectId, action) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/eligibility?action=${encodeURIComponent(action)}`),
+  changeObjectState: (objectType, objectId, body) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/state`, { method: "POST", body }),
+  applyRetention: (objectType, objectId, body) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/retention`, { method: "POST", body }),
+  setObjectTier: (objectType, objectId, dataTier) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/tier`, { method: "POST", body: { data_tier: dataTier } }),
+  archiveObjectByRef: (objectType, objectId, body) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/archive`, { method: "POST", body }),
+  moveToColdStorage: (objectType, objectId, body) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/cold-storage`, { method: "POST", body }),
+  restoreObjectByRef: (objectType, objectId, body) =>
+    api(`/api/v1/lifecycle/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/restore`, { method: "POST", body }),
+
+  checkEligibility: (body) => api("/api/v1/lifecycle/eligibility/check", { method: "POST", body }),
+  batchEligibility: (body) => api("/api/v1/lifecycle/eligibility/batch", { method: "POST", body }),
+  dueObjects: (qs) => api(`/api/v1/lifecycle/eligibility/due${qs || ""}`),
+
+  legalHolds: (qs) => api(`/api/v1/lifecycle/legal-holds${qs || ""}`),
+  legalHold: (ref) => api(`/api/v1/lifecycle/legal-holds/${encodeURIComponent(ref)}`),
+  createLegalHold: (body) => api("/api/v1/lifecycle/legal-holds", { method: "POST", body }),
+  releaseLegalHold: (ref, body) =>
+    api(`/api/v1/lifecycle/legal-holds/${encodeURIComponent(ref)}/release`, { method: "POST", body }),
+  cancelLegalHold: (ref, body) =>
+    api(`/api/v1/lifecycle/legal-holds/${encodeURIComponent(ref)}/cancel`, { method: "POST", body }),
+
+  dependencies: (qs) => api(`/api/v1/lifecycle/dependencies${qs || ""}`),
+  recordDependency: (body) => api("/api/v1/lifecycle/dependencies", { method: "POST", body }),
+  refreshDependencies: (body) => api("/api/v1/lifecycle/dependencies/refresh", { method: "POST", body }),
+  resolveDependency: (id) => api(`/api/v1/lifecycle/dependencies/${encodeURIComponent(id)}/resolve`, { method: "POST" }),
+
+  archives: (qs) => api(`/api/v1/lifecycle/archives${qs || ""}`),
+  archive: (ref) => api(`/api/v1/lifecycle/archives/${encodeURIComponent(ref)}`),
+  archiveObject: (body) => api("/api/v1/lifecycle/archives", { method: "POST", body }),
+  verifyArchive: (ref) => api(`/api/v1/lifecycle/archives/${encodeURIComponent(ref)}/verify`, { method: "POST" }),
+
+  restores: (qs) => api(`/api/v1/lifecycle/restores${qs || ""}`),
+  restore: (ref) => api(`/api/v1/lifecycle/restores/${encodeURIComponent(ref)}`),
+  requestRestore: (body) => api("/api/v1/lifecycle/restores", { method: "POST", body }),
+  executeRestore: (ref) => api(`/api/v1/lifecycle/restores/${encodeURIComponent(ref)}/execute`, { method: "POST" }),
+
+  purges: (qs) => api(`/api/v1/lifecycle/purges${qs || ""}`),
+  purgeSummary: () => api("/api/v1/lifecycle/purges/summary"),
+  purge: (ref) => api(`/api/v1/lifecycle/purges/${encodeURIComponent(ref)}`),
+  evaluatePurge: (body) => api("/api/v1/lifecycle/purges/evaluate", { method: "POST", body }),
+  executePurge: (body) => api("/api/v1/lifecycle/purges", { method: "POST", body }),
+
+  recoveries: (qs) => api(`/api/v1/lifecycle/recoveries${qs || ""}`),
+  recovery: (ref) => api(`/api/v1/lifecycle/recoveries/${encodeURIComponent(ref)}`),
+  requestRecovery: (body) => api("/api/v1/lifecycle/recoveries", { method: "POST", body }),
+  executeRecovery: (ref) => api(`/api/v1/lifecycle/recoveries/${encodeURIComponent(ref)}/execute`, { method: "POST" }),
+
+  history: (qs) => api(`/api/v1/lifecycle/history${qs || ""}`),
+  catalogTypes: () => api("/api/v1/lifecycle/catalog-types"),
+  snapshots: (body) => api("/api/v1/lifecycle/snapshots", { method: "POST", body }),
+
+  configuration: () => api("/api/v1/lifecycle/configuration"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/lifecycle/configuration/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  jobs: (qs) => api(`/api/v1/lifecycle/jobs${qs || ""}`),
+  job: (ref) => api(`/api/v1/lifecycle/jobs/${encodeURIComponent(ref)}`),
+  submitEvaluation: (body) => api("/api/v1/lifecycle/jobs/evaluate", { method: "POST", body }),
+  submitArchive: (body) => api("/api/v1/lifecycle/jobs/archive", { method: "POST", body }),
+  submitColdStorage: (body) => api("/api/v1/lifecycle/jobs/cold-storage", { method: "POST", body }),
+  submitRestore: (body) => api("/api/v1/lifecycle/jobs/restore", { method: "POST", body }),
+  submitPurge: (body) => api("/api/v1/lifecycle/jobs/purge", { method: "POST", body }),
+  submitRecovery: (body) => api("/api/v1/lifecycle/jobs/recovery", { method: "POST", body }),
+  submitMaintenance: () => api("/api/v1/lifecycle/jobs/maintenance", { method: "POST" }),
+};

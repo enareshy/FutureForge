@@ -30,6 +30,7 @@ import * as reference from "./services/reference.js";
 import * as content from "./services/content.js";
 import * as dataGovernance from "./services/data-governance/index.js";
 import * as dataCatalog from "./services/data-catalog/index.js";
+import * as dataLifecycle from "./services/data-lifecycle/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -986,6 +987,21 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.data_catalog.admin", name: "Catalog administration & configuration", parentCode: "iam.data_catalog" },
     { applicationCode: "iam", code: "iam.data_catalog.jobs", name: "Catalog background jobs", parentCode: "iam.data_catalog" },
     { applicationCode: "iam", code: "iam.data_catalog.metrics", name: "Catalog metrics & health", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_lifecycle", name: "Data lifecycle & archival service", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.overview", name: "Lifecycle overview & registry", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.states", name: "Lifecycle states & transitions", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.policies", name: "Retention policies", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.objects", name: "Tracked object lifecycles", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.eligibility", name: "Lifecycle eligibility engine", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.archive", name: "Archive & cold storage", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.restore", name: "Restore operations", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.recovery", name: "Recovery operations", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.purge", name: "Purge operations", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.legal_holds", name: "Legal holds", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.dependencies", name: "Lifecycle dependencies", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.jobs", name: "Lifecycle background jobs", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.metrics", name: "Lifecycle metrics & health", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.admin", name: "Lifecycle administration & configuration", parentCode: "iam.data_lifecycle" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1233,7 +1249,24 @@ function seedMissingCatalog(db) {
     "iam.data_catalog.jobs",
     "iam.data_catalog.metrics",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes]) {
+  const dataLifecycleResourceCodes = [
+    "iam.data_lifecycle",
+    "iam.data_lifecycle.overview",
+    "iam.data_lifecycle.states",
+    "iam.data_lifecycle.policies",
+    "iam.data_lifecycle.objects",
+    "iam.data_lifecycle.eligibility",
+    "iam.data_lifecycle.archive",
+    "iam.data_lifecycle.restore",
+    "iam.data_lifecycle.recovery",
+    "iam.data_lifecycle.purge",
+    "iam.data_lifecycle.legal_holds",
+    "iam.data_lifecycle.dependencies",
+    "iam.data_lifecycle.jobs",
+    "iam.data_lifecycle.metrics",
+    "iam.data_lifecycle.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2755,7 +2788,8 @@ export function seedDatabase(db) {
   const contentResult = withEventSuppression(() => seedContent(db));
   const dataGovernanceResult = withEventSuppression(() => seedDataGovernance(db));
   const dataCatalogResult = withEventSuppression(() => seedDataCatalog(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult };
+  const dataLifecycleResult = withEventSuppression(() => seedDataLifecycle(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult };
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -2779,6 +2813,19 @@ function seedDataCatalog(db) {
     return { dataCatalogSeeded: true, ...result };
   } catch (err) {
     return { dataCatalogSeeded: false, dataCatalogError: err.message };
+  }
+}
+
+// Installs the centralized Data Lifecycle & Archival foundation (default states,
+// transitions, tier mappings, event types, job handlers, search registrations)
+// plus a small demo estate so lifecycle dashboards are not empty on a fresh
+// install.
+function seedDataLifecycle(db) {
+  try {
+    const result = dataLifecycle.ensureDataLifecycleSeed(db);
+    return { dataLifecycleSeeded: true, ...result };
+  } catch (err) {
+    return { dataLifecycleSeeded: false, dataLifecycleError: err.message };
   }
 }
 

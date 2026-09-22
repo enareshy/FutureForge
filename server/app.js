@@ -47,6 +47,8 @@ import { createDataQualityRouter } from "./services/data-governance/router-data-
 import * as dataCatalog from "./services/data-catalog/index.js";
 import { createDataCatalogRouter } from "./services/data-catalog/router-data-catalog.js";
 import { createGlossaryRouter } from "./services/data-catalog/router-glossary.js";
+import * as dataLifecycle from "./services/data-lifecycle/index.js";
+import { createDataLifecycleRouter } from "./services/data-lifecycle/router-data-lifecycle.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -173,6 +175,11 @@ export function createApp(db) {
     dataCatalog.ensureDataCatalogFoundation(db);
   } catch {
     /* data catalog foundation is idempotent and must never block application boot */
+  }
+  try {
+    dataLifecycle.ensureDataLifecycleFoundation(db);
+  } catch {
+    /* data lifecycle foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -9864,6 +9871,11 @@ export function createApp(db) {
   app.use("/api/v1/catalog", dataCatalogRouter);
   app.use("/api/glossary", glossaryRouter);
   app.use("/api/v1/glossary", glossaryRouter);
+
+  // ── Data Lifecycle & Archival ─────────────────────────────────────────────
+  const dataLifecycleRouter = createDataLifecycleRouter({ express, db, auth, can, wrap });
+  app.use("/api/lifecycle", dataLifecycleRouter);
+  app.use("/api/v1/lifecycle", dataLifecycleRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

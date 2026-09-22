@@ -6889,3 +6889,429 @@ CREATE TABLE IF NOT EXISTS dc_configuration (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dc_configuration_tenant ON dc_configuration(tenant_id, key);
+
+-- ── Data Lifecycle & Archival ────────────────────────────────────────────────
+-- Centralized lifecycle of actual enterprise/business data: states, retention
+-- policies, legal holds, archive/cold-storage/restore/recovery/purge, tiers and
+-- lifecycle history. This is deliberately independent from the Audit & History
+-- retention engine: Audit keeps controlling audit records; this service owns
+-- business-data lifecycle. All tables are tenant scoped.
+
+-- Configurable lifecycle state model. System states are seeded per tenant and
+-- carry the capability matrix the service and UI consult.
+CREATE TABLE IF NOT EXISTS lc_states (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  state_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  read_allowed INTEGER NOT NULL DEFAULT 1,
+  update_allowed INTEGER NOT NULL DEFAULT 0,
+  delete_allowed INTEGER NOT NULL DEFAULT 0,
+  restore_allowed INTEGER NOT NULL DEFAULT 0,
+  export_allowed INTEGER NOT NULL DEFAULT 0,
+  archive_eligible INTEGER NOT NULL DEFAULT 0,
+  purge_eligible INTEGER NOT NULL DEFAULT 0,
+  system INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_states_tenant ON lc_states(tenant_id, sequence);
+
+-- Policy-controlled transition graph. The service refuses any transition that is
+-- not declared here (and legal holds can block declared transitions too).
+CREATE TABLE IF NOT EXISTS lc_state_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  from_state TEXT NOT NULL,
+  to_state TEXT NOT NULL,
+  action TEXT NOT NULL DEFAULT 'CHANGE_STATE',
+  description TEXT NOT NULL DEFAULT '',
+  requires_legal_hold_clear INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, from_state, to_state, action)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_transitions_tenant ON lc_state_transitions(tenant_id, from_state);
+
+-- Retention / archive / purge policies. A policy declares the scope dimensions
+-- (org, object type, subtype, classification, lifecycle state), the retention
+-- anchor and period, and the actions to take at each stage.
+CREATE TABLE IF NOT EXISTS lc_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  scope_type TEXT NOT NULL DEFAULT 'TENANT' CHECK (scope_type IN ('PLATFORM', 'TENANT', 'ORGANIZATION', 'OBJECT_TYPE', 'OBJECT')),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  plant_id INTEGER,
+  object_type TEXT NOT NULL DEFAULT '',
+  subtype TEXT NOT NULL DEFAULT '',
+  classification TEXT NOT NULL DEFAULT '',
+  lifecycle_state TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  retention_period_days INTEGER NOT NULL DEFAULT 0,
+  retention_basis TEXT NOT NULL DEFAULT 'LAST_MODIFIED_DATE',
+  archive_action TEXT NOT NULL DEFAULT 'MARK_ELIGIBLE',
+  cold_storage_action TEXT NOT NULL DEFAULT 'MARK_ELIGIBLE',
+  purge_action TEXT NOT NULL DEFAULT 'MARK_ELIGIBLE',
+  archive_after_days INTEGER NOT NULL DEFAULT 0,
+  cold_storage_after_days INTEGER NOT NULL DEFAULT 0,
+  purge_after_days INTEGER NOT NULL DEFAULT 0,
+  data_tier TEXT NOT NULL DEFAULT 'HOT',
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'suspended', 'retired')),
+  effective_from TEXT,
+  effective_to TEXT,
+  priority INTEGER NOT NULL DEFAULT 100,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_policies_resolve ON lc_policies(tenant_id, status, object_type, organization_id, priority);
+CREATE INDEX IF NOT EXISTS idx_lc_policies_scope ON lc_policies(tenant_id, scope_type, lifecycle_state);
+
+-- Immutable policy versions. Editing an active policy snapshots the prior state
+-- so change control is preserved.
+CREATE TABLE IF NOT EXISTS lc_policy_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_id INTEGER NOT NULL REFERENCES lc_policies(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (policy_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_policy_versions_policy ON lc_policy_versions(policy_id, version);
+
+-- State -> data tier mapping, decoupled from lifecycle state so physical storage
+-- can differ from logical state where required.
+CREATE TABLE IF NOT EXISTS lc_tier_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  state_code TEXT NOT NULL,
+  data_tier TEXT NOT NULL CHECK (data_tier IN ('HOT', 'WARM', 'ARCHIVE', 'COLD')),
+  description TEXT NOT NULL DEFAULT '',
+  system INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, state_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_tier_policies_tenant ON lc_tier_policies(tenant_id, state_code);
+
+-- One row per tracked business object. This is the lifecycle ledger; it stores
+-- metadata only and never a copy of business data (archives do that).
+CREATE TABLE IF NOT EXISTS lc_object_lifecycle (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  plant_id INTEGER,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  object_ref TEXT NOT NULL DEFAULT '',
+  current_state TEXT NOT NULL DEFAULT 'ACTIVE',
+  previous_state TEXT,
+  data_tier TEXT NOT NULL DEFAULT 'HOT',
+  retention_policy_id INTEGER REFERENCES lc_policies(id) ON DELETE SET NULL,
+  retention_anchor TEXT,
+  retention_basis TEXT,
+  retention_start TEXT,
+  archive_eligible_at TEXT,
+  cold_storage_at TEXT,
+  purge_eligible_at TEXT,
+  legal_hold_status TEXT NOT NULL DEFAULT 'NONE',
+  classification TEXT NOT NULL DEFAULT 'internal',
+  version INTEGER NOT NULL DEFAULT 1,
+  archived_at TEXT,
+  purged_at TEXT,
+  last_evaluated_at TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type, object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_object_tenant_type ON lc_object_lifecycle(tenant_id, object_type);
+CREATE INDEX IF NOT EXISTS idx_lc_object_object ON lc_object_lifecycle(tenant_id, object_id);
+CREATE INDEX IF NOT EXISTS idx_lc_object_state ON lc_object_lifecycle(tenant_id, current_state);
+CREATE INDEX IF NOT EXISTS idx_lc_object_tier ON lc_object_lifecycle(tenant_id, data_tier);
+CREATE INDEX IF NOT EXISTS idx_lc_object_archive_at ON lc_object_lifecycle(tenant_id, archive_eligible_at);
+CREATE INDEX IF NOT EXISTS idx_lc_object_purge_at ON lc_object_lifecycle(tenant_id, purge_eligible_at);
+CREATE INDEX IF NOT EXISTS idx_lc_object_hold ON lc_object_lifecycle(tenant_id, legal_hold_status);
+CREATE INDEX IF NOT EXISTS idx_lc_object_org ON lc_object_lifecycle(tenant_id, organization_id);
+
+-- Immutable lifecycle history. Every transition and operation appends here.
+CREATE TABLE IF NOT EXISTS lc_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  object_ref TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  from_state TEXT,
+  to_state TEXT,
+  data_tier TEXT,
+  policy_id INTEGER,
+  reason TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_history_object ON lc_history(tenant_id, object_type, object_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_lc_history_action ON lc_history(tenant_id, action, created_at);
+
+-- Legal holds. A hold blocks archive/purge/deletion where policy requires it, and
+-- always overrides purge eligibility.
+CREATE TABLE IF NOT EXISTS lc_legal_holds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  hold_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  scope_type TEXT NOT NULL DEFAULT 'OBJECT' CHECK (scope_type IN ('OBJECT', 'OBJECT_TYPE', 'OBJECT_SET', 'ORGANIZATION', 'PLANT', 'CLASSIFICATION', 'BUSINESS_DOMAIN')),
+  object_type TEXT NOT NULL DEFAULT '',
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  plant_id INTEGER,
+  classification TEXT NOT NULL DEFAULT '',
+  business_domain TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'RELEASED', 'CANCELLED', 'EXPIRED')),
+  start_date TEXT,
+  end_date TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  released_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  released_at TEXT,
+  release_reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_legal_holds_scope ON lc_legal_holds(tenant_id, status, scope_type, object_type);
+CREATE INDEX IF NOT EXISTS idx_lc_legal_holds_org ON lc_legal_holds(tenant_id, status, organization_id);
+
+-- Explicit object scope for a legal hold (bounded, indexed).
+CREATE TABLE IF NOT EXISTS lc_legal_hold_objects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  hold_id INTEGER NOT NULL REFERENCES lc_legal_holds(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (hold_id, object_type, object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_hold_objects_lookup ON lc_legal_hold_objects(tenant_id, object_type, object_id);
+
+-- Rule-based scopes evaluated by query, so millions of ids are never loaded.
+CREATE TABLE IF NOT EXISTS lc_legal_hold_scopes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  hold_id INTEGER NOT NULL REFERENCES lc_legal_holds(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  scope_type TEXT NOT NULL,
+  scope_value TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_hold_scopes_lookup ON lc_legal_hold_scopes(tenant_id, scope_type, scope_value);
+
+-- Archive records: the durable evidence an object version was packaged and
+-- stored, with the integrity checksum. Idempotent on object + version + key.
+CREATE TABLE IF NOT EXISTS lc_archive_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  archive_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  object_ref TEXT NOT NULL DEFAULT '',
+  object_version INTEGER,
+  policy_id INTEGER,
+  state_at_archive TEXT NOT NULL DEFAULT '',
+  data_tier TEXT NOT NULL DEFAULT 'ARCHIVE',
+  provider_code TEXT NOT NULL DEFAULT 'database',
+  provider_type TEXT NOT NULL DEFAULT 'DATABASE',
+  storage_uri TEXT NOT NULL DEFAULT '',
+  checksum TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  manifest_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'stored' CHECK (status IN ('stored', 'failed', 'restored', 'purged')),
+  idempotency_key TEXT NOT NULL DEFAULT '',
+  archived_at TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_archive_object ON lc_archive_records(tenant_id, object_type, object_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lc_archive_idem ON lc_archive_records(tenant_id, idempotency_key) WHERE idempotency_key <> '';
+
+-- Local database-backed archive payload store (development/testing provider).
+-- Production providers (object storage, cloud archive) replace this behind the
+-- same provider interface without touching business modules.
+CREATE TABLE IF NOT EXISTS lc_archive_blobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  storage_uri TEXT NOT NULL,
+  checksum TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  content TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (storage_uri)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_archive_blobs_tenant ON lc_archive_blobs(tenant_id, storage_uri);
+
+-- Restore orchestration records.
+CREATE TABLE IF NOT EXISTS lc_restore_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  restore_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  archive_id INTEGER REFERENCES lc_archive_records(id) ON DELETE SET NULL,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  object_ref TEXT NOT NULL DEFAULT '',
+  target_state TEXT NOT NULL DEFAULT 'INACTIVE',
+  conflict_strategy TEXT NOT NULL DEFAULT 'FAIL',
+  conflict_detected INTEGER NOT NULL DEFAULT 0,
+  conflict_json TEXT NOT NULL DEFAULT '{}',
+  dependencies_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'running', 'completed', 'failed', 'skipped')),
+  idempotency_key TEXT NOT NULL DEFAULT '',
+  requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  error TEXT NOT NULL DEFAULT '',
+  UNIQUE (tenant_id, restore_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_restore_object ON lc_restore_records(tenant_id, object_type, object_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lc_restore_idem ON lc_restore_records(tenant_id, idempotency_key) WHERE idempotency_key <> '';
+
+-- Recovery framework records (recover after failure/corruption/storage loss).
+CREATE TABLE IF NOT EXISTS lc_recovery_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  recovery_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  provider_code TEXT NOT NULL DEFAULT 'database',
+  recovery_point_ref TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT,
+  status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'running', 'completed', 'failed')),
+  details_json TEXT NOT NULL DEFAULT '{}',
+  requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  error TEXT NOT NULL DEFAULT '',
+  UNIQUE (tenant_id, recovery_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_recovery_tenant ON lc_recovery_records(tenant_id, status, requested_at);
+
+-- Purge records. Purge is the most restricted operation and always carries the
+-- eligibility snapshot that authorized it.
+CREATE TABLE IF NOT EXISTS lc_purge_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  purge_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  object_ref TEXT NOT NULL DEFAULT '',
+  policy_id INTEGER,
+  archive_id INTEGER,
+  reason TEXT NOT NULL DEFAULT '',
+  eligibility_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'executed' CHECK (status IN ('executed', 'failed', 'denied')),
+  idempotency_key TEXT NOT NULL DEFAULT '',
+  executed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  executed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_purge_object ON lc_purge_records(tenant_id, object_type, object_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lc_purge_idem ON lc_purge_records(tenant_id, idempotency_key) WHERE idempotency_key <> '';
+
+-- Lifecycle job ledger. Mirrors the platform job engine status for lifecycle
+-- operations, with per-object success/failure/error counters.
+CREATE TABLE IF NOT EXISTS lc_lifecycle_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  job_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'QUEUED' CHECK (status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'PARTIAL', 'FAILED', 'CANCELLED')),
+  priority TEXT NOT NULL DEFAULT 'normal',
+  object_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  params_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT,
+  completed_at TEXT,
+  platform_job_id INTEGER,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, job_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_jobs_tenant ON lc_lifecycle_jobs(tenant_id, status, created_at);
+
+-- Dependency snapshot used for pre-archive/purge checks. Populated from the
+-- Object & Relationship Framework; never a parallel relationship engine.
+CREATE TABLE IF NOT EXISTS lc_dependencies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  depends_on_type TEXT NOT NULL,
+  depends_on_id TEXT NOT NULL,
+  relationship_type TEXT NOT NULL DEFAULT '',
+  blocking INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'resolved')),
+  details_json TEXT NOT NULL DEFAULT '{}',
+  resolved_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_dependencies_object ON lc_dependencies(tenant_id, object_type, object_id, status);
+
+-- Tenant-scoped lifecycle configuration. Bounds and gates are data, not code.
+CREATE TABLE IF NOT EXISTS lc_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lc_configuration_tenant ON lc_configuration(tenant_id, key);
