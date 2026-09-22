@@ -31,6 +31,7 @@ import * as content from "./services/content.js";
 import * as dataGovernance from "./services/data-governance/index.js";
 import * as dataCatalog from "./services/data-catalog/index.js";
 import * as dataLifecycle from "./services/data-lifecycle/index.js";
+import * as dataExchange from "./services/data-exchange/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1002,6 +1003,21 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.data_lifecycle.jobs", name: "Lifecycle background jobs", parentCode: "iam.data_lifecycle" },
     { applicationCode: "iam", code: "iam.data_lifecycle.metrics", name: "Lifecycle metrics & health", parentCode: "iam.data_lifecycle" },
     { applicationCode: "iam", code: "iam.data_lifecycle.admin", name: "Lifecycle administration & configuration", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_exchange", name: "Import & export framework service", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_exchange.overview", name: "Data exchange overview & catalogue", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.imports", name: "Data imports", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.import_definitions", name: "Import definitions & mappings", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.exports", name: "Data exports", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.export_definitions", name: "Export definitions & field selection", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.connectors", name: "Connector configurations & credentials", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.mapping", name: "Field mapping engine", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.validation", name: "Import validation engine", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.reconciliation", name: "Import reconciliation", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.templates", name: "Import & export templates", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.history", name: "Data exchange history", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.jobs", name: "Data exchange background jobs", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.metrics", name: "Data exchange metrics & health", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.admin", name: "Data exchange administration & configuration", parentCode: "iam.data_exchange" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1266,7 +1282,24 @@ function seedMissingCatalog(db) {
     "iam.data_lifecycle.metrics",
     "iam.data_lifecycle.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes]) {
+  const dataExchangeResourceCodes = [
+    "iam.data_exchange",
+    "iam.data_exchange.overview",
+    "iam.data_exchange.imports",
+    "iam.data_exchange.import_definitions",
+    "iam.data_exchange.exports",
+    "iam.data_exchange.export_definitions",
+    "iam.data_exchange.connectors",
+    "iam.data_exchange.mapping",
+    "iam.data_exchange.validation",
+    "iam.data_exchange.reconciliation",
+    "iam.data_exchange.templates",
+    "iam.data_exchange.history",
+    "iam.data_exchange.jobs",
+    "iam.data_exchange.metrics",
+    "iam.data_exchange.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2789,7 +2822,8 @@ export function seedDatabase(db) {
   const dataGovernanceResult = withEventSuppression(() => seedDataGovernance(db));
   const dataCatalogResult = withEventSuppression(() => seedDataCatalog(db));
   const dataLifecycleResult = withEventSuppression(() => seedDataLifecycle(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult };
+  const dataExchangeResult = withEventSuppression(() => seedDataExchange(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult };
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -2826,6 +2860,18 @@ function seedDataLifecycle(db) {
     return { dataLifecycleSeeded: true, ...result };
   } catch (err) {
     return { dataLifecycleSeeded: false, dataLifecycleError: err.message };
+  }
+}
+
+// Installs the centralized Import & Export Framework foundation (built-in
+// connectors, event types, job handlers, configuration) plus a small demo
+// estate so exchange dashboards are not empty on a fresh install.
+function seedDataExchange(db) {
+  try {
+    const result = dataExchange.ensureDataExchangeSeed(db);
+    return { dataExchangeSeeded: true, ...result };
+  } catch (err) {
+    return { dataExchangeSeeded: false, dataExchangeError: err.message };
   }
 }
 

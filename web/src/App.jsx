@@ -17,6 +17,7 @@ import DataGovernancePage from "./pages/DataGovernancePage.jsx";
 import DataCatalogPage from "./pages/DataCatalogPage.jsx";
 import GlossaryPage from "./pages/GlossaryPage.jsx";
 import DataLifecyclePage from "./pages/DataLifecyclePage.jsx";
+import DataExchangePage from "./pages/DataExchangePage.jsx";
 import OrganizationsPage from "./pages/OrganizationsPage.jsx";
 import OrganizationDetailPage from "./pages/OrganizationDetailPage.jsx";
 import PlatformPage from "./pages/PlatformPage.jsx";
@@ -275,6 +276,11 @@ const PLATFORM_GROUPS = [
     items: [{ to: "/data-lifecycle", label: "Lifecycle & archival", platformOrAdmin: true }],
   },
   {
+    key: "data-exchange",
+    label: "Data exchange",
+    items: [{ to: "/data-exchange", label: "Import & export", platformOrAdmin: true }],
+  },
+  {
     key: "communication",
     label: "Communication",
     items: [
@@ -523,6 +529,7 @@ export default function App() {
         <Route path="/data-catalog" element={<DataCatalogPage />} />
         <Route path="/glossary" element={<GlossaryPage />} />
         <Route path="/data-lifecycle" element={<DataLifecyclePage />} />
+        <Route path="/data-exchange" element={<DataExchangePage />} />
         <Route path="/policy" element={<PolicyPage />} />
         <Route path="/authentication" element={<AuthenticationPage />} />
         <Route path="/sessions" element={<SessionsPage />} />

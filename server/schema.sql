@@ -7315,3 +7315,557 @@ CREATE TABLE IF NOT EXISTS lc_configuration (
 );
 
 CREATE INDEX IF NOT EXISTS idx_lc_configuration_tenant ON lc_configuration(tenant_id, key);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Import / Export Framework (data-exchange)
+--
+-- The single reusable enterprise data-movement layer. Business modules declare
+-- what data moves, its mappings, transformations and validations; this schema
+-- owns transport, parsing, orchestration, reconciliation and history. It never
+-- stores a copy of business data and never stores raw external credentials.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Reusable source/destination connector configuration (no secrets inline).
+CREATE TABLE IF NOT EXISTS ie_connector_configurations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  config_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  connector_type TEXT NOT NULL,
+  direction TEXT NOT NULL DEFAULT 'SOURCE' CHECK (direction IN ('SOURCE', 'DESTINATION', 'BOTH')),
+  settings_json TEXT NOT NULL DEFAULT '{}',
+  credential_ref_id INTEGER,
+  capabilities_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'retired')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_connector_config_tenant ON ie_connector_configurations(tenant_id, connector_type, status);
+
+-- Reference to a secret held by the platform secret store. The secret value is
+-- never written here; only an opaque reference and metadata are persisted.
+CREATE TABLE IF NOT EXISTS ie_connector_credential_references (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  credential_type TEXT NOT NULL DEFAULT 'TOKEN',
+  secret_ref TEXT NOT NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'retired')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+-- ── Import definitions & versions ────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ie_import_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL,
+  target_subtype TEXT NOT NULL DEFAULT '',
+  source_type TEXT NOT NULL DEFAULT 'CSV',
+  connector_config_id INTEGER REFERENCES ie_connector_configurations(id) ON DELETE SET NULL,
+  source_config_json TEXT NOT NULL DEFAULT '{}',
+  mapping_json TEXT NOT NULL DEFAULT '{}',
+  transformation_json TEXT NOT NULL DEFAULT '{}',
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  duplicate_strategy TEXT NOT NULL DEFAULT 'REJECT',
+  duplicate_key_json TEXT NOT NULL DEFAULT '{}',
+  batch_size INTEGER NOT NULL DEFAULT 500,
+  error_strategy TEXT NOT NULL DEFAULT 'CONTINUE',
+  reconciliation_strategy TEXT NOT NULL DEFAULT 'COUNT',
+  transaction_strategy TEXT NOT NULL DEFAULT 'PER_BATCH',
+  mode TEXT NOT NULL DEFAULT 'IMPORT',
+  template_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'ACTIVE', 'INACTIVE', 'DEPRECATED')),
+  version INTEGER NOT NULL DEFAULT 1,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  catalog_refs_json TEXT NOT NULL DEFAULT '{}',
+  schedule_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_def_tenant ON ie_import_definitions(tenant_id, status, target_object_type);
+
+CREATE TABLE IF NOT EXISTS ie_import_definition_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES ie_import_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_ver_definition ON ie_import_definition_versions(definition_id, version);
+
+CREATE TABLE IF NOT EXISTS ie_import_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES ie_import_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  source_field TEXT NOT NULL,
+  target_field TEXT NOT NULL,
+  mapping_type TEXT NOT NULL DEFAULT 'DIRECT',
+  data_type TEXT NOT NULL DEFAULT 'string',
+  required INTEGER NOT NULL DEFAULT 0,
+  default_value TEXT,
+  constant_value TEXT,
+  expression TEXT NOT NULL DEFAULT '',
+  lookup_json TEXT NOT NULL DEFAULT '{}',
+  condition_json TEXT NOT NULL DEFAULT '{}',
+  concat_json TEXT NOT NULL DEFAULT '[]',
+  split_json TEXT NOT NULL DEFAULT '{}',
+  nested_json TEXT NOT NULL DEFAULT '{}',
+  transform_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_mapping_def ON ie_import_mappings(definition_id, sequence);
+
+CREATE TABLE IF NOT EXISTS ie_import_transformations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES ie_import_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  stage TEXT NOT NULL DEFAULT 'FIELD',
+  target_field TEXT NOT NULL DEFAULT '',
+  transformation_type TEXT NOT NULL,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_transform_def ON ie_import_transformations(definition_id, sequence);
+
+CREATE TABLE IF NOT EXISTS ie_import_validation_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES ie_import_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  level TEXT NOT NULL DEFAULT 'FIELD',
+  target_field TEXT NOT NULL DEFAULT '',
+  rule_type TEXT NOT NULL,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  severity TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity IN ('ERROR', 'WARNING', 'INFO')),
+  message TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_rule_def ON ie_import_validation_rules(definition_id, sequence);
+
+-- ── Import execution ledger ──────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ie_import_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  definition_id INTEGER REFERENCES ie_import_definitions(id) ON DELETE SET NULL,
+  definition_version INTEGER NOT NULL DEFAULT 1,
+  source_type TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'IMPORT',
+  duplicate_strategy TEXT NOT NULL DEFAULT 'REJECT',
+  status TEXT NOT NULL DEFAULT 'QUEUED' CHECK (status IN ('QUEUED', 'RUNNING', 'VALIDATING', 'PREVIEW', 'PAUSED', 'COMPLETED', 'PARTIAL', 'FAILED', 'CANCELLED')),
+  total_records INTEGER NOT NULL DEFAULT 0,
+  processed_records INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  created_count INTEGER NOT NULL DEFAULT 0,
+  updated_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  rejected_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  warning_count INTEGER NOT NULL DEFAULT 0,
+  batch_size INTEGER NOT NULL DEFAULT 500,
+  source_json TEXT NOT NULL DEFAULT '{}',
+  mapping_json TEXT NOT NULL DEFAULT '{}',
+  transformation_json TEXT NOT NULL DEFAULT '{}',
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  options_json TEXT NOT NULL DEFAULT '{}',
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  error_message TEXT NOT NULL DEFAULT '',
+  idempotency_key TEXT NOT NULL DEFAULT '',
+  platform_job_id INTEGER,
+  started_at TEXT,
+  completed_at TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_jobs_tenant ON ie_import_jobs(tenant_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_ie_import_jobs_def ON ie_import_jobs(definition_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ie_import_jobs_idem ON ie_import_jobs(tenant_id, idempotency_key) WHERE idempotency_key <> '';
+
+CREATE TABLE IF NOT EXISTS ie_import_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES ie_import_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  batch_number INTEGER NOT NULL,
+  start_record INTEGER NOT NULL DEFAULT 0,
+  end_record INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  success INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL DEFAULT 0,
+  updated INTEGER NOT NULL DEFAULT 0,
+  skipped INTEGER NOT NULL DEFAULT 0,
+  rejected INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'ROLLED_BACK')),
+  error_message TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (job_id, batch_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_batches_job ON ie_import_batches(job_id, batch_number);
+
+CREATE TABLE IF NOT EXISTS ie_import_record_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES ie_import_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  batch_number INTEGER NOT NULL DEFAULT 0,
+  record_number INTEGER NOT NULL,
+  business_key TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT 'CREATE' CHECK (action IN ('CREATE', 'UPDATE', 'SKIP', 'REJECT', 'FAIL', 'WARNING')),
+  status TEXT NOT NULL DEFAULT 'SUCCESS' CHECK (status IN ('SUCCESS', 'WARNING', 'ERROR', 'SKIPPED', 'FAILED')),
+  target_object_type TEXT NOT NULL DEFAULT '',
+  target_object_id TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  source_json TEXT NOT NULL DEFAULT '{}',
+  mapped_json TEXT NOT NULL DEFAULT '{}',
+  transformed_json TEXT NOT NULL DEFAULT '{}',
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_results_job ON ie_import_record_results(job_id, record_number);
+CREATE INDEX IF NOT EXISTS idx_ie_import_results_status ON ie_import_record_results(job_id, status);
+
+CREATE TABLE IF NOT EXISTS ie_import_errors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES ie_import_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  batch_number INTEGER NOT NULL DEFAULT 0,
+  record_number INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT NOT NULL,
+  error_type TEXT NOT NULL DEFAULT 'RECORD',
+  message TEXT NOT NULL DEFAULT '',
+  field TEXT NOT NULL DEFAULT '',
+  object_ref TEXT NOT NULL DEFAULT '',
+  retryable INTEGER NOT NULL DEFAULT 0,
+  suggested_resolution TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  resolved INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_errors_job ON ie_import_errors(job_id, error_code);
+CREATE INDEX IF NOT EXISTS idx_ie_import_errors_retry ON ie_import_errors(job_id, retryable, resolved);
+
+CREATE TABLE IF NOT EXISTS ie_import_checkpoints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES ie_import_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  checkpoint_number INTEGER NOT NULL DEFAULT 1,
+  last_record INTEGER NOT NULL DEFAULT 0,
+  processed INTEGER NOT NULL DEFAULT 0,
+  success INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0,
+  state_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (job_id, checkpoint_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_checkpoints_job ON ie_import_checkpoints(job_id, checkpoint_number);
+
+CREATE TABLE IF NOT EXISTS ie_import_reconciliations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES ie_import_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  strategy TEXT NOT NULL DEFAULT 'COUNT',
+  source_count INTEGER NOT NULL DEFAULT 0,
+  valid_count INTEGER NOT NULL DEFAULT 0,
+  target_count INTEGER NOT NULL DEFAULT 0,
+  created_count INTEGER NOT NULL DEFAULT 0,
+  updated_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  rejected_count INTEGER NOT NULL DEFAULT 0,
+  variance INTEGER NOT NULL DEFAULT 0,
+  reconciliation_percent REAL NOT NULL DEFAULT 0,
+  report_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'COMPLETED', 'VARIANCE')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (job_id)
+);
+
+CREATE TABLE IF NOT EXISTS ie_import_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  job_id INTEGER REFERENCES ie_import_jobs(id) ON DELETE SET NULL,
+  definition_id INTEGER REFERENCES ie_import_definitions(id) ON DELETE SET NULL,
+  definition_version INTEGER NOT NULL DEFAULT 1,
+  action TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT '',
+  source_type TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL DEFAULT '',
+  total_records INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_import_history_tenant ON ie_import_history(tenant_id, created_at);
+
+-- ── Export definitions & versions ────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ie_export_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL,
+  fields_json TEXT NOT NULL DEFAULT '[]',
+  filters_json TEXT NOT NULL DEFAULT '[]',
+  sort_json TEXT NOT NULL DEFAULT '[]',
+  transformation_json TEXT NOT NULL DEFAULT '{}',
+  format TEXT NOT NULL DEFAULT 'CSV',
+  destination TEXT NOT NULL DEFAULT 'DOWNLOAD',
+  destination_json TEXT NOT NULL DEFAULT '{}',
+  schedule_json TEXT NOT NULL DEFAULT '{}',
+  security_json TEXT NOT NULL DEFAULT '{}',
+  catalog_refs_json TEXT NOT NULL DEFAULT '{}',
+  max_records INTEGER NOT NULL DEFAULT 100000,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'ACTIVE', 'INACTIVE', 'DEPRECATED')),
+  version INTEGER NOT NULL DEFAULT 1,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_export_def_tenant ON ie_export_definitions(tenant_id, status, object_type);
+
+CREATE TABLE IF NOT EXISTS ie_export_definition_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES ie_export_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS ie_export_field_selections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES ie_export_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  field_path TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  data_type TEXT NOT NULL DEFAULT 'string',
+  transformation_json TEXT NOT NULL DEFAULT '[]',
+  nested INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_export_fields_def ON ie_export_field_selections(definition_id, sequence);
+
+CREATE TABLE IF NOT EXISTS ie_export_filters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES ie_export_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  filter_type TEXT NOT NULL DEFAULT 'ATTRIBUTE',
+  field TEXT NOT NULL DEFAULT '',
+  operator TEXT NOT NULL DEFAULT 'eq',
+  value_json TEXT NOT NULL DEFAULT 'null',
+  conjunction TEXT NOT NULL DEFAULT 'AND',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_export_filters_def ON ie_export_filters(definition_id, sequence);
+
+CREATE TABLE IF NOT EXISTS ie_export_transformations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES ie_export_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  field_path TEXT NOT NULL,
+  transformation_type TEXT NOT NULL,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_export_transform_def ON ie_export_transformations(definition_id, sequence);
+
+-- ── Export execution ledger ──────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ie_export_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  definition_id INTEGER REFERENCES ie_export_definitions(id) ON DELETE SET NULL,
+  definition_version INTEGER NOT NULL DEFAULT 1,
+  object_type TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT 'CSV',
+  destination TEXT NOT NULL DEFAULT 'DOWNLOAD',
+  status TEXT NOT NULL DEFAULT 'QUEUED' CHECK (status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'PARTIAL', 'FAILED', 'CANCELLED', 'EXPIRED')),
+  record_count INTEGER NOT NULL DEFAULT 0,
+  exported_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  output_size INTEGER NOT NULL DEFAULT 0,
+  output_uri TEXT NOT NULL DEFAULT '',
+  output_filename TEXT NOT NULL DEFAULT '',
+  expires_at TEXT,
+  filters_json TEXT NOT NULL DEFAULT '[]',
+  fields_json TEXT NOT NULL DEFAULT '[]',
+  transformation_json TEXT NOT NULL DEFAULT '{}',
+  destination_json TEXT NOT NULL DEFAULT '{}',
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  error_message TEXT NOT NULL DEFAULT '',
+  idempotency_key TEXT NOT NULL DEFAULT '',
+  platform_job_id INTEGER,
+  started_at TEXT,
+  completed_at TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_export_jobs_tenant ON ie_export_jobs(tenant_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_ie_export_jobs_def ON ie_export_jobs(definition_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ie_export_jobs_idem ON ie_export_jobs(tenant_id, idempotency_key) WHERE idempotency_key <> '';
+
+CREATE TABLE IF NOT EXISTS ie_export_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES ie_export_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  result_ref TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT 'CSV',
+  storage_uri TEXT NOT NULL DEFAULT '',
+  filename TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  record_count INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT,
+  status TEXT NOT NULL DEFAULT 'AVAILABLE' CHECK (status IN ('AVAILABLE', 'EXPIRED', 'DELETED')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_export_results_job ON ie_export_results(job_id);
+
+CREATE TABLE IF NOT EXISTS ie_export_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  job_id INTEGER REFERENCES ie_export_jobs(id) ON DELETE SET NULL,
+  definition_id INTEGER REFERENCES ie_export_definitions(id) ON DELETE SET NULL,
+  definition_version INTEGER NOT NULL DEFAULT 1,
+  action TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT '',
+  record_count INTEGER NOT NULL DEFAULT 0,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_export_history_tenant ON ie_export_history(tenant_id, created_at);
+
+-- ── Templates ────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ie_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'IMPORT' CHECK (direction IN ('IMPORT', 'EXPORT')),
+  object_type TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 1,
+  definition_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'ACTIVE', 'INACTIVE', 'DEPRECATED')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_templates_tenant ON ie_templates(tenant_id, direction, code);
+
+-- ── Stored payloads (database provider) ──────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ie_blobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  storage_uri TEXT NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  checksum TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  content BLOB,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, storage_uri)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_blobs_tenant ON ie_blobs(tenant_id, storage_uri);
+
+-- ── Tenant configuration ─────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ie_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ie_configuration_tenant ON ie_configuration(tenant_id, key);

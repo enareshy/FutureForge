@@ -3,6 +3,7 @@ import { HttpError, pagination } from "../../validation.js";
 import { writeAudit } from "../audit.js";
 import { CATALOG_JOB_TYPES } from "../data-catalog/constants.js";
 import { LIFECYCLE_JOB_TYPES } from "../data-lifecycle/constants.js";
+import { EXCHANGE_JOB_TYPES } from "../data-exchange/constants.js";
 import {
   assertJobTypeCode,
   assertPriority,
@@ -383,6 +384,7 @@ const DEFAULT_TYPES = [
   },
   ...CATALOG_JOB_TYPES,
   ...LIFECYCLE_JOB_TYPES,
+  ...EXCHANGE_JOB_TYPES,
 ];
 
 export function publicJobType(row) {

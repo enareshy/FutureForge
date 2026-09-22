@@ -1781,3 +1781,90 @@ export const dataLifecycle = {
   submitRecovery: (body) => api("/api/v1/lifecycle/jobs/recovery", { method: "POST", body }),
   submitMaintenance: () => api("/api/v1/lifecycle/jobs/maintenance", { method: "POST" }),
 };
+
+export const dataExchange = {
+  meta: () => api("/api/v1/data-exchange/meta"),
+  health: () => api("/api/v1/data-exchange/health"),
+  metrics: () => api("/api/v1/data-exchange/metrics"),
+  connectors: () => api("/api/v1/data-exchange/connectors"),
+  configuration: () => api("/api/v1/data-exchange/configuration"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/data-exchange/configuration/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  connectorConfigurations: (qs) => api(`/api/v1/data-exchange/connector-configurations${qs || ""}`),
+  connectorConfiguration: (ref) => api(`/api/v1/data-exchange/connector-configurations/${encodeURIComponent(ref)}`),
+  createConnectorConfiguration: (body) =>
+    api("/api/v1/data-exchange/connector-configurations", { method: "POST", body }),
+  testConnectorConfiguration: (ref) =>
+    api(`/api/v1/data-exchange/connector-configurations/${encodeURIComponent(ref)}/test`, { method: "POST" }),
+  setConnectorConfigurationStatus: (ref, status) =>
+    api(`/api/v1/data-exchange/connector-configurations/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+
+  credentialReferences: (qs) => api(`/api/v1/data-exchange/credential-references${qs || ""}`),
+  createCredentialReference: (body) =>
+    api("/api/v1/data-exchange/credential-references", { method: "POST", body }),
+
+  importDefinitions: (qs) => api(`/api/v1/data-exchange/import-definitions${qs || ""}`),
+  importDefinition: (ref) => api(`/api/v1/data-exchange/import-definitions/${encodeURIComponent(ref)}`),
+  createImportDefinition: (body) => api("/api/v1/data-exchange/import-definitions", { method: "POST", body }),
+  updateImportDefinition: (ref, body) =>
+    api(`/api/v1/data-exchange/import-definitions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setImportDefinitionStatus: (ref, status) =>
+    api(`/api/v1/data-exchange/import-definitions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  importDefinitionVersions: (ref) =>
+    api(`/api/v1/data-exchange/import-definitions/${encodeURIComponent(ref)}/versions`),
+  importDefinitionCatalog: (ref) =>
+    api(`/api/v1/data-exchange/import-definitions/${encodeURIComponent(ref)}/catalog`),
+  validateImportDefinition: (ref, body) =>
+    api(`/api/v1/data-exchange/import-definitions/${encodeURIComponent(ref)}/validate`, { method: "POST", body }),
+  previewImport: (ref, body) =>
+    api(`/api/v1/data-exchange/import-definitions/${encodeURIComponent(ref)}/preview`, { method: "POST", body }),
+  runImport: (ref, body) =>
+    api(`/api/v1/data-exchange/import-definitions/${encodeURIComponent(ref)}/run`, { method: "POST", body }),
+
+  importJobs: (qs) => api(`/api/v1/data-exchange/import-jobs${qs || ""}`),
+  importJob: (ref) => api(`/api/v1/data-exchange/import-jobs/${encodeURIComponent(ref)}`),
+  importJobRecords: (ref, qs) => api(`/api/v1/data-exchange/import-jobs/${encodeURIComponent(ref)}/records${qs || ""}`),
+  importJobErrors: (ref, qs) => api(`/api/v1/data-exchange/import-jobs/${encodeURIComponent(ref)}/errors${qs || ""}`),
+  reconcileImportJob: (ref) =>
+    api(`/api/v1/data-exchange/import-jobs/${encodeURIComponent(ref)}/reconcile`, { method: "POST", body: {} }),
+  retryImportJob: (ref) => api(`/api/v1/data-exchange/import-jobs/${encodeURIComponent(ref)}/retry`, { method: "POST" }),
+  cancelImportJob: (ref) => api(`/api/v1/data-exchange/import-jobs/${encodeURIComponent(ref)}/cancel`, { method: "POST" }),
+
+  exportDefinitions: (qs) => api(`/api/v1/data-exchange/export-definitions${qs || ""}`),
+  exportDefinition: (ref) => api(`/api/v1/data-exchange/export-definitions/${encodeURIComponent(ref)}`),
+  createExportDefinition: (body) => api("/api/v1/data-exchange/export-definitions", { method: "POST", body }),
+  updateExportDefinition: (ref, body) =>
+    api(`/api/v1/data-exchange/export-definitions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setExportDefinitionStatus: (ref, status) =>
+    api(`/api/v1/data-exchange/export-definitions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  exportDefinitionVersions: (ref) =>
+    api(`/api/v1/data-exchange/export-definitions/${encodeURIComponent(ref)}/versions`),
+  exportDefinitionCatalog: (ref) =>
+    api(`/api/v1/data-exchange/export-definitions/${encodeURIComponent(ref)}/catalog`),
+  validateExportDefinition: (ref) =>
+    api(`/api/v1/data-exchange/export-definitions/${encodeURIComponent(ref)}/validate`, { method: "POST" }),
+  previewExport: (ref, body) =>
+    api(`/api/v1/data-exchange/export-definitions/${encodeURIComponent(ref)}/preview`, { method: "POST", body }),
+  runExport: (ref, body) =>
+    api(`/api/v1/data-exchange/export-definitions/${encodeURIComponent(ref)}/run`, { method: "POST", body }),
+
+  exportJobs: (qs) => api(`/api/v1/data-exchange/export-jobs${qs || ""}`),
+  exportJob: (ref) => api(`/api/v1/data-exchange/export-jobs/${encodeURIComponent(ref)}`),
+  exportJobResults: (ref) => api(`/api/v1/data-exchange/export-jobs/${encodeURIComponent(ref)}/results`),
+  cancelExportJob: (ref) => api(`/api/v1/data-exchange/export-jobs/${encodeURIComponent(ref)}/cancel`, { method: "POST" }),
+  exportResults: (qs) => api(`/api/v1/data-exchange/export-results${qs || ""}`),
+  downloadExportResult: (ref) =>
+    apiDownload(`/api/v1/data-exchange/export-results/${encodeURIComponent(ref)}/download`),
+
+  templates: (qs) => api(`/api/v1/data-exchange/templates${qs || ""}`),
+  template: (ref) => api(`/api/v1/data-exchange/templates/${encodeURIComponent(ref)}`),
+  createTemplate: (body) => api("/api/v1/data-exchange/templates", { method: "POST", body }),
+  updateTemplate: (ref, body) =>
+    api(`/api/v1/data-exchange/templates/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setTemplateStatus: (ref, status) =>
+    api(`/api/v1/data-exchange/templates/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+
+  history: (qs) => api(`/api/v1/data-exchange/history${qs || ""}`),
+  jobs: (qs) => api(`/api/v1/data-exchange/jobs${qs || ""}`),
+};

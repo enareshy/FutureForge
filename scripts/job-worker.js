@@ -33,6 +33,7 @@ import { registerContentProcessingHandlers, registerContentHandlers, runContentM
 import { registerDataGovernanceHandlers, runGovernanceMaintenance } from "../server/services/data-governance/index.js";
 import { registerCatalogHandlers, runCatalogMaintenance } from "../server/services/data-catalog/index.js";
 import { registerLifecycleHandlers, runLifecycleMaintenance } from "../server/services/data-lifecycle/index.js";
+import { registerExchangeHandlers, runExchangeMaintenance } from "../server/services/data-exchange/index.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -130,6 +131,10 @@ registerCatalogHandlers();
 // archive/cold-storage/restore/purge/recovery batches and housekeeping).
 registerLifecycleHandlers();
 
+// Import & Export Framework background handlers (import/export execution,
+// validation, reconciliation, retry of failed records and housekeeping).
+registerExchangeHandlers();
+
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
 const fileMaintenanceMs = positive(process.env.FILE_MAINTENANCE_MS, 60000);
@@ -218,6 +223,26 @@ const lifecycleMaintenance = setInterval(async () => {
   }
 }, lifecycleMaintenanceMs);
 lifecycleMaintenance.unref?.();
+
+// Periodic data exchange housekeeping: expire export artifacts and prune stale
+// import checkpoints so storage never grows unbounded.
+const exchangeMaintenanceMs = positive(process.env.EXCHANGE_MAINTENANCE_MS, 60000);
+const exchangeMaintenance = setInterval(() => {
+  try {
+    const summary = runExchangeMaintenance(db);
+    if (summary.exports_expired || summary.blobs_pruned || summary.checkpoints_pruned) {
+      log("info", "Data exchange housekeeping", {
+        tenants: summary.tenants,
+        exports_expired: summary.exports_expired,
+        blobs_pruned: summary.blobs_pruned,
+        checkpoints_pruned: summary.checkpoints_pruned,
+      });
+    }
+  } catch (error) {
+    log("warn", "Data exchange housekeeping failed", { error: error.message });
+  }
+}, exchangeMaintenanceMs);
+exchangeMaintenance.unref?.();
 
 // Periodic search housekeeping: converge the index queue and prune expired
 // search history / exports.

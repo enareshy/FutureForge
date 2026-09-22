@@ -19,6 +19,7 @@ export const EVENT_CATEGORIES = [
   "change",
   "workflow",
   "lifecycle",
+  "data_exchange",
   "user",
   "security",
   "manufacturing",
