@@ -35,6 +35,7 @@ import { registerCatalogHandlers, runCatalogMaintenance } from "../server/servic
 import { registerLifecycleHandlers, runLifecycleMaintenance } from "../server/services/data-lifecycle/index.js";
 import { registerExchangeHandlers, runExchangeMaintenance } from "../server/services/data-exchange/index.js";
 import { registerMigrationHandlers, runMigrationMaintenance, ensureMigrationJobTypes } from "../server/services/migration/index.js";
+import { registerClassificationHandlers, runClassificationMaintenance, ensureClassificationJobTypes } from "../server/services/classification/index.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -140,6 +141,11 @@ registerExchangeHandlers();
 // validation, reconciliation, retry, replanning and housekeeping).
 ensureMigrationJobTypes(db);
 registerMigrationHandlers();
+
+// Enterprise Classification Framework background handlers (bulk assignment,
+// bulk validation, duplicate scans and housekeeping).
+ensureClassificationJobTypes(db);
+registerClassificationHandlers();
 
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
@@ -269,6 +275,25 @@ const migrationMaintenance = setInterval(() => {
   }
 }, migrationMaintenanceMs);
 migrationMaintenance.unref?.();
+
+// Periodic classification housekeeping: prune change history beyond retention
+// and remove orphaned assignment values.
+const classificationMaintenanceMs = positive(process.env.CLASSIFICATION_MAINTENANCE_MS, 120000);
+const classificationMaintenance = setInterval(() => {
+  try {
+    const summary = runClassificationMaintenance(db);
+    if (summary.history_pruned || summary.orphans_pruned) {
+      log("info", "Classification housekeeping", {
+        tenants: summary.tenants,
+        history_pruned: summary.history_pruned,
+        orphans_pruned: summary.orphans_pruned,
+      });
+    }
+  } catch (error) {
+    log("warn", "Classification housekeeping failed", { error: error.message });
+  }
+}, classificationMaintenanceMs);
+classificationMaintenance.unref?.();
 
 // Periodic search housekeeping: converge the index queue and prune expired
 // search history / exports.
@@ -413,6 +438,7 @@ async function shutdown(signal) {
   clearInterval(governanceMaintenance);
   clearInterval(catalogMaintenance);
   clearInterval(lifecycleMaintenance);
+  clearInterval(classificationMaintenance);
   log("info", "Worker draining", { signal, drain_ms: drainMs, active_jobs: worker.active.size });
   try {
     await worker.stop({ timeoutMs: drainMs });

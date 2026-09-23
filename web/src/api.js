@@ -1977,3 +1977,112 @@ export const migration = {
   audit: (qs) => api(`/api/v1/migration/audit${qs || ""}`),
   objectLineage: (qs) => api(`/api/v1/migration/object-lineage${qs || ""}`),
 };
+
+export const classification = {
+  meta: () => api("/api/v1/classification/meta"),
+  health: () => api("/api/v1/classification/health"),
+  metrics: () => api("/api/v1/classification/metrics"),
+  coverage: (qs) => api(`/api/v1/classification/coverage${qs || ""}`),
+  configuration: () => api("/api/v1/classification/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/classification/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  classifications: (qs) => api(`/api/v1/classification/classifications${qs || ""}`),
+  classification: (ref) => api(`/api/v1/classification/classifications/${encodeURIComponent(ref)}`),
+  createClassification: (body) => api("/api/v1/classification/classifications", { method: "POST", body }),
+  updateClassification: (ref, body) =>
+    api(`/api/v1/classification/classifications/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setClassificationStatus: (ref, status) =>
+    api(`/api/v1/classification/classifications/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  approveClassification: (ref) =>
+    api(`/api/v1/classification/classifications/${encodeURIComponent(ref)}/approve`, { method: "POST" }),
+  classificationVersions: (ref) =>
+    api(`/api/v1/classification/classifications/${encodeURIComponent(ref)}/versions`),
+  classificationTree: (ref, qs) =>
+    api(`/api/v1/classification/classifications/${encodeURIComponent(ref)}/tree${qs || ""}`),
+
+  classes: (qs) => api(`/api/v1/classification/classes${qs || ""}`),
+  class: (ref) => api(`/api/v1/classification/classes/${encodeURIComponent(ref)}`),
+  createClass: (body) => api("/api/v1/classification/classes", { method: "POST", body }),
+  updateClass: (ref, body) =>
+    api(`/api/v1/classification/classes/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setClassStatus: (ref, status) =>
+    api(`/api/v1/classification/classes/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  moveClass: (ref, body) =>
+    api(`/api/v1/classification/classes/${encodeURIComponent(ref)}/move`, { method: "POST", body }),
+  classEffective: (ref) => api(`/api/v1/classification/classes/${encodeURIComponent(ref)}/effective`),
+  classCharacteristics: (ref) => api(`/api/v1/classification/classes/${encodeURIComponent(ref)}/characteristics`),
+  addClassCharacteristic: (ref, body) =>
+    api(`/api/v1/classification/classes/${encodeURIComponent(ref)}/characteristics`, { method: "POST", body }),
+  validateClass: (ref, body) =>
+    api(`/api/v1/classification/classes/${encodeURIComponent(ref)}/validate`, { method: "POST", body }),
+  updateClassCharacteristic: (ref, body) =>
+    api(`/api/v1/classification/class-characteristics/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  removeClassCharacteristic: (ref) =>
+    api(`/api/v1/classification/class-characteristics/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  characteristics: (qs) => api(`/api/v1/classification/characteristics${qs || ""}`),
+  characteristic: (ref) => api(`/api/v1/classification/characteristics/${encodeURIComponent(ref)}`),
+  createCharacteristic: (body) => api("/api/v1/classification/characteristics", { method: "POST", body }),
+  updateCharacteristic: (ref, body) =>
+    api(`/api/v1/classification/characteristics/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setCharacteristicStatus: (ref, status) =>
+    api(`/api/v1/classification/characteristics/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  allowedValues: (ref, qs) =>
+    api(`/api/v1/classification/characteristics/${encodeURIComponent(ref)}/allowed-values${qs || ""}`),
+  createAllowedValue: (ref, body) =>
+    api(`/api/v1/classification/characteristics/${encodeURIComponent(ref)}/allowed-values`, { method: "POST", body }),
+  updateAllowedValue: (ref, body) =>
+    api(`/api/v1/classification/allowed-values/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteAllowedValue: (ref) =>
+    api(`/api/v1/classification/allowed-values/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  groups: (qs) => api(`/api/v1/classification/groups${qs || ""}`),
+  createGroup: (body) => api("/api/v1/classification/groups", { method: "POST", body }),
+  groupMembers: (ref) => api(`/api/v1/classification/groups/${encodeURIComponent(ref)}/members`),
+  addGroupMember: (ref, body) =>
+    api(`/api/v1/classification/groups/${encodeURIComponent(ref)}/members`, { method: "POST", body }),
+
+  rules: (qs) => api(`/api/v1/classification/rules${qs || ""}`),
+  createRule: (body) => api("/api/v1/classification/rules", { method: "POST", body }),
+  updateRule: (ref, body) =>
+    api(`/api/v1/classification/rules/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteRule: (ref) => api(`/api/v1/classification/rules/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  assignments: (qs) => api(`/api/v1/classification/assignments${qs || ""}`),
+  assignment: (ref) => api(`/api/v1/classification/assignments/${encodeURIComponent(ref)}`),
+  assign: (body) => api("/api/v1/classification/assignments", { method: "POST", body }),
+  setAssignmentValues: (ref, body) =>
+    api(`/api/v1/classification/assignments/${encodeURIComponent(ref)}/values`, { method: "PUT", body }),
+  setAssignmentStatus: (ref, status) =>
+    api(`/api/v1/classification/assignments/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  reclassify: (ref, body) =>
+    api(`/api/v1/classification/assignments/${encodeURIComponent(ref)}/reclassify`, { method: "POST", body }),
+  validateAssignment: (ref) =>
+    api(`/api/v1/classification/assignments/${encodeURIComponent(ref)}/validate`, { method: "POST" }),
+  unassign: (ref) => api(`/api/v1/classification/assignments/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  objectClassifications: (objectType, objectId, qs) =>
+    api(`/api/v1/classification/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}${qs || ""}`),
+  objectValues: (objectType, objectId) =>
+    api(`/api/v1/classification/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/values`),
+  validateObject: (objectType, objectId) =>
+    api(`/api/v1/classification/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/validate`, { method: "POST" }),
+  validateBatch: (objectType, body) =>
+    api(`/api/v1/classification/objects/${encodeURIComponent(objectType)}/validate-batch`, { method: "POST", body }),
+
+  scanDuplicates: (body) => api("/api/v1/classification/duplicates/scan", { method: "POST", body }),
+  duplicateSummary: () => api("/api/v1/classification/duplicates/summary"),
+
+  units: (qs) => api(`/api/v1/classification/units${qs || ""}`),
+  convertUnit: (body) => api("/api/v1/classification/units/convert", { method: "POST", body }),
+
+  history: (qs) => api(`/api/v1/classification/history${qs || ""}`),
+  lineage: (objectType, objectId) =>
+    api(`/api/v1/classification/lineage/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`),
+
+  submitBulkAssign: (body) => api("/api/v1/classification/jobs/bulk-assign", { method: "POST", body }),
+  submitBulkValidate: (body) => api("/api/v1/classification/jobs/bulk-validate", { method: "POST", body }),
+  submitDuplicateScan: (body) => api("/api/v1/classification/jobs/duplicate-scan", { method: "POST", body }),
+  submitMaintenance: () => api("/api/v1/classification/jobs/maintenance", { method: "POST" }),
+};

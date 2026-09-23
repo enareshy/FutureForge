@@ -8421,3 +8421,328 @@ CREATE TABLE IF NOT EXISTS mig_file_migrations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mig_files_job ON mig_file_migrations(job_id, status);
+
+-- Enterprise Classification Framework (P1)
+--
+-- A centralized, reusable semantic classification capability consumed by PDM,
+-- BOM, Documents, Manufacturing, Quality, Parts, Products and Suppliers. It
+-- reuses the Object & Relationship, Metadata, Reference/UOM, Security, Audit,
+-- Event, Search and Job frameworks rather than duplicating them. Hierarchies are
+-- unbounded; characteristics and their allowed values are data, never code.
+
+CREATE TABLE IF NOT EXISTS cla_classifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  classification_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','SUPERSEDED','OBSOLETE')),
+  version INTEGER NOT NULL DEFAULT 1,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  steward_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  approval_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (approval_status IN ('PENDING','APPROVED','REJECTED')),
+  effective_date TEXT,
+  obsolete_date TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_classifications_tenant ON cla_classifications(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_cla_classifications_owner ON cla_classifications(owner_user_id);
+
+CREATE TABLE IF NOT EXISTS cla_classification_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  classification_id INTEGER NOT NULL REFERENCES cla_classifications(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_reason TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (classification_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_classification_versions ON cla_classification_versions(classification_id, version);
+
+CREATE TABLE IF NOT EXISTS cla_classes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  class_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  classification_id INTEGER NOT NULL REFERENCES cla_classifications(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  parent_class_id INTEGER REFERENCES cla_classes(id) ON DELETE RESTRICT,
+  path TEXT NOT NULL DEFAULT '',
+  level INTEGER NOT NULL DEFAULT 0,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','SUPERSEDED','OBSOLETE')),
+  version INTEGER NOT NULL DEFAULT 1,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  effective_date TEXT,
+  obsolete_date TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, classification_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_classes_tenant ON cla_classes(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_cla_classes_classification ON cla_classes(classification_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_cla_classes_parent ON cla_classes(parent_class_id);
+CREATE INDEX IF NOT EXISTS idx_cla_classes_path ON cla_classes(path);
+
+CREATE TABLE IF NOT EXISTS cla_class_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  class_id INTEGER NOT NULL REFERENCES cla_classes(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_reason TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (class_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_class_versions ON cla_class_versions(class_id, version);
+
+CREATE TABLE IF NOT EXISTS cla_characteristics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  characteristic_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  data_type TEXT NOT NULL DEFAULT 'STRING',
+  unit TEXT NOT NULL DEFAULT '',
+  base_unit TEXT NOT NULL DEFAULT '',
+  precision INTEGER,
+  scale INTEGER,
+  min_value REAL,
+  max_value REAL,
+  min_inclusive INTEGER NOT NULL DEFAULT 1,
+  max_inclusive INTEGER NOT NULL DEFAULT 1,
+  default_value TEXT NOT NULL DEFAULT '',
+  multi_valued INTEGER NOT NULL DEFAULT 0,
+  searchable INTEGER NOT NULL DEFAULT 1,
+  required INTEGER NOT NULL DEFAULT 0,
+  reference_type TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE','DEPRECATED')),
+  version INTEGER NOT NULL DEFAULT 1,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_characteristics_tenant ON cla_characteristics(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_cla_characteristics_type ON cla_characteristics(data_type);
+
+CREATE TABLE IF NOT EXISTS cla_characteristic_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  characteristic_id INTEGER NOT NULL REFERENCES cla_characteristics(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_reason TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (characteristic_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_characteristic_versions ON cla_characteristic_versions(characteristic_id, version);
+
+CREATE TABLE IF NOT EXISTS cla_characteristic_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS cla_characteristic_group_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  group_id INTEGER NOT NULL REFERENCES cla_characteristic_groups(id) ON DELETE CASCADE,
+  characteristic_id INTEGER NOT NULL REFERENCES cla_characteristics(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (group_id, characteristic_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_group_members_group ON cla_characteristic_group_members(group_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_cla_group_members_char ON cla_characteristic_group_members(characteristic_id);
+
+CREATE TABLE IF NOT EXISTS cla_class_characteristics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  class_id INTEGER NOT NULL REFERENCES cla_classes(id) ON DELETE CASCADE,
+  characteristic_id INTEGER NOT NULL REFERENCES cla_characteristics(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  required INTEGER NOT NULL DEFAULT 0,
+  multi_valued INTEGER NOT NULL DEFAULT 0,
+  origin TEXT NOT NULL DEFAULT 'LOCAL' CHECK (origin IN ('LOCAL','OVERRIDDEN')),
+  override_required INTEGER NOT NULL DEFAULT 0,
+  override_default INTEGER NOT NULL DEFAULT 0,
+  unit_override TEXT NOT NULL DEFAULT '',
+  min_value REAL,
+  max_value REAL,
+  allowed_value_mode TEXT NOT NULL DEFAULT 'INHERIT' CHECK (allowed_value_mode IN ('INHERIT','EXTEND','RESTRICT')),
+  allowed_value_ids_json TEXT NOT NULL DEFAULT '[]',
+  default_value TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (class_id, characteristic_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_class_chars_class ON cla_class_characteristics(class_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_cla_class_chars_char ON cla_class_characteristics(characteristic_id);
+
+CREATE TABLE IF NOT EXISTS cla_allowed_values (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  characteristic_id INTEGER NOT NULL REFERENCES cla_characteristics(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
+  effective_date TEXT,
+  obsolete_date TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (characteristic_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_allowed_values_char ON cla_allowed_values(characteristic_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS cla_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  assignment_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  classification_id INTEGER NOT NULL REFERENCES cla_classifications(id) ON DELETE RESTRICT,
+  class_id INTEGER NOT NULL REFERENCES cla_classes(id) ON DELETE RESTRICT,
+  classification_version INTEGER NOT NULL DEFAULT 1,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE','OBSOLETE')),
+  version INTEGER NOT NULL DEFAULT 1,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, object_type, object_id, class_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_assignments_object ON cla_assignments(tenant_id, object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_cla_assignments_class ON cla_assignments(class_id, status);
+CREATE INDEX IF NOT EXISTS idx_cla_assignments_classification ON cla_assignments(classification_id);
+CREATE INDEX IF NOT EXISTS idx_cla_assignments_assigned_by ON cla_assignments(assigned_by);
+
+CREATE TABLE IF NOT EXISTS cla_assignment_values (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  assignment_id INTEGER NOT NULL REFERENCES cla_assignments(id) ON DELETE CASCADE,
+  characteristic_id INTEGER NOT NULL REFERENCES cla_characteristics(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  value_text TEXT NOT NULL DEFAULT '',
+  value_number REAL,
+  value_boolean INTEGER,
+  value_date TEXT,
+  value_reference TEXT NOT NULL DEFAULT '',
+  unit TEXT NOT NULL DEFAULT '',
+  normalized_value REAL,
+  normalized_unit TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_assignment_values_assignment ON cla_assignment_values(assignment_id, characteristic_id);
+CREATE INDEX IF NOT EXISTS idx_cla_assignment_values_char ON cla_assignment_values(characteristic_id);
+
+CREATE TABLE IF NOT EXISTS cla_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  class_id INTEGER REFERENCES cla_classes(id) ON DELETE CASCADE,
+  characteristic_id INTEGER REFERENCES cla_characteristics(id) ON DELETE CASCADE,
+  rule_type TEXT NOT NULL DEFAULT 'REQUIRED',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  severity TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity IN ('ERROR','WARNING','INFO')),
+  message TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_rules_class ON cla_rules(class_id, status);
+CREATE INDEX IF NOT EXISTS idx_cla_rules_char ON cla_rules(characteristic_id);
+
+CREATE TABLE IF NOT EXISTS cla_change_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  entity_type TEXT NOT NULL DEFAULT '',
+  entity_id INTEGER,
+  entity_ref TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT '',
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor_username TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_history_tenant ON cla_change_history(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_cla_history_entity ON cla_change_history(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_cla_history_object ON cla_change_history(entity_ref);
+
+CREATE TABLE IF NOT EXISTS cla_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cla_configuration_tenant ON cla_configuration(tenant_id, key);

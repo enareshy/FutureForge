@@ -53,6 +53,8 @@ import * as dataExchange from "./services/data-exchange/index.js";
 import { createDataExchangeRouter } from "./services/data-exchange/router-data-exchange.js";
 import * as migration from "./services/migration/index.js";
 import { createMigrationRouter } from "./services/migration/router-migration.js";
+import * as classification from "./services/classification/index.js";
+import { createClassificationRouter } from "./services/classification/router-classification.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -194,6 +196,11 @@ export function createApp(db) {
     migration.ensureMigrationFoundation(db);
   } catch {
     /* migration foundation is idempotent and must never block application boot */
+  }
+  try {
+    classification.ensureClassificationFoundation(db);
+  } catch {
+    /* classification foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -10070,6 +10077,11 @@ export function createApp(db) {
   const migrationRouter = createMigrationRouter({ express, db, auth, can, wrap });
   app.use("/api/migration", migrationRouter);
   app.use("/api/v1/migration", migrationRouter);
+
+  // ── Enterprise Classification Framework ───────────────────────────────────
+  const classificationRouter = createClassificationRouter({ express, db, auth, can, wrap });
+  app.use("/api/classification", classificationRouter);
+  app.use("/api/v1/classification", classificationRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

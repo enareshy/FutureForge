@@ -33,6 +33,7 @@ import * as dataCatalog from "./services/data-catalog/index.js";
 import * as dataLifecycle from "./services/data-lifecycle/index.js";
 import * as dataExchange from "./services/data-exchange/index.js";
 import * as migration from "./services/migration/index.js";
+import * as classification from "./services/classification/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1038,6 +1039,21 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.migration.statistics", name: "Migration statistics", parentCode: "iam.migration" },
     { applicationCode: "iam", code: "iam.migration.metrics", name: "Migration metrics & health", parentCode: "iam.migration" },
     { applicationCode: "iam", code: "iam.migration.admin", name: "Migration administration & configuration", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.classification", name: "Enterprise classification framework service", kind: "module" },
+    { applicationCode: "iam", code: "iam.classification.overview", name: "Classification overview & registry", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.classifications", name: "Classification definitions", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.classes", name: "Classification classes & hierarchy", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.characteristics", name: "Classification characteristics", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.groups", name: "Characteristic groups", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.values", name: "Allowed values", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.assignments", name: "Classification assignments", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.validation", name: "Classification validation & rules", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.search", name: "Classification search & discovery", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.governance", name: "Classification duplicate detection", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.migration", name: "Classification migration & bulk load", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.audit", name: "Classification audit trail & lineage", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.metrics", name: "Classification metrics & health", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.admin", name: "Classification administration & configuration", parentCode: "iam.classification" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1340,7 +1356,24 @@ function seedMissingCatalog(db) {
     "iam.migration.metrics",
     "iam.migration.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes]) {
+  const classificationResourceCodes = [
+    "iam.classification",
+    "iam.classification.overview",
+    "iam.classification.classifications",
+    "iam.classification.classes",
+    "iam.classification.characteristics",
+    "iam.classification.groups",
+    "iam.classification.values",
+    "iam.classification.assignments",
+    "iam.classification.validation",
+    "iam.classification.search",
+    "iam.classification.governance",
+    "iam.classification.migration",
+    "iam.classification.audit",
+    "iam.classification.metrics",
+    "iam.classification.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2865,7 +2898,8 @@ export function seedDatabase(db) {
   const dataLifecycleResult = withEventSuppression(() => seedDataLifecycle(db));
   const dataExchangeResult = withEventSuppression(() => seedDataExchange(db));
   const migrationResult = withEventSuppression(() => seedMigrationFramework(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult };
+  const classificationResult = withEventSuppression(() => seedClassificationFramework(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult };
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -2926,6 +2960,18 @@ function seedMigrationFramework(db) {
     return { migrationSeeded: true, ...result };
   } catch (err) {
     return { migrationSeeded: false, migrationError: err.message };
+  }
+}
+
+// Installs the centralized Enterprise Classification Framework foundation
+// (units, event types, job types/handlers, search registrations, duplicate
+// strategy, per-tenant configuration) plus a small demo classification estate.
+function seedClassificationFramework(db) {
+  try {
+    const result = classification.ensureClassificationSeed(db);
+    return { classificationSeeded: true, ...result };
+  } catch (err) {
+    return { classificationSeeded: false, classificationError: err.message };
   }
 }
 
