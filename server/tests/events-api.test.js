@@ -382,4 +382,116 @@ describe("Event & Messaging Framework REST APIs", () => {
     assert.equal(list.status, 200);
     assert.ok(list.body.total >= 1);
   });
+
+  test("canonical specification aliases mirror the event services", async () => {
+    // Event definitions alias
+    const created = await request(port, "POST", "/api/v1/events/definitions", {
+      ...auth(),
+      body: {
+        code: "AliasWidgetCreated",
+        category: "product",
+        source_module: "test",
+        schema: { type: "object", required: ["name"], properties: { name: { type: "string" } } },
+      },
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.code, "AliasWidgetCreated");
+
+    const listed = await request(port, "GET", "/api/v1/events/definitions?q=AliasWidget", auth());
+    assert.equal(listed.status, 200);
+    assert.ok(listed.body.items.some((t) => t.code === "AliasWidgetCreated"));
+
+    const fetched = await request(port, "GET", "/api/v1/events/definitions/AliasWidgetCreated", auth());
+    assert.equal(fetched.status, 200);
+    assert.equal(fetched.body.code, "AliasWidgetCreated");
+
+    const updated = await request(port, "PUT", "/api/v1/events/definitions/AliasWidgetCreated", {
+      ...auth(),
+      body: { description: "alias demo" },
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.description, "alias demo");
+
+    const deprecated = await request(port, "POST", "/api/v1/events/definitions/AliasWidgetCreated/deprecate", auth());
+    assert.equal(deprecated.status, 200);
+    assert.equal(deprecated.body.status, "deprecated");
+    const activated = await request(port, "POST", "/api/v1/events/definitions/AliasWidgetCreated/activate", auth());
+    assert.equal(activated.status, 200);
+    assert.equal(activated.body.status, "active");
+
+    // Event history alias
+    const history = await request(port, "GET", "/api/v1/events/history?pageSize=5", auth());
+    assert.equal(history.status, 200);
+    assert.ok(history.body.items.length >= 1);
+    const eventRef = history.body.items[0].event_ref;
+    const detail = await request(port, "GET", `/api/v1/events/history/${eventRef}`, auth());
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.event_ref, eventRef);
+
+    // Topics & subscriptions write aliases
+    assert.equal((await request(port, "POST", "/api/v1/events/topics", { ...auth(), body: { code: "alias-topic", name: "Alias topic" } })).status, 201);
+    const topicPut = await request(port, "PUT", "/api/v1/events/topics/alias-topic", { ...auth(), body: { description: "alias topic" } });
+    assert.equal(topicPut.status, 200);
+
+    const sub = await request(port, "POST", "/api/v1/events/subscriptions", {
+      ...auth(),
+      body: { code: "alias-sub", event_type_code: "AliasWidgetCreated", subscriber: "audit", handler: "audit.record" },
+    });
+    assert.equal(sub.status, 201);
+    const subPut = await request(port, "PUT", "/api/v1/events/subscriptions/alias-sub", { ...auth(), body: { description: "alias sub" } });
+    assert.equal(subPut.status, 200);
+    const paused = await request(port, "POST", "/api/v1/events/subscriptions/alias-sub/pause", auth());
+    assert.equal(paused.status, 200);
+    assert.equal(paused.body.status, "suspended");
+    const resumed = await request(port, "POST", "/api/v1/events/subscriptions/alias-sub/resume", auth());
+    assert.equal(resumed.status, 200);
+    assert.equal(resumed.body.status, "active");
+
+    // Replay aliases (batch and single event)
+    const batchReplay = await request(port, "POST", "/api/v1/events/replay", {
+      ...auth(),
+      body: { scope_type: "type", event_type_code: "ApiWidgetCreated", dry_run: true },
+    });
+    assert.equal(batchReplay.status, 202);
+    assert.ok(batchReplay.body.replay_ref);
+    assert.equal(batchReplay.body.status, "completed");
+
+    const widget = queryOne(db, "SELECT event_ref FROM event_records WHERE event_type_code = 'ApiWidgetCreated' ORDER BY id ASC LIMIT 1");
+    const singleReplay = await request(port, "POST", `/api/v1/events/${widget.event_ref}/replay`, { ...auth(), body: { dry_run: true } });
+    assert.equal(singleReplay.status, 202);
+    assert.ok(singleReplay.body.replay_ref);
+
+    // Dead-letter retry and replay aliases
+    const tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;
+    const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
+    const insertDeadLetter = (eventRefValue) =>
+      Number(
+        run(
+          db,
+          `INSERT INTO event_dead_letters
+            (event_ref, event_type_code, event_version, subscriber, handler, attempts, error_category, error_message,
+             failure_at, payload_json, security_classification, status, tenant_id, created_at, updated_at)
+           VALUES (?, 'AliasWidget', 1, 'test', 'test.alias', 1, 'technical', 'manual', ?, '{}', 'internal', 'open', ?, ?, ?)`,
+          [eventRefValue, ts, tenantId, ts, ts]
+        ).lastInsertRowid
+      );
+    const retryId = insertDeadLetter("EVT-API-ALIAS-RETRY");
+    const retried = await request(port, "POST", `/api/v1/events/dead-letters/${retryId}/retry`, { ...auth(), body: {} });
+    assert.equal(retried.status, 200);
+    assert.equal(retried.body.status, "retrying");
+
+    const replayId = insertDeadLetter("EVT-API-ALIAS-REPLAY");
+    const replayedDl = await request(port, "POST", `/api/v1/events/dead-letters/${replayId}/replay`, { ...auth(), body: {} });
+    assert.equal(replayedDl.status, 200);
+    assert.equal(replayedDl.body.status, "retrying");
+
+    // Monitoring aliases
+    const metrics = await request(port, "GET", "/api/v1/events/metrics", auth());
+    assert.equal(metrics.status, 200);
+    assert.ok(metrics.body.events);
+    const consumers = await request(port, "GET", "/api/v1/events/consumers", auth());
+    assert.equal(consumers.status, 200);
+    assert.ok(Array.isArray(consumers.body.items));
+    assert.ok(Array.isArray(consumers.body.consumer_groups.items));
+  });
 });

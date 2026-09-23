@@ -9462,6 +9462,176 @@ export function createApp(db) {
     })
   );
 
+  // ── Canonical specification aliases ───────────────────────────────────────
+  // Thin aliases exposing the framework under the canonical paths documented
+  // in the Event & Messaging specification. They reuse the exact same
+  // services, DTOs and permission guards as the primary routes above.
+  const eventDefinitionVersion = (req, type) => Number(req.body?.version) || Number(type?.version) || 1;
+
+  eventsRouter.get(
+    "/definitions",
+    auth,
+    canEventRegistry("read"),
+    wrap((req, res) => {
+      res.json(events.Registry.listEventTypes(db, { ...req.query, tenantId: eventTenant(req) }));
+    })
+  );
+  eventsRouter.post(
+    "/definitions",
+    auth,
+    canEventRegistry("create"),
+    wrap((req, res) => {
+      res.status(201).json(events.Registry.createEventType(db, req.body || {}, req.actor, eventTenant(req)));
+    })
+  );
+  eventsRouter.get(
+    "/definitions/:id",
+    auth,
+    canEventRegistry("read"),
+    wrap((req, res) => {
+      res.json(events.Registry.getEventType(db, req.params.id));
+    })
+  );
+  eventsRouter.put(
+    "/definitions/:id",
+    auth,
+    canEventRegistry("update"),
+    wrap((req, res) => {
+      res.json(events.Registry.updateEventType(db, req.params.id, req.body || {}, req.actor));
+    })
+  );
+  eventsRouter.post(
+    "/definitions/:id/activate",
+    auth,
+    canEventRegistry("update"),
+    wrap((req, res) => {
+      const type = events.Registry.getEventType(db, req.params.id);
+      res.json(events.Registry.setVersionStatus(db, req.params.id, eventDefinitionVersion(req, type), "active", req.actor));
+    })
+  );
+  eventsRouter.post(
+    "/definitions/:id/deprecate",
+    auth,
+    canEventRegistry("update"),
+    wrap((req, res) => {
+      const type = events.Registry.getEventType(db, req.params.id);
+      res.json(events.Registry.setVersionStatus(db, req.params.id, eventDefinitionVersion(req, type), "deprecated", req.actor));
+    })
+  );
+
+  eventsRouter.get(
+    "/history",
+    auth,
+    canEventPublish("read"),
+    wrap((req, res) => {
+      res.json(events.Publisher.listEvents(db, { ...req.query, tenantId: eventTenant(req) }));
+    })
+  );
+  eventsRouter.get(
+    "/history/:eventId",
+    auth,
+    canEventPublish("read"),
+    wrap((req, res) => {
+      res.json(events.Publisher.getEvent(db, req.params.eventId, { includePayload: true }));
+    })
+  );
+
+  eventsRouter.put(
+    "/topics/:id",
+    auth,
+    canEventTopology("update"),
+    wrap((req, res) => {
+      res.json(events.Bus.updateTopic(db, req.params.id, req.body || {}));
+    })
+  );
+
+  eventsRouter.put(
+    "/subscriptions/:id",
+    auth,
+    canEventSubscriptions("update"),
+    wrap((req, res) => {
+      res.json(events.Subscriptions.updateSubscription(db, req.params.id, req.body || {}, req.actor));
+    })
+  );
+  eventsRouter.post(
+    "/subscriptions/:id/pause",
+    auth,
+    canEventSubscriptions("update"),
+    wrap((req, res) => {
+      res.json(events.Subscriptions.setSubscriptionStatus(db, req.params.id, "suspended", req.actor));
+    })
+  );
+  eventsRouter.post(
+    "/subscriptions/:id/resume",
+    auth,
+    canEventSubscriptions("update"),
+    wrap((req, res) => {
+      res.json(events.Subscriptions.setSubscriptionStatus(db, req.params.id, "active", req.actor));
+    })
+  );
+
+  eventsRouter.post(
+    "/replay",
+    auth,
+    canEventReplay("create"),
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      const created = events.Replay.createReplay(db, body, req.actor, eventTenant(req));
+      if (body.run === false) return res.status(201).json(created);
+      res.status(202).json(await events.Replay.runReplay(db, created.replay_ref, req.actor));
+    })
+  );
+  eventsRouter.post(
+    "/:eventId/replay",
+    auth,
+    canEventReplay("create"),
+    wrap(async (req, res) => {
+      const body = { scope_type: "event", event_ref: req.params.eventId, ...(req.body || {}) };
+      const created = events.Replay.createReplay(db, body, req.actor, eventTenant(req));
+      if (body.run === false) return res.status(201).json(created);
+      res.status(202).json(await events.Replay.runReplay(db, created.replay_ref, req.actor));
+    })
+  );
+
+  eventsRouter.post(
+    "/dead-letters/:id/retry",
+    auth,
+    canEventDeadLetters("update"),
+    wrap((req, res) => {
+      res.json(events.DeadLetter.resolveDeadLetter(db, req.params.id, { action: "retry", reason: req.body?.reason, actor: req.actor }));
+    })
+  );
+  eventsRouter.post(
+    "/dead-letters/:id/replay",
+    auth,
+    canEventDeadLetters("update"),
+    wrap((req, res) => {
+      res.json(events.DeadLetter.resolveDeadLetter(db, req.params.id, { action: "retry", reason: req.body?.reason || "replayed by operator", actor: req.actor }));
+    })
+  );
+
+  eventsRouter.get(
+    "/metrics",
+    auth,
+    canEventMonitoring("read"),
+    wrap((req, res) => {
+      res.json(events.Monitoring.dashboardSummary(db, { tenantId: eventTenant(req), ...req.query }));
+    })
+  );
+  eventsRouter.get(
+    "/consumers",
+    auth,
+    canEventMonitoring("read"),
+    wrap((req, res) => {
+      res.json({
+        items: events.Handlers.listHandlers(),
+        stats: events.Handlers.handlerStats(db, { tenantId: eventTenant(req), ...req.query }),
+        consumer_groups: events.Bus.listConsumerGroups(db, { tenantId: eventTenant(req) }),
+        slow: events.Handlers.slowHandlers(db, { tenantId: eventTenant(req) }),
+      });
+    })
+  );
+
   // ── Event records (generic, must be registered last to avoid shadowing) ──
   eventsRouter.get(
     "/:ref",

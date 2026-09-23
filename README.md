@@ -269,6 +269,7 @@ The dev server binds to `0.0.0.0`, so other devices can reach it via your laptop
 - `/api/events/replays` (+ `/stats`, `/preview`, `/:ref`, `/run`, `/cancel`) and `/api/events/retention-policies` (+ `/:code`, `/apply`) `/retention` (`/apply`, `/stats`) — controlled replay and retention
 - `/api/events/monitoring` (`/dashboard`, `/throughput`, `/failures`, `/latency`, `/health`, `/ordering`, `/traceability`) and `/api/events/handlers` (+ `/stats`, `/:code`) — operational dashboards, traceability and handler monitoring
 - `/api/v1/events/*` — versioned alias of the entire event router
+- `/api/v1/events/definitions` `/history` `/replay` `/metrics` `/consumers` and the `/dead-letters/:id/retry|replay`, `/subscriptions/:id/pause|resume`, `/:eventId/replay` aliases — canonical specification surface (same services, DTOs and permissions as the primary routes)
 - `/api/numbering/meta` — numbering vocabularies, token registry and scopes
 - `/api/numbering/object-types` (+ `/:code/status`) and `/api/numbering/tokens` (+ `/scopes`) — numbering foundation
 - `/api/numbering/schemes` (+ `/:ref`, `/versions`, `/validate`, `/clone`, `/activate`, `/deactivate`, `/retire`) — versioned scheme administration

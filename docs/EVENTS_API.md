@@ -306,6 +306,39 @@ Traceability query: `?correlationId=...` or `?traceId=...`.
 | `GET` | `/handlers/stats` | `monitoring:read` | Per-handler/type activity; `?window=` and `slow` list |
 | `GET` | `/handlers/:code` | `monitoring:read` | Handler detail with recent deliveries |
 
+## Canonical specification aliases
+
+The framework spec lists a canonical REST surface. Every one of those routes is
+served as a thin alias that reuses the exact same services, DTOs and permission
+guards as the primary routes above, so either naming works.
+
+| Method | Canonical path | Equivalent primary route | Permission |
+| --- | --- | --- | --- |
+| `GET` | `/definitions` | `GET /event-types` | `registry:read` |
+| `POST` | `/definitions` | `POST /event-types` | `registry:create` |
+| `GET` | `/definitions/:id` | `GET /event-types/:code` | `registry:read` |
+| `PUT` | `/definitions/:id` | `PATCH /event-types/:code` | `registry:update` |
+| `POST` | `/definitions/:id/activate` | version status `active` | `registry:update` |
+| `POST` | `/definitions/:id/deprecate` | version status `deprecated` | `registry:update` |
+| `GET` | `/history` | `GET /` (list records) | `publish:read` |
+| `GET` | `/history/:eventId` | `GET /:ref` | `publish:read` |
+| `PUT` | `/topics/:id` | `PATCH /topics/:code` | `topology:update` |
+| `PUT` | `/subscriptions/:id` | `PATCH /subscriptions/:code` | `subscriptions:update` |
+| `POST` | `/subscriptions/:id/pause` | status `suspended` | `subscriptions:update` |
+| `POST` | `/subscriptions/:id/resume` | status `active` | `subscriptions:update` |
+| `POST` | `/replay` | create + run a replay | `replay:create` |
+| `POST` | `/:eventId/replay` | replay one event | `replay:create` |
+| `POST` | `/dead-letters/:id/retry` | requeue a dead letter | `deadletters:update` |
+| `POST` | `/dead-letters/:id/replay` | requeue a dead letter | `deadletters:update` |
+| `GET` | `/metrics` | `/monitoring/dashboard` | `monitoring:read` |
+| `GET` | `/consumers` | `/handlers` + `/handlers/stats` + consumer groups | `monitoring:read` |
+
+`invoke` endpoints (topics, definitions) and the already-canonical routes
+(`POST /publish`, `GET /topics`, `GET /subscriptions`, `GET /dead-letters`,
+`GET /queues`, `GET /outbox`) need no alias. For `POST /replay` and
+`POST /:eventId/replay`, pass `{ "run": false }` to create the replay record
+without executing it, or `{ "dry_run": true }` to validate the target set.
+
 ## End-to-end example
 
 ```bash
