@@ -32,6 +32,7 @@ import * as dataGovernance from "./services/data-governance/index.js";
 import * as dataCatalog from "./services/data-catalog/index.js";
 import * as dataLifecycle from "./services/data-lifecycle/index.js";
 import * as dataExchange from "./services/data-exchange/index.js";
+import * as migration from "./services/migration/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1018,6 +1019,25 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.data_exchange.jobs", name: "Data exchange background jobs", parentCode: "iam.data_exchange" },
     { applicationCode: "iam", code: "iam.data_exchange.metrics", name: "Data exchange metrics & health", parentCode: "iam.data_exchange" },
     { applicationCode: "iam", code: "iam.data_exchange.admin", name: "Data exchange administration & configuration", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.migration", name: "Migration & onboarding framework service", kind: "module" },
+    { applicationCode: "iam", code: "iam.migration.overview", name: "Migration overview & registry", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.projects", name: "Migration projects", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.packages", name: "Migration packages", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.definitions", name: "Migration definitions & mappings", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.sources", name: "Migration source configurations & adapters", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.mapping", name: "Migration mapping & transformation engine", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.validation", name: "Migration validation engine", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.dependencies", name: "Migration dependency resolution", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.planning", name: "Migration planning & readiness", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.execution", name: "Migration execution & jobs", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.reconciliation", name: "Migration reconciliation", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.identifiers", name: "Source identifier mapping", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.relationships", name: "Relationship migration", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.files", name: "File & binary migration", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.audit", name: "Migration audit trail & lineage", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.statistics", name: "Migration statistics", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.metrics", name: "Migration metrics & health", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.admin", name: "Migration administration & configuration", parentCode: "iam.migration" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1299,7 +1319,28 @@ function seedMissingCatalog(db) {
     "iam.data_exchange.metrics",
     "iam.data_exchange.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes]) {
+  const dataMigrationResourceCodes = [
+    "iam.migration",
+    "iam.migration.overview",
+    "iam.migration.projects",
+    "iam.migration.packages",
+    "iam.migration.definitions",
+    "iam.migration.sources",
+    "iam.migration.mapping",
+    "iam.migration.validation",
+    "iam.migration.dependencies",
+    "iam.migration.planning",
+    "iam.migration.execution",
+    "iam.migration.reconciliation",
+    "iam.migration.identifiers",
+    "iam.migration.relationships",
+    "iam.migration.files",
+    "iam.migration.audit",
+    "iam.migration.statistics",
+    "iam.migration.metrics",
+    "iam.migration.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2823,7 +2864,8 @@ export function seedDatabase(db) {
   const dataCatalogResult = withEventSuppression(() => seedDataCatalog(db));
   const dataLifecycleResult = withEventSuppression(() => seedDataLifecycle(db));
   const dataExchangeResult = withEventSuppression(() => seedDataExchange(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult };
+  const migrationResult = withEventSuppression(() => seedMigrationFramework(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult };
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -2875,6 +2917,18 @@ function seedDataExchange(db) {
   }
 }
 
+// Installs the centralized Migration & Onboarding Framework foundation (source
+// adapters, event types, job types/handlers, search registrations) plus a small
+// demo onboarding estate so migration dashboards are not empty on a fresh install.
+function seedMigrationFramework(db) {
+  try {
+    const result = migration.ensureMigrationSeed(db);
+    return { migrationSeeded: true, ...result };
+  } catch (err) {
+    return { migrationSeeded: false, migrationError: err.message };
+  }
+}
+
 function seedSearch(db) {
   try {
     const result = search.initializeSearch(db);
@@ -2883,7 +2937,6 @@ function seedSearch(db) {
     return { searchSeeded: false, searchError: err.message };
   }
 }
-
 // Registers the platform's default domain event types so business modules can
 // publish/subscribe without any manual catalogue maintenance.
 function seedIntegration(db) {

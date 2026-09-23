@@ -51,6 +51,8 @@ import * as dataLifecycle from "./services/data-lifecycle/index.js";
 import { createDataLifecycleRouter } from "./services/data-lifecycle/router-data-lifecycle.js";
 import * as dataExchange from "./services/data-exchange/index.js";
 import { createDataExchangeRouter } from "./services/data-exchange/router-data-exchange.js";
+import * as migration from "./services/migration/index.js";
+import { createMigrationRouter } from "./services/migration/router-migration.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -187,6 +189,11 @@ export function createApp(db) {
     dataExchange.ensureDataExchangeFoundation(db);
   } catch {
     /* data exchange foundation is idempotent and must never block application boot */
+  }
+  try {
+    migration.ensureMigrationFoundation(db);
+  } catch {
+    /* migration foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -9888,6 +9895,11 @@ export function createApp(db) {
   const dataExchangeRouter = createDataExchangeRouter({ express, db, auth, can, wrap });
   app.use("/api/data-exchange", dataExchangeRouter);
   app.use("/api/v1/data-exchange", dataExchangeRouter);
+
+  // ── Migration & Onboarding Framework ──────────────────────────────────────
+  const migrationRouter = createMigrationRouter({ express, db, auth, can, wrap });
+  app.use("/api/migration", migrationRouter);
+  app.use("/api/v1/migration", migrationRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

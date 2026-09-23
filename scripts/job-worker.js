@@ -34,6 +34,7 @@ import { registerDataGovernanceHandlers, runGovernanceMaintenance } from "../ser
 import { registerCatalogHandlers, runCatalogMaintenance } from "../server/services/data-catalog/index.js";
 import { registerLifecycleHandlers, runLifecycleMaintenance } from "../server/services/data-lifecycle/index.js";
 import { registerExchangeHandlers, runExchangeMaintenance } from "../server/services/data-exchange/index.js";
+import { registerMigrationHandlers, runMigrationMaintenance, ensureMigrationJobTypes } from "../server/services/migration/index.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -134,6 +135,11 @@ registerLifecycleHandlers();
 // Import & Export Framework background handlers (import/export execution,
 // validation, reconciliation, retry of failed records and housekeeping).
 registerExchangeHandlers();
+
+// Migration & Onboarding Framework background handlers (migration execution,
+// validation, reconciliation, retry, replanning and housekeeping).
+ensureMigrationJobTypes(db);
+registerMigrationHandlers();
 
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
@@ -243,6 +249,26 @@ const exchangeMaintenance = setInterval(() => {
   }
 }, exchangeMaintenanceMs);
 exchangeMaintenance.unref?.();
+
+// Periodic migration housekeeping: prune stale checkpoints, promote dependents
+// of completed packages and archive stale non-retryable errors.
+const migrationMaintenanceMs = positive(process.env.MIGRATION_MAINTENANCE_MS, 60000);
+const migrationMaintenance = setInterval(() => {
+  try {
+    const summary = runMigrationMaintenance(db);
+    if (summary.checkpoints_pruned || summary.errors_archived || summary.dependencies_promoted) {
+      log("info", "Migration housekeeping", {
+        tenants: summary.tenants,
+        checkpoints_pruned: summary.checkpoints_pruned,
+        errors_archived: summary.errors_archived,
+        dependencies_promoted: summary.dependencies_promoted,
+      });
+    }
+  } catch (error) {
+    log("warn", "Migration housekeeping failed", { error: error.message });
+  }
+}, migrationMaintenanceMs);
+migrationMaintenance.unref?.();
 
 // Periodic search housekeeping: converge the index queue and prune expired
 // search history / exports.

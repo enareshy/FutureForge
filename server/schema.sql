@@ -7869,3 +7869,555 @@ CREATE TABLE IF NOT EXISTS ie_configuration (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ie_configuration_tenant ON ie_configuration(tenant_id, key);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Migration & Onboarding Framework (P1)
+--
+-- A first-class, dependency-aware onboarding capability for large-scale legacy
+-- migrations. It reuses the shared data-movement engines (connectors, mapping,
+-- transformation, validation) from the Import/Export Framework but owns its own
+-- projects, packages, dependency graph, planning, identifier mapping,
+-- checkpoints, reconciliation and migration audit.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS mig_projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  source_system TEXT NOT NULL DEFAULT '',
+  source_version TEXT NOT NULL DEFAULT '',
+  target_platform_version TEXT NOT NULL DEFAULT '',
+  scope_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','PLANNED','READY','RUNNING','PAUSED','COMPLETED','PARTIALLY_COMPLETED','FAILED','CANCELLED','ARCHIVED')),
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  start_date TEXT,
+  end_date TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_projects_tenant ON mig_projects(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS mig_project_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES mig_projects(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (project_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS mig_packages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  package_ref TEXT NOT NULL DEFAULT '',
+  project_id INTEGER NOT NULL REFERENCES mig_projects(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL DEFAULT '',
+  source_object_type TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL DEFAULT '',
+  source_json TEXT NOT NULL DEFAULT '{}',
+  scope_json TEXT NOT NULL DEFAULT '{}',
+  mapping_json TEXT NOT NULL DEFAULT '{}',
+  transformation_json TEXT NOT NULL DEFAULT '[]',
+  validation_json TEXT NOT NULL DEFAULT '[]',
+  dependency_json TEXT NOT NULL DEFAULT '[]',
+  duplicate_strategy TEXT NOT NULL DEFAULT 'REJECT',
+  execution_order INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','READY','BLOCKED','RUNNING','PAUSED','COMPLETED','PARTIALLY_COMPLETED','FAILED','CANCELLED')),
+  statistics_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (project_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_packages_project ON mig_packages(project_id, execution_order);
+
+CREATE TABLE IF NOT EXISTS mig_package_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  package_id INTEGER NOT NULL REFERENCES mig_packages(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (package_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS mig_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  source_object_type TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL DEFAULT '',
+  source_json TEXT NOT NULL DEFAULT '{}',
+  target_schema_json TEXT NOT NULL DEFAULT '{}',
+  duplicate_strategy TEXT NOT NULL DEFAULT 'REJECT',
+  duplicate_key_json TEXT NOT NULL DEFAULT '{}',
+  dependency_strategy TEXT NOT NULL DEFAULT 'STRICT',
+  batch_size INTEGER NOT NULL DEFAULT 1000,
+  retry_json TEXT NOT NULL DEFAULT '{}',
+  error_policy TEXT NOT NULL DEFAULT 'CONTINUE',
+  reconciliation_policy TEXT NOT NULL DEFAULT 'COUNT',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','INACTIVE','DEPRECATED')),
+  version INTEGER NOT NULL DEFAULT 1,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_definitions_tenant ON mig_definitions(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS mig_definition_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES mig_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS mig_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES mig_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  source_field TEXT NOT NULL DEFAULT '',
+  target_field TEXT NOT NULL,
+  mapping_type TEXT NOT NULL DEFAULT 'DIRECT',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  required INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_mappings_definition ON mig_mappings(definition_id, sequence);
+
+CREATE TABLE IF NOT EXISTS mig_transformations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES mig_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  stage TEXT NOT NULL DEFAULT 'FIELD',
+  target_field TEXT NOT NULL DEFAULT '',
+  transformation_type TEXT NOT NULL,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_transformations_definition ON mig_transformations(definition_id, sequence);
+
+CREATE TABLE IF NOT EXISTS mig_validation_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES mig_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  level TEXT NOT NULL DEFAULT 'FIELD',
+  target_field TEXT NOT NULL DEFAULT '',
+  rule_type TEXT NOT NULL,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  severity TEXT NOT NULL DEFAULT 'ERROR',
+  message TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_validation_definition ON mig_validation_rules(definition_id, sequence);
+
+CREATE TABLE IF NOT EXISTS mig_dependencies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  project_id INTEGER NOT NULL REFERENCES mig_projects(id) ON DELETE CASCADE,
+  package_id INTEGER NOT NULL REFERENCES mig_packages(id) ON DELETE CASCADE,
+  depends_on_package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  dependency_type TEXT NOT NULL DEFAULT 'PACKAGE',
+  source_ref TEXT NOT NULL DEFAULT '',
+  target_ref TEXT NOT NULL DEFAULT '',
+  required INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','satisfied','missing','circular')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_dependencies_package ON mig_dependencies(package_id);
+
+CREATE TABLE IF NOT EXISTS mig_plans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  project_id INTEGER NOT NULL REFERENCES mig_projects(id) ON DELETE CASCADE,
+  package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','READY','BLOCKED','APPROVED','RUNNING','COMPLETED','FAILED')),
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  generated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_plans_project ON mig_plans(project_id);
+
+CREATE TABLE IF NOT EXISTS mig_plan_steps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id INTEGER NOT NULL REFERENCES mig_plans(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  package_code TEXT NOT NULL DEFAULT '',
+  dependency_json TEXT NOT NULL DEFAULT '[]',
+  estimated_records INTEGER NOT NULL DEFAULT 0,
+  estimated_duration_ms INTEGER NOT NULL DEFAULT 0,
+  validation_status TEXT NOT NULL DEFAULT 'pending',
+  readiness TEXT NOT NULL DEFAULT 'unknown',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_plan_steps_plan ON mig_plan_steps(plan_id, sequence);
+
+CREATE TABLE IF NOT EXISTS mig_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  project_id INTEGER REFERENCES mig_projects(id) ON DELETE SET NULL,
+  package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  definition_id INTEGER REFERENCES mig_definitions(id) ON DELETE SET NULL,
+  definition_version INTEGER NOT NULL DEFAULT 1,
+  source_adapter TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'EXECUTE' CHECK (mode IN ('DRY_RUN','EXECUTE','VALIDATE')),
+  status TEXT NOT NULL DEFAULT 'QUEUED' CHECK (status IN ('QUEUED','PREPARING','VALIDATING','RUNNING','PAUSED','RETRYING','RECONCILING','COMPLETED','PARTIALLY_COMPLETED','FAILED','CANCELLED')),
+  batch_size INTEGER NOT NULL DEFAULT 1000,
+  worker_count INTEGER NOT NULL DEFAULT 1,
+  total_records INTEGER NOT NULL DEFAULT 0,
+  processed_records INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  duplicate_count INTEGER NOT NULL DEFAULT 0,
+  rejected_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  updated_count INTEGER NOT NULL DEFAULT 0,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  checkpoint_json TEXT NOT NULL DEFAULT '{}',
+  statistics_json TEXT NOT NULL DEFAULT '{}',
+  params_json TEXT NOT NULL DEFAULT '{}',
+  source_json TEXT NOT NULL DEFAULT '{}',
+  idempotency_key TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  completed_at TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_jobs_tenant ON mig_jobs(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_mig_jobs_package ON mig_jobs(package_id, id);
+
+CREATE TABLE IF NOT EXISTS mig_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES mig_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  batch_number INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING','COMPLETED','FAILED','PARTIAL')),
+  records INTEGER NOT NULL DEFAULT 0,
+  success INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0,
+  duplicates INTEGER NOT NULL DEFAULT 0,
+  rejected INTEGER NOT NULL DEFAULT 0,
+  skipped INTEGER NOT NULL DEFAULT 0,
+  checkpoint_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (job_id, batch_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_batches_job ON mig_batches(job_id, batch_number);
+
+CREATE TABLE IF NOT EXISTS mig_checkpoints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES mig_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  checkpoint_number INTEGER NOT NULL,
+  last_record INTEGER NOT NULL DEFAULT 0,
+  processed INTEGER NOT NULL DEFAULT 0,
+  success INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0,
+  state_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (job_id, checkpoint_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_checkpoints_job ON mig_checkpoints(job_id, checkpoint_number);
+
+CREATE TABLE IF NOT EXISTS mig_object_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES mig_jobs(id) ON DELETE CASCADE,
+  batch_id INTEGER REFERENCES mig_batches(id) ON DELETE SET NULL,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  record_number INTEGER NOT NULL DEFAULT 0,
+  source_object_type TEXT NOT NULL DEFAULT '',
+  source_object_id TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL DEFAULT '',
+  target_object_id TEXT NOT NULL DEFAULT '',
+  business_key TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT 'CREATE',
+  status TEXT NOT NULL DEFAULT 'SUCCESS',
+  mapped_json TEXT NOT NULL DEFAULT '{}',
+  transformed_json TEXT NOT NULL DEFAULT '{}',
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  message TEXT NOT NULL DEFAULT '',
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_results_job ON mig_object_results(job_id, record_number);
+CREATE INDEX IF NOT EXISTS idx_mig_results_target ON mig_object_results(target_object_type, target_object_id);
+
+CREATE TABLE IF NOT EXISTS mig_errors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES mig_jobs(id) ON DELETE CASCADE,
+  batch_id INTEGER REFERENCES mig_batches(id) ON DELETE SET NULL,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  record_number INTEGER NOT NULL DEFAULT 0,
+  source_object_type TEXT NOT NULL DEFAULT '',
+  source_object_id TEXT NOT NULL DEFAULT '',
+  target_object_id TEXT NOT NULL DEFAULT '',
+  field TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  error_type TEXT NOT NULL DEFAULT 'RECORD',
+  category TEXT NOT NULL DEFAULT 'SYSTEM_ERROR',
+  message TEXT NOT NULL DEFAULT '',
+  retryable INTEGER NOT NULL DEFAULT 0,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','RETRYING','RESOLVED','IGNORED','REJECTED')),
+  details_json TEXT NOT NULL DEFAULT '{}',
+  resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  resolved_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_errors_job ON mig_errors(job_id, status, category);
+
+CREATE TABLE IF NOT EXISTS mig_retries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES mig_jobs(id) ON DELETE CASCADE,
+  error_id INTEGER REFERENCES mig_errors(id) ON DELETE SET NULL,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  attempt INTEGER NOT NULL DEFAULT 1,
+  strategy TEXT NOT NULL DEFAULT 'MANUAL',
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  error_message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_retries_job ON mig_retries(job_id, id);
+
+CREATE TABLE IF NOT EXISTS mig_identifier_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  project_id INTEGER REFERENCES mig_projects(id) ON DELETE SET NULL,
+  package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  source_system TEXT NOT NULL DEFAULT '',
+  source_object_type TEXT NOT NULL DEFAULT '',
+  source_object_id TEXT NOT NULL,
+  target_object_type TEXT NOT NULL DEFAULT '',
+  target_object_id TEXT NOT NULL DEFAULT '',
+  target_object_ref TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'MAPPED' CHECK (status IN ('MAPPED','PENDING','MISSING','REJECTED')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, source_system, source_object_type, source_object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_identifiers_target ON mig_identifier_mappings(target_object_type, target_object_id);
+
+CREATE TABLE IF NOT EXISTS mig_relationship_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  project_id INTEGER REFERENCES mig_projects(id) ON DELETE SET NULL,
+  package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  job_id INTEGER REFERENCES mig_jobs(id) ON DELETE SET NULL,
+  relationship_type TEXT NOT NULL DEFAULT '',
+  source_relationship_id TEXT NOT NULL DEFAULT '',
+  source_parent_id TEXT NOT NULL DEFAULT '',
+  source_child_id TEXT NOT NULL DEFAULT '',
+  target_parent_id TEXT NOT NULL DEFAULT '',
+  target_child_id TEXT NOT NULL DEFAULT '',
+  target_relationship_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'MAPPED' CHECK (status IN ('MAPPED','MISSING','SKIPPED','FAILED')),
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_relationship_job ON mig_relationship_mappings(job_id, status);
+
+CREATE TABLE IF NOT EXISTS mig_reconciliations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reconciliation_ref TEXT NOT NULL DEFAULT '',
+  job_id INTEGER NOT NULL REFERENCES mig_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  strategy TEXT NOT NULL DEFAULT 'COUNT',
+  source_count INTEGER NOT NULL DEFAULT 0,
+  processed_count INTEGER NOT NULL DEFAULT 0,
+  successful_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  duplicate_count INTEGER NOT NULL DEFAULT 0,
+  rejected_count INTEGER NOT NULL DEFAULT 0,
+  target_count INTEGER NOT NULL DEFAULT 0,
+  variance INTEGER NOT NULL DEFAULT 0,
+  reconciliation_percent REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','COMPLETED','VARIANCE','FAILED')),
+  report_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (job_id, strategy)
+);
+
+CREATE TABLE IF NOT EXISTS mig_reconciliation_exceptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reconciliation_id INTEGER NOT NULL REFERENCES mig_reconciliations(id) ON DELETE CASCADE,
+  job_id INTEGER REFERENCES mig_jobs(id) ON DELETE SET NULL,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  exception_type TEXT NOT NULL DEFAULT 'TARGET_MISSING',
+  object_type TEXT NOT NULL DEFAULT '',
+  source_object_id TEXT NOT NULL DEFAULT '',
+  target_object_id TEXT NOT NULL DEFAULT '',
+  field TEXT NOT NULL DEFAULT '',
+  expected TEXT NOT NULL DEFAULT '',
+  actual TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_recon_exceptions ON mig_reconciliation_exceptions(reconciliation_id, exception_type);
+
+CREATE TABLE IF NOT EXISTS mig_statistics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  job_id INTEGER REFERENCES mig_jobs(id) ON DELETE CASCADE,
+  package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  project_id INTEGER REFERENCES mig_projects(id) ON DELETE SET NULL,
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_statistics_job ON mig_statistics(job_id, id);
+
+CREATE TABLE IF NOT EXISTS mig_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  project_id INTEGER REFERENCES mig_projects(id) ON DELETE SET NULL,
+  package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  definition_version INTEGER NOT NULL DEFAULT 0,
+  job_id INTEGER REFERENCES mig_jobs(id) ON DELETE SET NULL,
+  batch_id INTEGER REFERENCES mig_batches(id) ON DELETE SET NULL,
+  source_object_type TEXT NOT NULL DEFAULT '',
+  source_object_id TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL DEFAULT '',
+  target_object_id TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT 'MAPPED',
+  status TEXT NOT NULL DEFAULT 'SUCCESS',
+  error_message TEXT NOT NULL DEFAULT '',
+  transformation_version INTEGER NOT NULL DEFAULT 0,
+  correlation_id TEXT NOT NULL DEFAULT '',
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor_username TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_audit_tenant ON mig_audit(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_mig_audit_job ON mig_audit(job_id, id);
+CREATE INDEX IF NOT EXISTS idx_mig_audit_object ON mig_audit(target_object_type, target_object_id);
+
+CREATE TABLE IF NOT EXISTS mig_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_configuration_tenant ON mig_configuration(tenant_id, key);
+
+CREATE TABLE IF NOT EXISTS mig_source_configurations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  adapter_type TEXT NOT NULL DEFAULT 'DATABASE',
+  settings_json TEXT NOT NULL DEFAULT '{}',
+  credential_ref TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS mig_file_migrations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  project_id INTEGER REFERENCES mig_projects(id) ON DELETE SET NULL,
+  package_id INTEGER REFERENCES mig_packages(id) ON DELETE SET NULL,
+  job_id INTEGER REFERENCES mig_jobs(id) ON DELETE SET NULL,
+  source_object_type TEXT NOT NULL DEFAULT '',
+  source_object_id TEXT NOT NULL DEFAULT '',
+  target_object_id TEXT NOT NULL DEFAULT '',
+  original_filename TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  file_size INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  storage_ref TEXT NOT NULL DEFAULT '',
+  file_version TEXT NOT NULL DEFAULT '',
+  upload_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (upload_status IN ('PENDING','UPLOADED','FAILED','SKIPPED')),
+  virus_scan_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','MIGRATED','FAILED','SKIPPED')),
+  error_message TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mig_files_job ON mig_file_migrations(job_id, status);

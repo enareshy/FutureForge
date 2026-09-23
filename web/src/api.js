@@ -1868,3 +1868,112 @@ export const dataExchange = {
   history: (qs) => api(`/api/v1/data-exchange/history${qs || ""}`),
   jobs: (qs) => api(`/api/v1/data-exchange/jobs${qs || ""}`),
 };
+
+export const migration = {
+  meta: () => api("/api/v1/migration/meta"),
+  health: () => api("/api/v1/migration/health"),
+  metrics: () => api("/api/v1/migration/metrics"),
+  sourceAdapters: () => api("/api/v1/migration/source-adapters"),
+  configuration: () => api("/api/v1/migration/configuration"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/migration/configuration/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  sourceConfigurations: (qs) => api(`/api/v1/migration/source-configurations${qs || ""}`),
+  sourceConfiguration: (ref) => api(`/api/v1/migration/source-configurations/${encodeURIComponent(ref)}`),
+  createSourceConfiguration: (body) =>
+    api("/api/v1/migration/source-configurations", { method: "POST", body }),
+  updateSourceConfiguration: (ref, body) =>
+    api(`/api/v1/migration/source-configurations/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setSourceConfigurationStatus: (ref, status) =>
+    api(`/api/v1/migration/source-configurations/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  testSourceConfiguration: (ref) =>
+    api(`/api/v1/migration/source-configurations/${encodeURIComponent(ref)}/test`, { method: "POST" }),
+  discoverSourceConfiguration: (ref, body) =>
+    api(`/api/v1/migration/source-configurations/${encodeURIComponent(ref)}/discover`, { method: "POST", body }),
+
+  projects: (qs) => api(`/api/v1/migration/projects${qs || ""}`),
+  project: (ref) => api(`/api/v1/migration/projects/${encodeURIComponent(ref)}`),
+  createProject: (body) => api("/api/v1/migration/projects", { method: "POST", body }),
+  updateProject: (ref, body) =>
+    api(`/api/v1/migration/projects/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setProjectStatus: (ref, status) =>
+    api(`/api/v1/migration/projects/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  projectPackages: (ref) => api(`/api/v1/migration/projects/${encodeURIComponent(ref)}/packages`),
+  projectDependencies: (ref) => api(`/api/v1/migration/projects/${encodeURIComponent(ref)}/dependencies`),
+  projectTopology: (ref) => api(`/api/v1/migration/projects/${encodeURIComponent(ref)}/topology`),
+  projectReadiness: (ref) => api(`/api/v1/migration/projects/${encodeURIComponent(ref)}/readiness`),
+  projectPlans: (ref, qs) => api(`/api/v1/migration/projects/${encodeURIComponent(ref)}/plans${qs || ""}`),
+  generatePlan: (ref, body) =>
+    api(`/api/v1/migration/projects/${encodeURIComponent(ref)}/plans`, { method: "POST", body: body || {} }),
+
+  plans: (qs) => api(`/api/v1/migration/plans${qs || ""}`),
+  plan: (ref) => api(`/api/v1/migration/plans/${encodeURIComponent(ref)}`),
+  approvePlan: (ref) => api(`/api/v1/migration/plans/${encodeURIComponent(ref)}/approve`, { method: "POST" }),
+
+  packages: (qs) => api(`/api/v1/migration/packages${qs || ""}`),
+  package: (ref) => api(`/api/v1/migration/packages/${encodeURIComponent(ref)}`),
+  createPackage: (body) => api("/api/v1/migration/packages", { method: "POST", body }),
+  updatePackage: (ref, body) =>
+    api(`/api/v1/migration/packages/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setPackageStatus: (ref, status) =>
+    api(`/api/v1/migration/packages/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  packageDependencies: (ref) => api(`/api/v1/migration/packages/${encodeURIComponent(ref)}/dependencies`),
+  packageReadiness: (ref) => api(`/api/v1/migration/packages/${encodeURIComponent(ref)}/readiness`),
+  previewPackage: (ref, body) =>
+    api(`/api/v1/migration/packages/${encodeURIComponent(ref)}/preview`, { method: "POST", body: body || {} }),
+  validatePackage: (ref, body) =>
+    api(`/api/v1/migration/packages/${encodeURIComponent(ref)}/validate`, { method: "POST", body: body || {} }),
+  runPackage: (ref, body) =>
+    api(`/api/v1/migration/packages/${encodeURIComponent(ref)}/jobs`, { method: "POST", body: body || {} }),
+
+  definitions: (qs) => api(`/api/v1/migration/definitions${qs || ""}`),
+  definition: (ref) => api(`/api/v1/migration/definitions/${encodeURIComponent(ref)}`),
+  createDefinition: (body) => api("/api/v1/migration/definitions", { method: "POST", body }),
+  updateDefinition: (ref, body) =>
+    api(`/api/v1/migration/definitions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setDefinitionStatus: (ref, status) =>
+    api(`/api/v1/migration/definitions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  validateDefinition: (ref) =>
+    api(`/api/v1/migration/definitions/${encodeURIComponent(ref)}/validate`, { method: "POST" }),
+  definitionVersions: (ref) =>
+    api(`/api/v1/migration/definitions/${encodeURIComponent(ref)}/versions`),
+  createDefinitionVersion: (ref, body) =>
+    api(`/api/v1/migration/definitions/${encodeURIComponent(ref)}/versions`, { method: "POST", body: body || {} }),
+  runDefinition: (ref, body) =>
+    api(`/api/v1/migration/definitions/${encodeURIComponent(ref)}/jobs`, { method: "POST", body: body || {} }),
+
+  jobs: (qs) => api(`/api/v1/migration/jobs${qs || ""}`),
+  job: (ref) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}`),
+  jobBatches: (ref, qs) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/batches${qs || ""}`),
+  jobResults: (ref, qs) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/results${qs || ""}`),
+  jobErrors: (ref, qs) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/errors${qs || ""}`),
+  jobCheckpoints: (ref, qs) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/checkpoints${qs || ""}`),
+  jobLineage: (ref, qs) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/lineage${qs || ""}`),
+  executeJob: (ref) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/execute`, { method: "POST" }),
+  cancelJob: (ref) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/cancel`, { method: "POST" }),
+  pauseJob: (ref) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/pause`, { method: "POST" }),
+  resumeJob: (ref) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/resume`, { method: "POST" }),
+  retryJob: (ref) => api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/retry`, { method: "POST" }),
+  reconcileJob: (ref, body) =>
+    api(`/api/v1/migration/jobs/${encodeURIComponent(ref)}/reconcile`, { method: "POST", body: body || {} }),
+
+  identifierMappings: (qs) => api(`/api/v1/migration/identifier-mappings${qs || ""}`),
+  mapIdentifier: (body) => api("/api/v1/migration/identifier-mappings", { method: "POST", body }),
+  bulkMapIdentifiers: (body) =>
+    api("/api/v1/migration/identifier-mappings/bulk", { method: "POST", body }),
+  resolveIdentifier: (qs) => api(`/api/v1/migration/identifier-mappings/resolve${qs || ""}`),
+
+  relationshipMappings: (qs) => api(`/api/v1/migration/relationship-mappings${qs || ""}`),
+  migrateRelationship: (body) => api("/api/v1/migration/relationships", { method: "POST", body }),
+  bulkMigrateRelationships: (body) => api("/api/v1/migration/relationships/bulk", { method: "POST", body }),
+  retryRelationships: (body) => api("/api/v1/migration/relationships/retry", { method: "POST", body: body || {} }),
+
+  fileMigrations: (qs) => api(`/api/v1/migration/file-migrations${qs || ""}`),
+  reconciliations: (qs) => api(`/api/v1/migration/reconciliations${qs || ""}`),
+  reconciliation: (ref) => api(`/api/v1/migration/reconciliations/${encodeURIComponent(ref)}`),
+  reconciliationExceptions: (ref, qs) =>
+    api(`/api/v1/migration/reconciliations/${encodeURIComponent(ref)}/exceptions${qs || ""}`),
+  statistics: (qs) => api(`/api/v1/migration/statistics${qs || ""}`),
+  audit: (qs) => api(`/api/v1/migration/audit${qs || ""}`),
+  objectLineage: (qs) => api(`/api/v1/migration/object-lineage${qs || ""}`),
+};
