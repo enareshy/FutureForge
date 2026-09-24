@@ -132,6 +132,7 @@ export const DataQuality = {
 export const ensureDataGovernanceFoundation = Foundation.ensureDataGovernanceFoundation;
 export const registerEventEvaluationHandler = Foundation.registerEventEvaluationHandler;
 export const registerDataGovernanceHandlers = Jobs.registerDataGovernanceHandlers;
+export const runGovernanceMaintenance = Jobs.runGovernanceMaintenance;
 export const seedDataGovernance = Seed.seedDataGovernance;
 export const ensureDataGovernanceSeed = Seed.ensureDataGovernanceSeed;
 export const registerDataGovernanceSources = Search.registerDataGovernanceSources;
