@@ -2086,3 +2086,140 @@ export const classification = {
   submitDuplicateScan: (body) => api("/api/v1/classification/jobs/duplicate-scan", { method: "POST", body }),
   submitMaintenance: () => api("/api/v1/classification/jobs/maintenance", { method: "POST" }),
 };
+
+export const bom = {
+  meta: () => api("/api/v1/bom/meta"),
+  health: () => api("/api/v1/bom/health"),
+  metrics: (qs) => api(`/api/v1/bom/metrics${qs || ""}`),
+  compareSummary: () => api("/api/v1/bom/compare-summary"),
+  configuration: () => api("/api/v1/bom/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/bom/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  units: (qs) => api(`/api/v1/bom/units${qs || ""}`),
+  convertUnit: (qs) => api(`/api/v1/bom/units/convert${qs || ""}`),
+
+  boms: (qs) => api(`/api/v1/bom/boms${qs || ""}`),
+  bom: (ref) => api(`/api/v1/bom/boms/${encodeURIComponent(ref)}`),
+  createBom: (body) => api("/api/v1/bom/boms", { method: "POST", body }),
+  updateBom: (ref, body) =>
+    api(`/api/v1/bom/boms/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setBomStatus: (ref, status) =>
+    api(`/api/v1/bom/boms/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  deleteBom: (ref) => api(`/api/v1/bom/boms/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  bomRevisions: (ref, qs) =>
+    api(`/api/v1/bom/boms/${encodeURIComponent(ref)}/revisions${qs || ""}`),
+  createRevision: (ref, body) =>
+    api(`/api/v1/bom/boms/${encodeURIComponent(ref)}/revisions`, { method: "POST", body }),
+
+  revisions: (qs) => api(`/api/v1/bom/revisions${qs || ""}`),
+  revision: (ref) => api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}`),
+  updateRevision: (ref, body) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setRevisionStatus: (ref, status) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  reviseRevision: (ref, body) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/revise`, { method: "POST", body }),
+  deleteRevision: (ref) => api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  revisionTree: (ref, qs) => api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/tree${qs || ""}`),
+  revisionStructure: (ref, qs) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/structure${qs || ""}`),
+  revisionLines: (ref, qs) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/lines${qs || ""}`),
+  createLine: (ref, body) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/lines`, { method: "POST", body }),
+  reorderLines: (ref, body) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/lines/reorder`, { method: "POST", body }),
+  revisionSubstitutes: (ref, qs) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/substitutes${qs || ""}`),
+  createSubstitute: (ref, body) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/substitutes`, { method: "POST", body }),
+  substituteSummary: (ref) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/substitutes/summary`),
+  revisionRollup: (ref, body) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/rollup`, { method: "POST", body }),
+  revisionValidate: (ref, body) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/validate`, { method: "POST", body }),
+  revisionValidationResults: (ref, qs) =>
+    api(`/api/v1/bom/revisions/${encodeURIComponent(ref)}/validation-results${qs || ""}`),
+
+  lines: (qs) => api(`/api/v1/bom/lines${qs || ""}`),
+  line: (ref) => api(`/api/v1/bom/lines/${encodeURIComponent(ref)}`),
+  updateLine: (ref, body) =>
+    api(`/api/v1/bom/lines/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteLine: (ref) => api(`/api/v1/bom/lines/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  lineAttributes: (ref) => api(`/api/v1/bom/lines/${encodeURIComponent(ref)}/attributes`),
+  setLineAttributes: (ref, body) =>
+    api(`/api/v1/bom/lines/${encodeURIComponent(ref)}/attributes`, { method: "PUT", body }),
+
+  substitutes: (qs) => api(`/api/v1/bom/substitutes${qs || ""}`),
+  updateSubstitute: (ref, body) =>
+    api(`/api/v1/bom/substitutes/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteSubstitute: (ref) => api(`/api/v1/bom/substitutes/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  whereUsed: (objectId, qs) =>
+    api(`/api/v1/bom/where-used/${encodeURIComponent(objectId)}${qs || ""}`),
+  whereUsedSearch: (qs) => api(`/api/v1/bom/where-used${qs || ""}`),
+  multiLevelWhereUsed: (objectId, body) =>
+    api(`/api/v1/bom/where-used/${encodeURIComponent(objectId)}/multi-level`, { method: "POST", body }),
+  componentUsageSummary: (objectId, qs) =>
+    api(`/api/v1/bom/where-used/${encodeURIComponent(objectId)}/summary${qs || ""}`),
+  uses: (qs) => api(`/api/v1/bom/uses${qs || ""}`),
+
+  compare: (body) => api("/api/v1/bom/compare", { method: "POST", body }),
+  comparisons: (qs) => api(`/api/v1/bom/comparisons${qs || ""}`),
+  comparison: (ref) => api(`/api/v1/bom/comparisons/${encodeURIComponent(ref)}`),
+  comparisonResults: (ref, qs) =>
+    api(`/api/v1/bom/comparisons/${encodeURIComponent(ref)}/results${qs || ""}`),
+
+  transformations: (qs) => api(`/api/v1/bom/transformations${qs || ""}`),
+  transformation: (ref) => api(`/api/v1/bom/transformations/${encodeURIComponent(ref)}`),
+  createTransformation: (body) => api("/api/v1/bom/transformations", { method: "POST", body }),
+  updateTransformation: (ref, body) =>
+    api(`/api/v1/bom/transformations/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteTransformation: (ref) =>
+    api(`/api/v1/bom/transformations/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  transformationMappings: (ref, qs) =>
+    api(`/api/v1/bom/transformations/${encodeURIComponent(ref)}/mappings${qs || ""}`),
+  createTransformationMapping: (ref, body) =>
+    api(`/api/v1/bom/transformations/${encodeURIComponent(ref)}/mappings`, { method: "POST", body }),
+  transform: (body) => api("/api/v1/bom/transform", { method: "POST", body }),
+  transformationRuns: (qs) => api(`/api/v1/bom/transformation-runs${qs || ""}`),
+  transformationRun: (ref) => api(`/api/v1/bom/transformation-runs/${encodeURIComponent(ref)}`),
+
+  validationRules: (qs) => api(`/api/v1/bom/validation-rules${qs || ""}`),
+  createValidationRule: (body) => api("/api/v1/bom/validation-rules", { method: "POST", body }),
+  updateValidationRule: (ref, body) =>
+    api(`/api/v1/bom/validation-rules/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteValidationRule: (ref) =>
+    api(`/api/v1/bom/validation-rules/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  validationResults: (qs) => api(`/api/v1/bom/validation-results${qs || ""}`),
+  validationResult: (ref) => api(`/api/v1/bom/validation-results/${encodeURIComponent(ref)}`),
+  validationIssues: (ref, qs) =>
+    api(`/api/v1/bom/validation-results/${encodeURIComponent(ref)}/issues${qs || ""}`),
+
+  baselines: (qs) => api(`/api/v1/bom/baselines${qs || ""}`),
+  baseline: (ref) => api(`/api/v1/bom/baselines/${encodeURIComponent(ref)}`),
+  createBaseline: (body) => api("/api/v1/bom/baselines", { method: "POST", body }),
+  baselineLines: (ref, qs) =>
+    api(`/api/v1/bom/baselines/${encodeURIComponent(ref)}/lines${qs || ""}`),
+  baselineSnapshot: (ref) => api(`/api/v1/bom/baselines/${encodeURIComponent(ref)}/snapshot`),
+  freezeBaseline: (ref) =>
+    api(`/api/v1/bom/baselines/${encodeURIComponent(ref)}/freeze`, { method: "POST" }),
+  deleteBaseline: (ref) => api(`/api/v1/bom/baselines/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  history: (qs) => api(`/api/v1/bom/history${qs || ""}`),
+  objectLineage: (objectType, objectId) =>
+    api(`/api/v1/bom/history/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`),
+
+  searchMeta: () => api("/api/v1/bom/search-meta"),
+  reindexSearch: () => api("/api/v1/bom/search/reindex", { method: "POST" }),
+  seed: () => api("/api/v1/bom/seed", { method: "POST" }),
+  ensureFoundation: () => api("/api/v1/bom/foundation/ensure", { method: "POST" }),
+
+  submitRollupJob: (body) => api("/api/v1/bom/jobs/rollup", { method: "POST", body }),
+  submitWhereUsedJob: (body) => api("/api/v1/bom/jobs/where-used", { method: "POST", body }),
+  submitTransformJob: (body) => api("/api/v1/bom/jobs/transform", { method: "POST", body }),
+  submitValidateJob: (body) => api("/api/v1/bom/jobs/validate", { method: "POST", body }),
+  submitCompareJob: (body) => api("/api/v1/bom/jobs/compare", { method: "POST", body }),
+  submitMaintenanceJob: () => api("/api/v1/bom/jobs/maintenance", { method: "POST" }),
+};

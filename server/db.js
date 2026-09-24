@@ -268,6 +268,9 @@ export function migrate(db) {
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("033_classification_framework");
   db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+  ).run("034_bom_engine");
+  db.prepare(
     `INSERT OR IGNORE INTO password_policy (id) VALUES (1)`
   ).run();
 }

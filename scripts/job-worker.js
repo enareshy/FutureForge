@@ -36,6 +36,7 @@ import { registerLifecycleHandlers, runLifecycleMaintenance } from "../server/se
 import { registerExchangeHandlers, runExchangeMaintenance } from "../server/services/data-exchange/index.js";
 import { registerMigrationHandlers, runMigrationMaintenance, ensureMigrationJobTypes } from "../server/services/migration/index.js";
 import { registerClassificationHandlers, runClassificationMaintenance, ensureClassificationJobTypes } from "../server/services/classification/index.js";
+import { registerBomHandlers, runBomMaintenance, ensureBomJobTypes } from "../server/services/bom/index.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -146,6 +147,11 @@ registerMigrationHandlers();
 // bulk validation, duplicate scans and housekeeping).
 ensureClassificationJobTypes(db);
 registerClassificationHandlers();
+
+// P1 BOM Engine background handlers (rollup, where-used, transformation,
+// validation, comparison and housekeeping).
+ensureBomJobTypes(db);
+registerBomHandlers();
 
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
@@ -294,6 +300,26 @@ const classificationMaintenance = setInterval(() => {
   }
 }, classificationMaintenanceMs);
 classificationMaintenance.unref?.();
+
+// Periodic BOM housekeeping: prune change history beyond retention, remove
+// orphaned line attributes/substitutes and refresh structure caches.
+const bomMaintenanceMs = positive(process.env.BOM_MAINTENANCE_MS, 120000);
+const bomMaintenance = setInterval(() => {
+  try {
+    const summary = runBomMaintenance(db);
+    if (summary.history_pruned || summary.orphan_attributes_pruned || summary.orphan_substitutes_pruned) {
+      log("info", "BOM housekeeping", {
+        tenants: summary.tenants,
+        history_pruned: summary.history_pruned,
+        orphan_attributes_pruned: summary.orphan_attributes_pruned,
+        orphan_substitutes_pruned: summary.orphan_substitutes_pruned,
+      });
+    }
+  } catch (error) {
+    log("warn", "BOM housekeeping failed", { error: error.message });
+  }
+}, bomMaintenanceMs);
+bomMaintenance.unref?.();
 
 // Periodic search housekeeping: converge the index queue and prune expired
 // search history / exports.

@@ -34,6 +34,7 @@ import * as dataLifecycle from "./services/data-lifecycle/index.js";
 import * as dataExchange from "./services/data-exchange/index.js";
 import * as migration from "./services/migration/index.js";
 import * as classification from "./services/classification/index.js";
+import * as bom from "./services/bom/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1054,6 +1055,22 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.classification.audit", name: "Classification audit trail & lineage", parentCode: "iam.classification" },
     { applicationCode: "iam", code: "iam.classification.metrics", name: "Classification metrics & health", parentCode: "iam.classification" },
     { applicationCode: "iam", code: "iam.classification.admin", name: "Classification administration & configuration", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.bom", name: "BOM engine service", kind: "module" },
+    { applicationCode: "iam", code: "iam.bom.overview", name: "BOM overview & registry", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.boms", name: "BOM headers", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.revisions", name: "BOM revisions", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.lines", name: "BOM lines, attributes & substitutes", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.structure", name: "BOM structure & units", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.compare", name: "BOM comparison", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.whereused", name: "BOM where-used analysis", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.rollup", name: "BOM quantity rollup", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.transformation", name: "BOM transformation (EBOM/MBOM)", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.validation", name: "BOM validation & rules", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.baseline", name: "BOM baselines", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.search", name: "BOM search & discovery", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.audit", name: "BOM audit trail & lineage", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.metrics", name: "BOM metrics & health", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.admin", name: "BOM administration & configuration", parentCode: "iam.bom" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1373,7 +1390,25 @@ function seedMissingCatalog(db) {
     "iam.classification.metrics",
     "iam.classification.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes]) {
+  const bomResourceCodes = [
+    "iam.bom",
+    "iam.bom.overview",
+    "iam.bom.boms",
+    "iam.bom.revisions",
+    "iam.bom.lines",
+    "iam.bom.structure",
+    "iam.bom.compare",
+    "iam.bom.whereused",
+    "iam.bom.rollup",
+    "iam.bom.transformation",
+    "iam.bom.validation",
+    "iam.bom.baseline",
+    "iam.bom.search",
+    "iam.bom.audit",
+    "iam.bom.metrics",
+    "iam.bom.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2899,7 +2934,8 @@ export function seedDatabase(db) {
   const dataExchangeResult = withEventSuppression(() => seedDataExchange(db));
   const migrationResult = withEventSuppression(() => seedMigrationFramework(db));
   const classificationResult = withEventSuppression(() => seedClassificationFramework(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult };
+  const bomResult = withEventSuppression(() => seedBomEngine(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult };
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -2972,6 +3008,18 @@ function seedClassificationFramework(db) {
     return { classificationSeeded: true, ...result };
   } catch (err) {
     return { classificationSeeded: false, classificationError: err.message };
+  }
+}
+
+// Installs the P1 BOM Engine foundation (units, event types, job types/handlers,
+// search registrations, per-tenant configuration and default validation rules)
+// plus a small demo EBOM estate so BOM dashboards are not empty on a fresh install.
+function seedBomEngine(db) {
+  try {
+    const result = bom.ensureBomSeed(db);
+    return { bomSeeded: true, ...result };
+  } catch (err) {
+    return { bomSeeded: false, bomError: err.message };
   }
 }
 

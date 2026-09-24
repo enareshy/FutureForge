@@ -8746,3 +8746,426 @@ CREATE TABLE IF NOT EXISTS cla_configuration (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cla_configuration_tenant ON cla_configuration(tenant_id, key);
+
+-- ===========================================================================
+-- P1 BOM Engine
+--
+-- A reusable enterprise BOM capability built ON TOP OF the Object & Relationship
+-- Framework, the Lifecycle/Effectivity & Versioning Kernel, Classification and
+-- Reference/UOM. It adds BOM-specific semantics (header/revision/line, EBOM/
+-- MBOM/BOP, compare, where-used, rollup, transformation, validation, baselines,
+-- substitutes, optionality, effectivity/variant applicability) without
+-- duplicating any platform engine. All vocabulary is data.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS bom_headers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bom_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  plant_id INTEGER,
+  site_id INTEGER,
+  bom_number TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  bom_type TEXT NOT NULL DEFAULT 'EBOM' CHECK (bom_type IN ('EBOM','MBOM','BOP','OTHER')),
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  owner_object_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','IN_REVIEW','RELEASED','SUPERSEDED','OBSOLETE')),
+  lifecycle_state TEXT NOT NULL DEFAULT 'DRAFT',
+  current_revision_id INTEGER,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, bom_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_headers_tenant ON bom_headers(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_bom_headers_type ON bom_headers(tenant_id, bom_type);
+CREATE INDEX IF NOT EXISTS idx_bom_headers_org ON bom_headers(organization_id);
+CREATE INDEX IF NOT EXISTS idx_bom_headers_plant ON bom_headers(plant_id, site_id);
+CREATE INDEX IF NOT EXISTS idx_bom_headers_owner ON bom_headers(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_bom_headers_updated ON bom_headers(updated_at);
+
+CREATE TABLE IF NOT EXISTS bom_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  revision_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  bom_id INTEGER NOT NULL REFERENCES bom_headers(id) ON DELETE CASCADE,
+  revision_number TEXT NOT NULL,
+  revision_sequence INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','IN_REVIEW','RELEASED','SUPERSEDED','OBSOLETE')),
+  lifecycle_state TEXT NOT NULL DEFAULT 'DRAFT',
+  valid_from TEXT,
+  valid_to TEXT,
+  effectivity_json TEXT NOT NULL DEFAULT '{}',
+  configuration_context TEXT NOT NULL DEFAULT '',
+  variant_id INTEGER,
+  variant_code TEXT NOT NULL DEFAULT '',
+  baseline_id INTEGER,
+  versioning_revision_id INTEGER,
+  versioning_version_id INTEGER,
+  object_id INTEGER,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (bom_id, revision_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_revisions_bom ON bom_revisions(bom_id, revision_sequence);
+CREATE INDEX IF NOT EXISTS idx_bom_revisions_status ON bom_revisions(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_bom_revisions_tenant ON bom_revisions(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_bom_revisions_variant ON bom_revisions(variant_id, variant_code);
+CREATE INDEX IF NOT EXISTS idx_bom_revisions_effectivity ON bom_revisions(valid_from, valid_to);
+
+CREATE TABLE IF NOT EXISTS bom_lines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  line_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  bom_revision_id INTEGER NOT NULL REFERENCES bom_revisions(id) ON DELETE CASCADE,
+  parent_object_id TEXT,
+  parent_object_type TEXT NOT NULL DEFAULT 'part',
+  child_object_id TEXT,
+  child_object_type TEXT NOT NULL DEFAULT 'part',
+  child_revision TEXT NOT NULL DEFAULT '',
+  quantity REAL NOT NULL DEFAULT 1,
+  uom TEXT NOT NULL DEFAULT 'EA',
+  normalized_quantity REAL,
+  normalized_uom TEXT NOT NULL DEFAULT '',
+  find_number TEXT NOT NULL DEFAULT '',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  reference_designator TEXT NOT NULL DEFAULT '',
+  usage TEXT NOT NULL DEFAULT 'DESIGN',
+  optional INTEGER NOT NULL DEFAULT 0,
+  substitute INTEGER NOT NULL DEFAULT 0,
+  substitute_group_id TEXT NOT NULL DEFAULT '',
+  effectivity_json TEXT NOT NULL DEFAULT '{}',
+  variant_id INTEGER,
+  variant_code TEXT NOT NULL DEFAULT '',
+  configuration_context TEXT NOT NULL DEFAULT '',
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  notes TEXT NOT NULL DEFAULT '',
+  line_status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (line_status IN ('DRAFT','ACTIVE','INACTIVE','OBSOLETE')),
+  relationship_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_lines_revision ON bom_lines(bom_revision_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_bom_lines_parent ON bom_lines(parent_object_id, parent_object_type);
+CREATE INDEX IF NOT EXISTS idx_bom_lines_child ON bom_lines(child_object_id, child_object_type);
+CREATE INDEX IF NOT EXISTS idx_bom_lines_find ON bom_lines(bom_revision_id, find_number);
+CREATE INDEX IF NOT EXISTS idx_bom_lines_tenant ON bom_lines(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_bom_lines_org ON bom_lines(organization_id);
+CREATE INDEX IF NOT EXISTS idx_bom_lines_variant ON bom_lines(variant_id, variant_code);
+CREATE INDEX IF NOT EXISTS idx_bom_lines_substitute_group ON bom_lines(substitute_group_id);
+
+CREATE TABLE IF NOT EXISTS bom_line_attributes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  line_id INTEGER NOT NULL REFERENCES bom_lines(id) ON DELETE CASCADE,
+  attribute_code TEXT NOT NULL,
+  data_type TEXT NOT NULL DEFAULT 'STRING',
+  attribute_value TEXT NOT NULL DEFAULT '',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (line_id, attribute_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_line_attributes_line ON bom_line_attributes(line_id, sequence);
+
+CREATE TABLE IF NOT EXISTS bom_substitutes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  bom_revision_id INTEGER NOT NULL REFERENCES bom_revisions(id) ON DELETE CASCADE,
+  line_id INTEGER REFERENCES bom_lines(id) ON DELETE CASCADE,
+  primary_object_id TEXT,
+  substitute_object_id TEXT NOT NULL,
+  substitute_object_type TEXT NOT NULL DEFAULT 'part',
+  substitute_group TEXT NOT NULL DEFAULT '',
+  priority INTEGER NOT NULL DEFAULT 1,
+  ratio REAL NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  notes TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_substitutes_revision ON bom_substitutes(bom_revision_id);
+CREATE INDEX IF NOT EXISTS idx_bom_substitutes_line ON bom_substitutes(line_id);
+CREATE INDEX IF NOT EXISTS idx_bom_substitutes_object ON bom_substitutes(substitute_object_id);
+CREATE INDEX IF NOT EXISTS idx_bom_substitutes_group ON bom_substitutes(substitute_group);
+
+CREATE TABLE IF NOT EXISTS bom_baselines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  baseline_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  bom_id INTEGER NOT NULL REFERENCES bom_headers(id) ON DELETE CASCADE,
+  revision_id INTEGER NOT NULL REFERENCES bom_revisions(id) ON DELETE CASCADE,
+  baseline_number TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','FROZEN','RETIRED')),
+  source_revision_number TEXT NOT NULL DEFAULT '',
+  immutable INTEGER NOT NULL DEFAULT 1,
+  line_count INTEGER NOT NULL DEFAULT 0,
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  frozen_at TEXT,
+  frozen_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, baseline_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_baselines_bom ON bom_baselines(bom_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_bom_baselines_revision ON bom_baselines(revision_id);
+
+CREATE TABLE IF NOT EXISTS bom_baseline_lines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  baseline_id INTEGER NOT NULL REFERENCES bom_baselines(id) ON DELETE CASCADE,
+  line_ref TEXT NOT NULL DEFAULT '',
+  find_number TEXT NOT NULL DEFAULT '',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  parent_object_id TEXT,
+  parent_object_type TEXT NOT NULL DEFAULT 'part',
+  child_object_id TEXT,
+  child_object_type TEXT NOT NULL DEFAULT 'part',
+  child_revision TEXT NOT NULL DEFAULT '',
+  quantity REAL NOT NULL DEFAULT 1,
+  uom TEXT NOT NULL DEFAULT 'EA',
+  usage TEXT NOT NULL DEFAULT 'DESIGN',
+  optional INTEGER NOT NULL DEFAULT 0,
+  substitute INTEGER NOT NULL DEFAULT 0,
+  reference_designator TEXT NOT NULL DEFAULT '',
+  effectivity_json TEXT NOT NULL DEFAULT '{}',
+  variant_code TEXT NOT NULL DEFAULT '',
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  level INTEGER NOT NULL DEFAULT 0,
+  path TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_baseline_lines_baseline ON bom_baseline_lines(baseline_id, sequence);
+
+CREATE TABLE IF NOT EXISTS bom_transformation_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  source_bom_type TEXT NOT NULL DEFAULT 'EBOM',
+  target_bom_type TEXT NOT NULL DEFAULT 'MBOM',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','INACTIVE')),
+  mapping_count INTEGER NOT NULL DEFAULT 0,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_transformation_definitions_tenant ON bom_transformation_definitions(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS bom_transformation_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  definition_id INTEGER NOT NULL REFERENCES bom_transformation_definitions(id) ON DELETE CASCADE,
+  mapping_ref TEXT NOT NULL DEFAULT '',
+  source_path TEXT NOT NULL DEFAULT '',
+  target_path TEXT NOT NULL DEFAULT '',
+  mapping_type TEXT NOT NULL DEFAULT 'LINE' CHECK (mapping_type IN ('OBJECT','LINE','QUANTITY','ATTRIBUTE','CLASSIFICATION','RELATIONSHIP','CONSTANT')),
+  expression TEXT NOT NULL DEFAULT '',
+  default_value TEXT NOT NULL DEFAULT '',
+  required INTEGER NOT NULL DEFAULT 0,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_transformation_mappings_definition ON bom_transformation_mappings(definition_id, sequence);
+
+CREATE TABLE IF NOT EXISTS bom_transformation_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  definition_id INTEGER REFERENCES bom_transformation_definitions(id) ON DELETE SET NULL,
+  source_revision_id INTEGER REFERENCES bom_revisions(id) ON DELETE SET NULL,
+  target_bom_id INTEGER,
+  target_revision_id INTEGER,
+  mode TEXT NOT NULL DEFAULT 'DRY_RUN' CHECK (mode IN ('DRY_RUN','EXECUTE')),
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','RUNNING','COMPLETED','FAILED')),
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  mapped_count INTEGER NOT NULL DEFAULT 0,
+  unmapped_count INTEGER NOT NULL DEFAULT 0,
+  warning_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_transformation_runs_definition ON bom_transformation_runs(definition_id, created_at);
+
+CREATE TABLE IF NOT EXISTS bom_validation_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  rule_type TEXT NOT NULL DEFAULT 'CUSTOM',
+  severity TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity IN ('PASS','WARNING','ERROR')),
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_validation_rules_tenant ON bom_validation_rules(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS bom_validation_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  result_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  bom_id INTEGER REFERENCES bom_headers(id) ON DELETE CASCADE,
+  revision_id INTEGER REFERENCES bom_revisions(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL DEFAULT 'REVISION',
+  status TEXT NOT NULL DEFAULT 'PASS' CHECK (status IN ('PASS','WARNING','ERROR')),
+  rule_count INTEGER NOT NULL DEFAULT 0,
+  issue_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  warning_count INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_validation_results_revision ON bom_validation_results(revision_id, created_at);
+
+CREATE TABLE IF NOT EXISTS bom_validation_issues (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  result_id INTEGER REFERENCES bom_validation_results(id) ON DELETE CASCADE,
+  revision_id INTEGER REFERENCES bom_revisions(id) ON DELETE CASCADE,
+  line_id INTEGER,
+  line_ref TEXT NOT NULL DEFAULT '',
+  rule_code TEXT NOT NULL DEFAULT '',
+  severity TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity IN ('PASS','WARNING','ERROR')),
+  message TEXT NOT NULL DEFAULT '',
+  field TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_validation_issues_result ON bom_validation_issues(result_id);
+CREATE INDEX IF NOT EXISTS idx_bom_validation_issues_revision ON bom_validation_issues(revision_id, severity);
+
+CREATE TABLE IF NOT EXISTS bom_comparisons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  comparison_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  left_kind TEXT NOT NULL DEFAULT 'REVISION' CHECK (left_kind IN ('REVISION','BASELINE')),
+  left_id INTEGER NOT NULL,
+  right_kind TEXT NOT NULL DEFAULT 'REVISION' CHECK (right_kind IN ('REVISION','BASELINE')),
+  right_id INTEGER NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'LINE' CHECK (scope IN ('LINE','RECURSIVE')),
+  status TEXT NOT NULL DEFAULT 'COMPLETED',
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  added_count INTEGER NOT NULL DEFAULT 0,
+  removed_count INTEGER NOT NULL DEFAULT 0,
+  modified_count INTEGER NOT NULL DEFAULT 0,
+  unchanged_count INTEGER NOT NULL DEFAULT 0,
+  match_count INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_comparisons_tenant ON bom_comparisons(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS bom_comparison_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  comparison_id INTEGER NOT NULL REFERENCES bom_comparisons(id) ON DELETE CASCADE,
+  change_type TEXT NOT NULL DEFAULT 'UNCHANGED' CHECK (change_type IN ('ADDED','REMOVED','MODIFIED','UNCHANGED')),
+  line_ref TEXT NOT NULL DEFAULT '',
+  child_object_id TEXT,
+  child_object_type TEXT NOT NULL DEFAULT 'part',
+  find_number TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL DEFAULT '',
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  changes_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_comparison_results_comparison ON bom_comparison_results(comparison_id, change_type);
+
+CREATE TABLE IF NOT EXISTS bom_change_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER,
+  entity_type TEXT NOT NULL DEFAULT 'BOM',
+  entity_id INTEGER,
+  entity_ref TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT '',
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor_username TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_history_tenant ON bom_change_history(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_bom_history_entity ON bom_change_history(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_bom_history_object ON bom_change_history(entity_ref);
+
+CREATE TABLE IF NOT EXISTS bom_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bom_configuration_tenant ON bom_configuration(tenant_id, key);

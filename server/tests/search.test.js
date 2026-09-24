@@ -33,9 +33,15 @@ describe("Search & Discovery Framework services", () => {
     const codes = search.listObjectTypes(db, { tenantId }).map((type) => type.code);
     assert.deepEqual(codes.sort(), [
       "archive_record",
+      "bom",
+      "bom_line",
+      "bom_revision",
       "business_term",
       "catalog_attribute",
       "catalog_object",
+      "classification",
+      "classification_assignment",
+      "classification_class",
       "content",
       "data_consumer",
       "data_domain",
