@@ -9169,3 +9169,504 @@ CREATE TABLE IF NOT EXISTS bom_configuration (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bom_configuration_tenant ON bom_configuration(tenant_id, key);
+
+-- ===========================================================================
+-- P1 PDM-specific Concepts
+--
+-- A reusable Product Data Management domain capability built ON TOP OF the
+-- Object & Relationship Framework, the Lifecycle/Effectivity & Versioning
+-- Kernel, Classification, Numbering, Enterprise Search, Data Security, File/
+-- Content Storage, Workflow, Events, Jobs and Audit. It adds PDM-specific
+-- engineering-data semantics (Item/Item Revision, Part/Product, Dataset,
+-- Representation, Design Data, CAD association, Revision Rule, Configuration
+-- Rule, Baseline, Where Used / Where Referenced, structure resolution) without
+-- duplicating any platform engine. All vocabulary is data.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS pdm_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  plant_id INTEGER,
+  site_id INTEGER,
+  item_number TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  item_type TEXT NOT NULL DEFAULT 'PART' CHECK (item_type IN ('PART','PRODUCT','DOCUMENT','ASSEMBLY','OTHER')),
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  owner_object_id INTEGER,
+  object_id INTEGER,
+  classification_code TEXT NOT NULL DEFAULT '',
+  current_revision_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','IN_WORK','IN_REVIEW','RELEASED','OBSOLETE')),
+  lifecycle_state TEXT NOT NULL DEFAULT 'DRAFT',
+  lifecycle_assignment_id INTEGER,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, item_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_items_tenant ON pdm_items(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_pdm_items_type ON pdm_items(tenant_id, item_type);
+CREATE INDEX IF NOT EXISTS idx_pdm_items_org ON pdm_items(organization_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_items_plant ON pdm_items(plant_id, site_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_items_owner ON pdm_items(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_items_object ON pdm_items(object_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_items_classification ON pdm_items(tenant_id, classification_code);
+CREATE INDEX IF NOT EXISTS idx_pdm_items_updated ON pdm_items(updated_at);
+
+CREATE TABLE IF NOT EXISTS pdm_item_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  revision_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  item_id INTEGER NOT NULL REFERENCES pdm_items(id) ON DELETE CASCADE,
+  revision_number TEXT NOT NULL,
+  revision_sequence INTEGER NOT NULL DEFAULT 1,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','IN_WORK','IN_REVIEW','RELEASED','OBSOLETE')),
+  lifecycle_state TEXT NOT NULL DEFAULT 'DRAFT',
+  lifecycle_assignment_id INTEGER,
+  valid_from TEXT,
+  valid_to TEXT,
+  effectivity_json TEXT NOT NULL DEFAULT '{}',
+  configuration_context TEXT NOT NULL DEFAULT '',
+  variant_id INTEGER,
+  variant_code TEXT NOT NULL DEFAULT '',
+  baseline_id INTEGER,
+  versioning_revision_id INTEGER,
+  versioning_version_id INTEGER,
+  object_id INTEGER,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (item_id, revision_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_revisions_item ON pdm_item_revisions(item_id, revision_sequence);
+CREATE INDEX IF NOT EXISTS idx_pdm_revisions_status ON pdm_item_revisions(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_pdm_revisions_tenant ON pdm_item_revisions(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_revisions_variant ON pdm_item_revisions(variant_id, variant_code);
+CREATE INDEX IF NOT EXISTS idx_pdm_revisions_effectivity ON pdm_item_revisions(valid_from, valid_to);
+CREATE INDEX IF NOT EXISTS idx_pdm_revisions_object ON pdm_item_revisions(object_id);
+
+CREATE TABLE IF NOT EXISTS pdm_datasets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dataset_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  item_id INTEGER REFERENCES pdm_items(id) ON DELETE SET NULL,
+  revision_id INTEGER REFERENCES pdm_item_revisions(id) ON DELETE SET NULL,
+  object_id INTEGER,
+  dataset_number TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  dataset_type TEXT NOT NULL DEFAULT 'OTHER',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','IN_WORK','IN_REVIEW','RELEASED','OBSOLETE')),
+  lifecycle_state TEXT NOT NULL DEFAULT 'DRAFT',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  content_id TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL DEFAULT '',
+  content_reference TEXT NOT NULL DEFAULT '',
+  checksum TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, dataset_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_datasets_tenant ON pdm_datasets(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_pdm_datasets_type ON pdm_datasets(tenant_id, dataset_type);
+CREATE INDEX IF NOT EXISTS idx_pdm_datasets_item ON pdm_datasets(item_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_datasets_revision ON pdm_datasets(revision_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_datasets_object ON pdm_datasets(object_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_datasets_content ON pdm_datasets(content_id);
+
+CREATE TABLE IF NOT EXISTS pdm_representations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  representation_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  item_id INTEGER REFERENCES pdm_items(id) ON DELETE CASCADE,
+  revision_id INTEGER REFERENCES pdm_item_revisions(id) ON DELETE CASCADE,
+  source_object_id TEXT,
+  dataset_id INTEGER REFERENCES pdm_datasets(id) ON DELETE SET NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  representation_type TEXT NOT NULL DEFAULT '3D',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('DRAFT','ACTIVE','INACTIVE','OBSOLETE')),
+  generated INTEGER NOT NULL DEFAULT 0,
+  derived_from_id INTEGER,
+  content_id TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_representations_revision ON pdm_representations(revision_id, representation_type);
+CREATE INDEX IF NOT EXISTS idx_pdm_representations_item ON pdm_representations(item_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_representations_dataset ON pdm_representations(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_representations_tenant ON pdm_representations(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS pdm_design_data (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  design_data_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  item_id INTEGER REFERENCES pdm_items(id) ON DELETE CASCADE,
+  revision_id INTEGER REFERENCES pdm_item_revisions(id) ON DELETE CASCADE,
+  dataset_id INTEGER REFERENCES pdm_datasets(id) ON DELETE SET NULL,
+  representation_id INTEGER REFERENCES pdm_representations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  data_type TEXT NOT NULL DEFAULT 'OTHER',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('DRAFT','ACTIVE','INACTIVE','OBSOLETE')),
+  category TEXT NOT NULL DEFAULT '',
+  external_reference TEXT NOT NULL DEFAULT '',
+  object_id INTEGER,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_design_data_revision ON pdm_design_data(revision_id, data_type);
+CREATE INDEX IF NOT EXISTS idx_pdm_design_data_item ON pdm_design_data(item_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_design_data_dataset ON pdm_design_data(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_design_data_tenant ON pdm_design_data(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS pdm_cad_associations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  association_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  item_id INTEGER REFERENCES pdm_items(id) ON DELETE CASCADE,
+  source_revision_id INTEGER REFERENCES pdm_item_revisions(id) ON DELETE CASCADE,
+  source_object_id TEXT,
+  dataset_id INTEGER NOT NULL REFERENCES pdm_datasets(id) ON DELETE CASCADE,
+  cad_type TEXT NOT NULL DEFAULT 'NATIVE',
+  association_type TEXT NOT NULL DEFAULT 'MASTER',
+  is_primary INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE','SUPERSEDED')),
+  application TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_cad_revision ON pdm_cad_associations(source_revision_id, association_type);
+CREATE INDEX IF NOT EXISTS idx_pdm_cad_dataset ON pdm_cad_associations(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_cad_item ON pdm_cad_associations(item_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_cad_tenant ON pdm_cad_associations(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_pdm_cad_object ON pdm_cad_associations(source_object_id);
+
+CREATE TABLE IF NOT EXISTS pdm_revision_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  rule_type TEXT NOT NULL DEFAULT 'LATEST_RELEASED',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','INACTIVE')),
+  priority INTEGER NOT NULL DEFAULT 100,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  current_version_id INTEGER,
+  version_number INTEGER NOT NULL DEFAULT 1,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_revision_rules_tenant ON pdm_revision_rules(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS pdm_revision_rule_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  rule_id INTEGER NOT NULL REFERENCES pdm_revision_rules(id) ON DELETE CASCADE,
+  version_number INTEGER NOT NULL DEFAULT 1,
+  rule_type TEXT NOT NULL DEFAULT 'LATEST_RELEASED',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  change_note TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (rule_id, version_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_revision_rule_versions_rule ON pdm_revision_rule_versions(rule_id, version_number);
+
+CREATE TABLE IF NOT EXISTS pdm_configuration_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  rule_type TEXT NOT NULL DEFAULT 'VARIANT',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','INACTIVE')),
+  priority INTEGER NOT NULL DEFAULT 100,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  current_version_id INTEGER,
+  version_number INTEGER NOT NULL DEFAULT 1,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_configuration_rules_tenant ON pdm_configuration_rules(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS pdm_configuration_rule_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  rule_id INTEGER NOT NULL REFERENCES pdm_configuration_rules(id) ON DELETE CASCADE,
+  version_number INTEGER NOT NULL DEFAULT 1,
+  rule_type TEXT NOT NULL DEFAULT 'VARIANT',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  change_note TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (rule_id, version_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_configuration_rule_versions_rule ON pdm_configuration_rule_versions(rule_id, version_number);
+
+CREATE TABLE IF NOT EXISTS pdm_baselines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  baseline_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  baseline_number TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','RELEASED','FROZEN','RETIRED')),
+  source_object_id TEXT,
+  source_revision_id INTEGER REFERENCES pdm_item_revisions(id) ON DELETE SET NULL,
+  item_id INTEGER REFERENCES pdm_items(id) ON DELETE SET NULL,
+  revision_rule_id INTEGER REFERENCES pdm_revision_rules(id) ON DELETE SET NULL,
+  configuration_rule_id INTEGER REFERENCES pdm_configuration_rules(id) ON DELETE SET NULL,
+  baseline_date TEXT,
+  immutable INTEGER NOT NULL DEFAULT 0,
+  member_count INTEGER NOT NULL DEFAULT 0,
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  released_at TEXT,
+  released_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  frozen_at TEXT,
+  frozen_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, baseline_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_baselines_tenant ON pdm_baselines(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_pdm_baselines_revision ON pdm_baselines(source_revision_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_baselines_item ON pdm_baselines(item_id, created_at);
+
+CREATE TABLE IF NOT EXISTS pdm_baseline_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  baseline_id INTEGER NOT NULL REFERENCES pdm_baselines(id) ON DELETE CASCADE,
+  member_type TEXT NOT NULL DEFAULT 'ITEM',
+  member_id INTEGER,
+  member_ref TEXT NOT NULL DEFAULT '',
+  item_id INTEGER,
+  revision_id INTEGER,
+  dataset_id INTEGER,
+  representation_id INTEGER,
+  relationship_id INTEGER,
+  level INTEGER NOT NULL DEFAULT 0,
+  path TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_baseline_members_baseline ON pdm_baseline_members(baseline_id, member_type);
+CREATE INDEX IF NOT EXISTS idx_pdm_baseline_members_object ON pdm_baseline_members(member_type, member_id);
+
+CREATE TABLE IF NOT EXISTS pdm_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  relationship_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  relationship_type TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  direction TEXT NOT NULL DEFAULT 'FORWARD' CHECK (direction IN ('FORWARD','REVERSE','BIDIRECTIONAL')),
+  cardinality TEXT NOT NULL DEFAULT '1:N',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE','SUPERSEDED')),
+  valid_from TEXT,
+  valid_to TEXT,
+  object_relationship_id INTEGER,
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_relationships_source ON pdm_relationships(tenant_id, source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_relationships_target ON pdm_relationships(tenant_id, target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_relationships_type ON pdm_relationships(tenant_id, relationship_type, status);
+CREATE INDEX IF NOT EXISTS idx_pdm_relationships_object ON pdm_relationships(object_relationship_id);
+
+CREATE TABLE IF NOT EXISTS pdm_references (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reference_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  source_ref TEXT NOT NULL DEFAULT '',
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  target_ref TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'OTHER',
+  relationship_type TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, source_type, source_id, target_type, target_id, category)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_references_target ON pdm_references(tenant_id, target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_references_source ON pdm_references(tenant_id, source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_references_category ON pdm_references(tenant_id, category);
+
+CREATE TABLE IF NOT EXISTS pdm_validation_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  rule_type TEXT NOT NULL DEFAULT 'CUSTOM',
+  severity TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity IN ('PASS','WARNING','ERROR')),
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_validation_rules_tenant ON pdm_validation_rules(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS pdm_validation_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  result_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  item_id INTEGER REFERENCES pdm_items(id) ON DELETE CASCADE,
+  revision_id INTEGER REFERENCES pdm_item_revisions(id) ON DELETE CASCADE,
+  dataset_id INTEGER REFERENCES pdm_datasets(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL DEFAULT 'ITEM',
+  status TEXT NOT NULL DEFAULT 'PASS' CHECK (status IN ('PASS','WARNING','ERROR')),
+  rule_count INTEGER NOT NULL DEFAULT 0,
+  issue_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  warning_count INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_validation_results_item ON pdm_validation_results(item_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_pdm_validation_results_revision ON pdm_validation_results(revision_id, created_at);
+
+CREATE TABLE IF NOT EXISTS pdm_validation_issues (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  result_id INTEGER REFERENCES pdm_validation_results(id) ON DELETE CASCADE,
+  item_id INTEGER,
+  revision_id INTEGER,
+  dataset_id INTEGER,
+  object_ref TEXT NOT NULL DEFAULT '',
+  rule_code TEXT NOT NULL DEFAULT '',
+  severity TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity IN ('PASS','WARNING','ERROR')),
+  message TEXT NOT NULL DEFAULT '',
+  field TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_validation_issues_result ON pdm_validation_issues(result_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_validation_issues_item ON pdm_validation_issues(item_id, severity);
+
+CREATE TABLE IF NOT EXISTS pdm_change_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER,
+  entity_type TEXT NOT NULL DEFAULT 'ITEM',
+  entity_id INTEGER,
+  entity_ref TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT '',
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor_username TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_history_tenant ON pdm_change_history(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_pdm_history_entity ON pdm_change_history(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_pdm_history_object ON pdm_change_history(entity_ref);
+
+CREATE TABLE IF NOT EXISTS pdm_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdm_configuration_tenant ON pdm_configuration(tenant_id, key);

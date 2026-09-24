@@ -57,6 +57,8 @@ import * as classification from "./services/classification/index.js";
 import { createClassificationRouter } from "./services/classification/router-classification.js";
 import * as bom from "./services/bom/index.js";
 import { createBomRouter } from "./services/bom/router-bom.js";
+import * as pdm from "./services/pdm/index.js";
+import { createPdmRouter } from "./services/pdm/router-pdm.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -208,6 +210,11 @@ export function createApp(db) {
     bom.ensureBomFoundation(db);
   } catch {
     /* BOM engine foundation is idempotent and must never block application boot */
+  }
+  try {
+    pdm.ensurePdmFoundation(db);
+  } catch {
+    /* PDM domain foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -10094,6 +10101,11 @@ export function createApp(db) {
   const bomRouter = createBomRouter({ express, db, auth, can, wrap });
   app.use("/api/bom", bomRouter);
   app.use("/api/v1/bom", bomRouter);
+
+  // ── P1 PDM domain ─────────────────────────────────────────────────────────
+  const pdmRouter = createPdmRouter({ express, db, auth, can, wrap });
+  app.use("/api/pdm", pdmRouter);
+  app.use("/api/v1/pdm", pdmRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

@@ -37,6 +37,7 @@ import { registerExchangeHandlers, runExchangeMaintenance } from "../server/serv
 import { registerMigrationHandlers, runMigrationMaintenance, ensureMigrationJobTypes } from "../server/services/migration/index.js";
 import { registerClassificationHandlers, runClassificationMaintenance, ensureClassificationJobTypes } from "../server/services/classification/index.js";
 import { registerBomHandlers, runBomMaintenance, ensureBomJobTypes } from "../server/services/bom/index.js";
+import { registerPdmHandlers, runPdmMaintenance, ensurePdmJobTypes } from "../server/services/pdm/index.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -152,6 +153,11 @@ registerClassificationHandlers();
 // validation, comparison and housekeeping).
 ensureBomJobTypes(db);
 registerBomHandlers();
+
+// P1 PDM domain background handlers (structure resolution, where-used,
+// where-referenced, baseline creation, validation, reindex and housekeeping).
+ensurePdmJobTypes(db);
+registerPdmHandlers();
 
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.
@@ -320,6 +326,28 @@ const bomMaintenance = setInterval(() => {
   }
 }, bomMaintenanceMs);
 bomMaintenance.unref?.();
+
+// Periodic PDM housekeeping: prune change history beyond retention, remove
+// orphaned baseline members/references, rebuild the reference index and refresh
+// caches.
+const pdmMaintenanceMs = positive(process.env.PDM_MAINTENANCE_MS, 120000);
+const pdmMaintenance = setInterval(() => {
+  try {
+    const summary = runPdmMaintenance(db);
+    if (summary.history_pruned || summary.orphan_members_pruned || summary.orphan_references_pruned || summary.references_rebuilt) {
+      log("info", "PDM housekeeping", {
+        tenants: summary.tenants,
+        history_pruned: summary.history_pruned,
+        orphan_members_pruned: summary.orphan_members_pruned,
+        orphan_references_pruned: summary.orphan_references_pruned,
+        references_rebuilt: summary.references_rebuilt,
+      });
+    }
+  } catch (error) {
+    log("warn", "PDM housekeeping failed", { error: error.message });
+  }
+}, pdmMaintenanceMs);
+pdmMaintenance.unref?.();
 
 // Periodic search housekeeping: converge the index queue and prune expired
 // search history / exports.

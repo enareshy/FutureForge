@@ -35,6 +35,7 @@ import * as dataExchange from "./services/data-exchange/index.js";
 import * as migration from "./services/migration/index.js";
 import * as classification from "./services/classification/index.js";
 import * as bom from "./services/bom/index.js";
+import * as pdm from "./services/pdm/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1071,6 +1072,27 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.bom.audit", name: "BOM audit trail & lineage", parentCode: "iam.bom" },
     { applicationCode: "iam", code: "iam.bom.metrics", name: "BOM metrics & health", parentCode: "iam.bom" },
     { applicationCode: "iam", code: "iam.bom.admin", name: "BOM administration & configuration", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.pdm", name: "PDM domain service", kind: "module" },
+    { applicationCode: "iam", code: "iam.pdm.overview", name: "PDM overview & registry", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.items", name: "PDM items", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.revisions", name: "PDM item revisions", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.parts", name: "PDM parts & assemblies", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.products", name: "PDM products", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.datasets", name: "PDM datasets", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.representations", name: "PDM representations", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.design-data", name: "PDM design data", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.cad", name: "PDM CAD associations", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.revision-rules", name: "PDM revision rules", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.configuration-rules", name: "PDM configuration rules", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.baselines", name: "PDM baselines", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.whereused", name: "PDM where-used analysis", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.wherereferenced", name: "PDM where-referenced analysis", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.structure", name: "PDM structure resolution", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.validation", name: "PDM validation & rules", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.search", name: "PDM search & discovery", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.audit", name: "PDM audit trail & lineage", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.metrics", name: "PDM metrics & health", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.admin", name: "PDM administration & configuration", parentCode: "iam.pdm" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1408,7 +1430,30 @@ function seedMissingCatalog(db) {
     "iam.bom.metrics",
     "iam.bom.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes]) {
+  const pdmResourceCodes = [
+    "iam.pdm",
+    "iam.pdm.overview",
+    "iam.pdm.items",
+    "iam.pdm.revisions",
+    "iam.pdm.parts",
+    "iam.pdm.products",
+    "iam.pdm.datasets",
+    "iam.pdm.representations",
+    "iam.pdm.design-data",
+    "iam.pdm.cad",
+    "iam.pdm.revision-rules",
+    "iam.pdm.configuration-rules",
+    "iam.pdm.baselines",
+    "iam.pdm.whereused",
+    "iam.pdm.wherereferenced",
+    "iam.pdm.structure",
+    "iam.pdm.validation",
+    "iam.pdm.search",
+    "iam.pdm.audit",
+    "iam.pdm.metrics",
+    "iam.pdm.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2935,7 +2980,8 @@ export function seedDatabase(db) {
   const migrationResult = withEventSuppression(() => seedMigrationFramework(db));
   const classificationResult = withEventSuppression(() => seedClassificationFramework(db));
   const bomResult = withEventSuppression(() => seedBomEngine(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult };
+  const pdmResult = withEventSuppression(() => seedPdmDomain(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult };
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -3020,6 +3066,18 @@ function seedBomEngine(db) {
     return { bomSeeded: true, ...result };
   } catch (err) {
     return { bomSeeded: false, bomError: err.message };
+  }
+}
+
+// Installs the P1 PDM domain foundation (event types, job types/handlers, search
+// registrations, per-tenant configuration and default validation rules) plus a
+// small demo product structure so PDM screens are not empty on a fresh install.
+function seedPdmDomain(db) {
+  try {
+    const result = pdm.ensurePdmSeed(db);
+    return { pdmSeeded: true, ...result };
+  } catch (err) {
+    return { pdmSeeded: false, pdmError: err.message };
   }
 }
 

@@ -2223,3 +2223,146 @@ export const bom = {
   submitCompareJob: (body) => api("/api/v1/bom/jobs/compare", { method: "POST", body }),
   submitMaintenanceJob: () => api("/api/v1/bom/jobs/maintenance", { method: "POST" }),
 };
+
+export const pdm = {
+  meta: () => api("/api/v1/pdm/meta"),
+  health: () => api("/api/v1/pdm/health"),
+  metrics: (qs) => api(`/api/v1/pdm/metrics${qs || ""}`),
+  ruleUsage: (qs) => api(`/api/v1/pdm/rule-usage${qs || ""}`),
+  configuration: () => api("/api/v1/pdm/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/pdm/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  items: (qs) => api(`/api/v1/pdm/items${qs || ""}`),
+  item: (ref) => api(`/api/v1/pdm/items/${encodeURIComponent(ref)}`),
+  createItem: (body) => api("/api/v1/pdm/items", { method: "POST", body }),
+  updateItem: (ref, body) =>
+    api(`/api/v1/pdm/items/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setItemStatus: (ref, status) =>
+    api(`/api/v1/pdm/items/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  deleteItem: (ref) => api(`/api/v1/pdm/items/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  itemRevisions: (ref, qs) =>
+    api(`/api/v1/pdm/items/${encodeURIComponent(ref)}/revisions${qs || ""}`),
+  itemStructure: (ref, qs) =>
+    api(`/api/v1/pdm/items/${encodeURIComponent(ref)}/structure${qs || ""}`),
+  itemWhereUsed: (ref, qs) =>
+    api(`/api/v1/pdm/items/${encodeURIComponent(ref)}/where-used${qs || ""}`),
+  itemAudit: (ref, qs) =>
+    api(`/api/v1/pdm/items/${encodeURIComponent(ref)}/audit${qs || ""}`),
+
+  parts: (qs) => api(`/api/v1/pdm/parts${qs || ""}`),
+  products: (qs) => api(`/api/v1/pdm/products${qs || ""}`),
+
+  revisions: (qs) => api(`/api/v1/pdm/revisions${qs || ""}`),
+  revision: (ref) => api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}`),
+  createRevision: (ref, body) =>
+    api(`/api/v1/pdm/items/${encodeURIComponent(ref)}/revisions`, { method: "POST", body }),
+  updateRevision: (ref, body) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setRevisionStatus: (ref, status) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  reviseRevision: (ref, body) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/revise`, { method: "POST", body }),
+  deleteRevision: (ref) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  revisionValidate: (ref) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/validate`, { method: "POST" }),
+  revisionDatasets: (ref, qs) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/datasets${qs || ""}`),
+  revisionRepresentations: (ref, qs) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/representations${qs || ""}`),
+  revisionDesignData: (ref, qs) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/design-data${qs || ""}`),
+  revisionCad: (ref, qs) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/cad${qs || ""}`),
+
+  datasets: (qs) => api(`/api/v1/pdm/datasets${qs || ""}`),
+  dataset: (ref) => api(`/api/v1/pdm/datasets/${encodeURIComponent(ref)}`),
+  createDataset: (ref, body) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/datasets`, { method: "POST", body }),
+  linkDatasetContent: (ref, body) =>
+    api(`/api/v1/pdm/datasets/${encodeURIComponent(ref)}/content`, { method: "POST", body }),
+
+  representations: (qs) => api(`/api/v1/pdm/representations${qs || ""}`),
+  createRepresentation: (ref, body) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/representations`, { method: "POST", body }),
+
+  designData: (qs) => api(`/api/v1/pdm/design-data${qs || ""}`),
+  createDesignData: (ref, body) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/design-data`, { method: "POST", body }),
+
+  cadAssociations: (qs) => api(`/api/v1/pdm/cad-associations${qs || ""}`),
+  createCadAssociation: (ref, body) =>
+    api(`/api/v1/pdm/revisions/${encodeURIComponent(ref)}/cad`, { method: "POST", body }),
+
+  revisionRules: (qs) => api(`/api/v1/pdm/revision-rules${qs || ""}`),
+  revisionRule: (ref) => api(`/api/v1/pdm/revision-rules/${encodeURIComponent(ref)}`),
+  createRevisionRule: (body) => api("/api/v1/pdm/revision-rules", { method: "POST", body }),
+  activateRevisionRule: (ref) =>
+    api(`/api/v1/pdm/revision-rules/${encodeURIComponent(ref)}/activate`, { method: "POST" }),
+  resolveRevisionRule: (body) => api("/api/v1/pdm/revision-rules/resolve", { method: "POST", body }),
+  revisionRuleVersions: (ref) =>
+    api(`/api/v1/pdm/revision-rules/${encodeURIComponent(ref)}/versions`),
+
+  configurationRules: (qs) => api(`/api/v1/pdm/configuration-rules${qs || ""}`),
+  createConfigurationRule: (body) => api("/api/v1/pdm/configuration-rules", { method: "POST", body }),
+  activateConfigurationRule: (ref) =>
+    api(`/api/v1/pdm/configuration-rules/${encodeURIComponent(ref)}/activate`, { method: "POST" }),
+  evaluateConfigurationRules: (body) =>
+    api("/api/v1/pdm/configuration-rules/evaluate", { method: "POST", body }),
+
+  baselines: (qs) => api(`/api/v1/pdm/baselines${qs || ""}`),
+  baseline: (ref) => api(`/api/v1/pdm/baselines/${encodeURIComponent(ref)}`),
+  createBaseline: (body) => api("/api/v1/pdm/baselines", { method: "POST", body }),
+  releaseBaseline: (ref) =>
+    api(`/api/v1/pdm/baselines/${encodeURIComponent(ref)}/release`, { method: "POST" }),
+  freezeBaseline: (ref) =>
+    api(`/api/v1/pdm/baselines/${encodeURIComponent(ref)}/freeze`, { method: "POST" }),
+  retireBaseline: (ref) =>
+    api(`/api/v1/pdm/baselines/${encodeURIComponent(ref)}/retire`, { method: "POST" }),
+  baselineMembers: (ref, qs) =>
+    api(`/api/v1/pdm/baselines/${encodeURIComponent(ref)}/members${qs || ""}`),
+  addBaselineMember: (ref, body) =>
+    api(`/api/v1/pdm/baselines/${encodeURIComponent(ref)}/members`, { method: "POST", body }),
+  baselineSnapshot: (ref) =>
+    api(`/api/v1/pdm/baselines/${encodeURIComponent(ref)}/snapshot`),
+
+  relationships: (qs) => api(`/api/v1/pdm/relationships${qs || ""}`),
+  createRelationship: (body) => api("/api/v1/pdm/relationships", { method: "POST", body }),
+  references: (qs) => api(`/api/v1/pdm/references${qs || ""}`),
+  whereUsed: (refOrQs, qs) =>
+    refOrQs && !refOrQs.startsWith("?")
+      ? api(`/api/v1/pdm/where-used/${encodeURIComponent(refOrQs)}${qs || ""}`)
+      : api(`/api/v1/pdm/where-used${refOrQs || qs || ""}`),
+  whereReferenced: (targetType, targetId, qs) =>
+    api(`/api/v1/pdm/where-referenced/${encodeURIComponent(targetType)}/${encodeURIComponent(targetId)}${qs || ""}`),
+  referencesSummary: (targetType, targetId) =>
+    api(`/api/v1/pdm/references/summary?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`),
+
+  structure: (ref, qs) => api(`/api/v1/pdm/structure/${encodeURIComponent(ref)}${qs || ""}`),
+  resolveStructure: (body) => api("/api/v1/pdm/structure/resolve", { method: "POST", body }),
+  validateStructure: (ref) => api(`/api/v1/pdm/structure/${encodeURIComponent(ref)}/validate`),
+
+  validationRules: (qs) => api(`/api/v1/pdm/validation-rules${qs || ""}`),
+  createValidationRule: (body) => api("/api/v1/pdm/validation-rules", { method: "POST", body }),
+  runValidation: (body) => api("/api/v1/pdm/validation/run", { method: "POST", body: body || {} }),
+  validationResults: (qs) => api(`/api/v1/pdm/validation-results${qs || ""}`),
+  validationResult: (ref) => api(`/api/v1/pdm/validation-results/${encodeURIComponent(ref)}`),
+
+  history: (qs) => api(`/api/v1/pdm/history${qs || ""}`),
+  objectLineage: (objectType, objectId) =>
+    api(`/api/v1/pdm/history/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`),
+
+  searchMeta: () => api("/api/v1/pdm/search-meta"),
+  reindexSearch: () => api("/api/v1/pdm/search/reindex", { method: "POST" }),
+  seed: () => api("/api/v1/pdm/seed", { method: "POST" }),
+  ensureFoundation: () => api("/api/v1/pdm/foundation/ensure", { method: "POST" }),
+
+  submitStructureJob: (body) => api("/api/v1/pdm/jobs/structure", { method: "POST", body }),
+  submitWhereUsedJob: (body) => api("/api/v1/pdm/jobs/where-used", { method: "POST", body }),
+  submitWhereReferencedJob: (body) => api("/api/v1/pdm/jobs/where-referenced", { method: "POST", body }),
+  submitBaselineJob: (body) => api("/api/v1/pdm/jobs/baseline", { method: "POST", body }),
+  submitValidateJob: (body) => api("/api/v1/pdm/jobs/validate", { method: "POST", body }),
+  submitReindexJob: (body) => api("/api/v1/pdm/jobs/reindex", { method: "POST", body }),
+  submitMaintenanceJob: () => api("/api/v1/pdm/jobs/maintenance", { method: "POST" }),
+};

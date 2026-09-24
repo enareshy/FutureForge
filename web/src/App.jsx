@@ -21,6 +21,7 @@ import DataExchangePage from "./pages/DataExchangePage.jsx";
 import MigrationPage from "./pages/MigrationPage.jsx";
 import ClassificationPage from "./pages/ClassificationPage.jsx";
 import BomPage from "./pages/BomPage.jsx";
+import PdmPage from "./pages/PdmPage.jsx";
 import OrganizationsPage from "./pages/OrganizationsPage.jsx";
 import OrganizationDetailPage from "./pages/OrganizationDetailPage.jsx";
 import PlatformPage from "./pages/PlatformPage.jsx";
@@ -299,6 +300,11 @@ const PLATFORM_GROUPS = [
     items: [{ to: "/bom", label: "BOM engine", platformOrAdmin: true }],
   },
   {
+    key: "pdm",
+    label: "Product data",
+    items: [{ to: "/pdm", label: "PDM domain", platformOrAdmin: true }],
+  },
+  {
     key: "communication",
     label: "Communication",
     items: [
@@ -551,6 +557,7 @@ export default function App() {
         <Route path="/migration" element={<MigrationPage />} />
         <Route path="/classification" element={<ClassificationPage />} />
         <Route path="/bom" element={<BomPage />} />
+        <Route path="/pdm" element={<PdmPage />} />
         <Route path="/policy" element={<PolicyPage />} />
         <Route path="/authentication" element={<AuthenticationPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
