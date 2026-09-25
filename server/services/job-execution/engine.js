@@ -590,7 +590,10 @@ export async function runJobNow(db, jobId, { workerId = "engine-run-now", hooks 
 // reactive evaluator.
 export function promoteReadyJobs(db) {
   const summary = { promoted: 0, blocked: 0 };
-  const created = queryAll(db, "SELECT * FROM jobs WHERE status = 'created'");
+  // Bound the maintenance sweep: dependency evaluation is per-job, so cap how
+  // many jobs a single pass promotes/blocks. Remaining jobs are handled on the
+  // next maintenance tick, keeping the sweep O(1) instead of O(pending jobs).
+  const created = queryAll(db, "SELECT * FROM jobs WHERE status = 'created' LIMIT 500");
   for (const job of created) {
     const state = dependencyState(db, job.id);
     if (state.total === 0) {
@@ -604,7 +607,7 @@ export function promoteReadyJobs(db) {
       recordHistory(db, job.id, { event_type: "status", from_status: "created", to_status: "waiting_for_dependency", message: "Waiting for dependencies", actor_type: "engine", source: "engine" });
     }
   }
-  const waiting = queryAll(db, "SELECT * FROM jobs WHERE status = 'waiting_for_dependency'");
+  const waiting = queryAll(db, "SELECT * FROM jobs WHERE status = 'waiting_for_dependency' LIMIT 500");
   for (const job of waiting) {
     const state = dependencyState(db, job.id);
     if (state.blocked) {

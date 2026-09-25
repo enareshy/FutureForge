@@ -30,7 +30,7 @@ export function listRolePermissions(db, roleId) {
   );
 }
 
-export function grantRolePermission(db, roleId, body, actor, ip) {
+export function grantRolePermission(db, roleId, body, actor, ip, options = {}) {
   getRole(db, roleId);
   if (!body.permission_id) throw new HttpError(400, "permission_id is required");
   assertEffect(body.effect || "allow");
@@ -66,6 +66,10 @@ export function grantRolePermission(db, roleId, body, actor, ip) {
     details: { permissionId: permission.id, effect, organizationId: scope },
     ip,
   });
+  // Bulk callers (seeders, matrix reconciliation) pass returnList: false to
+  // avoid re-reading the whole grant set after every individual insert, which
+  // would otherwise make a large grant sweep quadratic.
+  if (options.returnList === false) return null;
   return listRolePermissions(db, roleId);
 }
 
@@ -102,7 +106,7 @@ export function replaceRolePermissionMatrix(db, roleId, grants, actor, ip) {
   run(db, "DELETE FROM role_permissions WHERE role_id = ?", [roleId]);
   for (const grant of grants) {
     if (!grant || grant.effect === "unset" || grant.effect === "" || grant.effect == null) continue;
-    grantRolePermission(db, roleId, grant, actor, ip);
+    grantRolePermission(db, roleId, grant, actor, ip, { returnList: false });
   }
   return listRolePermissions(db, roleId);
 }

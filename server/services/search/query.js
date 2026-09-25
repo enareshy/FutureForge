@@ -178,8 +178,8 @@ function applyHighlights(doc, terms) {
   };
 }
 
-function resolveScope(db, actor, scope, organizationId) {
-  if (scope === "global" && !isPlatformAdmin(db, actor?.id)) {
+function resolveScope(db, actor, scope, organizationId, platformAdmin) {
+  if (scope === "global" && !(platformAdmin ?? isPlatformAdmin(db, actor?.id))) {
     return { scope: "tenant", organizationIds: [] };
   }
   if (scope === "organization") {
@@ -214,7 +214,8 @@ export function runSearch(db, input, actor, options = {}) {
     throw new HttpError(400, `Search query must be at least ${config.min_query_length} characters`);
   }
 
-  const scopeInfo = resolveScope(db, actor, norm.scope, norm.organization_id);
+  const platformAdmin = isPlatformAdmin(db, actor?.id);
+  const scopeInfo = resolveScope(db, actor, norm.scope, norm.organization_id, platformAdmin);
   norm.scope = scopeInfo.scope;
 
   const availableTypes = searchableObjectTypeCodes(db, tenantId);
@@ -255,11 +256,12 @@ export function runSearch(db, input, actor, options = {}) {
   }
 
   let authorized = rows;
-  if (norm.scope !== "global" || !isPlatformAdmin(db, actor?.id)) {
+  if (norm.scope !== "global" || !platformAdmin) {
     authorized = filterAuthorizedDocuments(db, actor, rows, {
       tenantId,
       action: options.action,
       cache: decisionCache,
+      platformAdmin,
     });
   }
 

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { jobs } from "../api.js";
+import { useDebouncedValue } from "../hooks.js";
 
 const EMPTY = {
   code: "",
@@ -22,16 +23,18 @@ export default function JobTypesPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
+  const debouncedQ = useDebouncedValue(q, 300);
+
   const load = useCallback(async () => {
     setError("");
     try {
       const params = new URLSearchParams({ pageSize: "200" });
-      if (q) params.set("q", q);
+      if (debouncedQ) params.set("q", debouncedQ);
       setList(await jobs.types(`?${params.toString()}`));
     } catch (err) {
       setError(err.message);
     }
-  }, [q]);
+  }, [debouncedQ]);
 
   useEffect(() => { load(); }, [load]);
 

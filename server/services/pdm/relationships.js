@@ -187,6 +187,44 @@ export function relationshipsTo(db, tenantId, targetType, targetId, options = {}
   return listRelationships(db, { tenantId, targetType, targetId, ...options });
 }
 
+// Batch adjacency for graph consumers (Digital Thread). `nodes` is a list of
+// { type, id } references; every active relationship touching one of them is
+// loaded in a single query per direction so traversal does not issue one query
+// per node.
+export function adjacency(db, nodes = [], options = {}) {
+  const { tenantId, direction = "both", status = "ACTIVE", relationshipTypes = null, limit = 2000 } = options || {};
+  const pairs = nodes
+    .map((node) => ({ type: String(node?.type ?? node?.sourceType ?? "").toUpperCase(), id: String(node?.id ?? "") }))
+    .filter((node) => node.type && node.id !== "");
+  if (!pairs.length) return [];
+  const dir = ["out", "in", "both"].includes(direction) ? direction : "both";
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  const outClause = pairs.map(() => "(source_type = ? AND source_id = ?)").join(" OR ");
+  const inClause = pairs.map(() => "(target_type = ? AND target_id = ?)").join(" OR ");
+  const flat = () => pairs.flatMap((node) => [node.type, node.id]);
+  if (dir === "out") {
+    where.push(`(${outClause})`);
+    params.push(...flat());
+  } else if (dir === "in") {
+    where.push(`(${inClause})`);
+    params.push(...flat());
+  } else {
+    where.push(`((${outClause}) OR (${inClause}))`);
+    params.push(...flat(), ...flat());
+  }
+  if (status) {
+    where.push("status = ?");
+    params.push(String(status).toUpperCase());
+  }
+  if (Array.isArray(relationshipTypes) && relationshipTypes.length) {
+    where.push(`relationship_type IN (${relationshipTypes.map(() => "?").join(",")})`);
+    params.push(...relationshipTypes.map((code) => String(code).toUpperCase()));
+  }
+  const cap = Math.min(20000, Math.max(1, Number(limit) || 2000));
+  return queryAll(db, `SELECT * FROM pdm_relationships WHERE ${where.join(" AND ")} ORDER BY id ASC LIMIT ?`, [...params, cap]).map(publicRelationship);
+}
+
 function rowToInput(row) {
   return {
     relationship_type: row.relationship_type,

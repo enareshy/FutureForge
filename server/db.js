@@ -137,6 +137,7 @@ export function migrate(db) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_actor_type_created ON audit_logs(actor_type, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_classification ON audit_logs(security_classification, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_related ON audit_logs(related_resource_type, related_resource_id, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_tenant_created ON audit_logs(tenant_id, created_at)");
   db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
   ).run("012_audit");
@@ -434,14 +435,37 @@ function rebuildNotificationProvidersTypeCheck(db) {
 export function nowIso() {
   return new Date().toISOString().replace("T", " ").slice(0, 19);
 }
+
+// Per-database prepared-statement cache. `DatabaseSync.prepare()` compiles the
+// SQL on every call, and the same statements (auth, audit, lookups) are reused
+// thousands of times across requests. Reusing the compiled StatementSync
+// avoids repeated parsing/planning. Statements are safe to reuse because every
+// call supplies its own bind parameters, and SQLite transparently recompiles a
+// cached statement if the schema it depends on changes.
+const statementCache = new WeakMap();
+
+function prepare(db, sql) {
+  let cache = statementCache.get(db);
+  if (!cache) {
+    cache = new Map();
+    statementCache.set(db, cache);
+  }
+  let statement = cache.get(sql);
+  if (!statement) {
+    statement = db.prepare(sql);
+    cache.set(sql, statement);
+  }
+  return statement;
+}
+
 export function queryAll(db, sql, params = []) {
-  return db.prepare(sql).all(...params);
+  return prepare(db, sql).all(...params);
 }
 
 export function queryOne(db, sql, params = []) {
-  return db.prepare(sql).get(...params) ?? null;
+  return prepare(db, sql).get(...params) ?? null;
 }
 
 export function run(db, sql, params = []) {
-  return db.prepare(sql).run(...params);
+  return prepare(db, sql).run(...params);
 }

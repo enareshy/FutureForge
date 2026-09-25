@@ -23,7 +23,8 @@ export function authorizeObjectType(db, actor, objectType, options = {}) {
   const row = objectTypeRow(db, objectType, tenantId);
   if (!row) return false;
   if (!row.permission_resource) return true;
-  if (isPlatformAdmin(db, actor?.id)) return true;
+  const platformAdmin = options.platformAdmin ?? isPlatformAdmin(db, actor?.id);
+  if (platformAdmin) return true;
   const organizationId = options.organizationId ?? actor?.organization_id ?? 0;
   return cachedDecision(
     db,
@@ -37,7 +38,8 @@ export function authorizeObjectType(db, actor, objectType, options = {}) {
 
 export function filterAuthorizedDocuments(db, actor, documents, options = {}) {
   const { tenantId, action = null, cache = decisionCache() } = options;
-  if (isPlatformAdmin(db, actor?.id)) return documents;
+  const platformAdmin = options.platformAdmin ?? isPlatformAdmin(db, actor?.id);
+  if (platformAdmin) return documents;
   const typeDecisions = new Map();
   const result = [];
   for (const doc of documents) {
@@ -48,6 +50,7 @@ export function filterAuthorizedDocuments(db, actor, documents, options = {}) {
           tenantId: doc.tenant_id ?? tenantId,
           action,
           cache,
+          platformAdmin,
           organizationId: doc.organization_id ?? actor?.organization_id ?? 0,
         })
       );

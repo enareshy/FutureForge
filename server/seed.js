@@ -36,6 +36,8 @@ import * as migration from "./services/migration/index.js";
 import * as classification from "./services/classification/index.js";
 import * as bom from "./services/bom/index.js";
 import * as pdm from "./services/pdm/index.js";
+import * as thread from "./services/thread/index.js";
+import * as exchange from "./services/exchange/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -259,11 +261,18 @@ function seedIdentity(db) {
 function grantAll(db, roleId, resource, actions = ACTIONS, organizationId = 0) {
   for (const action of actions) {
     const permission = catalog.ensurePermission(db, resource.id, action);
-    grants.grantRolePermission(db, roleId, {
-      permission_id: permission.id,
-      effect: "allow",
-      organization_id: organizationId,
-    });
+    grants.grantRolePermission(
+      db,
+      roleId,
+      {
+        permission_id: permission.id,
+        effect: "allow",
+        organization_id: organizationId,
+      },
+      undefined,
+      undefined,
+      { returnList: false }
+    );
   }
 }
 
@@ -656,11 +665,18 @@ function seedAuthz(db) {
     grantAll(db, auditor.id, iamRoot, ["read"], apac?.id || 0);
     const delUsers = permissionByCode(db, "iam.users:delete");
     if (delUsers) {
-      grants.grantRolePermission(db, auditor.id, {
-        permission_id: delUsers.id,
-        effect: "deny",
-        organization_id: apac?.id || 0,
-      });
+      grants.grantRolePermission(
+        db,
+        auditor.id,
+        {
+          permission_id: delUsers.id,
+          effect: "deny",
+          organization_id: apac?.id || 0,
+        },
+        undefined,
+        undefined,
+        { returnList: false }
+      );
     }
   }
   if (reader) {
@@ -1093,6 +1109,37 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.pdm.audit", name: "PDM audit trail & lineage", parentCode: "iam.pdm" },
     { applicationCode: "iam", code: "iam.pdm.metrics", name: "PDM metrics & health", parentCode: "iam.pdm" },
     { applicationCode: "iam", code: "iam.pdm.admin", name: "PDM administration & configuration", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.thread", name: "Digital Thread service", kind: "module" },
+    { applicationCode: "iam", code: "iam.thread.overview", name: "Digital Thread overview & registry", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.explorer", name: "Digital Thread explorer & traversal", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.traceability", name: "Digital Thread traceability & matrices", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.impact", name: "Digital Thread impact analysis", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.dependency", name: "Digital Thread dependency analysis", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.paths", name: "Digital Thread path finding", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.completeness", name: "Digital Thread completeness", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.snapshots", name: "Digital Thread snapshots", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.baselines", name: "Digital Thread baselines", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.compare", name: "Digital Thread comparison", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.definitions", name: "Digital Thread definitions & rules", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.search", name: "Digital Thread search & discovery", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.audit", name: "Digital Thread audit trail & lineage", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.metrics", name: "Digital Thread metrics & health", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.admin", name: "Digital Thread administration & configuration", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.exchange", name: "Standards & Exchange service", kind: "module" },
+    { applicationCode: "iam", code: "iam.exchange.dashboard", name: "Standards & Exchange overview & dashboard", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.formats", name: "Standards & Exchange formats & adapters", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.definitions", name: "Standards & Exchange definitions & versions", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.import", name: "Standards & Exchange import execution", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.export", name: "Standards & Exchange export execution", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.mappings", name: "Standards & Exchange field mappings", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.transformations", name: "Standards & Exchange transformations", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.validation", name: "Standards & Exchange validation profiles", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.jobs", name: "Standards & Exchange background jobs", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.history", name: "Standards & Exchange history & reconciliation", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.search", name: "Standards & Exchange search & discovery", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.metrics", name: "Standards & Exchange metrics & health", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.audit", name: "Standards & Exchange audit trail", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.admin", name: "Standards & Exchange administration & configuration", parentCode: "iam.exchange" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1453,7 +1500,42 @@ function seedMissingCatalog(db) {
     "iam.pdm.metrics",
     "iam.pdm.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes]) {
+  const threadResourceCodes = [
+    "iam.thread",
+    "iam.thread.overview",
+    "iam.thread.explorer",
+    "iam.thread.traceability",
+    "iam.thread.impact",
+    "iam.thread.dependency",
+    "iam.thread.paths",
+    "iam.thread.completeness",
+    "iam.thread.snapshots",
+    "iam.thread.baselines",
+    "iam.thread.compare",
+    "iam.thread.definitions",
+    "iam.thread.search",
+    "iam.thread.audit",
+    "iam.thread.metrics",
+    "iam.thread.admin",
+  ];
+  const exchangeResourceCodes = [
+    "iam.exchange",
+    "iam.exchange.dashboard",
+    "iam.exchange.formats",
+    "iam.exchange.definitions",
+    "iam.exchange.import",
+    "iam.exchange.export",
+    "iam.exchange.mappings",
+    "iam.exchange.transformations",
+    "iam.exchange.validation",
+    "iam.exchange.jobs",
+    "iam.exchange.history",
+    "iam.exchange.search",
+    "iam.exchange.metrics",
+    "iam.exchange.audit",
+    "iam.exchange.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -2981,7 +3063,9 @@ export function seedDatabase(db) {
   const classificationResult = withEventSuppression(() => seedClassificationFramework(db));
   const bomResult = withEventSuppression(() => seedBomEngine(db));
   const pdmResult = withEventSuppression(() => seedPdmDomain(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult };
+  const threadResult = withEventSuppression(() => seedThreadDomain(db));
+  const exchangeResult = withEventSuppression(() => seedExchangeDomain(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult, ...threadResult, ...exchangeResult };
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -3078,6 +3162,31 @@ function seedPdmDomain(db) {
     return { pdmSeeded: true, ...result };
   } catch (err) {
     return { pdmSeeded: false, pdmError: err.message };
+  }
+}
+
+// Installs the P1 Digital Thread foundation (providers, event/job types, search
+// registrations, default definition and rules, configuration) plus a demo
+// snapshot and released baseline so the capability is visible on a fresh install.
+function seedThreadDomain(db) {
+  try {
+    const result = thread.ensureThreadSeed(db);
+    return { threadSeeded: true, ...result };
+  } catch (err) {
+    return { threadSeeded: false, threadError: err.message };
+  }
+}
+
+// Installs the P2 Standards & Exchange foundation (formats/adapters, event and
+// job types, search registrations, default JSON exchange definitions, mappings,
+// transformations and validation profiles) plus a demo transaction so the
+// capability is visible on a fresh install. Reuses the Import/Export framework.
+function seedExchangeDomain(db) {
+  try {
+    const result = exchange.ensureExchangeSeed(db);
+    return { exchangeSeeded: true, ...result };
+  } catch (err) {
+    return { exchangeSeeded: false, exchangeError: err.message };
   }
 }
 

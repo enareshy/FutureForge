@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 export function ts(value) {
   if (!value) return "—";
@@ -20,18 +20,32 @@ export function useAsync(loader, deps = []) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // Sequence guard: when deps change quickly (typing in a filter) an older,
+  // slower response must not overwrite the newer one, and state must not be
+  // written after the component unmounts.
+  const seq = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const run = useCallback(async () => {
+    const current = ++seq.current;
     setLoading(true);
     setError("");
     try {
       const result = await loader();
+      if (current !== seq.current || !mounted.current) return null;
       setData(result);
       return result;
     } catch (err) {
+      if (current !== seq.current || !mounted.current) return null;
       setError(err.message || String(err));
       return null;
     } finally {
-      setLoading(false);
+      if (current === seq.current && mounted.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);

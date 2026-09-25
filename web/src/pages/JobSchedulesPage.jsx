@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { jobExecution, jobs } from "../api.js";
 import { ScheduleStatusBadge, describeCadence, formatDateTime } from "../components/JobEngineBadges.jsx";
+import { useDebouncedValue } from "../hooks.js";
 
 const EMPTY = {
   code: "",
@@ -81,17 +82,19 @@ export default function JobSchedulesPage() {
     jobExecution.queues("?pageSize=100").then((res) => setQueues(res.items || [])).catch(() => {});
   }, []);
 
+  const appliedFilters = useDebouncedValue(filters, 300);
+
   const load = useCallback(async () => {
     setError("");
     try {
       const params = new URLSearchParams({ pageSize: "200" });
-      if (filters.status) params.set("status", filters.status);
-      if (filters.q) params.set("q", filters.q);
+      if (appliedFilters.status) params.set("status", appliedFilters.status);
+      if (appliedFilters.q) params.set("q", appliedFilters.q);
       setList(await jobExecution.schedules(`?${scope}${params.toString()}`));
     } catch (err) {
       setError(err.message);
     }
-  }, [filters, scope]);
+  }, [appliedFilters, scope]);
 
   useEffect(() => { load(); }, [load]);
 

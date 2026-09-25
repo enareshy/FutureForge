@@ -134,7 +134,13 @@ function publicDefinition(row) {
   };
 }
 
+// Definitions are static defaults inserted once per database. Memoising the
+// sweep avoids re-running the constant INSERT-OR-IGNORE set on every
+// listDefinitions/getDefinition/resolveConfig call.
+const definitionsInitialised = new WeakSet();
+
 export function ensureDefinitions(db) {
+  if (definitionsInitialised.has(db)) return;
   const ts = nowIso();
   for (const def of DEFAULT_DEFINITIONS) {
     run(
@@ -157,6 +163,7 @@ export function ensureDefinitions(db) {
       ]
     );
   }
+  definitionsInitialised.add(db);
 }
 
 export function listDefinitions(db) {
@@ -200,8 +207,8 @@ function readOverride(db, key, scope, scopeId) {
   );
 }
 
-export function resolveConfig(db, key, context = {}) {
-  const def = getDefinition(db, key);
+export function resolveConfig(db, key, context = {}, preloadedDefinition = null) {
+  const def = preloadedDefinition || getDefinition(db, key);
   const layers = [];
   let value = parseValue(def.value_type, def.default_value);
   let source = "default";
@@ -255,7 +262,7 @@ export function resolveConfig(db, key, context = {}) {
 
 export function resolveAll(db, context = {}) {
   return listDefinitions(db).map((def) => {
-    const resolved = resolveConfig(db, def.key, context);
+    const resolved = resolveConfig(db, def.key, context, def);
     return {
       key: def.key,
       value: resolved.value,

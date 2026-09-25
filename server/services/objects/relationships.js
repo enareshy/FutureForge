@@ -472,6 +472,46 @@ export function relationshipsForObject(db, reference, tenantId, query = {}) {
   return { object: briefObject(db, row.id, tenantId), outgoing, incoming };
 }
 
+// Batch adjacency for graph consumers (for example the Digital Thread query
+// layer). Loads every active, non-deleted edge touching any of `objectIds` in a
+// single query per requested direction, so a traversal never issues one query
+// per node. Returned rows are public relationships carrying both endpoint type
+// codes, letting callers filter by domain without another lookup.
+export function adjacency(db, objectIds = [], options = {}) {
+  const { tenantId = null, direction = "both", status = "active", typeCodes = null, limit = 2000 } = options || {};
+  const ids = [...new Set(objectIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))];
+  if (!ids.length) return [];
+  const dir = ["out", "in", "both"].includes(direction) ? direction : "both";
+  const marks = ids.map(() => "?").join(",");
+  const where = [];
+  const params = [];
+  if (tenantId !== null && tenantId !== undefined) {
+    where.push("r.tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (dir === "out") {
+    where.push(`r.source_object_id IN (${marks})`);
+    params.push(...ids);
+  } else if (dir === "in") {
+    where.push(`r.target_object_id IN (${marks})`);
+    params.push(...ids);
+  } else {
+    where.push(`(r.source_object_id IN (${marks}) OR r.target_object_id IN (${marks}))`);
+    params.push(...ids, ...ids);
+  }
+  if (status) {
+    where.push("r.status = ?");
+    params.push(status);
+  }
+  where.push("r.deleted_at IS NULL");
+  if (Array.isArray(typeCodes) && typeCodes.length) {
+    where.push(`rt.code IN (${typeCodes.map(() => "?").join(",")})`);
+    params.push(...typeCodes.map((code) => String(code)));
+  }
+  const cap = Math.min(20000, Math.max(1, Number(limit) || 2000));
+  return queryAll(db, `${REL_SELECT} WHERE ${where.join(" AND ")} ORDER BY r.id ASC LIMIT ?`, [...params, cap]).map(publicRelationship);
+}
+
 // Breadth-first traversal with a hard depth cap and visited set. Direction is
 // `out`, `in` or `both`; optional relationship-type code narrows the walk.
 export function traverse(db, reference, options = {}, tenantId) {

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiDownload, files } from "../api.js";
+import { useDebouncedValue } from "../hooks.js";
 
 function StatusBadge({ status, label }) {
   const tone = ["available", "processing", "checked_out"].includes(status)
@@ -51,11 +52,13 @@ export default function FilesPage() {
     loadTree();
   }, [loadTree]);
 
+  const appliedFilters = useDebouncedValue(filters, 300);
+
   const load = useCallback(async () => {
     setError("");
     try {
       const params = new URLSearchParams();
-      for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
+      for (const [key, value] of Object.entries(appliedFilters)) if (value) params.set(key, value);
       if (currentFolder) params.set("folderId", String(currentFolder.id));
       else params.set("folderId", "root");
       if (includeDeleted) params.set("includeDeleted", "true");
@@ -68,7 +71,7 @@ export default function FilesPage() {
     } catch (err) {
       setError(err.message);
     }
-  }, [filters, currentFolder, includeDeleted, page, pageSize, sort]);
+  }, [appliedFilters, currentFolder, includeDeleted, page, pageSize, sort]);
 
   useEffect(() => { load(); }, [load]);
 

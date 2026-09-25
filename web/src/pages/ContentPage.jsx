@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { content } from "../api.js";
 
 const TABS = [
@@ -46,6 +46,7 @@ export default function ContentPage() {
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [filters, setFilters] = useState({ q: "", status: "", security_status: "", content_role: "" });
+  const [debouncedQ, setDebouncedQ] = useState("");
   const [uploadForm, setUploadForm] = useState(EMPTY_UPLOAD);
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -65,15 +66,22 @@ export default function ContentPage() {
   const [associationForm, setAssociationForm] = useState({ contentId: "", objectType: "", objectId: "", contentRole: "ATTACHMENT" });
   const [policyForm, setPolicyForm] = useState({ policy_code: "", name: "", retention_days: 365, description: "" });
 
+  // Debounce free-text search so the library refetches once the user pauses
+  // instead of on every keystroke.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQ(filters.q), 300);
+    return () => clearTimeout(timer);
+  }, [filters.q]);
+
   const query = useMemo(() => {
     const params = new URLSearchParams();
-    if (filters.q) params.set("q", filters.q);
+    if (debouncedQ) params.set("q", debouncedQ);
     if (filters.status) params.set("status", filters.status);
     if (filters.security_status) params.set("securityStatus", filters.security_status);
     if (filters.content_role) params.set("contentRole", filters.content_role);
     params.set("pageSize", "50");
     return `?${params.toString()}`;
-  }, [filters]);
+  }, [debouncedQ, filters.status, filters.security_status, filters.content_role]);
 
   const loadLibrary = useCallback(async () => {
     const [listRes, facetRes] = await Promise.all([content.list(query), content.facets()]);
@@ -105,9 +113,44 @@ export default function ContentPage() {
     }
   }, [loadLibrary, loadAdminLists]);
 
+  // Keep list results tied to the debounced query. A sequence guard prevents an
+  // out-of-order response from overwriting a newer one.
+  const librarySeq = useRef(0);
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    const current = ++librarySeq.current;
+    setError("");
+    loadLibrary().catch((err) => {
+      if (current === librarySeq.current) setError(err.message);
+    });
+    return () => {
+      librarySeq.current += 1;
+    };
+  }, [loadLibrary]);
+
+  useEffect(() => {
+    let active = true;
+    content
+      .meta()
+      .then((res) => {
+        if (active) setMeta(res);
+      })
+      .catch((err) => {
+        if (active) setError(err.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    loadAdminLists().catch((err) => {
+      if (active) setError(err.message);
+    });
+    return () => {
+      active = false;
+    };
+  }, [loadAdminLists]);
 
   async function run(fn, success) {
     setError("");

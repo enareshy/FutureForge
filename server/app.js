@@ -59,6 +59,10 @@ import * as bom from "./services/bom/index.js";
 import { createBomRouter } from "./services/bom/router-bom.js";
 import * as pdm from "./services/pdm/index.js";
 import { createPdmRouter } from "./services/pdm/router-pdm.js";
+import * as thread from "./services/thread/index.js";
+import { createThreadRouter } from "./services/thread/router-thread.js";
+import * as exchange from "./services/exchange/index.js";
+import { createExchangeRouter } from "./services/exchange/router-exchange.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -215,6 +219,16 @@ export function createApp(db) {
     pdm.ensurePdmFoundation(db);
   } catch {
     /* PDM domain foundation is idempotent and must never block application boot */
+  }
+  try {
+    thread.ensureThreadFoundation(db);
+  } catch {
+    /* Digital Thread foundation is idempotent and must never block application boot */
+  }
+  try {
+    exchange.ensureExchangeFoundation(db);
+  } catch {
+    /* Standards & Exchange foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -10106,6 +10120,16 @@ export function createApp(db) {
   const pdmRouter = createPdmRouter({ express, db, auth, can, wrap });
   app.use("/api/pdm", pdmRouter);
   app.use("/api/v1/pdm", pdmRouter);
+
+  // ── P1 Digital Thread ─────────────────────────────────────────────────────
+  const threadRouter = createThreadRouter({ express, db, auth, can, wrap });
+  app.use("/api/digital-thread", threadRouter);
+  app.use("/api/v1/digital-thread", threadRouter);
+
+  // ── P2 Standards & Exchange ───────────────────────────────────────────────
+  const exchangeRouter = createExchangeRouter({ express, db, auth, can, wrap });
+  app.use("/api/standards-exchange", exchangeRouter);
+  app.use("/api/v1/standards-exchange", exchangeRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

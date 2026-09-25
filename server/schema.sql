@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS group_members (
   PRIMARY KEY (group_id, user_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id);
+
 CREATE TABLE IF NOT EXISTS roles (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -2475,6 +2477,7 @@ CREATE TABLE IF NOT EXISTS job_executions (
 
 CREATE INDEX IF NOT EXISTS idx_job_executions_job ON job_executions(job_id, attempt);
 CREATE INDEX IF NOT EXISTS idx_job_executions_status ON job_executions(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_executions_queue_started ON job_executions(queue, started_at);
 
 -- Administrative configuration audit trail (queue and schedule changes).
 CREATE TABLE IF NOT EXISTS job_engine_audit (
@@ -9670,3 +9673,723 @@ CREATE TABLE IF NOT EXISTS pdm_configuration (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pdm_configuration_tenant ON pdm_configuration(tenant_id, key);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Digital Thread (P1 cross-domain traceability & query layer)
+--
+-- The Digital Thread is a projection/query capability over the existing
+-- Object & Relationship, Reference and Dependency frameworks plus the PDM and
+-- BOM domains. These tables persist configuration (definitions, rules),
+-- immutable projections (snapshots, baselines) and derived projection state;
+-- they never duplicate the source business objects.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS thread_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  thread_type TEXT NOT NULL DEFAULT 'PRODUCT_DEVELOPMENT',
+  root_object_type TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'DOWNSTREAM' CHECK (direction IN ('UPSTREAM','DOWNSTREAM','BOTH')),
+  max_depth INTEGER NOT NULL DEFAULT 25,
+  revision_rule_code TEXT NOT NULL DEFAULT '',
+  configuration_rule_code TEXT NOT NULL DEFAULT '',
+  definition_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE','ARCHIVED')),
+  display_order INTEGER NOT NULL DEFAULT 100,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_definitions_code ON thread_definitions(tenant_id, code);
+CREATE INDEX IF NOT EXISTS idx_thread_definitions_tenant ON thread_definitions(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS thread_definition_domains (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES thread_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  domain_code TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  object_types_json TEXT NOT NULL DEFAULT '[]',
+  color TEXT NOT NULL DEFAULT '',
+  icon TEXT NOT NULL DEFAULT '',
+  is_required INTEGER NOT NULL DEFAULT 0 CHECK (is_required IN (0,1)),
+  display_order INTEGER NOT NULL DEFAULT 100,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, domain_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_domains_definition ON thread_definition_domains(definition_id, display_order);
+
+CREATE TABLE IF NOT EXISTS thread_definition_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES thread_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  relationship_type TEXT NOT NULL,
+  semantic TEXT NOT NULL DEFAULT 'CUSTOM',
+  source_domain TEXT NOT NULL DEFAULT '',
+  target_domain TEXT NOT NULL DEFAULT '',
+  is_required INTEGER NOT NULL DEFAULT 0 CHECK (is_required IN (0,1)),
+  display_order INTEGER NOT NULL DEFAULT 100,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, relationship_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_rel_def ON thread_definition_relationships(definition_id, display_order);
+
+CREATE TABLE IF NOT EXISTS thread_traceability_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  definition_code TEXT NOT NULL DEFAULT '',
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  source_domain TEXT NOT NULL,
+  target_domain TEXT NOT NULL,
+  relationship_type TEXT NOT NULL DEFAULT '',
+  required INTEGER NOT NULL DEFAULT 1 CHECK (required IN (0,1)),
+  severity TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity IN ('INFO','WARNING','ERROR')),
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
+  display_order INTEGER NOT NULL DEFAULT 100,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_rules_tenant ON thread_traceability_rules(tenant_id, status, display_order);
+
+CREATE TABLE IF NOT EXISTS thread_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  thread_id TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  definition_code TEXT NOT NULL DEFAULT '',
+  root_object_type TEXT NOT NULL DEFAULT '',
+  root_object_id TEXT NOT NULL DEFAULT '',
+  root_revision TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'DOWNSTREAM',
+  query_context_json TEXT NOT NULL DEFAULT '{}',
+  revision_context_json TEXT NOT NULL DEFAULT '{}',
+  effectivity_context_json TEXT NOT NULL DEFAULT '{}',
+  configuration_context_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'FROZEN' CHECK (status IN ('DRAFT','FROZEN','ARCHIVED')),
+  immutable INTEGER NOT NULL DEFAULT 0 CHECK (immutable IN (0,1)),
+  node_count INTEGER NOT NULL DEFAULT 0,
+  edge_count INTEGER NOT NULL DEFAULT 0,
+  truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
+  consistency TEXT NOT NULL DEFAULT 'CURRENT' CHECK (consistency IN ('CURRENT','UPDATING','STALE','FAILED')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_snapshots_ref ON thread_snapshots(tenant_id, snapshot_ref);
+CREATE INDEX IF NOT EXISTS idx_thread_snapshots_tenant ON thread_snapshots(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS thread_snapshot_nodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_id INTEGER NOT NULL REFERENCES thread_snapshots(id) ON DELETE CASCADE,
+  node_ref TEXT NOT NULL,
+  source_object_type TEXT NOT NULL,
+  source_object_id TEXT NOT NULL,
+  source_object_revision_id TEXT NOT NULL DEFAULT '',
+  domain TEXT NOT NULL DEFAULT '',
+  display_name TEXT NOT NULL DEFAULT '',
+  number TEXT NOT NULL DEFAULT '',
+  revision TEXT NOT NULL DEFAULT '',
+  lifecycle_state TEXT NOT NULL DEFAULT '',
+  organization_id INTEGER,
+  site TEXT NOT NULL DEFAULT '',
+  node_type TEXT NOT NULL DEFAULT '',
+  depth INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_snapshot_nodes_snapshot ON thread_snapshot_nodes(snapshot_id, depth);
+CREATE INDEX IF NOT EXISTS idx_thread_snapshot_nodes_ref ON thread_snapshot_nodes(snapshot_id, node_ref);
+
+CREATE TABLE IF NOT EXISTS thread_snapshot_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_id INTEGER NOT NULL REFERENCES thread_snapshots(id) ON DELETE CASCADE,
+  edge_ref TEXT NOT NULL DEFAULT '',
+  source_node_ref TEXT NOT NULL,
+  target_node_ref TEXT NOT NULL,
+  relationship_type TEXT NOT NULL DEFAULT '',
+  relationship_id TEXT NOT NULL DEFAULT '',
+  relationship_direction TEXT NOT NULL DEFAULT 'OUT',
+  source_revision TEXT NOT NULL DEFAULT '',
+  target_revision TEXT NOT NULL DEFAULT '',
+  effectivity_json TEXT NOT NULL DEFAULT '{}',
+  configuration_json TEXT NOT NULL DEFAULT '{}',
+  lifecycle_context TEXT NOT NULL DEFAULT '',
+  confidence REAL,
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_snapshot_edges_snapshot ON thread_snapshot_edges(snapshot_id);
+
+CREATE TABLE IF NOT EXISTS thread_baselines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  baseline_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  snapshot_id INTEGER REFERENCES thread_snapshots(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  definition_code TEXT NOT NULL DEFAULT '',
+  query_context_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','RELEASED','FROZEN','ARCHIVED')),
+  immutable INTEGER NOT NULL DEFAULT 0 CHECK (immutable IN (0,1)),
+  member_count INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  released_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  released_at TEXT,
+  frozen_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_baselines_ref ON thread_baselines(tenant_id, baseline_ref);
+CREATE INDEX IF NOT EXISTS idx_thread_baselines_tenant ON thread_baselines(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS thread_baseline_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  baseline_id INTEGER NOT NULL REFERENCES thread_baselines(id) ON DELETE CASCADE,
+  node_ref TEXT NOT NULL,
+  domain TEXT NOT NULL DEFAULT '',
+  source_object_type TEXT NOT NULL DEFAULT '',
+  source_object_id TEXT NOT NULL DEFAULT '',
+  revision TEXT NOT NULL DEFAULT '',
+  lifecycle_state TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_baseline_members_baseline ON thread_baseline_members(baseline_id);
+
+CREATE TABLE IF NOT EXISTS thread_query_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  action TEXT NOT NULL,
+  request_json TEXT NOT NULL DEFAULT '{}',
+  result_summary_json TEXT NOT NULL DEFAULT '{}',
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  node_count INTEGER NOT NULL DEFAULT 0,
+  edge_count INTEGER NOT NULL DEFAULT 0,
+  truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor_username TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_query_history_tenant ON thread_query_history(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_thread_query_history_action ON thread_query_history(tenant_id, action);
+
+CREATE TABLE IF NOT EXISTS thread_change_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entity_type TEXT NOT NULL DEFAULT '',
+  entity_id TEXT NOT NULL DEFAULT '',
+  entity_ref TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT '',
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  summary TEXT NOT NULL DEFAULT '',
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor_username TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_history_tenant ON thread_change_history(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_thread_history_entity ON thread_change_history(entity_type, entity_id);
+
+CREATE TABLE IF NOT EXISTS thread_projections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  projection_key TEXT NOT NULL DEFAULT 'default',
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'CURRENT' CHECK (status IN ('CURRENT','UPDATING','STALE','FAILED')),
+  node_json TEXT NOT NULL DEFAULT '{}',
+  last_event_type TEXT NOT NULL DEFAULT '',
+  last_event_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, projection_key, object_type, object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_projections_tenant ON thread_projections(tenant_id, projection_key, status);
+
+CREATE TABLE IF NOT EXISTS thread_projection_state (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  projection_key TEXT NOT NULL DEFAULT 'default',
+  consistency TEXT NOT NULL DEFAULT 'CURRENT' CHECK (consistency IN ('CURRENT','UPDATING','STALE','FAILED')),
+  last_event_type TEXT NOT NULL DEFAULT '',
+  last_event_at TEXT,
+  processed_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  lag_ms INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, projection_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_projection_state_tenant ON thread_projection_state(tenant_id, projection_key);
+
+CREATE TABLE IF NOT EXISTS thread_events_processed (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  projection_key TEXT NOT NULL DEFAULT 'default',
+  event_id INTEGER,
+  event_type TEXT NOT NULL DEFAULT '',
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'PROCESSED' CHECK (status IN ('PROCESSED','FAILED','SKIPPED')),
+  error TEXT NOT NULL DEFAULT '',
+  processed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, projection_key, event_id, event_type, object_type, object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_events_processed_event ON thread_events_processed(event_id);
+
+CREATE TABLE IF NOT EXISTS thread_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_configuration_tenant ON thread_configuration(tenant_id, key);
+
+-- ── Standards & Exchange (P2 Module 19) ──────────────────────────────────────
+-- Standards-specific knowledge only: formats, adapters, mapping/transformation/
+-- validation profiles and the exchange ledger. Enterprise objects, files, BOMs,
+-- PDM data, security, jobs, events and audit remain in their platform services.
+
+CREATE TABLE IF NOT EXISTS exchange_adapters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  provider TEXT NOT NULL DEFAULT 'platform',
+  provider_version TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'OTHER',
+  status TEXT NOT NULL DEFAULT 'AVAILABLE' CHECK (status IN ('AVAILABLE','PLANNED','UNSUPPORTED','DISABLED')),
+  capabilities_json TEXT NOT NULL DEFAULT '{}',
+  formats_json TEXT NOT NULL DEFAULT '[]',
+  library TEXT NOT NULL DEFAULT '',
+  is_builtin INTEGER NOT NULL DEFAULT 0 CHECK (is_builtin IN (0,1)),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_adapters_tenant ON exchange_adapters(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS exchange_formats (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  format_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  standard_name TEXT NOT NULL DEFAULT '',
+  standard_version TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'OTHER',
+  mime_types_json TEXT NOT NULL DEFAULT '[]',
+  extensions_json TEXT NOT NULL DEFAULT '[]',
+  direction TEXT NOT NULL DEFAULT 'BOTH' CHECK (direction IN ('IMPORT','EXPORT','BOTH')),
+  adapter_code TEXT NOT NULL DEFAULT '',
+  import_supported INTEGER NOT NULL DEFAULT 0 CHECK (import_supported IN (0,1)),
+  export_supported INTEGER NOT NULL DEFAULT 0 CHECK (export_supported IN (0,1)),
+  validate_supported INTEGER NOT NULL DEFAULT 0 CHECK (validate_supported IN (0,1)),
+  capabilities_json TEXT NOT NULL DEFAULT '{}',
+  schema_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('DRAFT','ACTIVE','DEPRECATED','OBSOLETE')),
+  effective_from TEXT,
+  effective_to TEXT,
+  is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0,1)),
+  display_order INTEGER NOT NULL DEFAULT 100,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_formats_tenant ON exchange_formats(tenant_id, status, category);
+
+CREATE TABLE IF NOT EXISTS exchange_format_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  format_id INTEGER NOT NULL REFERENCES exchange_formats(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  standard_version TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('DRAFT','ACTIVE','DEPRECATED','OBSOLETE')),
+  schema_json TEXT NOT NULL DEFAULT '{}',
+  capabilities_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  effective_from TEXT,
+  effective_to TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (format_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_format_versions_format ON exchange_format_versions(format_id, version);
+
+CREATE TABLE IF NOT EXISTS exchange_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  site TEXT NOT NULL DEFAULT '',
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  format_code TEXT NOT NULL,
+  format_version TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'IMPORT' CHECK (direction IN ('IMPORT','EXPORT','BOTH')),
+  source_object_type TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL DEFAULT '',
+  source_schema_json TEXT NOT NULL DEFAULT '{}',
+  mapping_code TEXT NOT NULL DEFAULT '',
+  transformation_code TEXT NOT NULL DEFAULT '',
+  validation_profile_code TEXT NOT NULL DEFAULT '',
+  security_policy_json TEXT NOT NULL DEFAULT '{}',
+  scope_json TEXT NOT NULL DEFAULT '{}',
+  lifecycle_constraints_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','DEPRECATED','OBSOLETE')),
+  approval_status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (approval_status IN ('DRAFT','PENDING','APPROVED','REJECTED')),
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  effective_from TEXT,
+  effective_to TEXT,
+  published_at TEXT,
+  published_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_definitions_tenant ON exchange_definitions(tenant_id, status, direction);
+CREATE INDEX IF NOT EXISTS idx_exchange_definitions_format ON exchange_definitions(tenant_id, format_code);
+
+CREATE TABLE IF NOT EXISTS exchange_definition_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  definition_id INTEGER NOT NULL REFERENCES exchange_definitions(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','DEPRECATED','OBSOLETE')),
+  approval_status TEXT NOT NULL DEFAULT 'DRAFT',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  change_summary TEXT NOT NULL DEFAULT '',
+  published_at TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (definition_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_definition_versions_def ON exchange_definition_versions(definition_id, version);
+
+CREATE TABLE IF NOT EXISTS exchange_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  mapping_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  format_code TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'IMPORT' CHECK (direction IN ('IMPORT','EXPORT','BOTH')),
+  source_kind TEXT NOT NULL DEFAULT 'STANDARD' CHECK (source_kind IN ('STANDARD','CANONICAL','ENTERPRISE')),
+  source_object_type TEXT NOT NULL DEFAULT '',
+  target_object_type TEXT NOT NULL DEFAULT '',
+  rules_json TEXT NOT NULL DEFAULT '[]',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','DEPRECATED','OBSOLETE')),
+  immutable INTEGER NOT NULL DEFAULT 0 CHECK (immutable IN (0,1)),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_mappings_tenant ON exchange_mappings(tenant_id, status, direction);
+
+CREATE TABLE IF NOT EXISTS exchange_mapping_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  mapping_id INTEGER NOT NULL REFERENCES exchange_mappings(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  rules_json TEXT NOT NULL DEFAULT '[]',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (mapping_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_mapping_versions_mapping ON exchange_mapping_versions(mapping_id, version);
+
+CREATE TABLE IF NOT EXISTS exchange_transformations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  transformation_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'IMPORT' CHECK (direction IN ('IMPORT','EXPORT','BOTH')),
+  stage TEXT NOT NULL DEFAULT 'FIELD',
+  steps_json TEXT NOT NULL DEFAULT '[]',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','DEPRECATED','OBSOLETE')),
+  immutable INTEGER NOT NULL DEFAULT 0 CHECK (immutable IN (0,1)),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_transformations_tenant ON exchange_transformations(tenant_id, status, direction);
+
+CREATE TABLE IF NOT EXISTS exchange_transformation_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  transformation_id INTEGER NOT NULL REFERENCES exchange_transformations(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  steps_json TEXT NOT NULL DEFAULT '[]',
+  change_summary TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (transformation_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_transformation_versions_tr ON exchange_transformation_versions(transformation_id, version);
+
+CREATE TABLE IF NOT EXISTS exchange_validation_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  profile_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  format_code TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'IMPORT' CHECK (direction IN ('IMPORT','EXPORT','BOTH')),
+  target_object_type TEXT NOT NULL DEFAULT '',
+  levels_json TEXT NOT NULL DEFAULT '["FILE","STANDARDS","ENTERPRISE"]',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ACTIVE','DEPRECATED','OBSOLETE')),
+  immutable INTEGER NOT NULL DEFAULT 0 CHECK (immutable IN (0,1)),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_validation_profiles_tenant ON exchange_validation_profiles(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS exchange_validation_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  profile_id INTEGER NOT NULL REFERENCES exchange_validation_profiles(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  sequence INTEGER NOT NULL DEFAULT 0,
+  level TEXT NOT NULL DEFAULT 'ENTERPRISE' CHECK (level IN ('FILE','STANDARDS','ENTERPRISE')),
+  target_field TEXT NOT NULL DEFAULT '',
+  rule_type TEXT NOT NULL,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  severity TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity IN ('ERROR','WARNING','INFO')),
+  message TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_validation_rules_profile ON exchange_validation_rules(profile_id, sequence);
+
+CREATE TABLE IF NOT EXISTS exchange_transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  transaction_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  site TEXT NOT NULL DEFAULT '',
+  definition_code TEXT NOT NULL DEFAULT '',
+  definition_version INTEGER NOT NULL DEFAULT 0,
+  format_code TEXT NOT NULL DEFAULT '',
+  format_version TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'IMPORT' CHECK (direction IN ('IMPORT','EXPORT','BOTH')),
+  operation TEXT NOT NULL DEFAULT 'EXECUTE' CHECK (operation IN ('PREVIEW','DRY_RUN','VALIDATE_ONLY','EXECUTE','EXPORT')),
+  status TEXT NOT NULL DEFAULT 'QUEUED' CHECK (status IN ('QUEUED','RUNNING','VALIDATING','PREVIEW','COMPLETED','PARTIAL','FAILED','CANCELLED')),
+  source_kind TEXT NOT NULL DEFAULT 'PAYLOAD',
+  source_name TEXT NOT NULL DEFAULT '',
+  input_json TEXT NOT NULL DEFAULT '{}',
+  output_ref TEXT NOT NULL DEFAULT '',
+  output_json TEXT NOT NULL DEFAULT '{}',
+  counts_json TEXT NOT NULL DEFAULT '{}',
+  validation_summary_json TEXT NOT NULL DEFAULT '{}',
+  reconciliation_json TEXT NOT NULL DEFAULT '{}',
+  security_json TEXT NOT NULL DEFAULT '{}',
+  file_ids_json TEXT NOT NULL DEFAULT '[]',
+  idempotency_key TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  error_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT,
+  finished_at TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exchange_transactions_ref ON exchange_transactions(tenant_id, transaction_ref);
+CREATE INDEX IF NOT EXISTS idx_exchange_transactions_tenant ON exchange_transactions(tenant_id, status, direction, created_at);
+CREATE INDEX IF NOT EXISTS idx_exchange_transactions_idem ON exchange_transactions(tenant_id, idempotency_key);
+
+CREATE TABLE IF NOT EXISTS exchange_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  transaction_ref TEXT NOT NULL DEFAULT '',
+  handler_code TEXT NOT NULL DEFAULT '',
+  platform_job_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'QUEUED' CHECK (status IN ('QUEUED','RUNNING','COMPLETED','PARTIAL','FAILED','CANCELLED')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 1,
+  progress_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT NOT NULL DEFAULT '',
+  queued_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exchange_jobs_ref ON exchange_jobs(tenant_id, job_ref);
+CREATE INDEX IF NOT EXISTS idx_exchange_jobs_tenant ON exchange_jobs(tenant_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_exchange_jobs_transaction ON exchange_jobs(tenant_id, transaction_ref);
+
+CREATE TABLE IF NOT EXISTS exchange_job_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES exchange_jobs(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  transaction_ref TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'COMPLETED',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_job_results_job ON exchange_job_results(job_id);
+
+CREATE TABLE IF NOT EXISTS exchange_reconciliations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reconciliation_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  transaction_ref TEXT NOT NULL DEFAULT '',
+  records_read INTEGER NOT NULL DEFAULT 0,
+  records_validated INTEGER NOT NULL DEFAULT 0,
+  records_created INTEGER NOT NULL DEFAULT 0,
+  records_updated INTEGER NOT NULL DEFAULT 0,
+  records_skipped INTEGER NOT NULL DEFAULT 0,
+  records_failed INTEGER NOT NULL DEFAULT 0,
+  relationships_created INTEGER NOT NULL DEFAULT 0,
+  relationships_failed INTEGER NOT NULL DEFAULT 0,
+  files_processed INTEGER NOT NULL DEFAULT 0,
+  warnings INTEGER NOT NULL DEFAULT 0,
+  errors INTEGER NOT NULL DEFAULT 0,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exchange_reconciliations_ref ON exchange_reconciliations(tenant_id, reconciliation_ref);
+CREATE INDEX IF NOT EXISTS idx_exchange_reconciliations_txn ON exchange_reconciliations(tenant_id, transaction_ref);
+
+CREATE TABLE IF NOT EXISTS exchange_errors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  transaction_ref TEXT NOT NULL DEFAULT '',
+  definition_code TEXT NOT NULL DEFAULT '',
+  severity TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity IN ('ERROR','WARNING','INFO')),
+  code TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  source_path TEXT NOT NULL DEFAULT '',
+  target_object TEXT NOT NULL DEFAULT '',
+  attribute TEXT NOT NULL DEFAULT '',
+  rule TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','RESOLVED','IGNORED')),
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_errors_txn ON exchange_errors(tenant_id, transaction_ref, severity);
+
+CREATE TABLE IF NOT EXISTS exchange_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  transaction_ref TEXT NOT NULL DEFAULT '',
+  definition_code TEXT NOT NULL DEFAULT '',
+  definition_version INTEGER NOT NULL DEFAULT 0,
+  format_code TEXT NOT NULL DEFAULT '',
+  format_version TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL DEFAULT 'IMPORT',
+  action TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '',
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor_username TEXT NOT NULL DEFAULT '',
+  counts_json TEXT NOT NULL DEFAULT '{}',
+  summary TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_history_tenant ON exchange_history(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_exchange_history_txn ON exchange_history(tenant_id, transaction_ref);
+
+CREATE TABLE IF NOT EXISTS exchange_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_configuration_tenant ON exchange_configuration(tenant_id, key);

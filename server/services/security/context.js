@@ -3,7 +3,7 @@
 // fields: they are always re-derived from the session/user record.
 import { queryAll, queryOne } from "../../db.js";
 import { effectiveAccess } from "../access.js";
-import { effectivePermissions } from "../authorization.js";
+import { permissionsFromAccess } from "../authorization.js";
 import { listUserOrganizations, ancestorOrganizationIds } from "../orgs.js";
 
 const PLANT_KINDS = new Set(["plant", "site"]);
@@ -71,7 +71,7 @@ export function buildSecurityContext(db, actor, options = {}) {
 
   let permissions = [];
   try {
-    permissions = effectivePermissions(db, actor.id, {
+    permissions = permissionsFromAccess(db, access, {
       organizationId: options.organizationId ?? principal?.organization_id ?? 0,
     }).permissions;
   } catch {

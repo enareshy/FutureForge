@@ -1,69 +1,74 @@
 import React, { useEffect, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { getToken, iam, setToken } from "./api.js";
-import UsersPage from "./pages/UsersPage.jsx";
-import UserDetailPage from "./pages/UserDetailPage.jsx";
-import GroupsPage from "./pages/GroupsPage.jsx";
-import GroupDetailPage from "./pages/GroupDetailPage.jsx";
-import RolesPage from "./pages/RolesPage.jsx";
-import RoleDetailPage from "./pages/RoleDetailPage.jsx";
-import PolicyPage from "./pages/PolicyPage.jsx";
-import AuditPage from "./pages/AuditPage.jsx";
-import DashboardPage from "./pages/DashboardPage.jsx";
-import PermissionsPage from "./pages/PermissionsPage.jsx";
-import AuthorizationPage from "./pages/AuthorizationPage.jsx";
-import SecurityModelPage from "./pages/SecurityModelPage.jsx";
-import DataGovernancePage from "./pages/DataGovernancePage.jsx";
-import DataCatalogPage from "./pages/DataCatalogPage.jsx";
-import GlossaryPage from "./pages/GlossaryPage.jsx";
-import DataLifecyclePage from "./pages/DataLifecyclePage.jsx";
-import DataExchangePage from "./pages/DataExchangePage.jsx";
-import MigrationPage from "./pages/MigrationPage.jsx";
-import ClassificationPage from "./pages/ClassificationPage.jsx";
-import BomPage from "./pages/BomPage.jsx";
-import PdmPage from "./pages/PdmPage.jsx";
-import OrganizationsPage from "./pages/OrganizationsPage.jsx";
-import OrganizationDetailPage from "./pages/OrganizationDetailPage.jsx";
-import PlatformPage from "./pages/PlatformPage.jsx";
-import TenantsPage from "./pages/TenantsPage.jsx";
-import ConfigurationPage from "./pages/ConfigurationPage.jsx";
-import MetadataPage from "./pages/MetadataPage.jsx";
-import ObjectsPage from "./pages/ObjectsPage.jsx";
-import ObjectDetailPage from "./pages/ObjectDetailPage.jsx";
-import RelationshipTypesPage from "./pages/RelationshipTypesPage.jsx";
-import LifecyclePage from "./pages/LifecyclePage.jsx";
-import WorkflowPage from "./pages/WorkflowPage.jsx";
-import ExplorerPage from "./pages/ExplorerPage.jsx";
-import NotificationsPage from "./pages/NotificationsPage.jsx";
-import NotificationAdminPage from "./pages/NotificationAdminPage.jsx";
-import DeliveryAdminPage from "./pages/DeliveryAdminPage.jsx";
-import JobsDashboardPage from "./pages/JobsDashboardPage.jsx";
-import JobsPage from "./pages/JobsPage.jsx";
-import JobDetailPage from "./pages/JobDetailPage.jsx";
-import JobTypesPage from "./pages/JobTypesPage.jsx";
-import JobQueuesPage from "./pages/JobQueuesPage.jsx";
-import JobSchedulesPage from "./pages/JobSchedulesPage.jsx";
-import JobWorkersPage from "./pages/JobWorkersPage.jsx";
-import JobExecutionPage from "./pages/JobExecutionPage.jsx";
-import JobDeadLetterPage from "./pages/JobDeadLetterPage.jsx";
 import NotificationBell from "./components/NotificationBell.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
-import AuthenticationPage from "./pages/AuthenticationPage.jsx";
-import SessionsPage from "./pages/SessionsPage.jsx";
-import MfaPage from "./pages/MfaPage.jsx";
-import FilesPage from "./pages/FilesPage.jsx";
-import FileDetailPage from "./pages/FileDetailPage.jsx";
-import FileAdminPage from "./pages/FileAdminPage.jsx";
-import ContentPage from "./pages/ContentPage.jsx";
-import ContentAdminPage from "./pages/ContentAdminPage.jsx";
-import SearchPage from "./pages/SearchPage.jsx";
-import SearchFoundationPage from "./pages/SearchFoundationPage.jsx";
-import SearchAdminPage from "./pages/SearchAdminPage.jsx";
-import IntegrationPage from "./pages/IntegrationPage.jsx";
-import EventsPage from "./pages/EventsPage.jsx";
-import NumberingPage from "./pages/NumberingPage.jsx";
-import VersioningPage from "./pages/VersioningPage.jsx";
-import ReferenceDataPage from "./pages/ReferenceDataPage.jsx";
+// Route-level code splitting: each page is loaded on demand so the initial
+// bundle only contains the shell and the landing route instead of all 60+ admin
+// modules.
+const UsersPage = React.lazy(() => import("./pages/UsersPage.jsx"));
+const UserDetailPage = React.lazy(() => import("./pages/UserDetailPage.jsx"));
+const GroupsPage = React.lazy(() => import("./pages/GroupsPage.jsx"));
+const GroupDetailPage = React.lazy(() => import("./pages/GroupDetailPage.jsx"));
+const RolesPage = React.lazy(() => import("./pages/RolesPage.jsx"));
+const RoleDetailPage = React.lazy(() => import("./pages/RoleDetailPage.jsx"));
+const PolicyPage = React.lazy(() => import("./pages/PolicyPage.jsx"));
+const AuditPage = React.lazy(() => import("./pages/AuditPage.jsx"));
+const DashboardPage = React.lazy(() => import("./pages/DashboardPage.jsx"));
+const PermissionsPage = React.lazy(() => import("./pages/PermissionsPage.jsx"));
+const AuthorizationPage = React.lazy(() => import("./pages/AuthorizationPage.jsx"));
+const SecurityModelPage = React.lazy(() => import("./pages/SecurityModelPage.jsx"));
+const DataGovernancePage = React.lazy(() => import("./pages/DataGovernancePage.jsx"));
+const DataCatalogPage = React.lazy(() => import("./pages/DataCatalogPage.jsx"));
+const GlossaryPage = React.lazy(() => import("./pages/GlossaryPage.jsx"));
+const DataLifecyclePage = React.lazy(() => import("./pages/DataLifecyclePage.jsx"));
+const DataExchangePage = React.lazy(() => import("./pages/DataExchangePage.jsx"));
+const MigrationPage = React.lazy(() => import("./pages/MigrationPage.jsx"));
+const ClassificationPage = React.lazy(() => import("./pages/ClassificationPage.jsx"));
+const BomPage = React.lazy(() => import("./pages/BomPage.jsx"));
+const PdmPage = React.lazy(() => import("./pages/PdmPage.jsx"));
+const DigitalThreadPage = React.lazy(() => import("./pages/DigitalThreadPage.jsx"));
+const StandardsExchangePage = React.lazy(() => import("./pages/StandardsExchangePage.jsx"));
+const OrganizationsPage = React.lazy(() => import("./pages/OrganizationsPage.jsx"));
+const OrganizationDetailPage = React.lazy(() => import("./pages/OrganizationDetailPage.jsx"));
+const PlatformPage = React.lazy(() => import("./pages/PlatformPage.jsx"));
+const TenantsPage = React.lazy(() => import("./pages/TenantsPage.jsx"));
+const ConfigurationPage = React.lazy(() => import("./pages/ConfigurationPage.jsx"));
+const MetadataPage = React.lazy(() => import("./pages/MetadataPage.jsx"));
+const ObjectsPage = React.lazy(() => import("./pages/ObjectsPage.jsx"));
+const ObjectDetailPage = React.lazy(() => import("./pages/ObjectDetailPage.jsx"));
+const RelationshipTypesPage = React.lazy(() => import("./pages/RelationshipTypesPage.jsx"));
+const LifecyclePage = React.lazy(() => import("./pages/LifecyclePage.jsx"));
+const WorkflowPage = React.lazy(() => import("./pages/WorkflowPage.jsx"));
+const ExplorerPage = React.lazy(() => import("./pages/ExplorerPage.jsx"));
+const NotificationsPage = React.lazy(() => import("./pages/NotificationsPage.jsx"));
+const NotificationAdminPage = React.lazy(() => import("./pages/NotificationAdminPage.jsx"));
+const DeliveryAdminPage = React.lazy(() => import("./pages/DeliveryAdminPage.jsx"));
+const JobsDashboardPage = React.lazy(() => import("./pages/JobsDashboardPage.jsx"));
+const JobsPage = React.lazy(() => import("./pages/JobsPage.jsx"));
+const JobDetailPage = React.lazy(() => import("./pages/JobDetailPage.jsx"));
+const JobTypesPage = React.lazy(() => import("./pages/JobTypesPage.jsx"));
+const JobQueuesPage = React.lazy(() => import("./pages/JobQueuesPage.jsx"));
+const JobSchedulesPage = React.lazy(() => import("./pages/JobSchedulesPage.jsx"));
+const JobWorkersPage = React.lazy(() => import("./pages/JobWorkersPage.jsx"));
+const JobExecutionPage = React.lazy(() => import("./pages/JobExecutionPage.jsx"));
+const JobDeadLetterPage = React.lazy(() => import("./pages/JobDeadLetterPage.jsx"));
+const AuthenticationPage = React.lazy(() => import("./pages/AuthenticationPage.jsx"));
+const SessionsPage = React.lazy(() => import("./pages/SessionsPage.jsx"));
+const MfaPage = React.lazy(() => import("./pages/MfaPage.jsx"));
+const FilesPage = React.lazy(() => import("./pages/FilesPage.jsx"));
+const FileDetailPage = React.lazy(() => import("./pages/FileDetailPage.jsx"));
+const FileAdminPage = React.lazy(() => import("./pages/FileAdminPage.jsx"));
+const ContentPage = React.lazy(() => import("./pages/ContentPage.jsx"));
+const ContentAdminPage = React.lazy(() => import("./pages/ContentAdminPage.jsx"));
+const SearchPage = React.lazy(() => import("./pages/SearchPage.jsx"));
+const SearchFoundationPage = React.lazy(() => import("./pages/SearchFoundationPage.jsx"));
+const SearchAdminPage = React.lazy(() => import("./pages/SearchAdminPage.jsx"));
+const IntegrationPage = React.lazy(() => import("./pages/IntegrationPage.jsx"));
+const EventsPage = React.lazy(() => import("./pages/EventsPage.jsx"));
+const NumberingPage = React.lazy(() => import("./pages/NumberingPage.jsx"));
+const VersioningPage = React.lazy(() => import("./pages/VersioningPage.jsx"));
+const ReferenceDataPage = React.lazy(() => import("./pages/ReferenceDataPage.jsx"));
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -305,6 +310,16 @@ const PLATFORM_GROUPS = [
     items: [{ to: "/pdm", label: "PDM domain", platformOrAdmin: true }],
   },
   {
+    key: "digital-thread",
+    label: "Digital thread",
+    items: [{ to: "/digital-thread", label: "Traceability workspace", platformOrAdmin: true }],
+  },
+  {
+    key: "standards-exchange",
+    label: "Standards & exchange",
+    items: [{ to: "/standards-exchange", label: "Exchange workspace", platformOrAdmin: true }],
+  },
+  {
     key: "communication",
     label: "Communication",
     items: [
@@ -535,6 +550,7 @@ export default function App() {
   return (
     <Shell me={me} access={access} tenant={tenant} tenants={tenants} onSwitch={switchTenant} onLogout={logout}>
       <ErrorBoundary>
+      <React.Suspense fallback={<div className="page-loading mono">Loading…</div>}>
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/explorer" element={<ExplorerPage />} />
@@ -558,6 +574,8 @@ export default function App() {
         <Route path="/classification" element={<ClassificationPage />} />
         <Route path="/bom" element={<BomPage />} />
         <Route path="/pdm" element={<PdmPage />} />
+        <Route path="/digital-thread" element={<DigitalThreadPage />} />
+        <Route path="/standards-exchange" element={<StandardsExchangePage />} />
         <Route path="/policy" element={<PolicyPage />} />
         <Route path="/authentication" element={<AuthenticationPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
@@ -600,6 +618,7 @@ export default function App() {
         <Route path="/jobs/:id" element={<JobDetailPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </React.Suspense>
       </ErrorBoundary>
     </Shell>
   );

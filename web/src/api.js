@@ -2366,3 +2366,218 @@ export const pdm = {
   submitReindexJob: (body) => api("/api/v1/pdm/jobs/reindex", { method: "POST", body }),
   submitMaintenanceJob: () => api("/api/v1/pdm/jobs/maintenance", { method: "POST" }),
 };
+
+// P1 Digital Thread: end-to-end Requirement -> Service traceability built on the
+// existing object, PDM and BOM engines.
+export const digitalThread = {
+  meta: () => api("/api/v1/digital-thread/meta"),
+  health: () => api("/api/v1/digital-thread/health"),
+  metrics: () => api("/api/v1/digital-thread/metrics"),
+  activity: (qs) => api(`/api/v1/digital-thread/activity${qs || ""}`),
+  configuration: () => api("/api/v1/digital-thread/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/digital-thread/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  domains: (qs) => api(`/api/v1/digital-thread/domains${qs || ""}`),
+  providers: () => api("/api/v1/digital-thread/providers"),
+
+  definitions: (qs) => api(`/api/v1/digital-thread/definitions${qs || ""}`),
+  definition: (ref) => api(`/api/v1/digital-thread/definitions/${encodeURIComponent(ref)}`),
+  definitionSummary: () => api("/api/v1/digital-thread/definitions/summary"),
+  createDefinition: (body) => api("/api/v1/digital-thread/definitions", { method: "POST", body }),
+  updateDefinition: (ref, body) =>
+    api(`/api/v1/digital-thread/definitions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setDefinitionStatus: (ref, status) =>
+    api(`/api/v1/digital-thread/definitions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  deleteDefinition: (ref) =>
+    api(`/api/v1/digital-thread/definitions/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  rules: (qs) => api(`/api/v1/digital-thread/rules${qs || ""}`),
+  rule: (ref) => api(`/api/v1/digital-thread/rules/${encodeURIComponent(ref)}`),
+  ruleSummary: () => api("/api/v1/digital-thread/rules/summary"),
+  createRule: (body) => api("/api/v1/digital-thread/rules", { method: "POST", body }),
+  updateRule: (ref, body) =>
+    api(`/api/v1/digital-thread/rules/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setRuleStatus: (ref, status) =>
+    api(`/api/v1/digital-thread/rules/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  deleteRule: (ref) => api(`/api/v1/digital-thread/rules/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  traverse: (body) => api("/api/v1/digital-thread/traverse", { method: "POST", body }),
+  traverseGet: (qs) => api(`/api/v1/digital-thread/traverse${qs || ""}`),
+  traceability: (body) => api("/api/v1/digital-thread/traceability", { method: "POST", body }),
+  traceabilityMatrix: (body) => api("/api/v1/digital-thread/traceability/matrix", { method: "POST", body }),
+  impact: (body) => api("/api/v1/digital-thread/impact", { method: "POST", body }),
+  impactDirect: (body) => api("/api/v1/digital-thread/impact/direct", { method: "POST", body }),
+  dependency: (body) => api("/api/v1/digital-thread/dependency", { method: "POST", body }),
+  dependencyDirect: (body) => api("/api/v1/digital-thread/dependency/direct", { method: "POST", body }),
+  paths: (body) => api("/api/v1/digital-thread/paths", { method: "POST", body }),
+  completeness: (body) => api("/api/v1/digital-thread/completeness", { method: "POST", body }),
+
+  snapshots: (qs) => api(`/api/v1/digital-thread/snapshots${qs || ""}`),
+  snapshot: (ref, qs) => api(`/api/v1/digital-thread/snapshots/${encodeURIComponent(ref)}${qs || ""}`),
+  snapshotSummary: () => api("/api/v1/digital-thread/snapshots/summary"),
+  snapshotGraph: (ref) => api(`/api/v1/digital-thread/snapshots/${encodeURIComponent(ref)}/graph`),
+  createSnapshot: (body) => api("/api/v1/digital-thread/snapshots", { method: "POST", body }),
+  setSnapshotStatus: (ref, status) =>
+    api(`/api/v1/digital-thread/snapshots/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  deleteSnapshot: (ref) =>
+    api(`/api/v1/digital-thread/snapshots/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  baselines: (qs) => api(`/api/v1/digital-thread/baselines${qs || ""}`),
+  baseline: (ref, qs) => api(`/api/v1/digital-thread/baselines/${encodeURIComponent(ref)}${qs || ""}`),
+  baselineSummary: () => api("/api/v1/digital-thread/baselines/summary"),
+  baselineMembers: (ref) =>
+    api(`/api/v1/digital-thread/baselines/${encodeURIComponent(ref)}/members`),
+  createBaseline: (body) => api("/api/v1/digital-thread/baselines", { method: "POST", body }),
+  updateBaseline: (ref, body) =>
+    api(`/api/v1/digital-thread/baselines/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  releaseBaseline: (ref) =>
+    api(`/api/v1/digital-thread/baselines/${encodeURIComponent(ref)}/release`, { method: "POST" }),
+  freezeBaseline: (ref) =>
+    api(`/api/v1/digital-thread/baselines/${encodeURIComponent(ref)}/freeze`, { method: "POST" }),
+  deleteBaseline: (ref) =>
+    api(`/api/v1/digital-thread/baselines/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  compare: (body) => api("/api/v1/digital-thread/compare", { method: "POST", body }),
+  compareSnapshots: (body) => api("/api/v1/digital-thread/compare/snapshots", { method: "POST", body }),
+  compareBaselines: (body) => api("/api/v1/digital-thread/compare/baselines", { method: "POST", body }),
+
+  projections: (qs) => api(`/api/v1/digital-thread/projections${qs || ""}`),
+  projectionState: () => api("/api/v1/digital-thread/projections/state"),
+  projectionHealth: () => api("/api/v1/digital-thread/projections/health"),
+  projection: (objectType, objectId) =>
+    api(`/api/v1/digital-thread/projections/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`),
+  rebuildProjection: (body) =>
+    api("/api/v1/digital-thread/projections/rebuild", { method: "POST", body: body || {} }),
+
+  searchMeta: () => api("/api/v1/digital-thread/search-meta"),
+  reindexSearch: () => api("/api/v1/digital-thread/search/reindex", { method: "POST" }),
+
+  history: (qs) => api(`/api/v1/digital-thread/history${qs || ""}`),
+  queryHistory: (qs) => api(`/api/v1/digital-thread/query-history${qs || ""}`),
+  objectLineage: (objectType, objectId) =>
+    api(`/api/v1/digital-thread/history/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`),
+
+  submitTraversalJob: (body) => api("/api/v1/digital-thread/jobs/traverse", { method: "POST", body }),
+  submitImpactJob: (body) => api("/api/v1/digital-thread/jobs/impact", { method: "POST", body }),
+  submitPathsJob: (body) => api("/api/v1/digital-thread/jobs/paths", { method: "POST", body }),
+  submitSnapshotJob: (body) => api("/api/v1/digital-thread/jobs/snapshot", { method: "POST", body }),
+  submitBaselineJob: (body) => api("/api/v1/digital-thread/jobs/baseline", { method: "POST", body }),
+  submitCompletenessJob: (body) => api("/api/v1/digital-thread/jobs/completeness", { method: "POST", body }),
+  submitReindexJob: (body) => api("/api/v1/digital-thread/jobs/reindex", { method: "POST", body }),
+  submitProjectionRebuildJob: (body) =>
+    api("/api/v1/digital-thread/jobs/projection-rebuild", { method: "POST", body }),
+  submitMaintenanceJob: () => api("/api/v1/digital-thread/jobs/maintenance", { method: "POST" }),
+
+  ensureFoundation: () => api("/api/v1/digital-thread/foundation/ensure", { method: "POST" }),
+  seed: () => api("/api/v1/digital-thread/seed", { method: "POST" }),
+};
+
+// P2 Standards & Exchange: standards-based import/export built on the shared
+// Import/Export, Object, BOM and PDM engines rather than a second framework.
+export const standardsExchange = {
+  meta: () => api("/api/v1/standards-exchange/meta"),
+  health: () => api("/api/v1/standards-exchange/health"),
+  metrics: () => api("/api/v1/standards-exchange/metrics"),
+  throughput: (qs) => api(`/api/v1/standards-exchange/throughput${qs || ""}`),
+  configuration: () => api("/api/v1/standards-exchange/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/standards-exchange/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  adapters: () => api("/api/v1/standards-exchange/adapters"),
+  adapter: (code) => api(`/api/v1/standards-exchange/adapters/${encodeURIComponent(code)}`),
+  integrations: () => api("/api/v1/standards-exchange/integrations"),
+  detect: (body) => api("/api/v1/standards-exchange/detect", { method: "POST", body }),
+
+  formats: (qs) => api(`/api/v1/standards-exchange/formats${qs || ""}`),
+  format: (ref) => api(`/api/v1/standards-exchange/formats/${encodeURIComponent(ref)}`),
+  createFormat: (body) => api("/api/v1/standards-exchange/formats", { method: "POST", body }),
+  setFormatStatus: (ref, status) =>
+    api(`/api/v1/standards-exchange/formats/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  formatVersions: (ref) => api(`/api/v1/standards-exchange/formats/${encodeURIComponent(ref)}/versions`),
+
+  definitions: (qs) => api(`/api/v1/standards-exchange/definitions${qs || ""}`),
+  definition: (ref) => api(`/api/v1/standards-exchange/definitions/${encodeURIComponent(ref)}`),
+  definitionSummary: () => api("/api/v1/standards-exchange/definitions/summary"),
+  createDefinition: (body) => api("/api/v1/standards-exchange/definitions", { method: "POST", body }),
+  updateDefinition: (ref, body) =>
+    api(`/api/v1/standards-exchange/definitions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  publishDefinition: (ref, body) =>
+    api(`/api/v1/standards-exchange/definitions/${encodeURIComponent(ref)}/publish`, { method: "POST", body }),
+  setDefinitionStatus: (ref, status) =>
+    api(`/api/v1/standards-exchange/definitions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  deleteDefinition: (ref) =>
+    api(`/api/v1/standards-exchange/definitions/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  definitionVersions: (ref) => api(`/api/v1/standards-exchange/definitions/${encodeURIComponent(ref)}/versions`),
+
+  mappings: (qs) => api(`/api/v1/standards-exchange/mappings${qs || ""}`),
+  mapping: (ref) => api(`/api/v1/standards-exchange/mappings/${encodeURIComponent(ref)}`),
+  createMapping: (body) => api("/api/v1/standards-exchange/mappings", { method: "POST", body }),
+  publishMapping: (ref, body) =>
+    api(`/api/v1/standards-exchange/mappings/${encodeURIComponent(ref)}/publish`, { method: "POST", body }),
+  validateMapping: (ref, body) =>
+    api(`/api/v1/standards-exchange/mappings/${encodeURIComponent(ref)}/validate`, { method: "POST", body }),
+  applyMapping: (ref, body) =>
+    api(`/api/v1/standards-exchange/mappings/${encodeURIComponent(ref)}/apply`, { method: "POST", body }),
+  deleteMapping: (ref) =>
+    api(`/api/v1/standards-exchange/mappings/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  transformations: (qs) => api(`/api/v1/standards-exchange/transformations${qs || ""}`),
+  transformation: (ref) => api(`/api/v1/standards-exchange/transformations/${encodeURIComponent(ref)}`),
+  createTransformation: (body) => api("/api/v1/standards-exchange/transformations", { method: "POST", body }),
+  publishTransformation: (ref, body) =>
+    api(`/api/v1/standards-exchange/transformations/${encodeURIComponent(ref)}/publish`, { method: "POST", body }),
+  validateTransformation: (ref) =>
+    api(`/api/v1/standards-exchange/transformations/${encodeURIComponent(ref)}/validate`, { method: "POST" }),
+  applyTransformation: (ref, body) =>
+    api(`/api/v1/standards-exchange/transformations/${encodeURIComponent(ref)}/apply`, { method: "POST", body }),
+  deleteTransformation: (ref) =>
+    api(`/api/v1/standards-exchange/transformations/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  validationProfiles: (qs) => api(`/api/v1/standards-exchange/validation-profiles${qs || ""}`),
+  validationProfile: (ref) => api(`/api/v1/standards-exchange/validation-profiles/${encodeURIComponent(ref)}`),
+  createValidationProfile: (body) => api("/api/v1/standards-exchange/validation-profiles", { method: "POST", body }),
+  addValidationRule: (ref, body) =>
+    api(`/api/v1/standards-exchange/validation-profiles/${encodeURIComponent(ref)}/rules`, { method: "POST", body }),
+  setValidationProfileStatus: (ref, status) =>
+    api(`/api/v1/standards-exchange/validation-profiles/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  deleteValidationProfile: (ref) =>
+    api(`/api/v1/standards-exchange/validation-profiles/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  importPreview: (body) => api("/api/v1/standards-exchange/import/preview", { method: "POST", body }),
+  importDryRun: (body) => api("/api/v1/standards-exchange/import/dry-run", { method: "POST", body }),
+  importRun: (body) => api("/api/v1/standards-exchange/import", { method: "POST", body }),
+  validate: (body) => api("/api/v1/standards-exchange/validate", { method: "POST", body }),
+  exportPreview: (body) => api("/api/v1/standards-exchange/export/preview", { method: "POST", body }),
+  exportRun: (body) => api("/api/v1/standards-exchange/export", { method: "POST", body }),
+
+  transactions: (qs) => api(`/api/v1/standards-exchange/transactions${qs || ""}`),
+  transaction: (ref) => api(`/api/v1/standards-exchange/transactions/${encodeURIComponent(ref)}`),
+  transactionSummary: () => api("/api/v1/standards-exchange/transactions/summary"),
+  cancelTransaction: (ref) =>
+    api(`/api/v1/standards-exchange/transactions/${encodeURIComponent(ref)}/cancel`, { method: "POST" }),
+  reconcileTransaction: (ref) =>
+    api(`/api/v1/standards-exchange/transactions/${encodeURIComponent(ref)}/reconcile`, { method: "POST" }),
+
+  reconciliations: (qs) => api(`/api/v1/standards-exchange/reconciliations${qs || ""}`),
+  reconciliation: (ref) => api(`/api/v1/standards-exchange/reconciliations/${encodeURIComponent(ref)}`),
+
+  errors: (qs) => api(`/api/v1/standards-exchange/errors${qs || ""}`),
+  history: (qs) => api(`/api/v1/standards-exchange/history${qs || ""}`),
+  transactionTimeline: (ref) =>
+    api(`/api/v1/standards-exchange/history/${encodeURIComponent(ref)}`),
+
+  jobs: (qs) => api(`/api/v1/standards-exchange/jobs${qs || ""}`),
+  job: (ref) => api(`/api/v1/standards-exchange/jobs/${encodeURIComponent(ref)}`),
+  submitImportJob: (body) => api("/api/v1/standards-exchange/jobs/import", { method: "POST", body }),
+  submitExportJob: (body) => api("/api/v1/standards-exchange/jobs/export", { method: "POST", body }),
+  submitValidateJob: (body) => api("/api/v1/standards-exchange/jobs/validate", { method: "POST", body }),
+  submitReconcileJob: (body) => api("/api/v1/standards-exchange/jobs/reconcile", { method: "POST", body }),
+  submitMaintenanceJob: () => api("/api/v1/standards-exchange/jobs/maintenance", { method: "POST" }),
+
+  searchMeta: () => api("/api/v1/standards-exchange/search-meta"),
+  reindexSearch: () => api("/api/v1/standards-exchange/search/reindex", { method: "POST" }),
+
+  ensureFoundation: () => api("/api/v1/standards-exchange/foundation/ensure", { method: "POST" }),
+  seed: () => api("/api/v1/standards-exchange/seed", { method: "POST" }),
+};

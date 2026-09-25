@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { jobs } from "../api.js";
+import { useDebouncedValue } from "../hooks.js";
 import { JobStatusBadge, JobProgress } from "../components/JobStatusBadge.jsx";
 
 const ACTIVE = ["created", "queued", "waiting_for_dependency", "scheduled", "running", "paused", "retrying", "cancel_requested"];
@@ -22,6 +23,7 @@ export default function JobsPage() {
   const [busy, setBusy] = useState(false);
 
   const scope = allTenants ? "all=true&" : "";
+  const appliedFilters = useDebouncedValue(filters, 300);
 
   useEffect(() => {
     jobs.meta().then(setMeta).catch((err) => setError(err.message));
@@ -38,7 +40,7 @@ export default function JobsPage() {
     setError("");
     try {
       const params = new URLSearchParams();
-      for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
+      for (const [key, value] of Object.entries(appliedFilters)) if (value) params.set(key, value);
       params.set("page", String(page));
       params.set("pageSize", String(pageSize));
       params.set("sort", sort.sort);
@@ -48,7 +50,7 @@ export default function JobsPage() {
     } catch (err) {
       setError(err.message);
     }
-  }, [filters, page, pageSize, sort, scope]);
+  }, [appliedFilters, page, pageSize, sort, scope]);
 
   useEffect(() => { load(); }, [load]);
 

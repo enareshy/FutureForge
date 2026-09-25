@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { referenceData } from "../api.js";
+import { useDebouncedValue } from "../hooks.js";
 
 const TABS = [
   { key: "overview", label: "Overview" },
@@ -95,11 +96,13 @@ export default function ReferenceDataPage() {
     setItems(res.items || []);
   }, []);
 
+  const debouncedSearchText = useDebouncedValue(searchText, 300);
+
   useEffect(() => {
     if (valuesDomain) {
-      loadValues(valuesDomain, searchText).catch((err) => setError(err.message));
+      loadValues(valuesDomain, debouncedSearchText).catch((err) => setError(err.message));
     }
-  }, [valuesDomain, searchText, loadValues]);
+  }, [valuesDomain, debouncedSearchText, loadValues]);
 
   async function run(fn, success) {
     setError("");

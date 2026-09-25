@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { jobExecution } from "../api.js";
 import { DeadLetterStatusBadge, formatDateTime } from "../components/JobEngineBadges.jsx";
+import { useDebouncedValue } from "../hooks.js";
 
 export default function JobDeadLetterPage() {
   const navigate = useNavigate();
@@ -16,6 +17,7 @@ export default function JobDeadLetterPage() {
   const [notice, setNotice] = useState("");
 
   const scope = allTenants ? "all=true&" : "";
+  const appliedFilters = useDebouncedValue(filters, 300);
 
   useEffect(() => { jobExecution.meta().then(setMeta).catch(() => {}); }, []);
 
@@ -23,12 +25,12 @@ export default function JobDeadLetterPage() {
     setError("");
     try {
       const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
-      for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
+      for (const [key, value] of Object.entries(appliedFilters)) if (value) params.set(key, value);
       setList(await jobExecution.deadLetters(`?${scope}${params.toString()}`));
     } catch (err) {
       setError(err.message);
     }
-  }, [filters, page, pageSize, scope]);
+  }, [appliedFilters, page, pageSize, scope]);
 
   useEffect(() => { load(); }, [load]);
 
