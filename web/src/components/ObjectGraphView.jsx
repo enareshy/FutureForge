@@ -40,7 +40,10 @@ function computeLayout(nodeIds, edges, rootId) {
   const area = WIDTH * HEIGHT;
   const k = Math.sqrt(area / Math.max(n, 1));
   let temperature = WIDTH / 8;
-  const iterations = 320;
+  // The all-pairs force loop is O(iterations · n²). Scale the iteration budget
+  // down as the graph grows so large projections stay interactive instead of
+  // freezing the main thread for seconds.
+  const iterations = Math.max(40, Math.min(320, Math.round(60000 / Math.max(n, 1))));
   const fixed = new Set([rootId]);
 
   for (let step = 0; step < iterations; step += 1) {
@@ -98,12 +101,16 @@ function computeLayout(nodeIds, edges, rootId) {
     temperature *= 0.985;
   }
 
-  const xs = [...positions.values()].map((p) => p.x);
-  const ys = [...positions.values()].map((p) => p.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of positions.values()) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
   const spanX = maxX - minX || 1;
   const spanY = maxY - minY || 1;
   const scale = Math.min((WIDTH - PAD * 2) / spanX, (HEIGHT - PAD * 2) / spanY, 3);

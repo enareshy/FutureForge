@@ -6,12 +6,57 @@ import * as tenants from "../tenants.js";
 import { findObjectRow, briefObject } from "./repository.js";
 import { findRelationshipType, publicRelationshipType } from "./relationship-types.js";
 import { RELATIONSHIP_STATUSES, assertValidEdgeValues } from "./validation.js";
+import { emitObjectIndexChange } from "../search/hooks.js";
+import { emitDomainEvent } from "../events/emit.js";
 
 // Relationship engine. Creates, validates and traverses typed edges while
 // enforcing type compatibility, cardinality, tenant isolation and referential
 // integrity. Edges are soft-deleted so the graph keeps an auditable history.
 
 export const MAX_TRAVERSAL_DEPTH = 10;
+
+// Relationship changes alter both endpoints' relationship projections, so both
+// objects are queued for search reindexing.
+function emitRelationshipIndex(db, tenantId, ...objectIds) {
+  for (const objectId of new Set(objectIds.filter(Boolean))) {
+    emitObjectIndexChange(db, {
+      tenantId,
+      objectType: "object",
+      objectId,
+      operation: "upsert",
+      reason: "relationship",
+    });
+  }
+}
+
+// Publishes a relationship domain event through the Event & Messaging
+// Framework so subscribers react without the object module calling them.
+function emitRelationshipEvent(db, row, eventTypeCode, actor, extra = {}) {
+  if (!row) return null;
+  return emitDomainEvent(
+    db,
+    {
+      event_type_code: eventTypeCode,
+      source_module: "objects",
+      source_object_type: "relationship",
+      source_object_id: String(row.id),
+      source_object_revision: row.sequence ?? null,
+      tenant_id: row.tenant_id ?? null,
+      payload: {
+        relationship_id: row.id,
+        relationship_type: row.type_code ?? null,
+        source_object_id: row.source_object_id ?? null,
+        target_object_id: row.target_object_id ?? null,
+        source_code: row.source_code ?? null,
+        target_code: row.target_code ?? null,
+        status: row.status ?? null,
+        ...extra,
+      },
+      idempotency_key: `relationship:${eventTypeCode}:${row.id}:${row.sequence ?? ""}`,
+    },
+    actor
+  );
+}
 
 const REL_SELECT = `
   SELECT r.*,
@@ -259,7 +304,10 @@ export function createRelationship(db, body, actor, tenantId, ip) {
     },
     ip,
   });
-  return publicRelationship(getRelationshipRow(db, result.lastInsertRowid));
+  emitRelationshipIndex(db, plan.tenantId, plan.sourceRow.id, plan.targetRow.id);
+  const created = getRelationshipRow(db, result.lastInsertRowid);
+  emitRelationshipEvent(db, created, "RelationshipCreated", actor);
+  return publicRelationship(created);
 }
 
 export function validateRelationship(db, body, tenantId) {
@@ -368,7 +416,10 @@ export function updateRelationship(db, id, body, actor, tenantId, ip) {
     details: { type: row.type_code, status },
     ip,
   });
-  return publicRelationship(getRelationshipRow(db, row.id));
+  emitRelationshipIndex(db, row.tenant_id, row.source_object_id, row.target_object_id);
+  const updated = getRelationshipRow(db, row.id);
+  emitRelationshipEvent(db, updated, "RelationshipUpdated", actor, { previous_status: row.status });
+  return publicRelationship(updated);
 }
 
 export function deleteRelationship(db, id, { force = false } = {}, actor, tenantId, ip) {
@@ -397,6 +448,8 @@ export function deleteRelationship(db, id, { force = false } = {}, actor, tenant
     details: { type: row.type_code, source: row.source_object_id, target: row.target_object_id, forced: force },
     ip,
   });
+  emitRelationshipIndex(db, row.tenant_id, row.source_object_id, row.target_object_id);
+  emitRelationshipEvent(db, row, "RelationshipDeleted", actor, { forced: force });
   return { deleted: true, id: row.id };
 }
 
@@ -417,6 +470,46 @@ export function relationshipsForObject(db, reference, tenantId, query = {}) {
     [row.id, ...statusParams]
   ).map(publicRelationship);
   return { object: briefObject(db, row.id, tenantId), outgoing, incoming };
+}
+
+// Batch adjacency for graph consumers (for example the Digital Thread query
+// layer). Loads every active, non-deleted edge touching any of `objectIds` in a
+// single query per requested direction, so a traversal never issues one query
+// per node. Returned rows are public relationships carrying both endpoint type
+// codes, letting callers filter by domain without another lookup.
+export function adjacency(db, objectIds = [], options = {}) {
+  const { tenantId = null, direction = "both", status = "active", typeCodes = null, limit = 2000 } = options || {};
+  const ids = [...new Set(objectIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))];
+  if (!ids.length) return [];
+  const dir = ["out", "in", "both"].includes(direction) ? direction : "both";
+  const marks = ids.map(() => "?").join(",");
+  const where = [];
+  const params = [];
+  if (tenantId !== null && tenantId !== undefined) {
+    where.push("r.tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (dir === "out") {
+    where.push(`r.source_object_id IN (${marks})`);
+    params.push(...ids);
+  } else if (dir === "in") {
+    where.push(`r.target_object_id IN (${marks})`);
+    params.push(...ids);
+  } else {
+    where.push(`(r.source_object_id IN (${marks}) OR r.target_object_id IN (${marks}))`);
+    params.push(...ids, ...ids);
+  }
+  if (status) {
+    where.push("r.status = ?");
+    params.push(status);
+  }
+  where.push("r.deleted_at IS NULL");
+  if (Array.isArray(typeCodes) && typeCodes.length) {
+    where.push(`rt.code IN (${typeCodes.map(() => "?").join(",")})`);
+    params.push(...typeCodes.map((code) => String(code)));
+  }
+  const cap = Math.min(20000, Math.max(1, Number(limit) || 2000));
+  return queryAll(db, `${REL_SELECT} WHERE ${where.join(" AND ")} ORDER BY r.id ASC LIMIT ?`, [...params, cap]).map(publicRelationship);
 }
 
 // Breadth-first traversal with a hard depth cap and visited set. Direction is

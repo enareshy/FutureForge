@@ -370,3 +370,110 @@ Both suites run under the standard `npm test` Node test runner.
 - No secrets are persisted; sensitive names are masked unconditionally.
 - Failed and denied actions are recorded, not silently dropped.
 - The framework never bypasses existing authorization; it layers on top of it.
+
+## 13. Compliance extensions (migration `019_audit_framework`)
+
+The compliance specification asked the audit trail to answer, for every change,
+*who, what, when, the previous value, the new value, why, whether it was a user
+or a process/integration, and which object/relationship/workflow/configuration
+was affected*. The original framework already stored most of this; migration
+`019_audit_framework` closes the remaining gaps without replacing any of the
+existing pipeline.
+
+### Event model enrichment
+
+`audit_logs` gains:
+
+| Column | Purpose |
+|---|---|
+| `actor_type` | `user`, `system`, `integration`, `job`, `workflow`, `service_account` |
+| `actor_ref` | Stable reference for non-user actors (integration key, job id, workflow id) |
+| `category` | Cross-cutting business category (see below) |
+| `security_classification` | `public`, `internal`, `confidential`, `restricted` |
+| `retention_category` | `standard`, `extended`, `permanent` (permanent is never purged) |
+| `session_id` | Session that produced the event |
+| `object_revision` | Object/version revision the change applied to |
+| `related_resource_type` / `related_resource_id` | The *other* side of a relationship change |
+| `failure_category` | Machine-readable failure bucket for failed/denied events |
+
+Categories: `object_data`, `attribute_change`, `relationship`, `lifecycle`,
+`workflow`, `approval`, `document`, `security`, `authentication`,
+`authorization`, `configuration`, `integration`, `background_job`,
+`administration`, `compliance`. Every action maps to exactly one category
+(`categoryOfAction`), which powers category filtering, category views and
+category-based retention.
+
+### Action registry
+
+`audit_action_types` is a tenant-scoped registry of dotted action codes. Each
+entry declares a label, category, event type, whether it is mandatory and
+whether it is system-owned. `ensureSystemActionTypes()` seeds the platform set;
+modules may register their own codes and `capture()` resolves them automatically.
+
+### New tables
+
+| Table | Purpose |
+|---|---|
+| `audit_action_types` | Action code registry and classification |
+| `audit_retention_policies` | Dedicated retention/archival policies per category/object type, with `legal_hold` |
+| `audit_export_requests` | Asynchronous, tracked exports with status, row count, expiry and download audit |
+| `audit_saved_filters` | Reusable, owner-scoped filter definitions for the console |
+
+`audit_policies` additionally supports `categories_json`, `export_allowed` and
+`system_mandatory`; mandatory capture policies cannot be disabled or deleted.
+
+### Capture and query
+
+- `capture()` now resolves the action registry, derives category, actor type,
+  classification and retention, enforces mandatory events regardless of capture
+  policy, and publishes `AuditEventCreated` on the internal bus.
+- `recordBatch()` records many events in one call; convenience wrappers
+  `recordStateChange`, `recordRelationshipChange`, `recordWorkflowAction`,
+  `recordSecurityEvent` and `recordAuthentication` set the right category,
+  actor type and related resource automatically.
+- `query.js` adds filters (`category`, `actorType`, `securityClassification`,
+  `retentionCategory`, `sessionId`, `objectRevision`, `failureCategory`,
+  related resource, `changedAttribute`, `hasChanges`), plus
+  `attributeHistory`, `relationshipHistory`, category views (`securityActivity`,
+  `workflowAudit`, `lifecycleAudit`, `configurationAudit`, `approvalAudit`,
+  `documentAudit`, `integrationAudit`, `backgroundJobAudit`) and `auditMetrics`.
+
+### Async exports, retention and jobs
+
+- `exports.js` implements request/run/list/get/download/expire. Exports are
+  materialised by the `AUDIT_EXPORT` job and retained for
+  `AUDIT_EXPORT_RETENTION_DAYS` (default 7). CSV, JSON and Excel are supported.
+- `retention.js` adds retention-policy CRUD, `ensureDefaultRetentionPolicies`,
+  and `executeRetentionPolicies` (dry-run safe, skips `permanent` events and
+  legal holds, publishes `RetentionStarted`/`RetentionCompleted`).
+- `jobs.js` registers the `AUDIT_EXPORT` and `AUDIT_RETENTION` handlers and the
+  `runAuditMaintenance` sweep; `scripts/job-worker.js` schedules it every
+  `AUDIT_MAINTENANCE_MS` (default 120000 ms).
+- `publisher.js` provides the decoupled audit event bus (`onAuditEvent`,
+  `publishAuditEvent`) and an opt-in notification bridge enabled with
+  `AUDIT_NOTIFY_EVENTS=true`.
+
+### REST API additions
+
+| Method & path | Purpose |
+|---|---|
+| `POST /api/audit/events/batch` | Batch record events |
+| `GET /api/audit/{security,workflows,lifecycle,configuration,approvals,documents,integrations,background-jobs}` | Category views |
+| `GET /api/audit/metrics` | Volume, security, storage and export metrics |
+| `GET /api/audit/attributes/:type/:id/history` | Single-attribute value timeline |
+| `GET /api/audit/relationships/:type/:id/history` | Relationship timeline (subject or related) |
+| `GET\|POST /api/audit/exports`, `GET /api/audit/exports/:id`, `GET /api/audit/exports/:id/download` | Async exports |
+| `GET\|POST\|PUT\|DELETE /api/audit/action-types(/:code)` | Action registry CRUD |
+| `GET\|POST\|PUT\|DELETE /api/audit/filters(/:id)` | Saved filters |
+| `GET\|POST\|PUT\|DELETE /api/audit/retention/policies(/:id)` | Retention policies |
+| `POST /api/audit/retention/execute` | Execute retention policies |
+| `POST /api/audit/policies/validate` | Validate a policy and preview matches |
+
+### Console additions
+
+`AuditPage.jsx` now exposes tabs for **Metrics**, **Security**, **Workflow**,
+**Lifecycle**, **Configuration**, **Object history** (attribute and
+relationship timelines), **Exports**, **Retention** (policies plus runs) and
+**Action types**, and the event stream gains category/actor-type/classification
+filters and saved filters. The event drawer shows the enriched actor,
+classification, retention, revision, related-resource and failure metadata.

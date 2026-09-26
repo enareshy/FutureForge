@@ -1,11 +1,13 @@
 import { run, nowIso } from "../../db.js";
 import { HttpError } from "../../validation.js";
 import { writeAudit } from "../audit.js";
+import { publish as publishNotificationEvent } from "../notifications.js";
 import * as metadata from "../metadata.js";
 import { getObjectRow } from "../objects/repository.js";
 import { recordObjectVersion } from "../objects/versions.js";
 import { getStatusRow, legacyForCategory } from "./statuses.js";
 import { hasConditions } from "./validation.js";
+import { emitObjectEvent } from "../events/emit.js";
 
 // Builds the expression context used by lifecycle guards and rules. Guard
 // expressions see the object's attribute payload plus the resolved
@@ -132,6 +134,42 @@ export function applyTransition(db, row, transition, toState, actor, tenantId, i
     },
     ip,
   });
+  publishNotificationEvent(
+    db,
+    {
+      event_type: "lifecycle.state.changed",
+      source_module: "lifecycle",
+      tenant_id: Number(tenantId ?? row.tenant_id),
+      object_type: "object",
+      object_id: row.code || String(row.id),
+      object_name: next.name || row.code || "",
+      payload: {
+        status: legacy,
+        from_status: row.status,
+        to_status: legacy,
+        owner_id: next.created_by ?? row.created_by ?? null,
+        transition: transition?.code ?? null,
+        reason: reason || comments || "",
+        link: `/objects/${row.code || row.id}`,
+      },
+    },
+    { actor, ip }
+  );
+  emitObjectEvent(db, next, "LifecycleStateChanged", {
+    source_module: "lifecycle",
+    idempotency_key: `lifecycle:${next.id}:${next.revision}`,
+    payload: {
+      from_state: row.lifecycle_state_id ?? null,
+      to_state: toState.code,
+      from_state_id: row.lifecycle_state_id ?? null,
+      to_state_id: toState.id,
+      from_status: row.status,
+      to_status: legacy,
+      transition: transition?.code ?? null,
+      reason: reason || comments || "",
+      source,
+    },
+  }, actor);
   return next;
 }
 

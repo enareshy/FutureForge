@@ -97,7 +97,14 @@ function ensureTenantLevel(db) {
   }
 }
 
+// Hierarchy defaults (levels, parent rules, platform settings) are installed
+// once per database. Tracking this in a WeakSet keeps hot read paths such as
+// `getSetting`/`getSettings` from re-running the COUNT plus the constant
+// INSERT-OR-IGNORE sweep on every call.
+const hierarchyInitialised = new WeakSet();
+
 export function ensureHierarchy(db) {
+  if (hierarchyInitialised.has(db)) return;
   const count = queryOne(db, "SELECT COUNT(*) AS c FROM hierarchy_levels").c;
   if (count === 0) {
     const ts = nowIso();
@@ -127,6 +134,7 @@ export function ensureHierarchy(db) {
       [setting.key, setting.value, setting.feature, setting.description, nowIso()]
     );
   }
+  hierarchyInitialised.add(db);
 }
 
 function loadLevels(db, { includeInactive = false } = {}) {

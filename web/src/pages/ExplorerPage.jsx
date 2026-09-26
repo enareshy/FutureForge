@@ -233,11 +233,13 @@ export default function ExplorerPage() {
 
   const roots = useMemo(() => {
     const nodes = buildOrgNodes(orgRoots);
+    // Build the metadata subtrees once and share them across tenants instead of
+    // re-allocating the full metadata tree for every tenant node.
+    const global = buildMetaNodes("global", "Global metadata", globalBucket);
+    const local = buildMetaNodes("tenant", "Tenant metadata", tenantBucket);
     for (const node of nodes) {
       if (node.kind !== "tenant") continue;
       const metaChildren = [];
-      const global = buildMetaNodes("global", "Global metadata", globalBucket);
-      const local = buildMetaNodes("tenant", "Tenant metadata", tenantBucket);
       if (global.children.length) metaChildren.push(global);
       if (local.children.length) metaChildren.push(local);
       if (metaChildren.length) {
@@ -254,8 +256,9 @@ export default function ExplorerPage() {
         ];
       }
     }
+    const codes = new Set(nodes.map((n) => n.code));
     const extra = tenants
-      .filter((t) => !nodes.some((n) => n.code === t.code))
+      .filter((t) => !codes.has(t.code))
       .map((t) => ({
         id: `tenant-${t.id}`,
         kind: "tenant",

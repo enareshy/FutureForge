@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { HttpError, requireFields, pagination } from "../../validation.js";
 import { writeAudit } from "../audit.js";
+import { publish as publishNotificationEvent } from "../notifications.js";
 import { assertReadable } from "../metadata/scope.js";
 import { TASK_STATUSES, TASK_OPEN_STATUSES, TASK_PRIORITIES, ASSIGNEE_TYPES, safeParse } from "./validation.js";
 import { readGraph } from "./graph.js";
@@ -397,6 +398,25 @@ export function notifyAssignment(db, task, instance = null) {
       payload: { task_id: task.id, instance_id: task.instance_id, code: task.code },
       tenantId: task.tenant_id,
     });
+    publishNotificationEvent(
+      db,
+      {
+        event_type: "task.assigned",
+        source_module: "workflow",
+        tenant_id: task.tenant_id,
+        object_type: "task",
+        object_id: task.code || String(task.id),
+        object_name: task.title,
+        payload: {
+          assignee_id: recipient.id,
+          priority: task.priority,
+          due_date: task.due_at || task.due_date || "",
+          link: `/workflow/tasks/${task.id}`,
+        },
+        idempotency_key: `task-assigned:${task.id}:${recipient.id}`,
+      },
+      {}
+    );
   }
   return recipients;
 }

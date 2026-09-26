@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
 import { writeAudit } from "../audit.js";
+import { publish as publishNotificationEvent } from "../notifications.js";
 import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
 import { ESCALATION_ACTIONS, TASK_PRIORITIES, safeParse } from "./validation.js";
 import { recordEvent } from "./events.js";
@@ -229,6 +230,29 @@ export function applyEscalation(db, task, rule, { actor = null } = {}) {
     details: applied,
     tenantId: task.tenant_id,
   });
+  const assigneeId = task.assignee_type === "user" ? task.assignee_id ?? task.claimed_by ?? null : task.claimed_by ?? null;
+  if (assigneeId) {
+    publishNotificationEvent(
+      db,
+      {
+        event_type: "task.overdue",
+        source_module: "workflow",
+        tenant_id: task.tenant_id,
+        object_type: "task",
+        object_id: task.code || String(task.id),
+        object_name: task.title,
+        payload: {
+          assignee_id: Number(assigneeId),
+          rule: rule.code,
+          action: rule.action,
+          due_date: task.due_at || task.due_date || "",
+          link: `/workflow/tasks/${task.id}`,
+        },
+        idempotency_key: `task-overdue:${task.id}:${rule.id}`,
+      },
+      { actor }
+    );
+  }
   return applied;
 }
 

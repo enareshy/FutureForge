@@ -410,10 +410,26 @@ export default function WorkflowDesigner({ templateId, onClose, onChanged }) {
     setSelected({ kind: "node", id: copy.id });
   }, [clipboard, commit, snapshot, editable]);
 
+  // Keep the latest shortcut state/handlers in a ref so the global keydown
+  // listener can be registered exactly once. Previously the effect had no
+  // dependency array, so the listener was removed and re-added on every render
+  // (including every mousemove during pan/drag).
+  const keyHandlerRef = useRef(null);
+  keyHandlerRef.current = { selected, undo, redo, copySelected, paste, removeSelected, setConnecting };
+
   useEffect(() => {
     function onKey(e) {
       const tag = e.target?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      const {
+        selected,
+        undo,
+        redo,
+        copySelected,
+        paste,
+        removeSelected,
+        setConnecting,
+      } = keyHandlerRef.current;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) redo();
@@ -436,7 +452,7 @@ export default function WorkflowDesigner({ templateId, onClose, onChanged }) {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, []);
 
   function onBackgroundDown(e) {
     if (e.target !== e.currentTarget && !e.target.classList.contains("wf-canvas")) return;

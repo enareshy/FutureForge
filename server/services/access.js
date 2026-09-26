@@ -31,9 +31,20 @@ export function effectiveAccess(db, userId) {
     : [];
 
   const roleMap = new Map();
+  const ancestorCache = new Map();
+  const sourceKeys = new Map();
+
+  function ancestors(roleId) {
+    let cached = ancestorCache.get(roleId);
+    if (!cached) {
+      cached = ancestorRoles(db, roleId);
+      ancestorCache.set(roleId, cached);
+    }
+    return cached;
+  }
 
   function add(roleId, source, sourceId, organizationId, inheritedFromAssignment) {
-    for (const role of ancestorRoles(db, roleId)) {
+    for (const role of ancestors(roleId)) {
       const inherited = role.id !== roleId || inheritedFromAssignment;
       const key = `${role.id}:${organizationId}`;
       const existing = roleMap.get(key);
@@ -46,7 +57,9 @@ export function effectiveAccess(db, userId) {
         sources: existing?.sources ? [...existing.sources] : [],
       };
       const src = { type: source, id: sourceId, assignedRoleId: roleId };
-      if (!entry.sources.some((s) => s.type === src.type && s.id === src.id && s.assignedRoleId === src.assignedRoleId)) {
+      const srcKey = `${key}|${src.type}|${src.id}|${src.assignedRoleId}`;
+      if (!sourceKeys.has(srcKey)) {
+        sourceKeys.set(srcKey, true);
         entry.sources.push(src);
       }
       if (existing && !inherited) entry.inherited = false;

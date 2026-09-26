@@ -48,15 +48,15 @@ export default function MetadataPage() {
   const [catalog, setCatalog] = useState([]);
   const [tenantId, setTenantId] = useState(null);
 
-  const flash = (message) => {
+  const flash = useCallback((message) => {
     setNotice(message);
     setError("");
-  };
+  }, []);
 
-  const fail = (err) => {
+  const fail = useCallback((err) => {
     setError(err?.message || String(err));
     setNotice("");
-  };
+  }, []);
 
   const loadTypes = useCallback(() => meta.types("?pageSize=200").then((r) => setTypes(r.items || [])), []);
   const loadAttributes = useCallback(() => meta.attributes("?pageSize=200").then((r) => setAttributes(r.items || [])), []);

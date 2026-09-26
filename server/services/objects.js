@@ -60,6 +60,7 @@ export {
   relationshipsForObject,
   traverse,
   graph,
+  adjacency,
 } from "./objects/relationships.js";
 
 export {

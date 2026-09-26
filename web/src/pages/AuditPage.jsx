@@ -4,11 +4,20 @@ import AuditTimeline from "../components/AuditTimeline.jsx";
 import AuditEventDrawer from "../components/AuditEventDrawer.jsx";
 import AuditPolicyPanel from "../components/AuditPolicyPanel.jsx";
 import AuditRetentionPanel from "../components/AuditRetentionPanel.jsx";
+import AuditRetentionPolicyPanel from "../components/AuditRetentionPolicyPanel.jsx";
+import AuditCategoryPanel from "../components/AuditCategoryPanel.jsx";
+import AuditMetricsPanel from "../components/AuditMetricsPanel.jsx";
+import AuditHistoryPanel from "../components/AuditHistoryPanel.jsx";
+import AuditExportsPanel from "../components/AuditExportsPanel.jsx";
+import AuditActionTypePanel from "../components/AuditActionTypePanel.jsx";
 
 const EMPTY_FILTERS = {
   q: "",
   action: "",
   eventType: "",
+  category: "",
+  actorType: "",
+  securityClassification: "",
   objectType: "",
   actorUsername: "",
   status: "",
@@ -19,8 +28,16 @@ const EMPTY_FILTERS = {
 const TABS = [
   ["events", "Event stream"],
   ["overview", "Overview"],
-  ["policies", "Policies"],
+  ["metrics", "Metrics"],
+  ["security", "Security"],
+  ["workflow", "Workflow"],
+  ["lifecycle", "Lifecycle"],
+  ["configuration", "Configuration"],
+  ["history", "Object history"],
+  ["exports", "Exports"],
   ["retention", "Retention"],
+  ["action-types", "Action types"],
+  ["policies", "Policies"],
 ];
 
 function toQuery(filters, page, pageSize = 25) {
@@ -51,6 +68,42 @@ export default function AuditPage() {
   const [error, setError] = useState("");
   const [denied, setDenied] = useState(false);
   const [exporting, setExporting] = useState("");
+  const [savedFilters, setSavedFilters] = useState([]);
+  const [filterName, setFilterName] = useState("");
+
+  const loadSavedFilters = useCallback(async () => {
+    try {
+      const res = await audit.filters("?scope=events");
+      setSavedFilters(res.items || []);
+    } catch {
+      /* saved filters are best-effort */
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSavedFilters();
+  }, [loadSavedFilters]);
+
+  async function saveFilter() {
+    if (!filterName.trim()) return;
+    setError("");
+    try {
+      await audit.createFilter({ name: filterName.trim(), scope: "events", filters });
+      setFilterName("");
+      await loadSavedFilters();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function deleteFilter(id) {
+    try {
+      await audit.deleteFilter(id);
+      await loadSavedFilters();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
 
   const loadEvents = useCallback(async (targetPage = page) => {
     setLoading(true);
@@ -262,6 +315,31 @@ export default function AuditPage() {
                   <option value="denied">denied</option>
                 </select>
               </label>
+              <label className="field"><span>Category</span>
+                <select value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value })}>
+                  <option value="">Any</option>
+                  {(facets.categories || []).filter((r) => r.category).map((row) => (
+                    <option key={row.category} value={row.category}>{row.category}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field"><span>Actor type</span>
+                <select value={draft.actorType} onChange={(e) => setDraft({ ...draft, actorType: e.target.value })}>
+                  <option value="">Any</option>
+                  {(facets.actor_types || []).filter((r) => r.actor_type).map((row) => (
+                    <option key={row.actor_type} value={row.actor_type}>{row.actor_type}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field"><span>Classification</span>
+                <select value={draft.securityClassification} onChange={(e) => setDraft({ ...draft, securityClassification: e.target.value })}>
+                  <option value="">Any</option>
+                  <option value="public">public</option>
+                  <option value="internal">internal</option>
+                  <option value="confidential">confidential</option>
+                  <option value="restricted">restricted</option>
+                </select>
+              </label>
             </div>
             <div className="row">
               <label className="field grow"><span>Object type</span>
@@ -281,6 +359,36 @@ export default function AuditPage() {
             </div>
           </form>
 
+          <div className="panel audit-saved-filters">
+            <div className="row" style={{ alignItems: "flex-end", marginBottom: 0 }}>
+              <label className="field grow">
+                <span>Saved filters</span>
+                <input value={filterName} onChange={(e) => setFilterName(e.target.value)} placeholder="Name this filter…" />
+              </label>
+              <button className="btn secondary" type="button" onClick={saveFilter} disabled={!filterName.trim()}>Save current</button>
+            </div>
+            {savedFilters.length ? (
+              <div className="chips" style={{ marginTop: 8 }}>
+                {savedFilters.map((row) => (
+                  <span className="chip" key={row.id}>
+                    <button
+                      className="link"
+                      type="button"
+                      onClick={() => {
+                        setDraft({ ...EMPTY_FILTERS, ...row.filters });
+                        setFilters({ ...EMPTY_FILTERS, ...row.filters });
+                        setPage(1);
+                      }}
+                    >
+                      {row.name}
+                    </button>
+                    <button className="link muted" type="button" onClick={() => deleteFilter(row.id)} title="Delete">remove</button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
           <div className="panel">
             {loading && !data.items.length ? <div className="audit-empty">Loading events…</div> : null}
             <AuditTimeline events={data.items} selectedId={selected?.id} onSelect={open} />
@@ -298,7 +406,28 @@ export default function AuditPage() {
       ) : null}
 
       {!denied && tab === "policies" ? <AuditPolicyPanel /> : null}
-      {!denied && tab === "retention" ? <AuditRetentionPanel /> : null}
+      {!denied && tab === "retention" ? (
+        <>
+          <AuditRetentionPolicyPanel />
+          <AuditRetentionPanel />
+        </>
+      ) : null}
+      {!denied && tab === "metrics" ? <AuditMetricsPanel /> : null}
+      {!denied && tab === "security" ? (
+        <AuditCategoryPanel kind="security" hint="Authentication, authorization, access denials and sensitive security events." />
+      ) : null}
+      {!denied && tab === "workflow" ? (
+        <AuditCategoryPanel kind="workflow" hint="Workflow starts, approvals, rejections, task assignment and completion." />
+      ) : null}
+      {!denied && tab === "lifecycle" ? (
+        <AuditCategoryPanel kind="lifecycle" hint="Lifecycle transitions and state changes across managed objects." />
+      ) : null}
+      {!denied && tab === "configuration" ? (
+        <AuditCategoryPanel kind="configuration" hint="Configuration, administration and integration changes." />
+      ) : null}
+      {!denied && tab === "history" ? <AuditHistoryPanel /> : null}
+      {!denied && tab === "exports" ? <AuditExportsPanel /> : null}
+      {!denied && tab === "action-types" ? <AuditActionTypePanel /> : null}
 
       {selected ? <AuditEventDrawer event={detail || selected} onClose={() => setSelected(null)} /> : null}
     </>

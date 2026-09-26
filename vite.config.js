@@ -18,5 +18,19 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Split the framework (rarely changing) from application code so
+        // returning users keep the vendor chunk cached across deploys.
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("react-router")) return "vendor-router";
+            if (id.includes("react")) return "vendor-react";
+            return "vendor";
+          }
+          return undefined;
+        },
+      },
+    },
   },
 });

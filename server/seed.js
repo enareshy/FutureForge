@@ -1,6 +1,6 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openDatabase, migrate, queryOne, queryAll } from "./db.js";
+import { openDatabase, migrate, queryOne, queryAll, run, nowIso } from "./db.js";
 import * as users from "./services/users.js";
 import * as groups from "./services/groups.js";
 import * as roles from "./services/roles.js";
@@ -16,6 +16,30 @@ import * as objects from "./services/objects.js";
 import * as lifecycle from "./services/lifecycle.js";
 import * as workflow from "./services/workflow.js";
 import * as audit from "./services/audit.js";
+import * as notifications from "./services/notifications.js";
+import * as delivery from "./services/delivery.js";
+import * as jobs from "./services/jobs.js";
+import * as jobExecution from "./services/job-execution.js";
+import * as search from "./services/search.js";
+import * as integration from "./services/integration.js";
+import * as events from "./services/events.js";
+import { withEventSuppression } from "./services/events/emit.js";
+import * as numbering from "./services/numbering.js";
+import * as versioning from "./services/versioning.js";
+import * as reference from "./services/reference.js";
+import * as content from "./services/content.js";
+import * as dataGovernance from "./services/data-governance/index.js";
+import * as dataCatalog from "./services/data-catalog/index.js";
+import * as dataLifecycle from "./services/data-lifecycle/index.js";
+import * as dataExchange from "./services/data-exchange/index.js";
+import * as migration from "./services/migration/index.js";
+import * as classification from "./services/classification/index.js";
+import * as bom from "./services/bom/index.js";
+import * as pdm from "./services/pdm/index.js";
+import * as thread from "./services/thread/index.js";
+import * as exchange from "./services/exchange/index.js";
+import * as reporting from "./services/reporting/index.js";
+import * as observability from "./services/observability/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -239,11 +263,18 @@ function seedIdentity(db) {
 function grantAll(db, roleId, resource, actions = ACTIONS, organizationId = 0) {
   for (const action of actions) {
     const permission = catalog.ensurePermission(db, resource.id, action);
-    grants.grantRolePermission(db, roleId, {
-      permission_id: permission.id,
-      effect: "allow",
-      organization_id: organizationId,
-    });
+    grants.grantRolePermission(
+      db,
+      roleId,
+      {
+        permission_id: permission.id,
+        effect: "allow",
+        organization_id: organizationId,
+      },
+      undefined,
+      undefined,
+      { returnList: false }
+    );
   }
 }
 
@@ -636,11 +667,18 @@ function seedAuthz(db) {
     grantAll(db, auditor.id, iamRoot, ["read"], apac?.id || 0);
     const delUsers = permissionByCode(db, "iam.users:delete");
     if (delUsers) {
-      grants.grantRolePermission(db, auditor.id, {
-        permission_id: delUsers.id,
-        effect: "deny",
-        organization_id: apac?.id || 0,
-      });
+      grants.grantRolePermission(
+        db,
+        auditor.id,
+        {
+          permission_id: delUsers.id,
+          effect: "deny",
+          organization_id: apac?.id || 0,
+        },
+        undefined,
+        undefined,
+        { returnList: false }
+      );
     }
   }
   if (reader) {
@@ -817,6 +855,331 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.workflow.tasks", name: "Workflow tasks", parentCode: "iam.workflow" },
     { applicationCode: "iam", code: "iam.workflow.approvals", name: "Workflow approvals", parentCode: "iam.workflow" },
     { applicationCode: "iam", code: "iam.workflow.config", name: "Workflow configuration", parentCode: "iam.workflow" },
+    { applicationCode: "iam", code: "iam.notifications", name: "Notifications & communication", kind: "module" },
+    { applicationCode: "iam", code: "iam.notifications.inbox", name: "Notification inbox", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.preferences", name: "Notification preferences", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.templates", name: "Notification templates", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.rules", name: "Notification rules", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.providers", name: "Notification providers", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.notifications.history", name: "Notification history", parentCode: "iam.notifications" },
+    { applicationCode: "iam", code: "iam.delivery", name: "Communication & delivery", kind: "module" },
+    { applicationCode: "iam", code: "iam.delivery.providers", name: "Delivery providers", parentCode: "iam.delivery" },
+    { applicationCode: "iam", code: "iam.delivery.requests", name: "Delivery requests", parentCode: "iam.delivery" },
+    { applicationCode: "iam", code: "iam.delivery.reminders", name: "Delivery reminders & escalations", parentCode: "iam.delivery" },
+    { applicationCode: "iam", code: "iam.delivery.monitoring", name: "Delivery monitoring", parentCode: "iam.delivery" },
+    { applicationCode: "iam", code: "iam.jobs", name: "Background job management", kind: "module" },
+    { applicationCode: "iam", code: "iam.jobs.list", name: "Job list & submission", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.details", name: "Job details & history", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.control", name: "Job control", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.types", name: "Job type administration", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.results", name: "Job results & artifacts", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.monitoring", name: "Job monitoring", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.queues", name: "Job queue administration", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.schedules", name: "Job schedule administration", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.jobs.execution", name: "Job execution monitoring & dead-letter", parentCode: "iam.jobs" },
+    { applicationCode: "iam", code: "iam.files", name: "Document & file management", kind: "module" },
+    { applicationCode: "iam", code: "iam.files.browser", name: "File browser & search", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.details", name: "File details, metadata & download", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.uploads", name: "File uploads", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.versions", name: "File versions", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.locks", name: "Check-out/check-in locks", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.associations", name: "File associations", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.folders", name: "Folders & collections", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.files.permissions", name: "File access control", parentCode: "iam.files" },
+    { applicationCode: "iam", code: "iam.search", name: "Search & discovery", kind: "module" },
+    { applicationCode: "iam", code: "iam.search.global", name: "Global search", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.advanced", name: "Advanced search", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.saved", name: "Saved searches", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.history", name: "Search history", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.indexes", name: "Search index administration", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.configuration", name: "Search configuration", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.search.export", name: "Search result exports", parentCode: "iam.search" },
+    { applicationCode: "iam", code: "iam.security", name: "Data security & entitlements", kind: "module" },
+    { applicationCode: "iam", code: "iam.security.console", name: "Security console & overview", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.policies", name: "Security policy administration", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.entitlements", name: "Entitlement administration", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.fields", name: "Field security & masking", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.classifications", name: "Classification security", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.organizations", name: "Organization & plant security", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.objecttypes", name: "Security object type registration", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.security.decisions", name: "Authorization decision inspector", parentCode: "iam.security" },
+    { applicationCode: "iam", code: "iam.integration", name: "Integration & API framework", kind: "module" },
+    { applicationCode: "iam", code: "iam.integration.systems", name: "External systems & credentials", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.endpoints", name: "Integration endpoints", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.transforms", name: "Transformation & mapping definitions", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.mappings", name: "External object mapping", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.schedules", name: "Scheduled integrations", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.events", name: "Events & subscriptions", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.webhooks", name: "Webhooks", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.messages", name: "Message queues", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.deadletters", name: "Dead-letter queues", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.transfers", name: "Import & export", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.monitoring", name: "Integration monitoring", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.integration.api", name: "API catalog & clients", parentCode: "iam.integration" },
+    { applicationCode: "iam", code: "iam.events", name: "Event & messaging framework", kind: "module" },
+    { applicationCode: "iam", code: "iam.events.registry", name: "Event type & schema registry", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.publish", name: "Event publishing", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.subscriptions", name: "Event subscriptions", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.topology", name: "Topics, queues & consumer groups", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.deliveries", name: "Event deliveries & consumers", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.deadletters", name: "Event dead letters", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.replay", name: "Event replay", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.retention", name: "Event retention", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.events.monitoring", name: "Event monitoring & traceability", parentCode: "iam.events" },
+    { applicationCode: "iam", code: "iam.numbering", name: "Numbering & identifier service", kind: "module" },
+    { applicationCode: "iam", code: "iam.numbering.schemes", name: "Numbering scheme administration", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.objecttypes", name: "Numbering object types", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.sequences", name: "Sequence administration & reset", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.allocations", name: "Allocation history & export", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.generate", name: "Generate & preview identifiers", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.reserve", name: "Reserve identifiers", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.consume", name: "Consume identifiers", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.release", name: "Release & cancel identifiers", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.manual", name: "Manual numbering", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.numbering.metrics", name: "Numbering monitoring & metrics", parentCode: "iam.numbering" },
+    { applicationCode: "iam", code: "iam.versioning", name: "Effectivity & versioning kernel", kind: "module" },
+    { applicationCode: "iam", code: "iam.versioning.revisions", name: "Revision management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.versions", name: "Version management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.effectivities", name: "Effectivity definitions & assignments", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.resolve", name: "As-of effectivity resolution", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.baselines", name: "Baseline management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.snapshots", name: "Historical snapshots", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.variants", name: "Variant & option management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.configurations", name: "Configuration context management", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.policies", name: "Resolution policy administration", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.versioning.metrics", name: "Versioning monitoring & metrics", parentCode: "iam.versioning" },
+    { applicationCode: "iam", code: "iam.reference", name: "Enterprise reference data management", kind: "module" },
+    { applicationCode: "iam", code: "iam.reference.domains", name: "Reference domains & ownership", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.items", name: "Reference data items & lifecycle", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.codes", name: "Reference codes", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.aliases", name: "Reference aliases", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.translations", name: "Reference translations", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.hierarchy", name: "Reference hierarchy", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.relationships", name: "Reference relationships", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.scopes", name: "Reference scope policies", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.versions", name: "Reference data versions", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.approvals", name: "Reference approvals", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.governance", name: "Reference governance & change requests", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.import", name: "Reference data import", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.export", name: "Reference data export", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.resolve", name: "Reference data resolution & validation", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.reference.metrics", name: "Reference data monitoring & metrics", parentCode: "iam.reference" },
+    { applicationCode: "iam", code: "iam.content", name: "File & content management service", kind: "module" },
+    { applicationCode: "iam", code: "iam.content.browser", name: "Content browser & search", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.details", name: "Content details, metadata & download", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.uploads", name: "Content uploads", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.versions", name: "Content versions", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.locks", name: "Content check-out/check-in locks", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.associations", name: "Object-content associations", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.renditions", name: "Content renditions & previews", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.processing", name: "Content processing & pipelines", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.security", name: "Content security & quarantine", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.retention", name: "Content retention & legal hold", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.content.admin", name: "Content administration", parentCode: "iam.content" },
+    { applicationCode: "iam", code: "iam.data_governance", name: "Data governance & data quality service", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_governance.domains", name: "Data domains & hierarchy", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.catalog", name: "Data catalogue & attributes", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.ownership", name: "Ownership & stewardship", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.policies", name: "Governance policies & lifecycle", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.configuration", name: "Governance configuration & scoring", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.dimensions", name: "Quality dimensions & scoring bands", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.jobs", name: "Governance & quality background jobs", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_governance.metrics", name: "Governance metrics & health", parentCode: "iam.data_governance" },
+    { applicationCode: "iam", code: "iam.data_quality", name: "Data quality rules & evaluation", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_quality.rules", name: "Quality rules & validation", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.evaluation", name: "Quality evaluation & execution modes", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.results", name: "Quality results, scores & dashboards", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.exceptions", name: "Quality exceptions & workflow", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.duplicates", name: "Duplicate detection", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_quality.remediation", name: "Quality remediation", parentCode: "iam.data_quality" },
+    { applicationCode: "iam", code: "iam.data_catalog", name: "Data catalog & business glossary service", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_catalog.overview", name: "Unified catalog registry & overview", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.domains", name: "Catalog domains", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.objects", name: "Catalog data objects", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.attributes", name: "Catalog attributes", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.glossary", name: "Business glossary", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.terms", name: "Business terms & definitions", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.sources", name: "Data sources", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.consumers", name: "Data consumers", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.mappings", name: "Source & consumer mappings", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.lineage", name: "Data lineage & impact analysis", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.relationships", name: "Catalog relationships", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.classifications", name: "Catalog classifications", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.ownership", name: "Catalog ownership & stewardship", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.import_export", name: "Catalog metadata import & export", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.admin", name: "Catalog administration & configuration", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.jobs", name: "Catalog background jobs", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_catalog.metrics", name: "Catalog metrics & health", parentCode: "iam.data_catalog" },
+    { applicationCode: "iam", code: "iam.data_lifecycle", name: "Data lifecycle & archival service", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.overview", name: "Lifecycle overview & registry", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.states", name: "Lifecycle states & transitions", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.policies", name: "Retention policies", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.objects", name: "Tracked object lifecycles", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.eligibility", name: "Lifecycle eligibility engine", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.archive", name: "Archive & cold storage", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.restore", name: "Restore operations", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.recovery", name: "Recovery operations", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.purge", name: "Purge operations", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.legal_holds", name: "Legal holds", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.dependencies", name: "Lifecycle dependencies", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.jobs", name: "Lifecycle background jobs", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.metrics", name: "Lifecycle metrics & health", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_lifecycle.admin", name: "Lifecycle administration & configuration", parentCode: "iam.data_lifecycle" },
+    { applicationCode: "iam", code: "iam.data_exchange", name: "Import & export framework service", kind: "module" },
+    { applicationCode: "iam", code: "iam.data_exchange.overview", name: "Data exchange overview & catalogue", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.imports", name: "Data imports", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.import_definitions", name: "Import definitions & mappings", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.exports", name: "Data exports", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.export_definitions", name: "Export definitions & field selection", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.connectors", name: "Connector configurations & credentials", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.mapping", name: "Field mapping engine", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.validation", name: "Import validation engine", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.reconciliation", name: "Import reconciliation", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.templates", name: "Import & export templates", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.history", name: "Data exchange history", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.jobs", name: "Data exchange background jobs", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.metrics", name: "Data exchange metrics & health", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.data_exchange.admin", name: "Data exchange administration & configuration", parentCode: "iam.data_exchange" },
+    { applicationCode: "iam", code: "iam.migration", name: "Migration & onboarding framework service", kind: "module" },
+    { applicationCode: "iam", code: "iam.migration.overview", name: "Migration overview & registry", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.projects", name: "Migration projects", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.packages", name: "Migration packages", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.definitions", name: "Migration definitions & mappings", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.sources", name: "Migration source configurations & adapters", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.mapping", name: "Migration mapping & transformation engine", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.validation", name: "Migration validation engine", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.dependencies", name: "Migration dependency resolution", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.planning", name: "Migration planning & readiness", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.execution", name: "Migration execution & jobs", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.reconciliation", name: "Migration reconciliation", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.identifiers", name: "Source identifier mapping", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.relationships", name: "Relationship migration", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.files", name: "File & binary migration", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.audit", name: "Migration audit trail & lineage", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.statistics", name: "Migration statistics", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.metrics", name: "Migration metrics & health", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.migration.admin", name: "Migration administration & configuration", parentCode: "iam.migration" },
+    { applicationCode: "iam", code: "iam.classification", name: "Enterprise classification framework service", kind: "module" },
+    { applicationCode: "iam", code: "iam.classification.overview", name: "Classification overview & registry", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.classifications", name: "Classification definitions", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.classes", name: "Classification classes & hierarchy", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.characteristics", name: "Classification characteristics", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.groups", name: "Characteristic groups", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.values", name: "Allowed values", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.assignments", name: "Classification assignments", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.validation", name: "Classification validation & rules", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.search", name: "Classification search & discovery", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.governance", name: "Classification duplicate detection", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.migration", name: "Classification migration & bulk load", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.audit", name: "Classification audit trail & lineage", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.metrics", name: "Classification metrics & health", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.classification.admin", name: "Classification administration & configuration", parentCode: "iam.classification" },
+    { applicationCode: "iam", code: "iam.bom", name: "BOM engine service", kind: "module" },
+    { applicationCode: "iam", code: "iam.bom.overview", name: "BOM overview & registry", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.boms", name: "BOM headers", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.revisions", name: "BOM revisions", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.lines", name: "BOM lines, attributes & substitutes", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.structure", name: "BOM structure & units", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.compare", name: "BOM comparison", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.whereused", name: "BOM where-used analysis", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.rollup", name: "BOM quantity rollup", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.transformation", name: "BOM transformation (EBOM/MBOM)", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.validation", name: "BOM validation & rules", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.baseline", name: "BOM baselines", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.search", name: "BOM search & discovery", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.audit", name: "BOM audit trail & lineage", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.metrics", name: "BOM metrics & health", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.bom.admin", name: "BOM administration & configuration", parentCode: "iam.bom" },
+    { applicationCode: "iam", code: "iam.pdm", name: "PDM domain service", kind: "module" },
+    { applicationCode: "iam", code: "iam.pdm.overview", name: "PDM overview & registry", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.items", name: "PDM items", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.revisions", name: "PDM item revisions", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.parts", name: "PDM parts & assemblies", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.products", name: "PDM products", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.datasets", name: "PDM datasets", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.representations", name: "PDM representations", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.design-data", name: "PDM design data", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.cad", name: "PDM CAD associations", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.revision-rules", name: "PDM revision rules", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.configuration-rules", name: "PDM configuration rules", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.baselines", name: "PDM baselines", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.whereused", name: "PDM where-used analysis", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.wherereferenced", name: "PDM where-referenced analysis", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.structure", name: "PDM structure resolution", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.validation", name: "PDM validation & rules", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.search", name: "PDM search & discovery", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.audit", name: "PDM audit trail & lineage", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.metrics", name: "PDM metrics & health", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.pdm.admin", name: "PDM administration & configuration", parentCode: "iam.pdm" },
+    { applicationCode: "iam", code: "iam.thread", name: "Digital Thread service", kind: "module" },
+    { applicationCode: "iam", code: "iam.thread.overview", name: "Digital Thread overview & registry", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.explorer", name: "Digital Thread explorer & traversal", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.traceability", name: "Digital Thread traceability & matrices", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.impact", name: "Digital Thread impact analysis", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.dependency", name: "Digital Thread dependency analysis", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.paths", name: "Digital Thread path finding", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.completeness", name: "Digital Thread completeness", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.snapshots", name: "Digital Thread snapshots", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.baselines", name: "Digital Thread baselines", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.compare", name: "Digital Thread comparison", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.definitions", name: "Digital Thread definitions & rules", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.search", name: "Digital Thread search & discovery", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.audit", name: "Digital Thread audit trail & lineage", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.metrics", name: "Digital Thread metrics & health", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.thread.admin", name: "Digital Thread administration & configuration", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.exchange", name: "Standards & Exchange service", kind: "module" },
+    { applicationCode: "iam", code: "iam.exchange.dashboard", name: "Standards & Exchange overview & dashboard", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.formats", name: "Standards & Exchange formats & adapters", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.definitions", name: "Standards & Exchange definitions & versions", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.import", name: "Standards & Exchange import execution", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.export", name: "Standards & Exchange export execution", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.mappings", name: "Standards & Exchange field mappings", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.transformations", name: "Standards & Exchange transformations", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.validation", name: "Standards & Exchange validation profiles", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.jobs", name: "Standards & Exchange background jobs", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.history", name: "Standards & Exchange history & reconciliation", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.search", name: "Standards & Exchange search & discovery", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.metrics", name: "Standards & Exchange metrics & health", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.audit", name: "Standards & Exchange audit trail", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.exchange.admin", name: "Standards & Exchange administration & configuration", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.reporting", name: "Reporting & Analytics service", kind: "module" },
+    { applicationCode: "iam", code: "iam.reporting.home", name: "Reporting & Analytics overview & home", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.reports", name: "Saved reports & report builder", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.builder", name: "Ad-hoc query builder & preview", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.dashboards", name: "Dashboards", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.dashboard_builder", name: "Dashboard & widget builder", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.kpis", name: "KPIs & targets", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.metrics", name: "Reusable metric definitions", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.data_sources", name: "Data sources & semantic layer", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.schedules", name: "Scheduled reports & distribution", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.exports", name: "Report exports & downloads", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.bi", name: "BI integration & datasets", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.jobs", name: "Reporting background jobs", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.history", name: "Reporting execution & change history", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.search", name: "Reporting search & discovery", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.observability", name: "Reporting metrics, cache & read model", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.audit", name: "Reporting audit trail", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.admin", name: "Reporting administration & configuration", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.observability", name: "Data Observability service", kind: "module" },
+    { applicationCode: "iam", code: "iam.observability.home", name: "Data Observability overview & home", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.overview", name: "Platform observability overview", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.health", name: "Health checks, snapshots & status", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.metrics", name: "Metric definitions & observations", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.data_volume", name: "Data volume & growth", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.freshness", name: "Data freshness & assets", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.quality", name: "Data quality signals", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.pipelines", name: "Pipeline throughput & latency", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.failures", name: "API, import, export & event failures", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.alerts", name: "Alert rules, alerts & lifecycle", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.incidents", name: "Incident tracking", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.slo", name: "SLO & SLA management", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.dashboards", name: "Observability dashboards", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.providers", name: "Telemetry providers", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.jobs", name: "Observability background jobs", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.history", name: "Observability change history", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.search", name: "Observability search & discovery", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.audit", name: "Observability audit trail", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.admin", name: "Observability administration & configuration", parentCode: "iam.observability" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -887,6 +1250,388 @@ function seedMissingCatalog(db) {
       if (!existing) grantAll(db, role.id, resource);
     }
   }
+  const notificationResourceCodes = [
+    "iam.notifications.inbox",
+    "iam.notifications.preferences",
+    "iam.notifications.templates",
+    "iam.notifications.rules",
+    "iam.notifications.providers",
+    "iam.notifications.history",
+  ];
+  const deliveryResourceCodes = [
+    "iam.delivery.providers",
+    "iam.delivery.requests",
+    "iam.delivery.reminders",
+    "iam.delivery.monitoring",
+  ];
+  const jobResourceCodes = [
+    "iam.jobs.list",
+    "iam.jobs.details",
+    "iam.jobs.control",
+    "iam.jobs.types",
+    "iam.jobs.results",
+    "iam.jobs.monitoring",
+    "iam.jobs.queues",
+    "iam.jobs.schedules",
+    "iam.jobs.execution",
+  ];
+  const fileResourceCodes = [
+    "iam.files.browser",
+    "iam.files.details",
+    "iam.files.uploads",
+    "iam.files.versions",
+    "iam.files.locks",
+    "iam.files.associations",
+    "iam.files.folders",
+    "iam.files.permissions",
+  ];
+  const searchResourceCodes = [
+    "iam.search.global",
+    "iam.search.advanced",
+    "iam.search.saved",
+    "iam.search.history",
+    "iam.search.indexes",
+    "iam.search.configuration",
+    "iam.search.export",
+  ];
+  const securityResourceCodes = [
+    "iam.security.console",
+    "iam.security.policies",
+    "iam.security.entitlements",
+    "iam.security.fields",
+    "iam.security.classifications",
+    "iam.security.organizations",
+    "iam.security.objecttypes",
+    "iam.security.decisions",
+  ];
+  const integrationResourceCodes = [
+    "iam.integration",
+    "iam.integration.systems",
+    "iam.integration.endpoints",
+    "iam.integration.transforms",
+    "iam.integration.mappings",
+    "iam.integration.schedules",
+    "iam.integration.events",
+    "iam.integration.webhooks",
+    "iam.integration.messages",
+    "iam.integration.deadletters",
+    "iam.integration.transfers",
+    "iam.integration.monitoring",
+    "iam.integration.api",
+  ];
+  const eventResourceCodes = [
+    "iam.events",
+    "iam.events.registry",
+    "iam.events.publish",
+    "iam.events.subscriptions",
+    "iam.events.topology",
+    "iam.events.deliveries",
+    "iam.events.deadletters",
+    "iam.events.replay",
+    "iam.events.retention",
+    "iam.events.monitoring",
+  ];
+  const numberingResourceCodes = [
+    "iam.numbering",
+    "iam.numbering.schemes",
+    "iam.numbering.objecttypes",
+    "iam.numbering.sequences",
+    "iam.numbering.allocations",
+    "iam.numbering.generate",
+    "iam.numbering.reserve",
+    "iam.numbering.consume",
+    "iam.numbering.release",
+    "iam.numbering.manual",
+    "iam.numbering.metrics",
+  ];
+  const versioningResourceCodes = [
+    "iam.versioning",
+    "iam.versioning.revisions",
+    "iam.versioning.versions",
+    "iam.versioning.effectivities",
+    "iam.versioning.resolve",
+    "iam.versioning.baselines",
+    "iam.versioning.snapshots",
+    "iam.versioning.variants",
+    "iam.versioning.configurations",
+    "iam.versioning.policies",
+    "iam.versioning.metrics",
+  ];
+  const referenceResourceCodes = [
+    "iam.reference",
+    "iam.reference.domains",
+    "iam.reference.items",
+    "iam.reference.codes",
+    "iam.reference.aliases",
+    "iam.reference.translations",
+    "iam.reference.hierarchy",
+    "iam.reference.relationships",
+    "iam.reference.scopes",
+    "iam.reference.versions",
+    "iam.reference.approvals",
+    "iam.reference.governance",
+    "iam.reference.import",
+    "iam.reference.export",
+    "iam.reference.resolve",
+    "iam.reference.metrics",
+  ];
+  const contentResourceCodes = [
+    "iam.content",
+    "iam.content.browser",
+    "iam.content.details",
+    "iam.content.uploads",
+    "iam.content.versions",
+    "iam.content.locks",
+    "iam.content.associations",
+    "iam.content.renditions",
+    "iam.content.processing",
+    "iam.content.security",
+    "iam.content.retention",
+    "iam.content.admin",
+  ];
+  const dataGovernanceResourceCodes = [
+    "iam.data_governance",
+    "iam.data_governance.domains",
+    "iam.data_governance.catalog",
+    "iam.data_governance.ownership",
+    "iam.data_governance.policies",
+    "iam.data_governance.configuration",
+    "iam.data_governance.dimensions",
+    "iam.data_governance.jobs",
+    "iam.data_governance.metrics",
+    "iam.data_quality",
+    "iam.data_quality.rules",
+    "iam.data_quality.evaluation",
+    "iam.data_quality.results",
+    "iam.data_quality.exceptions",
+    "iam.data_quality.duplicates",
+    "iam.data_quality.remediation",
+  ];
+  const dataCatalogResourceCodes = [
+    "iam.data_catalog",
+    "iam.data_catalog.overview",
+    "iam.data_catalog.domains",
+    "iam.data_catalog.objects",
+    "iam.data_catalog.attributes",
+    "iam.data_catalog.glossary",
+    "iam.data_catalog.terms",
+    "iam.data_catalog.sources",
+    "iam.data_catalog.consumers",
+    "iam.data_catalog.mappings",
+    "iam.data_catalog.lineage",
+    "iam.data_catalog.relationships",
+    "iam.data_catalog.classifications",
+    "iam.data_catalog.ownership",
+    "iam.data_catalog.import_export",
+    "iam.data_catalog.admin",
+    "iam.data_catalog.jobs",
+    "iam.data_catalog.metrics",
+  ];
+  const dataLifecycleResourceCodes = [
+    "iam.data_lifecycle",
+    "iam.data_lifecycle.overview",
+    "iam.data_lifecycle.states",
+    "iam.data_lifecycle.policies",
+    "iam.data_lifecycle.objects",
+    "iam.data_lifecycle.eligibility",
+    "iam.data_lifecycle.archive",
+    "iam.data_lifecycle.restore",
+    "iam.data_lifecycle.recovery",
+    "iam.data_lifecycle.purge",
+    "iam.data_lifecycle.legal_holds",
+    "iam.data_lifecycle.dependencies",
+    "iam.data_lifecycle.jobs",
+    "iam.data_lifecycle.metrics",
+    "iam.data_lifecycle.admin",
+  ];
+  const dataExchangeResourceCodes = [
+    "iam.data_exchange",
+    "iam.data_exchange.overview",
+    "iam.data_exchange.imports",
+    "iam.data_exchange.import_definitions",
+    "iam.data_exchange.exports",
+    "iam.data_exchange.export_definitions",
+    "iam.data_exchange.connectors",
+    "iam.data_exchange.mapping",
+    "iam.data_exchange.validation",
+    "iam.data_exchange.reconciliation",
+    "iam.data_exchange.templates",
+    "iam.data_exchange.history",
+    "iam.data_exchange.jobs",
+    "iam.data_exchange.metrics",
+    "iam.data_exchange.admin",
+  ];
+  const dataMigrationResourceCodes = [
+    "iam.migration",
+    "iam.migration.overview",
+    "iam.migration.projects",
+    "iam.migration.packages",
+    "iam.migration.definitions",
+    "iam.migration.sources",
+    "iam.migration.mapping",
+    "iam.migration.validation",
+    "iam.migration.dependencies",
+    "iam.migration.planning",
+    "iam.migration.execution",
+    "iam.migration.reconciliation",
+    "iam.migration.identifiers",
+    "iam.migration.relationships",
+    "iam.migration.files",
+    "iam.migration.audit",
+    "iam.migration.statistics",
+    "iam.migration.metrics",
+    "iam.migration.admin",
+  ];
+  const classificationResourceCodes = [
+    "iam.classification",
+    "iam.classification.overview",
+    "iam.classification.classifications",
+    "iam.classification.classes",
+    "iam.classification.characteristics",
+    "iam.classification.groups",
+    "iam.classification.values",
+    "iam.classification.assignments",
+    "iam.classification.validation",
+    "iam.classification.search",
+    "iam.classification.governance",
+    "iam.classification.migration",
+    "iam.classification.audit",
+    "iam.classification.metrics",
+    "iam.classification.admin",
+  ];
+  const bomResourceCodes = [
+    "iam.bom",
+    "iam.bom.overview",
+    "iam.bom.boms",
+    "iam.bom.revisions",
+    "iam.bom.lines",
+    "iam.bom.structure",
+    "iam.bom.compare",
+    "iam.bom.whereused",
+    "iam.bom.rollup",
+    "iam.bom.transformation",
+    "iam.bom.validation",
+    "iam.bom.baseline",
+    "iam.bom.search",
+    "iam.bom.audit",
+    "iam.bom.metrics",
+    "iam.bom.admin",
+  ];
+  const pdmResourceCodes = [
+    "iam.pdm",
+    "iam.pdm.overview",
+    "iam.pdm.items",
+    "iam.pdm.revisions",
+    "iam.pdm.parts",
+    "iam.pdm.products",
+    "iam.pdm.datasets",
+    "iam.pdm.representations",
+    "iam.pdm.design-data",
+    "iam.pdm.cad",
+    "iam.pdm.revision-rules",
+    "iam.pdm.configuration-rules",
+    "iam.pdm.baselines",
+    "iam.pdm.whereused",
+    "iam.pdm.wherereferenced",
+    "iam.pdm.structure",
+    "iam.pdm.validation",
+    "iam.pdm.search",
+    "iam.pdm.audit",
+    "iam.pdm.metrics",
+    "iam.pdm.admin",
+  ];
+  const threadResourceCodes = [
+    "iam.thread",
+    "iam.thread.overview",
+    "iam.thread.explorer",
+    "iam.thread.traceability",
+    "iam.thread.impact",
+    "iam.thread.dependency",
+    "iam.thread.paths",
+    "iam.thread.completeness",
+    "iam.thread.snapshots",
+    "iam.thread.baselines",
+    "iam.thread.compare",
+    "iam.thread.definitions",
+    "iam.thread.search",
+    "iam.thread.audit",
+    "iam.thread.metrics",
+    "iam.thread.admin",
+  ];
+  const exchangeResourceCodes = [
+    "iam.exchange",
+    "iam.exchange.dashboard",
+    "iam.exchange.formats",
+    "iam.exchange.definitions",
+    "iam.exchange.import",
+    "iam.exchange.export",
+    "iam.exchange.mappings",
+    "iam.exchange.transformations",
+    "iam.exchange.validation",
+    "iam.exchange.jobs",
+    "iam.exchange.history",
+    "iam.exchange.search",
+    "iam.exchange.metrics",
+    "iam.exchange.audit",
+    "iam.exchange.admin",
+  ];
+  const reportingResourceCodes = [
+    "iam.reporting",
+    "iam.reporting.home",
+    "iam.reporting.reports",
+    "iam.reporting.builder",
+    "iam.reporting.dashboards",
+    "iam.reporting.dashboard_builder",
+    "iam.reporting.kpis",
+    "iam.reporting.metrics",
+    "iam.reporting.data_sources",
+    "iam.reporting.schedules",
+    "iam.reporting.exports",
+    "iam.reporting.bi",
+    "iam.reporting.jobs",
+    "iam.reporting.history",
+    "iam.reporting.search",
+    "iam.reporting.observability",
+    "iam.reporting.audit",
+    "iam.reporting.admin",
+  ];
+  const observabilityResourceCodes = [
+    "iam.observability",
+    "iam.observability.home",
+    "iam.observability.overview",
+    "iam.observability.health",
+    "iam.observability.metrics",
+    "iam.observability.data_volume",
+    "iam.observability.freshness",
+    "iam.observability.quality",
+    "iam.observability.pipelines",
+    "iam.observability.failures",
+    "iam.observability.alerts",
+    "iam.observability.incidents",
+    "iam.observability.slo",
+    "iam.observability.dashboards",
+    "iam.observability.providers",
+    "iam.observability.jobs",
+    "iam.observability.history",
+    "iam.observability.search",
+    "iam.observability.audit",
+    "iam.observability.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
+    const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
+    if (!resource) continue;
+    const owners = [platform, iamAdmin].filter(Boolean);
+    for (const role of owners) {
+      const existing = queryOne(
+        db,
+        `SELECT 1 AS x FROM role_permissions rp
+         JOIN permissions p ON p.id = rp.permission_id
+         WHERE rp.role_id = ? AND p.resource_id = ? AND p.action = 'delete'`,
+        [role.id, resource.id]
+      );
+      if (!existing) grantAll(db, role.id, resource);
+    }
+  }
   if (platform && platformRes) {
     const existingGrant = queryOne(
       db,
@@ -916,6 +1661,101 @@ function reconcileReaderGrants(db) {
     ["iam.workflow.tasks", ["read", "execute", "update"]],
     ["iam.workflow.approvals", ["read", "execute"]],
     ["iam.audit.history", ["read"]],
+    ["iam.notifications.inbox", ["read", "update"]],
+    ["iam.notifications.preferences", ["read", "update"]],
+    ["iam.jobs.list", ["read", "create"]],
+    ["iam.jobs.details", ["read"]],
+    ["iam.jobs.control", ["execute"]],
+    ["iam.jobs.results", ["read"]],
+    ["iam.jobs.types", ["read"]],
+    ["iam.jobs.monitoring", ["read"]],
+    ["iam.jobs.queues", ["read"]],
+    ["iam.jobs.schedules", ["read"]],
+    ["iam.jobs.execution", ["read"]],
+    ["iam.files.browser", ["read"]],
+    ["iam.files.details", ["read", "update", "delete"]],
+    ["iam.files.uploads", ["create"]],
+    ["iam.files.versions", ["read", "create"]],
+    ["iam.files.locks", ["read", "execute"]],
+    ["iam.files.associations", ["read", "create", "delete"]],
+    ["iam.files.folders", ["read", "create", "update"]],
+    ["iam.search.global", ["read"]],
+    ["iam.search.advanced", ["read"]],
+    ["iam.search.saved", ["read", "create", "update", "delete"]],
+    ["iam.search.history", ["read", "delete"]],
+    ["iam.search.export", ["read", "create"]],
+    ["iam.numbering.generate", ["read", "create"]],
+    ["iam.numbering.reserve", ["read", "create"]],
+    ["iam.numbering.consume", ["execute"]],
+    ["iam.numbering.release", ["execute"]],
+    ["iam.numbering.schemes", ["read"]],
+    ["iam.numbering.allocations", ["read"]],
+    ["iam.numbering.sequences", ["read"]],
+    ["iam.numbering.objecttypes", ["read"]],
+    ["iam.numbering.metrics", ["read"]],
+    ["iam.versioning.revisions", ["read"]],
+    ["iam.versioning.versions", ["read"]],
+    ["iam.versioning.effectivities", ["read"]],
+    ["iam.versioning.resolve", ["read", "execute"]],
+    ["iam.versioning.baselines", ["read"]],
+    ["iam.versioning.snapshots", ["read"]],
+    ["iam.versioning.variants", ["read"]],
+    ["iam.versioning.configurations", ["read"]],
+    ["iam.versioning.metrics", ["read"]],
+    ["iam.reference.domains", ["read"]],
+    ["iam.reference.items", ["read"]],
+    ["iam.reference.codes", ["read"]],
+    ["iam.reference.aliases", ["read"]],
+    ["iam.reference.translations", ["read"]],
+    ["iam.reference.hierarchy", ["read"]],
+    ["iam.reference.relationships", ["read"]],
+    ["iam.reference.scopes", ["read"]],
+    ["iam.reference.versions", ["read"]],
+    ["iam.reference.resolve", ["read", "execute"]],
+    ["iam.reference.metrics", ["read"]],
+    ["iam.content.browser", ["read"]],
+    ["iam.content.details", ["read"]],
+    ["iam.content.uploads", ["read", "create"]],
+    ["iam.content.versions", ["read"]],
+    ["iam.content.locks", ["read", "execute"]],
+    ["iam.content.associations", ["read"]],
+    ["iam.content.renditions", ["read"]],
+    ["iam.content.processing", ["read"]],
+    ["iam.content.security", ["read"]],
+    ["iam.content.retention", ["read"]],
+    ["iam.data_governance", ["read"]],
+    ["iam.data_governance.domains", ["read"]],
+    ["iam.data_governance.catalog", ["read"]],
+    ["iam.data_governance.ownership", ["read"]],
+    ["iam.data_governance.policies", ["read"]],
+    ["iam.data_governance.configuration", ["read"]],
+    ["iam.data_governance.dimensions", ["read"]],
+    ["iam.data_governance.jobs", ["read", "execute"]],
+    ["iam.data_governance.metrics", ["read"]],
+    ["iam.data_quality", ["read"]],
+    ["iam.data_quality.rules", ["read"]],
+    ["iam.data_quality.evaluation", ["read", "execute"]],
+    ["iam.data_quality.results", ["read"]],
+    ["iam.data_quality.exceptions", ["read", "create", "update", "execute"]],
+    ["iam.data_quality.duplicates", ["read", "execute"]],
+    ["iam.data_quality.remediation", ["read", "execute"]],
+    ["iam.observability.home", ["read"]],
+    ["iam.observability.overview", ["read"]],
+    ["iam.observability.health", ["read"]],
+    ["iam.observability.metrics", ["read"]],
+    ["iam.observability.data_volume", ["read"]],
+    ["iam.observability.freshness", ["read"]],
+    ["iam.observability.quality", ["read"]],
+    ["iam.observability.pipelines", ["read"]],
+    ["iam.observability.failures", ["read"]],
+    ["iam.observability.alerts", ["read", "execute"]],
+    ["iam.observability.incidents", ["read"]],
+    ["iam.observability.slo", ["read"]],
+    ["iam.observability.dashboards", ["read"]],
+    ["iam.observability.providers", ["read"]],
+    ["iam.observability.jobs", ["read"]],
+    ["iam.observability.history", ["read"]],
+    ["iam.observability.search", ["read"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -1711,6 +2551,8 @@ function seedWorkflow(db) {
 // the console has content on a fresh installation.
 function seedAudit(db) {
   audit.ensureDefaultPolicies(db);
+  audit.ensureSystemActionTypes(db);
+  audit.ensureDefaultRetentionPolicies(db);
   const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
   const admin = queryOne(db, "SELECT id, username, display_name FROM users WHERE username = 'admin'");
   const tenantId = helix?.id || null;
@@ -1858,6 +2700,435 @@ function seedAudit(db) {
   return { auditSeeded: true };
 }
 
+// Default notification configuration: providers, system templates, system rules,
+// per-user preferences and a couple of sample notifications so the inbox has
+// content in a fresh environment. Idempotent: a global "task.assigned" template
+// is used as the presence marker.
+function seedNotifications(db) {
+  notifications.ensureDefaultProviders(db);
+
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const tenantId = helix?.id || null;
+  const admin = queryOne(db, "SELECT id, username, display_name, email, organization_id FROM users WHERE username = 'admin'");
+  const operator = queryOne(db, "SELECT id, username, display_name, email, organization_id FROM users WHERE username = 'j.patel'");
+  const actor = admin
+    ? { id: admin.id, username: admin.username, display_name: admin.display_name, tenant_id: tenantId }
+    : { username: "system", tenant_id: tenantId };
+
+  const ensurePrefs = () => {
+    for (const user of queryAll(db, "SELECT id, tenant_id FROM users")) {
+      try {
+        notifications.ensureDefaultPreferences(db, user.id, user.tenant_id ?? tenantId);
+      } catch {
+        /* preferences are best-effort during seeding */
+      }
+    }
+  };
+
+  const marker = queryOne(db, "SELECT id FROM notification_templates WHERE code = 'task.assigned' AND tenant_id IS NULL");
+  if (marker) {
+    ensurePrefs();
+    return { notificationsSeeded: false };
+  }
+
+  const templateDefs = [
+    {
+      code: "task.assigned",
+      name: "Task assigned",
+      description: "In-app notification when a workflow task is assigned.",
+      event_type: "task.assigned",
+      channel: "in_app",
+      subject: "New task: {{object.name}}",
+      html_body:
+        '<p>Hi {{recipient.name}} {{recipient.username}},</p><p>You have been assigned <strong>{{object.name}}</strong>.</p><p>Due: {{dueDate}}.</p><p><a href="{{applicationUrl}}{{link}}">Open task</a></p>',
+      text_body: "You have been assigned {{object.name}}. Due {{dueDate}}.",
+    },
+    {
+      code: "task.assigned",
+      name: "Task assigned (email)",
+      description: "Email notification when a workflow task is assigned.",
+      event_type: "task.assigned",
+      channel: "email",
+      subject: "[Action required] {{object.name}}",
+      html_body:
+        '<p>Hello {{recipient.username}},</p><p>The task <strong>{{object.name}}</strong> has been assigned to you.</p><p>Due: {{dueDate}}.</p>',
+      text_body: "The task {{object.name}} has been assigned to you. Due {{dueDate}}.",
+    },
+    {
+      code: "task.overdue",
+      name: "Task overdue",
+      description: "Reminder when a task passes its due date.",
+      event_type: "task.overdue",
+      channel: "in_app",
+      subject: "Overdue: {{object.name}}",
+      html_body: '<p>The task <strong>{{object.name}}</strong> is overdue (due {{dueDate}}).</p>',
+      text_body: "The task {{object.name}} is overdue. Due {{dueDate}}.",
+    },
+    {
+      code: "change.request.rejected",
+      name: "Change request rejected",
+      description: "Notifies the requester when a change request is rejected.",
+      event_type: "change.request.rejected",
+      channel: "in_app",
+      subject: "Change request rejected: {{object.name}}",
+      html_body:
+        '<p>Your change request <strong>{{object.name}}</strong> was rejected.</p><p>Reason: {{reason}}</p>',
+      text_body: "Your change request {{object.name}} was rejected. Reason: {{reason}}",
+    },
+    {
+      code: "bom.released",
+      name: "BOM released",
+      description: "Notifies stakeholders when a bill of materials is released.",
+      event_type: "bom.released",
+      channel: "in_app",
+      subject: "BOM released: {{object.name}}",
+      html_body: '<p>The BOM <strong>{{object.name}}</strong> has been released.</p><p><a href="{{applicationUrl}}{{link}}">View BOM</a></p>',
+      text_body: "The BOM {{object.name}} has been released.",
+    },
+    {
+      code: "approval.requested",
+      name: "Approval requested",
+      description: "Notifies an approver that a decision is required.",
+      event_type: "approval.requested",
+      channel: "in_app",
+      subject: "Approval requested: {{object.name}}",
+      html_body:
+        '<p>An approval is waiting for you on <strong>{{object.name}}</strong>.</p><p><a href="{{applicationUrl}}{{link}}">Review</a></p>',
+      text_body: "An approval is waiting for you on {{object.name}}.",
+    },
+    {
+      code: "lifecycle.state.changed",
+      name: "Lifecycle state changed",
+      description: "Notifies object stakeholders of a state transition.",
+      event_type: "lifecycle.state.changed",
+      channel: "in_app",
+      subject: "{{object.name}} is now {{status}}",
+      html_body: '<p><strong>{{object.name}}</strong> moved to status <strong>{{status}}</strong>.</p>',
+      text_body: "{{object.name}} moved to status {{status}}.",
+    },
+  ];
+
+  for (const def of templateDefs) {
+    try {
+      const row = notifications.createTemplate(db, { ...def, tenant_id: null }, actor, "seed", null);
+      run(db, "UPDATE notification_templates SET is_system = 1 WHERE id = ?", [row.id]);
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+
+  const ruleDefs = [
+    {
+      code: "task-assigned",
+      name: "Task assigned",
+      description: "Notify the assignee in-app and by email, with a due-date reminder.",
+      event_type: "task.assigned",
+      template_code: "task.assigned",
+      channels: ["in_app", "email"],
+      priority: "high",
+      recipient: { items: [{ type: "event_payload", value: "assignee_id" }] },
+      reminder: { enabled: true, offset_minutes: 1440, subject: "Reminder: {{object.name}} is due", repeat_minutes: 1440, max_repeats: 2 },
+    },
+    {
+      code: "task-overdue",
+      name: "Task overdue",
+      description: "Remind the assignee when a task is overdue.",
+      event_type: "task.overdue",
+      template_code: "task.overdue",
+      channels: ["in_app"],
+      priority: "urgent",
+      recipient: { items: [{ type: "event_payload", value: "assignee_id" }] },
+    },
+    {
+      code: "change-rejected",
+      name: "Change request rejected",
+      description: "Notify the requester when a change request is rejected.",
+      event_type: "change.request.rejected",
+      template_code: "change.request.rejected",
+      channels: ["in_app", "email"],
+      priority: "high",
+      recipient: { items: [{ type: "event_payload", value: "requester_id" }], fallback: [{ type: "initiator" }] },
+    },
+    {
+      code: "bom-released",
+      name: "BOM released",
+      description: "Notify the object owner and responsible organization when a BOM is released.",
+      event_type: "bom.released",
+      template_code: "bom.released",
+      channels: ["in_app"],
+      recipient: {
+        items: [{ type: "event_payload", value: "owner_id" }],
+        fallback: [{ type: "initiator" }],
+      },
+    },
+    {
+      code: "approval-requested",
+      name: "Approval requested",
+      description: "Notify the approver that a decision is required.",
+      event_type: "approval.requested",
+      template_code: "approval.requested",
+      channels: ["in_app"],
+      priority: "high",
+      recipient: { items: [{ type: "event_payload", value: "approver_id" }], fallback: [{ type: "initiator" }] },
+    },
+    {
+      code: "lifecycle-state-changed",
+      name: "Lifecycle state changed",
+      description: "Notify the object owner when a lifecycle state changes.",
+      event_type: "lifecycle.state.changed",
+      template_code: "lifecycle.state.changed",
+      channels: ["in_app"],
+      recipient: {
+        items: [{ type: "event_payload", value: "owner_id" }],
+        fallback: [{ type: "initiator" }],
+      },
+    },
+  ];
+
+  for (const def of ruleDefs) {
+    try {
+      const row = notifications.createRule(db, { ...def, tenant_id: null }, actor, "seed", null);
+      run(db, "UPDATE notification_rules SET is_system = 1 WHERE id = ?", [row.id]);
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+
+  ensurePrefs();
+
+  if (tenantId && admin) {
+    const assigneeId = operator?.id ?? admin.id;
+    notifications.publish(
+      db,
+      {
+        event_type: "task.assigned",
+        source_module: "workflow",
+        tenant_id: tenantId,
+        object_type: "task",
+        object_id: "TASK-1001",
+        object_name: "Inspect hydraulic manifold",
+        initiator: { id: admin.id, username: admin.username },
+        payload: { assignee_id: assigneeId, due_date: "2026-09-25", link: "/workflow/tasks/1001" },
+      },
+      { actor }
+    );
+    notifications.publish(
+      db,
+      {
+        event_type: "approval.requested",
+        source_module: "lifecycle",
+        tenant_id: tenantId,
+        object_type: "part",
+        object_id: "PART-000001",
+        object_name: "Hydraulic bracket",
+        initiator: { id: operator?.id ?? admin.id, username: operator?.username ?? admin.username },
+        payload: { approver_id: admin.id, link: "/lifecycle/approvals/1" },
+      },
+      { actor }
+    );
+  }
+
+  return { notificationsSeeded: true };
+}
+
+// Idempotent delivery-module seed. Ensures the built-in store/email providers
+// exist and registers placeholder entries for the future external channels so
+// administrators can see and configure them from the delivery console without
+// the platform sending anything by default.
+function seedDelivery(db) {
+  delivery.ensureDefaultProviders(db);
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const admin = queryOne(db, "SELECT id, username, display_name, email FROM users WHERE username = 'admin'");
+  const actor = admin
+    ? { id: admin.id, username: admin.username, display_name: admin.display_name, tenant_id: helix?.id ?? null }
+    : { username: "system", tenant_id: helix?.id ?? null };
+  const defs = [
+    { code: "teams-webhook", name: "Microsoft Teams (webhook)", channel: "teams", type: "teams", enabled: false, status: "inactive", config: {} },
+    { code: "slack-webhook", name: "Slack (webhook)", channel: "slack", type: "slack", enabled: false, status: "inactive", config: {} },
+  ];
+  for (const def of defs) {
+    if (queryOne(db, "SELECT id FROM notification_providers WHERE code = ?", [def.code])) continue;
+    try {
+      delivery.createDeliveryProvider(db, def, actor, "seed");
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+  return { deliverySeeded: true };
+}
+
+// Registers the standard job types every business module exposes and a small,
+// representative set of sample jobs so the dashboard is meaningful on a fresh
+// install. Idempotent: sample jobs are only created when the table is empty.
+function seedJobs(db) {
+  jobs.ensureDefaultJobTypes(db);
+  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM jobs").c;
+  if (existing > 0) return { jobsSeeded: true, jobTypesSeeded: true };
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const admin = queryOne(db, "SELECT id, username, display_name, email FROM users WHERE username = 'admin'");
+  const actor = admin
+    ? { id: admin.id, username: admin.username, display_name: admin.display_name, tenant_id: helix?.id ?? null, organization_id: helix?.id ?? null }
+    : null;
+  const context = { actor };
+  const hire = queryOne(db, "SELECT id, code, name FROM organizations WHERE code = 'helix' ORDER BY id LIMIT 1");
+
+  const samples = [
+    {
+      type: "REPORT_GENERATION",
+      idempotency_key: "seed:job:report",
+      name: "Quarterly cost rollup",
+      description: "Roll up approved cost records into the quarterly report.",
+      related_object_type: "report",
+      related_object_name: "Quarterly cost rollup",
+    },
+    {
+      type: "DATA_SYNC",
+      idempotency_key: "seed:job:sync",
+      name: "ERP item master sync",
+      description: "Synchronize the item master with the ERP system.",
+      related_object_type: "integration",
+      related_object_name: "ERP item master",
+    },
+    {
+      type: "CAD_PROCESSING",
+      idempotency_key: "seed:job:cad",
+      name: "Tessellate housing assembly",
+      description: "Generate viewable geometry for the housing assembly.",
+      related_object_type: "part",
+      related_object_name: "Housing assembly",
+    },
+    {
+      type: "BULK_IMPORT",
+      idempotency_key: "seed:job:import",
+      name: "Supplier contacts import",
+      description: "Import 2,400 supplier contacts from a spreadsheet.",
+      related_object_type: "import",
+      related_object_name: "Supplier contacts",
+    },
+    {
+      type: "SEARCH_INDEXING",
+      idempotency_key: "seed:job:index",
+      name: "Nightly search reindex",
+      description: "Reindex all published documents for full-text search.",
+      delay_seconds: 3600,
+      related_object_type: "index",
+      related_object_name: "Document index",
+    },
+  ];
+
+  const created = [];
+  for (const sample of samples) {
+    try {
+      const job = jobs.submitJob(
+        db,
+        { ...sample, job_type_code: sample.type, tenant_id: helix?.id ?? null, organization_id: hire?.id ?? null },
+        context
+      );
+      created.push(job);
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+
+  const byKey = (key) => created.find((job) => job.idempotency_key === key);
+  const report = byKey("seed:job:report");
+  if (report) {
+    jobs.transitionJob(db, report.id, "running", { actorId: admin?.id ?? null, source: "engine" });
+    jobs.updateProgress(db, report.id, { progress: 100, stage: "finalize", message: "Report rendered" }, {});
+    jobs.transitionJob(db, report.id, "completed", { actorId: admin?.id ?? null, source: "engine" });
+    const row = jobs.getJobRow(db, report.id);
+    jobs.setJobResult(db, row, { result: { rows: 1840, duration_seconds: 214 }, result_ref: "doc://reports/quarterly-cost-rollup" }, {});
+    jobs.addArtifact(db, report.id, {
+      kind: "report",
+      name: "Quarterly cost rollup (PDF)",
+      filename: "quarterly-cost-rollup.pdf",
+      content_type: "application/pdf",
+      size: 284113,
+      storage_ref: "doc://reports/quarterly-cost-rollup.pdf",
+    });
+  }
+
+  const sync = byKey("seed:job:sync");
+  if (sync) {
+    jobs.transitionJob(db, sync.id, "running", { actorId: admin?.id ?? null, source: "engine" });
+    jobs.transitionJob(db, sync.id, "failed", {
+      actorId: admin?.id ?? null,
+      source: "engine",
+      errorCode: "erp_timeout",
+      errorMessage: "The ERP gateway did not respond within 300 seconds",
+    });
+  }
+
+  const cad = byKey("seed:job:cad");
+  if (cad) {
+    jobs.transitionJob(db, cad.id, "running", { actorId: admin?.id ?? null, source: "engine" });
+    jobs.updateProgress(db, cad.id, { progress: 42, stage: "tessellate", message: "Processing mesh 3 of 7" }, {});
+  }
+
+  return { jobsSeeded: true, jobTypesSeeded: true, sampleJobs: created.length };
+}
+
+// Ensures the logical execution queues and a representative set of recurring
+// schedules exist. Queues are system configuration and are only created when
+// missing; admin edits are never overwritten.
+function seedJobEngine(db) {
+  const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const admin = queryOne(db, "SELECT id, username, display_name, email FROM users WHERE username = 'admin'");
+  const actor = admin
+    ? { id: admin.id, username: admin.username, display_name: admin.display_name, tenant_id: helix?.id ?? null, organization_id: helix?.id ?? null }
+    : null;
+  jobExecution.ensureDefaultQueues(db, actor);
+
+  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM job_schedules").c;
+  if (existing > 0) return { jobEngineSeeded: true, queuesSeeded: jobExecution.LOGICAL_QUEUES.length };
+
+  const samples = [
+    {
+      code: "NIGHTLY_SEARCH_REINDEX",
+      name: "Nightly search reindex",
+      description: "Rebuild the full-text search index every night at 02:00 UTC.",
+      job_type_code: "SEARCH_INDEXING",
+      queue: "SEARCH_INDEXING",
+      schedule_type: "cron",
+      cron_expression: "0 2 * * *",
+      timezone: "UTC",
+      catchup_policy: "skip",
+    },
+    {
+      code: "HOURLY_ERP_SYNC",
+      name: "Hourly ERP sync",
+      description: "Synchronize the item master with the ERP system every hour.",
+      job_type_code: "DATA_SYNC",
+      queue: "INTEGRATION",
+      schedule_type: "interval",
+      interval_seconds: 3600,
+      failure_policy: "continue",
+    },
+    {
+      code: "WEEKLY_COST_ROLLUP",
+      name: "Weekly cost rollup",
+      description: "Roll up approved cost records into the weekly report on Mondays.",
+      job_type_code: "REPORT_GENERATION",
+      queue: "REPORTING",
+      schedule_type: "weekly",
+      weekdays: [1],
+      daily_time: "06:00",
+      timezone: "UTC",
+      max_retries: 2,
+    },
+  ];
+  let created = 0;
+  for (const sample of samples) {
+    try {
+      jobExecution.createSchedule(db, { ...sample, tenant_id: helix?.id ?? null }, actor, "seed");
+      created += 1;
+    } catch (err) {
+      if (!String(err.message).includes("already exists")) throw err;
+    }
+  }
+  return { jobEngineSeeded: true, queuesSeeded: jobExecution.LOGICAL_QUEUES.length, schedulesSeeded: created };
+}
+
 export function seedDatabase(db) {
   hierarchy.ensureHierarchy(db);
   config.ensureDefinitions(db);
@@ -1872,7 +3143,298 @@ export function seedDatabase(db) {
   seedLifecycle(db);
   seedWorkflow(db);
   seedAudit(db);
-  return { ...identity, ...authz };
+  seedNotifications(db);
+  seedDelivery(db);
+  seedJobs(db);
+  seedJobEngine(db);
+  const searchResult = seedSearch(db);
+  const integrationResult = seedIntegration(db);
+  const eventsResult = seedEvents(db);
+  const numberingResult = withEventSuppression(() => seedNumbering(db));
+  const versioningResult = withEventSuppression(() => seedVersioning(db));
+  const referenceResult = withEventSuppression(() => seedReference(db));
+  const contentResult = withEventSuppression(() => seedContent(db));
+  const dataGovernanceResult = withEventSuppression(() => seedDataGovernance(db));
+  const dataCatalogResult = withEventSuppression(() => seedDataCatalog(db));
+  const dataLifecycleResult = withEventSuppression(() => seedDataLifecycle(db));
+  const dataExchangeResult = withEventSuppression(() => seedDataExchange(db));
+  const migrationResult = withEventSuppression(() => seedMigrationFramework(db));
+  const classificationResult = withEventSuppression(() => seedClassificationFramework(db));
+  const bomResult = withEventSuppression(() => seedBomEngine(db));
+  const pdmResult = withEventSuppression(() => seedPdmDomain(db));
+  const threadResult = withEventSuppression(() => seedThreadDomain(db));
+  const exchangeResult = withEventSuppression(() => seedExchangeDomain(db));
+  const reportingResult = withEventSuppression(() => seedReportingDomain(db));
+  const observabilityResult = withEventSuppression(() => seedObservabilityDomain(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult, ...threadResult, ...exchangeResult, ...reportingResult, ...observabilityResult };
+}
+
+// Installs the centralized Data Governance & Data Quality foundation (default
+// dimensions, scoring bands, event types, job handlers, search registrations)
+// plus a small demo estate so dashboards are not empty on a fresh install.
+function seedDataGovernance(db) {
+  try {
+    const result = dataGovernance.ensureDataGovernanceSeed(db);
+    return { dataGovernanceSeeded: true, ...result };
+  } catch (err) {
+    return { dataGovernanceSeeded: false, dataGovernanceError: err.message };
+  }
+}
+
+// Installs the centralized Data Catalog & Business Glossary foundation (default
+// relationship types, event types, job handlers, search registrations) plus a
+// small demo estate so catalog dashboards are not empty on a fresh install.
+function seedDataCatalog(db) {
+  try {
+    const result = dataCatalog.ensureDataCatalogSeed(db);
+    return { dataCatalogSeeded: true, ...result };
+  } catch (err) {
+    return { dataCatalogSeeded: false, dataCatalogError: err.message };
+  }
+}
+
+// Installs the centralized Data Lifecycle & Archival foundation (default states,
+// transitions, tier mappings, event types, job handlers, search registrations)
+// plus a small demo estate so lifecycle dashboards are not empty on a fresh
+// install.
+function seedDataLifecycle(db) {
+  try {
+    const result = dataLifecycle.ensureDataLifecycleSeed(db);
+    return { dataLifecycleSeeded: true, ...result };
+  } catch (err) {
+    return { dataLifecycleSeeded: false, dataLifecycleError: err.message };
+  }
+}
+
+// Installs the centralized Import & Export Framework foundation (built-in
+// connectors, event types, job handlers, configuration) plus a small demo
+// estate so exchange dashboards are not empty on a fresh install.
+function seedDataExchange(db) {
+  try {
+    const result = dataExchange.ensureDataExchangeSeed(db);
+    return { dataExchangeSeeded: true, ...result };
+  } catch (err) {
+    return { dataExchangeSeeded: false, dataExchangeError: err.message };
+  }
+}
+
+// Installs the centralized Migration & Onboarding Framework foundation (source
+// adapters, event types, job types/handlers, search registrations) plus a small
+// demo onboarding estate so migration dashboards are not empty on a fresh install.
+function seedMigrationFramework(db) {
+  try {
+    const result = migration.ensureMigrationSeed(db);
+    return { migrationSeeded: true, ...result };
+  } catch (err) {
+    return { migrationSeeded: false, migrationError: err.message };
+  }
+}
+
+// Installs the centralized Enterprise Classification Framework foundation
+// (units, event types, job types/handlers, search registrations, duplicate
+// strategy, per-tenant configuration) plus a small demo classification estate.
+function seedClassificationFramework(db) {
+  try {
+    const result = classification.ensureClassificationSeed(db);
+    return { classificationSeeded: true, ...result };
+  } catch (err) {
+    return { classificationSeeded: false, classificationError: err.message };
+  }
+}
+
+// Installs the P1 BOM Engine foundation (units, event types, job types/handlers,
+// search registrations, per-tenant configuration and default validation rules)
+// plus a small demo EBOM estate so BOM dashboards are not empty on a fresh install.
+function seedBomEngine(db) {
+  try {
+    const result = bom.ensureBomSeed(db);
+    return { bomSeeded: true, ...result };
+  } catch (err) {
+    return { bomSeeded: false, bomError: err.message };
+  }
+}
+
+// Installs the P1 PDM domain foundation (event types, job types/handlers, search
+// registrations, per-tenant configuration and default validation rules) plus a
+// small demo product structure so PDM screens are not empty on a fresh install.
+function seedPdmDomain(db) {
+  try {
+    const result = pdm.ensurePdmSeed(db);
+    return { pdmSeeded: true, ...result };
+  } catch (err) {
+    return { pdmSeeded: false, pdmError: err.message };
+  }
+}
+
+// Installs the P1 Digital Thread foundation (providers, event/job types, search
+// registrations, default definition and rules, configuration) plus a demo
+// snapshot and released baseline so the capability is visible on a fresh install.
+function seedThreadDomain(db) {
+  try {
+    const result = thread.ensureThreadSeed(db);
+    return { threadSeeded: true, ...result };
+  } catch (err) {
+    return { threadSeeded: false, threadError: err.message };
+  }
+}
+
+// Installs the P2 Standards & Exchange foundation (formats/adapters, event and
+// job types, search registrations, default JSON exchange definitions, mappings,
+// transformations and validation profiles) plus a demo transaction so the
+// capability is visible on a fresh install. Reuses the Import/Export framework.
+function seedExchangeDomain(db) {
+  try {
+    const result = exchange.ensureExchangeSeed(db);
+    return { exchangeSeeded: true, ...result };
+  } catch (err) {
+    return { exchangeSeeded: false, exchangeError: err.message };
+  }
+}
+
+// Installs the P2 Reporting & Analytics foundation (event and job types, search
+// registrations, semantic layer, configuration) plus curated KPI definitions, a
+// demo report and an operations dashboard so the capability is visible on a
+// fresh install. Modules 20 is a platform service consumed by every domain.
+function seedReportingDomain(db) {
+  try {
+    const result = reporting.ensureReportingSeed(db);
+    return { reportingSeeded: true, ...result };
+  } catch (err) {
+    return { reportingSeeded: false, reportingError: err.message };
+  }
+}
+
+function seedObservabilityDomain(db) {
+  try {
+    const result = observability.ensureObservabilitySeed(db);
+    return { observabilitySeeded: true, ...result };
+  } catch (err) {
+    return { observabilitySeeded: false, observabilityError: err.message };
+  }
+}
+
+function seedSearch(db) {
+  try {
+    const result = search.initializeSearch(db);
+    return { searchSeeded: true, ...result };
+  } catch (err) {
+    return { searchSeeded: false, searchError: err.message };
+  }
+}
+// Registers the platform's default domain event types so business modules can
+// publish/subscribe without any manual catalogue maintenance.
+function seedIntegration(db) {
+  try {
+    const result = integration.Events.ensureDefaultEventTypes(db);
+    return { integrationSeeded: true, eventTypes: result.total };
+  } catch (err) {
+    return { integrationSeeded: false, integrationError: err.message };
+  }
+}
+
+// Installs the Event & Messaging Framework foundation: the event type catalogue,
+// the default topic/queue/consumer-group topology and default retention policies.
+function seedEvents(db) {
+  try {
+    const result = events.ensureEventFoundation(db);
+    return {
+      eventsSeeded: true,
+      eventTypesRegistry: result.event_types.total,
+      eventTopology: result.topology,
+      eventRetentionPolicies: result.retention_policies.total,
+      eventSubscriptions: result.subscriptions.total,
+    };
+  } catch (err) {
+    return { eventsSeeded: false, eventsError: err.message };
+  }
+}
+
+// Installs the Numbering & Identifier Service foundation: object types, token
+// catalogue, scope registry, event types, search resolver and a set of example
+// schemes that demonstrate the standard enterprise identifier patterns.
+function seedNumbering(db) {
+  try {
+    const foundation = numbering.ensureNumberingFoundation(db);
+    const schemes = seedNumberingSchemes(db);
+    return { numberingSeeded: true, ...foundation, schemes };
+  } catch (err) {
+    return { numberingSeeded: false, numberingError: err.message };
+  }
+}
+
+function seedNumberingSchemes(db) {
+  const helixes = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  const tenantId = helixes?.id ?? null;
+  const admin = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin'");
+  const actor = admin ? { id: admin.id, username: admin.username } : null;
+  const definitions = [
+    { code: "PART_STANDARD", name: "Part standard", object_type_code: "PART", pattern: "{TYPE}-{YYYY}-{SEQ}", padding: 6, reset_policy: "yearly", is_default: true, priority: 100 },
+    { code: "PRODUCT_STANDARD", name: "Product standard", object_type_code: "PRODUCT", pattern: "{TYPE}-{SEQ}", padding: 6, is_default: true, priority: 100 },
+    { code: "DOCUMENT_CONTROLLED", name: "Controlled document", object_type_code: "DOCUMENT", pattern: "{TYPE}-{YYYY}-{SEQ}", padding: 5, reset_policy: "yearly", sequence_scope: "organization", is_default: true, priority: 100 },
+    { code: "BOM_STANDARD", name: "BOM standard", object_type_code: "BOM", pattern: "{TYPE}-{YYYY}-{SEQ}", padding: 6, reset_policy: "yearly", is_default: true, priority: 100 },
+    { code: "DRAWING_STANDARD", name: "Drawing standard", object_type_code: "DRAWING", pattern: "{TYPE}-{YY}-{SEQ}", padding: 5, is_default: true, priority: 100 },
+    { code: "SPECIFICATION_STANDARD", name: "Specification standard", object_type_code: "SPECIFICATION", pattern: "{TYPE}-{SEQ}", padding: 5, is_default: true, priority: 100 },
+    { code: "CHANGE_REQUEST", name: "Engineering change", object_type_code: "CHANGE", pattern: "ECN-{YYYY}-{SEQ}", padding: 4, reset_policy: "yearly", is_default: true, priority: 100 },
+    { code: "SUPPLIER_STANDARD", name: "Supplier standard", object_type_code: "SUPPLIER", pattern: "{TYPE}-{SEQ}", padding: 5, is_default: true, priority: 100 },
+    { code: "CUSTOMER_STANDARD", name: "Customer standard", object_type_code: "CUSTOMER", pattern: "{TYPE}-{SEQ}", padding: 5, is_default: true, priority: 100 },
+    { code: "MATERIAL_STANDARD", name: "Material standard", object_type_code: "MATERIAL", pattern: "{TYPE}-{SEQ}", padding: 6, is_default: true, priority: 100 },
+  ];
+  let created = 0;
+  const codes = [];
+  for (const def of definitions) {
+    const existing = queryOne(
+      db,
+      "SELECT id FROM numbering_schemes WHERE code = ? AND COALESCE(tenant_id, 0) = COALESCE(?, 0)",
+      [def.code, tenantId]
+    );
+    if (existing) continue;
+    try {
+      numbering.Schemes.createScheme(db, { ...def, status: "active" }, actor, tenantId, "seed");
+      created += 1;
+      codes.push(def.code);
+    } catch {
+      /* a missing object type in an older database must not fail seeding */
+    }
+  }
+  return { created, codes };
+}
+
+// Installs the Effectivity & Versioning Kernel foundation: effectivity types,
+// the default resolution policy, event types, search registrations and a small
+// set of demonstration objects covering date/serial/plant/model effectivity.
+function seedVersioning(db) {
+  try {
+    const foundation = versioning.ensureVersioningFoundation(db);
+    const sample = versioning.seedVersioning(db);
+    return { versioningSeeded: true, ...foundation, sample };
+  } catch (err) {
+    return { versioningSeeded: false, versioningError: err.message };
+  }
+}
+
+// Installs the Enterprise Reference Data Management foundation: the canonical
+// domain catalogue (UoM, currency, country, ...), default governance policies,
+// scope precedence and a demonstration set of governed master values.
+function seedReference(db) {
+  try {
+    const foundation = reference.ensureReferenceFoundation(db);
+    const sample = reference.seedReference(db);
+    return { referenceSeeded: true, referenceFoundation: foundation.domains?.created ?? 0, referenceSample: sample.items_created ?? 0 };
+  } catch (err) {
+    return { referenceSeeded: false, referenceError: err.message };
+  }
+}
+
+// Installs the File & Content Management foundation: content event types, search
+// registration and the baseline retention policy set.
+function seedContent(db) {
+  try {
+    const foundation = content.ensureContentFoundation(db);
+    const sample = content.seedContent(db);
+    return { contentSeeded: true, contentEventTypes: foundation.event_types, contentRetentionPolicies: sample.retention_policies };
+  } catch (err) {
+    return { contentSeeded: false, contentError: err.message };
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

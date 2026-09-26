@@ -4,11 +4,18 @@ import {
   normalizeSource,
   normalizeStatus,
   normalizeEventType,
+  normalizeActorType,
+  normalizeCategory,
+  normalizeClassification,
+  normalizeRetentionCategory,
+  categoryOfAction,
+  isMandatoryEvent,
   isSensitiveKey,
   maskValue,
   valueTypeOf,
 } from "./validation.js";
 import { resolvePolicy } from "./policies.js";
+import { publishAuditEvent, AUDIT_EVENT_TYPES } from "./publisher.js";
 
 // Core audit event capture. Invariants:
 //  * capture never throws into the business transaction it observes; failures
@@ -141,18 +148,28 @@ export function publicEvent(row) {
     actor_id: row.actor_id ?? null,
     actor_username: row.actor_username ?? "system",
     user_display_name: row.user_display_name ?? null,
+    actor_type: row.actor_type || "user",
+    actor_ref: row.actor_ref ?? null,
     action: row.action,
     event_type: row.event_type || null,
+    category: row.category || null,
     source: row.source || "api",
+    security_classification: row.security_classification || "internal",
+    retention_category: row.retention_category || "standard",
     object_type: row.resource_type,
     object_id: row.resource_id,
     object_name: row.object_name ?? null,
+    object_revision: row.object_revision ?? null,
+    session_id: row.session_id ?? null,
+    related_resource_type: row.related_resource_type ?? null,
+    related_resource_id: row.related_resource_id ?? null,
     details: safeParse(row.details),
     changed_fields: safeParse(row.changed_fields) || [],
     before_values: safeParse(row.before_values),
     after_values: safeParse(row.after_values),
     related: safeParse(row.related_json),
     status: row.status || "success",
+    failure_category: row.failure_category ?? null,
     error_message: row.error_message ?? null,
     reason: row.reason ?? null,
     correlation_id: row.correlation_id ?? null,
@@ -187,6 +204,65 @@ export function captureChanges(db, eventId, tenantId, beforeChanged, afterChange
   }
 }
 
+// Looks up an action type registered at runtime. Returns null when the action
+// is not in the registry, in which case the framework falls back to its
+// built-in classifier.
+export function resolveActionType(db, action) {
+  const code = String(action || "").trim().toLowerCase();
+  if (!code) return null;
+  const row = queryOne(
+    db,
+    "SELECT code, category, event_type, mandatory FROM audit_action_types WHERE code = ? COLLATE NOCASE AND active = 1",
+    [code]
+  );
+  if (!row) return null;
+  return {
+    code: row.code,
+    category: row.category,
+    event_type: row.event_type || null,
+    mandatory: row.mandatory === 1,
+  };
+}
+
+// Infers who or what performed the action when the caller does not say.
+function inferActorType(actor, source) {
+  if (actor?.id) {
+    if (actor.actor_type) return normalizeActorType(actor.actor_type);
+    const code = String(actor.code || actor.username || "").toLowerCase();
+    if (source === "integration" || code.includes("integration")) return "integration";
+    if (source === "workflow") return "workflow";
+    if (source === "scheduler" || source === "system") return "system";
+    if (code.includes("service") || code.includes("bot")) return "service_account";
+    return "user";
+  }
+  if (source === "integration") return "integration";
+  if (source === "workflow") return "workflow";
+  if (source === "scheduler" || source === "system") return "system";
+  if (source === "api") return "user";
+  return "system";
+}
+
+function actorReference(actor, input) {
+  const explicit = input.actor_ref ?? input.actorRef;
+  if (explicit) return String(explicit).slice(0, 255);
+  if (!actor) return null;
+  const ref = actor.username || actor.code || actor.email;
+  return ref ? String(ref).slice(0, 255) : null;
+}
+
+// Security classification defaults by category so sensitive control-plane
+// events are never labelled as internal by omission.
+function defaultClassification(category) {
+  if (["security", "authentication", "authorization"].includes(category)) return "restricted";
+  if (["configuration", "compliance", "administration"].includes(category)) return "confidential";
+  return "internal";
+}
+
+function defaultRetentionCategory(category) {
+  if (category === "compliance") return "extended";
+  return "standard";
+}
+
 // Records an audit event. Accepts the rich event model and legacy field names
 // (resource_type/resource_id) so existing modules keep working unchanged.
 export function capture(db, input = {}) {
@@ -202,19 +278,37 @@ export function capture(db, input = {}) {
     const action = normalizeAction(input.action);
     const status = normalizeStatus(input.status);
     const source = normalizeSource(input.source);
-    const eventType = normalizeEventType(input.event_type ?? input.eventType, action);
+    const registryAction = resolveActionType(db, action);
+    const eventType = normalizeEventType(
+      input.event_type ?? input.eventType ?? registryAction?.event_type,
+      action
+    );
+    const category = normalizeCategory(
+      input.category ?? registryAction?.category ?? categoryOfAction(action, eventType)
+    );
+    const mandatory =
+      input.mandatory === true ||
+      registryAction?.mandatory === true ||
+      isMandatoryEvent(action, category);
 
     const { policy, scope } = resolvePolicy(db, tenantId, objectType);
-    if (!policy.enabled) return null;
-    if (status === "failure" && !policy.record_failure) return null;
-    if (status === "success" && !policy.record_success) return null;
-    if (eventType === "VIEW" && !policy.capture_views && !policy.capture_reads) return null;
-    if (eventType === "DOWNLOAD" && !policy.capture_downloads) return null;
-    if (Array.isArray(policy.actions) && policy.actions.length) {
-      const allowed = policy.actions.some(
-        (entry) => entry === action || String(entry).toUpperCase() === eventType
-      );
-      if (!allowed) return null;
+    // Mandatory security/configuration events are always captured. Policy
+    // controls cannot suppress the audit trail for the control plane.
+    if (!mandatory) {
+      if (!policy.enabled) return null;
+      if (status === "failure" && !policy.record_failure) return null;
+      if (status === "success" && !policy.record_success) return null;
+      if (eventType === "VIEW" && !policy.capture_views && !policy.capture_reads) return null;
+      if (eventType === "DOWNLOAD" && !policy.capture_downloads) return null;
+      if (Array.isArray(policy.actions) && policy.actions.length) {
+        const allowed = policy.actions.some(
+          (entry) => entry === action || String(entry).toUpperCase() === eventType
+        );
+        if (!allowed) return null;
+      }
+      if (Array.isArray(policy.categories) && policy.categories.length && !policy.categories.includes(category)) {
+        return null;
+      }
     }
 
     const maskedKeys = new Set(policy.masked_attributes || []);
@@ -229,14 +323,30 @@ export function capture(db, input = {}) {
     const storedBefore = maskObject(beforeChanged, maskedKeys);
     const storedAfter = maskObject(afterChanged, maskedKeys);
 
+    const actorType = normalizeActorType(
+      input.actor_type ?? input.actorType ?? inferActorType(actor, source)
+    );
+    const securityClassification = normalizeClassification(
+      input.security_classification ?? input.securityClassification ?? defaultClassification(category)
+    );
+    const retentionCategory = normalizeRetentionCategory(
+      input.retention_category ?? input.retentionCategory ?? defaultRetentionCategory(category)
+    );
+    const organizationId = numberOrNull(
+      input.organization_id ?? input.organizationId ?? actor?.organization_id
+    );
+
     const result = run(
       db,
       `INSERT INTO audit_logs
         (tenant_id, organization_id, plant_id, site_id, department_id, actor_id, actor_username,
-         user_display_name, action, event_type, source, resource_type, resource_id, object_name,
-         details, changed_fields, before_values, after_values, related_json, status, error_message,
-         reason, correlation_id, request_id, parent_event_id, ip, device, duration_ms, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         user_display_name, actor_type, actor_ref, action, event_type, category, source,
+         security_classification, retention_category, resource_type, resource_id, object_name,
+         object_revision, session_id, related_resource_type, related_resource_id,
+         details, changed_fields, before_values, after_values, related_json, status,
+         failure_category, error_message, reason, correlation_id, request_id, parent_event_id,
+         ip, device, duration_ms, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         tenantId,
         numberOrNull(input.organization_id ?? input.organizationId ?? actor?.organization_id),
@@ -246,18 +356,28 @@ export function capture(db, input = {}) {
         numberOrNull(actor?.id ?? input.actor_id ?? input.actorId),
         actor?.username || input.actor_username || input.actorUsername || "system",
         actor?.display_name || actor?.displayName || input.user_display_name || input.userDisplayName || null,
+        actorType,
+        actorReference(actor, input),
         action,
         eventType,
+        category,
         source,
+        securityClassification,
+        retentionCategory,
         objectType,
         objectId,
         stringOrNull(input.object_name ?? input.objectName),
+        stringOrNull(input.object_revision ?? input.objectRevision),
+        stringOrNull(input.session_id ?? input.sessionId),
+        stringOrNull(input.related_resource_type ?? input.relatedResourceType),
+        stringOrNull(input.related_resource_id ?? input.relatedResourceId),
         jsonOrNull(input.details),
         changedFields.length ? JSON.stringify(changedFields) : null,
         changedFields.length ? jsonOrNull(storedBefore) : null,
         changedFields.length ? jsonOrNull(storedAfter) : null,
         jsonOrNull(input.related),
         status,
+        stringOrNull(input.failure_category ?? input.failureCategory),
         stringOrNull(input.error_message ?? input.errorMessage),
         stringOrNull(input.reason),
         stringOrNull(input.correlation_id ?? input.correlationId),
@@ -271,11 +391,53 @@ export function capture(db, input = {}) {
     );
     const eventId = Number(result.lastInsertRowid);
     if (changedFields.length) captureChanges(db, eventId, tenantId, storedBefore, storedAfter, changedFields);
-    return { id: eventId, event_type: eventType, scope };
+    const outcome = {
+      id: eventId,
+      event_type: eventType,
+      category,
+      actor_type: actorType,
+      security_classification: securityClassification,
+      scope,
+    };
+    if (input.publish !== false) {
+      publishAuditEvent(AUDIT_EVENT_TYPES.EVENT_CREATED, {
+        id: eventId,
+        tenant_id: tenantId,
+        organization_id: organizationId,
+        object_type: objectType,
+        object_id: objectId,
+        object_name: stringOrNull(input.object_name ?? input.objectName),
+        action,
+        event_type: eventType,
+        category,
+        actor_type: actorType,
+        security_classification: securityClassification,
+        retention_category: retentionCategory,
+        status,
+        source,
+        reason: stringOrNull(input.reason),
+        actor: actor ? { id: actor.id, username: actor.username } : null,
+        ip: stringOrNull(input.ip),
+        correlation_id: stringOrNull(input.correlation_id ?? input.correlationId),
+      });
+    }
+    return outcome;
   } catch (err) {
     structuredLog("audit.capture.failed", { message: err?.message, action: input?.action });
     return null;
   }
+}
+
+// Records multiple events in one call. Each entry is captured independently so
+// one invalid entry cannot drop the others. Returns the captured event ids.
+export function recordBatch(db, events = []) {
+  if (!Array.isArray(events)) return [];
+  const captured = [];
+  for (const entry of events) {
+    const result = capture(db, entry);
+    if (result) captured.push(result.id);
+  }
+  return captured;
 }
 
 // Backwards-compatible writer used by all pre-existing modules. Keeps the
@@ -331,6 +493,45 @@ export function recordObjectChange(db, {
     correlation_id: correlationId,
     request_id: requestId,
     related,
+  });
+}
+
+// Convenience wrappers for the specialised event families. They keep call
+// sites declarative and guarantee the correct category/event type is applied.
+export function recordStateChange(db, options = {}) {
+  return capture(db, { ...options, action: options.action || "state.change", category: "lifecycle" });
+}
+
+export function recordRelationshipChange(db, options = {}) {
+  const action = options.action || (options.removed ? "relationship.removed" : "relationship.created");
+  return capture(db, {
+    ...options,
+    action,
+    category: "relationship",
+    related_resource_type: options.relatedResourceType ?? options.related_resource_type,
+    related_resource_id: options.relatedResourceId ?? options.related_resource_id,
+  });
+}
+
+export function recordWorkflowAction(db, options = {}) {
+  return capture(db, { ...options, action: options.action || "workflow.action", category: options.category || "workflow" });
+}
+
+export function recordSecurityEvent(db, options = {}) {
+  return capture(db, {
+    ...options,
+    category: options.category || "security",
+    security_classification: options.security_classification || options.securityClassification || "restricted",
+    failure_category: options.failure_category ?? options.failureCategory,
+  });
+}
+
+export function recordAuthentication(db, options = {}) {
+  return capture(db, {
+    ...options,
+    action: options.action || (options.status === "failure" ? "login.failed" : "login"),
+    category: "authentication",
+    source: options.source || "api",
   });
 }
 

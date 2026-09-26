@@ -56,6 +56,11 @@ export function checkPermission(db, user, resource, action, context = {}) {
   }
 
   const roleIds = [...new Set(access.roles.map((r) => r.id))];
+  const ancestryIds = [...resourceIds];
+  // Filter by the resource ancestry (and action) in SQL rather than fetching
+  // every grant the roles hold and discarding most of them in JavaScript. For
+  // broad roles (e.g. platform admin) this avoids materialising thousands of
+  // irrelevant grants on every permission check.
   const grants = queryAll(
     db,
     `SELECT rp.role_id, rp.permission_id, rp.effect, rp.organization_id AS grant_organization_id,
@@ -63,15 +68,23 @@ export function checkPermission(db, user, resource, action, context = {}) {
      FROM role_permissions rp
      JOIN permissions p ON p.id = rp.permission_id
      WHERE rp.role_id IN (${roleIds.map(() => "?").join(",")})
-       AND p.action = ?`,
-    [...roleIds, action]
+       AND p.action = ?
+       AND p.resource_id IN (${ancestryIds.map(() => "?").join(",")})`,
+    [...roleIds, action, ...ancestryIds]
   );
 
   const matches = [];
+  const rolesById = new Map();
+  for (const role of access.roles) {
+    const bindings = rolesById.get(role.id);
+    if (bindings) bindings.push(role);
+    else rolesById.set(role.id, [role]);
+  }
   for (const grant of grants) {
     if (!resourceIds.has(grant.resource_id)) continue;
     if (!applicableOrgs.has(grant.grant_organization_id)) continue;
-    const roleBindings = access.roles.filter((r) => r.id === grant.role_id);
+    const roleBindings = rolesById.get(grant.role_id);
+    if (!roleBindings) continue;
     for (const binding of roleBindings) {
       if (!applicableOrgs.has(binding.organizationId)) continue;
       matches.push({
@@ -163,7 +176,13 @@ export function checkPermissionAudited(db, user, resource, action, context, acto
 }
 
 export function effectivePermissions(db, userId, context = {}) {
-  const access = effectiveAccess(db, userId);
+  return permissionsFromAccess(db, effectiveAccess(db, userId), context);
+}
+
+// Same computation as effectivePermissions but reusing an already-resolved
+// access set, so callers that have just computed `effectiveAccess` (for example
+// the security context builder) do not pay for it twice.
+export function permissionsFromAccess(db, access, context = {}) {
   const orgId = contextOrg(context);
   const applicableOrgs = new Set(ancestorOrganizationIds(db, orgId));
   const roleIds = [...new Set(access.roles.map((r) => r.id))];
@@ -184,10 +203,16 @@ export function effectivePermissions(db, userId, context = {}) {
   );
 
   const map = new Map();
+  const rolesById = new Map();
+  for (const role of access.roles) {
+    const bindings = rolesById.get(role.id);
+    if (bindings) bindings.push(role);
+    else rolesById.set(role.id, [role]);
+  }
   for (const grant of grants) {
     if (!applicableOrgs.has(grant.grant_organization_id)) continue;
-    const bindings = access.roles.filter((r) => r.id === grant.role_id);
-    const inScope = bindings.some((b) => applicableOrgs.has(b.organizationId));
+    const bindings = rolesById.get(grant.role_id);
+    const inScope = bindings ? bindings.some((b) => applicableOrgs.has(b.organizationId)) : false;
     if (!inScope) continue;
     const key = `${grant.resource_id}:${grant.action}`;
     const current = map.get(key);
