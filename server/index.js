@@ -8,6 +8,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3001);
 const dbPath = process.env.IAM_DB || join(__dirname, "..", "data", "iam.db");
 
+if (process.env.NODE_ENV === "production" && !process.env.HELIX_AUTH_SECRET) {
+  console.error(
+    "[helix] Refusing to start: HELIX_AUTH_SECRET is not set. This key protects " +
+      "every encrypted secret in the database and must not use the built-in dev " +
+      "fallback in production. Set HELIX_AUTH_SECRET and restart " +
+      "(see docs/INTEGRATION_OPERATIONS.md)."
+  );
+  process.exit(1);
+}
+
 const db = openDatabase(dbPath);
 migrate(db);
 seedDatabase(db);

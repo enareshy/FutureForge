@@ -42,8 +42,25 @@ export function safeEqual(a, b) {
   return timingSafeEqual(left, right);
 }
 
+let warnedInsecureFallback = false;
+
+// HELIX_AUTH_SECRET keys every encrypted secret (integration credentials,
+// MFA data). Production must set it (enforced at boot in server/index.js);
+// this fallback exists only so local dev/test runs, which never set it,
+// keep working without every contributor exporting a throwaway secret.
 function dataKey() {
-  const material = process.env.HELIX_AUTH_SECRET || "helix-local-auth-key";
+  const material = process.env.HELIX_AUTH_SECRET;
+  if (!material) {
+    if (!warnedInsecureFallback) {
+      warnedInsecureFallback = true;
+      console.warn(
+        "[helix] HELIX_AUTH_SECRET is not set — using an insecure, publicly-known " +
+          "dev fallback key. This is only acceptable for local development/tests. " +
+          "Production deployments must set HELIX_AUTH_SECRET (see docs/INTEGRATION_OPERATIONS.md)."
+      );
+    }
+    return scryptSync("helix-local-auth-key", "helix-iam-auth-v1", 32);
+  }
   return scryptSync(material, "helix-iam-auth-v1", 32);
 }
 

@@ -2367,6 +2367,58 @@ export const pdm = {
   submitMaintenanceJob: () => api("/api/v1/pdm/jobs/maintenance", { method: "POST" }),
 };
 
+// Change Management: Engineering Change Request/Order/Notice (ECR/ECO/ECN).
+export const change = {
+  meta: () => api("/api/v1/change/meta"),
+  health: () => api("/api/v1/change/health"),
+  configuration: () => api("/api/v1/change/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/change/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/change/foundation/ensure", { method: "POST" }),
+  seed: () => api("/api/v1/change/seed", { method: "POST" }),
+
+  requests: (qs) => api(`/api/v1/change/requests${qs || ""}`),
+  request: (ref) => api(`/api/v1/change/requests/${encodeURIComponent(ref)}`),
+  createRequest: (body) => api("/api/v1/change/requests", { method: "POST", body }),
+  updateRequest: (ref, body) =>
+    api(`/api/v1/change/requests/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  submitRequest: (ref) => api(`/api/v1/change/requests/${encodeURIComponent(ref)}/submit`, { method: "POST" }),
+  withdrawRequest: (ref) => api(`/api/v1/change/requests/${encodeURIComponent(ref)}/withdraw`, { method: "POST" }),
+  screenRequest: (ref, decision, notes) =>
+    api(`/api/v1/change/requests/${encodeURIComponent(ref)}/screen`, { method: "POST", body: { decision, notes } }),
+  promoteRequest: (ref, body) =>
+    api(`/api/v1/change/requests/${encodeURIComponent(ref)}/promote`, { method: "POST", body: body || {} }),
+  requestHistory: (ref) => api(`/api/v1/change/requests/${encodeURIComponent(ref)}/history`),
+
+  orders: (qs) => api(`/api/v1/change/orders${qs || ""}`),
+  order: (ref) => api(`/api/v1/change/orders/${encodeURIComponent(ref)}`),
+  createOrder: (body) => api("/api/v1/change/orders", { method: "POST", body }),
+  updateOrder: (ref, body) =>
+    api(`/api/v1/change/orders/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  submitOrder: (ref) => api(`/api/v1/change/orders/${encodeURIComponent(ref)}/submit`, { method: "POST" }),
+  decideOrder: (ref, decision) =>
+    api(`/api/v1/change/orders/${encodeURIComponent(ref)}/decide`, { method: "POST", body: { decision } }),
+  releaseOrder: (ref) => api(`/api/v1/change/orders/${encodeURIComponent(ref)}/release`, { method: "POST" }),
+  cancelOrder: (ref) => api(`/api/v1/change/orders/${encodeURIComponent(ref)}/cancel`, { method: "POST" }),
+  orderHistory: (ref) => api(`/api/v1/change/orders/${encodeURIComponent(ref)}/history`),
+
+  affectedItems: (ref) => api(`/api/v1/change/orders/${encodeURIComponent(ref)}/affected-items`),
+  addAffectedItem: (ref, body) =>
+    api(`/api/v1/change/orders/${encodeURIComponent(ref)}/affected-items`, { method: "POST", body }),
+  removeAffectedItem: (ref, itemRef) =>
+    api(`/api/v1/change/orders/${encodeURIComponent(ref)}/affected-items/${encodeURIComponent(itemRef)}`, { method: "DELETE" }),
+  impact: (qs) => api(`/api/v1/change/impact${qs || ""}`),
+
+  notices: (qs) => api(`/api/v1/change/notices${qs || ""}`),
+  notice: (ref) => api(`/api/v1/change/notices/${encodeURIComponent(ref)}`),
+  createNotice: (body) => api("/api/v1/change/notices", { method: "POST", body }),
+  issueNotice: (ref) => api(`/api/v1/change/notices/${encodeURIComponent(ref)}/issue`, { method: "POST" }),
+  acknowledgeNotice: (ref) => api(`/api/v1/change/notices/${encodeURIComponent(ref)}/acknowledge`, { method: "POST" }),
+  noticeHistory: (ref) => api(`/api/v1/change/notices/${encodeURIComponent(ref)}/history`),
+
+  relationships: (qs) => api(`/api/v1/change/relationships${qs || ""}`),
+};
+
 // P1 Digital Thread: end-to-end Requirement -> Service traceability built on the
 // existing object, PDM and BOM engines.
 export const digitalThread = {

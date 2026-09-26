@@ -9675,6 +9675,171 @@ CREATE TABLE IF NOT EXISTS pdm_configuration (
 CREATE INDEX IF NOT EXISTS idx_pdm_configuration_tenant ON pdm_configuration(tenant_id, key);
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- Change Management (ECR/ECO/ECN) — engineering change control
+--
+-- A domain layer over the platform engines, exactly like PDM: it owns change
+-- request/order/notice identity and status, and composes Numbering
+-- (identifiers), the Effectivity & Versioning Kernel (what a released change
+-- makes effective, via a baseline snapshot + effectivity assignment per
+-- affected item), BOM where-used (impact discovery), Audit and Events. It
+-- never duplicates any of them.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS change_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  request_number TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'OTHER' CHECK (category IN ('DESIGN','PROCESS','DOCUMENTATION','SUPPLIER','QUALITY','OTHER')),
+  priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK (priority IN ('LOW','NORMAL','HIGH','URGENT')),
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','SUBMITTED','SCREENING','APPROVED','REJECTED','WITHDRAWN','PROMOTED')),
+  requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  object_id INTEGER,
+  lifecycle_state TEXT NOT NULL DEFAULT 'DRAFT',
+  lifecycle_assignment_id INTEGER,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, request_number)
+);
+CREATE INDEX IF NOT EXISTS idx_change_requests_tenant ON change_requests(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_change_requests_ref ON change_requests(request_ref);
+
+CREATE TABLE IF NOT EXISTS change_orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  order_number TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  change_request_id INTEGER REFERENCES change_requests(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','IN_REVIEW','APPROVED','REJECTED','RELEASED','CANCELLED')),
+  effective_strategy TEXT NOT NULL DEFAULT 'DATE' CHECK (effective_strategy IN ('DATE','IMMEDIATE','SERIAL')),
+  effective_context_json TEXT NOT NULL DEFAULT '{}',
+  requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  object_id INTEGER,
+  lifecycle_state TEXT NOT NULL DEFAULT 'DRAFT',
+  lifecycle_assignment_id INTEGER,
+  released_at TEXT,
+  released_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  baseline_id INTEGER,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, order_number)
+);
+CREATE INDEX IF NOT EXISTS idx_change_orders_tenant ON change_orders(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_change_orders_ref ON change_orders(order_ref);
+CREATE INDEX IF NOT EXISTS idx_change_orders_request ON change_orders(change_request_id);
+
+CREATE TABLE IF NOT EXISTS change_notices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  notice_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  notice_number TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  change_order_id INTEGER NOT NULL REFERENCES change_orders(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','ISSUED','ACKNOWLEDGED')),
+  distribution_json TEXT NOT NULL DEFAULT '[]',
+  issued_at TEXT,
+  issued_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  acknowledged_at TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, notice_number)
+);
+CREATE INDEX IF NOT EXISTS idx_change_notices_tenant ON change_notices(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_change_notices_order ON change_notices(change_order_id);
+
+CREATE TABLE IF NOT EXISTS change_affected_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  change_order_id INTEGER NOT NULL REFERENCES change_orders(id) ON DELETE CASCADE,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  object_label TEXT NOT NULL DEFAULT '',
+  disposition TEXT NOT NULL DEFAULT 'NEW_REVISION' CHECK (disposition IN ('NEW_REVISION','OBSOLETE','NO_CHANGE','SUPERSEDED')),
+  notes TEXT NOT NULL DEFAULT '',
+  resulting_object_type TEXT,
+  resulting_object_id TEXT,
+  effectivity_definition_id INTEGER,
+  effectivity_assignment_id INTEGER,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (change_order_id, object_type, object_id)
+);
+CREATE INDEX IF NOT EXISTS idx_change_affected_items_order ON change_affected_items(change_order_id);
+CREATE INDEX IF NOT EXISTS idx_change_affected_items_object ON change_affected_items(object_type, object_id);
+
+CREATE TABLE IF NOT EXISTS change_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  relationship_ref TEXT NOT NULL DEFAULT '',
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  relationship_type TEXT NOT NULL CHECK (relationship_type IN ('PRODUCES_ORDER','PRODUCES_NOTICE','AFFECTS')),
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, relationship_type, source_type, source_id, target_type, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_change_relationships_source ON change_relationships(source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_change_relationships_target ON change_relationships(target_type, target_id);
+
+CREATE TABLE IF NOT EXISTS change_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER,
+  entity_ref TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT '',
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  actor_user_id INTEGER,
+  actor_username TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_change_history_tenant ON change_history(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_change_history_entity ON change_history(entity_type, entity_id);
+
+CREATE TABLE IF NOT EXISTS change_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_change_configuration_tenant ON change_configuration(tenant_id, key);
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- Digital Thread (P1 cross-domain traceability & query layer)
 --
 -- The Digital Thread is a projection/query capability over the existing

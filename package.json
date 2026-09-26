@@ -12,7 +12,10 @@
     "seed": "node server/seed.js"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "cors": "^2.8.6",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

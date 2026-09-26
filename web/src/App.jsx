@@ -27,6 +27,7 @@ const MigrationPage = React.lazy(() => import("./pages/MigrationPage.jsx"));
 const ClassificationPage = React.lazy(() => import("./pages/ClassificationPage.jsx"));
 const BomPage = React.lazy(() => import("./pages/BomPage.jsx"));
 const PdmPage = React.lazy(() => import("./pages/PdmPage.jsx"));
+const ChangeManagementPage = React.lazy(() => import("./pages/ChangeManagementPage.jsx"));
 const DigitalThreadPage = React.lazy(() => import("./pages/DigitalThreadPage.jsx"));
 const StandardsExchangePage = React.lazy(() => import("./pages/StandardsExchangePage.jsx"));
 const ReportingAnalyticsPage = React.lazy(() => import("./pages/ReportingAnalyticsPage.jsx"));
@@ -162,63 +163,59 @@ function Login({ onLogin }) {
   );
 }
 
-// Everything that is not personal workspace lives under the Platform menu,
-// grouped by domain. "My Data" stays a top-level section of its own.
-const PLATFORM_GROUPS = [
+// Left navigation, organized by role rather than as one flat "Platform" wall:
+//
+// - `platform: true`   -> Super Admin only (platform.admin role). Tenant
+//   creation/entitlement. Structurally invisible to Admin/User: it's its own
+//   top-level section, and a section with zero visible items renders nothing.
+// - `platformOrAdmin: true` -> Admin only (iam.admin role, tenant-scoped) or
+//   Super Admin. True configuration/admin surfaces a plain business user
+//   never needs.
+// - no flag -> everyone, including plain Users. This covers business
+//   modules (PDM, BOM, Change Management, ...): the backend's own
+//   `can(resource, action)` check is what actually enforces a User's
+//   granted access (403s anything ungranted) — the nav's job is to stop
+//   hiding a module a User genuinely has access to, not to duplicate that
+//   check.
+const NAV_SECTIONS = [
   {
-    key: "overview",
-    label: "",
+    key: "platform-admin",
+    label: "Platform administration",
+    items: [
+      { to: "/tenants", label: "Tenants", platform: true },
+      { to: "/platform", label: "Platform properties", platform: true },
+    ],
+  },
+  {
+    key: "mydata",
+    label: "My workspace",
     items: [
       { to: "/", label: "Overview", end: true },
       { to: "/explorer", label: "Data explorer" },
+      { to: "/objects", label: "Business objects" },
+      { to: "/workflows", label: "My tasks & approvals", end: true },
+      { to: "/notifications", label: "Inbox", end: true },
     ],
   },
   {
-    key: "organization",
-    label: "Organization",
+    key: "engineering",
+    label: "Engineering",
     items: [
-      { to: "/organizations", label: "Org structure" },
-      { to: "/tenants", label: "Tenants", platform: true },
+      { to: "/pdm", label: "Product data (PDM)" },
+      { to: "/bom", label: "Bill of materials" },
+      { to: "/change", label: "Change management (ECR/ECO/ECN)" },
+      { to: "/classification", label: "Classification" },
+      { to: "/digital-thread", label: "Digital thread" },
+      { to: "/standards-exchange", label: "Standards & exchange" },
     ],
   },
   {
-    key: "identity",
-    label: "Identity",
+    key: "analytics",
+    label: "Analytics & search",
     items: [
-      { to: "/users", label: "Users" },
-      { to: "/groups", label: "Groups" },
-    ],
-  },
-  {
-    key: "access",
-    label: "Access control",
-    items: [
-      { to: "/roles", label: "Roles" },
-      { to: "/permissions", label: "Permissions" },
-      { to: "/authorization", label: "Authorization" },
-      { to: "/security", label: "Data security", platformOrAdmin: true },
-    ],
-  },
-  {
-    key: "authentication",
-    label: "Authentication",
-    items: [
-      { to: "/authentication", label: "Providers" },
-      { to: "/policy", label: "Password policy" },
-      { to: "/sessions", label: "Sessions" },
-      { to: "/mfa", label: "MFA" },
-    ],
-  },
-  {
-    key: "configuration",
-    label: "Configuration",
-    items: [
-      { to: "/configuration", label: "Scoped config" },
-      { to: "/metadata", label: "Metadata", platformOrAdmin: true },
-      { to: "/relationship-types", label: "Relationship types" },
-      { to: "/lifecycles", label: "Lifecycles" },
-      { to: "/workflows/templates", label: "Workflow Engine", platformOrAdmin: true },
-      { to: "/platform", label: "Platform properties", platform: true },
+      { to: "/search", label: "Search & discovery", end: true },
+      { to: "/search/foundation", label: "Enterprise search" },
+      { to: "/reporting", label: "Reporting & analytics" },
     ],
   },
   {
@@ -226,149 +223,108 @@ const PLATFORM_GROUPS = [
     label: "Documents",
     items: [
       { to: "/files", label: "File browser", end: true },
-      { to: "/files/admin", label: "File administration", platformOrAdmin: true },
       { to: "/content", label: "Content library", end: true },
-      { to: "/content/admin", label: "Content administration", platformOrAdmin: true },
-    ],
-  },
-  {
-    key: "discovery",
-    label: "Search",
-    items: [
-      { to: "/search", label: "Search & Discovery", end: true },
-      { to: "/search/foundation", label: "Enterprise search" },
-      { to: "/search/admin", label: "Search administration", platformOrAdmin: true },
-    ],
-  },
-  {
-    key: "audit",
-    label: "Compliance",
-    items: [{ to: "/audit", label: "Audit log" }],
-  },
-  {
-    key: "integration",
-    label: "Integration",
-    items: [
-      { to: "/integration", label: "Integration hub", platformOrAdmin: true },
-      { to: "/events", label: "Event framework", platformOrAdmin: true },
-    ],
-  },
-  {
-    key: "numbering",
-    label: "Identifiers",
-    items: [{ to: "/numbering", label: "Numbering service", platformOrAdmin: true }],
-  },
-  {
-    key: "versioning",
-    label: "Versioning",
-    items: [{ to: "/versioning", label: "Effectivity & versioning", platformOrAdmin: true }],
-  },
-  {
-    key: "reference",
-    label: "Reference data",
-    items: [{ to: "/reference-data", label: "Enterprise reference data", platformOrAdmin: true }],
-  },
-  {
-    key: "governance",
-    label: "Data governance",
-    items: [{ to: "/data-governance", label: "Governance & quality", platformOrAdmin: true }],
-  },
-  {
-    key: "catalog",
-    label: "Data catalog",
-    items: [
-      { to: "/data-catalog", label: "Catalog registry", platformOrAdmin: true },
-      { to: "/glossary", label: "Business glossary", platformOrAdmin: true },
-    ],
-  },
-  {
-    key: "data-lifecycle",
-    label: "Data lifecycle",
-    items: [{ to: "/data-lifecycle", label: "Lifecycle & archival", platformOrAdmin: true }],
-  },
-  {
-    key: "data-exchange",
-    label: "Data exchange",
-    items: [{ to: "/data-exchange", label: "Import & export", platformOrAdmin: true }],
-  },
-  {
-    key: "migration",
-    label: "Migration & onboarding",
-    items: [{ to: "/migration", label: "Migration & onboarding", platformOrAdmin: true }],
-  },
-  {
-    key: "classification",
-    label: "Classification",
-    items: [{ to: "/classification", label: "Enterprise classification", platformOrAdmin: true }],
-  },
-  {
-    key: "bom",
-    label: "Bill of materials",
-    items: [{ to: "/bom", label: "BOM engine", platformOrAdmin: true }],
-  },
-  {
-    key: "pdm",
-    label: "Product data",
-    items: [{ to: "/pdm", label: "PDM domain", platformOrAdmin: true }],
-  },
-  {
-    key: "digital-thread",
-    label: "Digital thread",
-    items: [{ to: "/digital-thread", label: "Traceability workspace", platformOrAdmin: true }],
-  },
-  {
-    key: "standards-exchange",
-    label: "Standards & exchange",
-    items: [{ to: "/standards-exchange", label: "Exchange workspace", platformOrAdmin: true }],
-  },
-  {
-    key: "reporting-analytics",
-    label: "Reporting & analytics",
-    items: [{ to: "/reporting", label: "Analytics workspace", platformOrAdmin: true }],
-  },
-  {
-    key: "observability",
-    label: "Data observability",
-    items: [{ to: "/observability", label: "Observability workspace", platformOrAdmin: true }],
-  },
-  {
-    key: "communication",
-    label: "Communication",
-    items: [
-      { to: "/notifications", label: "Inbox", end: true },
-      { to: "/notifications/admin", label: "Notification admin", platformOrAdmin: true },
-      { to: "/delivery/admin", label: "Delivery services", platformOrAdmin: true },
     ],
   },
   {
     key: "jobs",
-    label: "Jobs",
+    label: "Jobs & operations",
     items: [
       { to: "/jobs", label: "Job dashboard", end: true },
       { to: "/jobs/list", label: "Jobs" },
       { to: "/jobs/execution", label: "Execution" },
       { to: "/jobs/workers", label: "Workers" },
       { to: "/jobs/dead-letter", label: "Dead letters" },
-      { to: "/jobs/queues", label: "Queues", platformOrAdmin: true },
-      { to: "/jobs/schedules", label: "Schedules", platformOrAdmin: true },
-      { to: "/jobs/admin", label: "Job types", platformOrAdmin: true },
     ],
   },
-];
-
-const NAV_SECTIONS = [
+  // Every configuration/governance surface an Admin (iam.admin) or Super Admin
+  // needs, consolidated under one "Admin" menu instead of six separate
+  // top-level sections. Invisible to plain Users, same as before — only the
+  // grouping changed, not who can see it.
   {
-    key: "mydata",
-    label: "My Data",
-    items: [
-      { to: "/objects", label: "Business objects" },
-      { to: "/workflows", label: "My tasks & approvals", end: true },
+    key: "admin",
+    label: "Admin",
+    groups: [
+      {
+        key: "admin-identity",
+        label: "Identity",
+        items: [
+          { to: "/users", label: "Users", platformOrAdmin: true },
+          { to: "/groups", label: "Groups", platformOrAdmin: true },
+          { to: "/roles", label: "Roles", platformOrAdmin: true },
+          { to: "/permissions", label: "Permissions", platformOrAdmin: true },
+          { to: "/authorization", label: "Authorization", platformOrAdmin: true },
+          { to: "/security", label: "Data security", platformOrAdmin: true },
+          { to: "/authentication", label: "Auth providers", platformOrAdmin: true },
+          { to: "/policy", label: "Password policy", platformOrAdmin: true },
+          { to: "/sessions", label: "Sessions", platformOrAdmin: true },
+          { to: "/mfa", label: "MFA", platformOrAdmin: true },
+        ],
+      },
+      {
+        key: "admin-configuration",
+        label: "Configuration",
+        items: [
+          { to: "/organizations", label: "Org structure", platformOrAdmin: true },
+          { to: "/configuration", label: "Scoped config", platformOrAdmin: true },
+          { to: "/metadata", label: "Metadata", platformOrAdmin: true },
+          { to: "/relationship-types", label: "Relationship types", platformOrAdmin: true },
+          { to: "/lifecycles", label: "Lifecycles", platformOrAdmin: true },
+          { to: "/workflows/templates", label: "Workflow Engine", platformOrAdmin: true },
+          { to: "/numbering", label: "Numbering service", platformOrAdmin: true },
+          { to: "/versioning", label: "Effectivity & versioning", platformOrAdmin: true },
+          { to: "/files/admin", label: "File administration", platformOrAdmin: true },
+          { to: "/content/admin", label: "Content administration", platformOrAdmin: true },
+          { to: "/search/admin", label: "Search administration", platformOrAdmin: true },
+        ],
+      },
+      {
+        key: "admin-governance",
+        label: "Governance",
+        items: [
+          { to: "/audit", label: "Audit log", platformOrAdmin: true },
+          { to: "/data-governance", label: "Governance & quality", platformOrAdmin: true },
+          { to: "/data-catalog", label: "Catalog registry", platformOrAdmin: true },
+          { to: "/glossary", label: "Business glossary", platformOrAdmin: true },
+          { to: "/data-lifecycle", label: "Lifecycle & archival", platformOrAdmin: true },
+          { to: "/reference-data", label: "Enterprise reference data", platformOrAdmin: true },
+        ],
+      },
+      {
+        key: "admin-exchange",
+        label: "Exchange",
+        items: [
+          { to: "/data-exchange", label: "Import & export", platformOrAdmin: true },
+          { to: "/migration", label: "Migration & onboarding", platformOrAdmin: true },
+        ],
+      },
+      {
+        key: "admin-integration",
+        label: "Integration",
+        items: [
+          { to: "/integration", label: "Integration hub", platformOrAdmin: true },
+          { to: "/events", label: "Event framework", platformOrAdmin: true },
+        ],
+      },
+      {
+        key: "admin-communication",
+        label: "Communication",
+        items: [
+          { to: "/notifications/admin", label: "Notification admin", platformOrAdmin: true },
+          { to: "/delivery/admin", label: "Delivery services", platformOrAdmin: true },
+        ],
+      },
+      {
+        key: "admin-operations",
+        label: "Operations",
+        items: [
+          { to: "/jobs/queues", label: "Job queues", platformOrAdmin: true },
+          { to: "/jobs/schedules", label: "Job schedules", platformOrAdmin: true },
+          { to: "/jobs/admin", label: "Job types", platformOrAdmin: true },
+          { to: "/observability", label: "Data observability", platformOrAdmin: true },
+        ],
+      },
     ],
-  },
-  {
-    key: "platform",
-    label: "Platform",
-    groups: PLATFORM_GROUPS,
   },
 ];
 
@@ -387,7 +343,7 @@ function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
   const isActive = (item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to);
 
-  const [open, setOpen] = useState(() => new Set(["mydata", "platform", "overview"]));
+  const [open, setOpen] = useState(() => new Set(["platform-admin", "mydata", "engineering"]));
   const mainRef = useRef(null);
 
   const visibleGroups = (section) =>
@@ -586,6 +542,7 @@ export default function App() {
         <Route path="/classification" element={<ClassificationPage />} />
         <Route path="/bom" element={<BomPage />} />
         <Route path="/pdm" element={<PdmPage />} />
+        <Route path="/change" element={<ChangeManagementPage />} />
         <Route path="/digital-thread" element={<DigitalThreadPage />} />
         <Route path="/standards-exchange" element={<StandardsExchangePage />} />
         <Route path="/reporting" element={<ReportingAnalyticsPage />} />

@@ -129,6 +129,8 @@ Then open http://localhost:3001.
 
 - `PORT` — API port, default `3001`.
 - `IAM_DB` — database file path, default `data/iam.db`.
+- `HELIX_AUTH_SECRET` — key for AES-256-GCM secret encryption and HMAC signing. **Required when `NODE_ENV=production`** — the server refuses to start without it. Falls back to an insecure, publicly-known dev key otherwise (fine for local dev/tests only).
+- `HELIX_CORS_ORIGINS` — comma-separated list of allowed cross-origin callers. Defaults to the Vite dev server (`http://localhost:5173`). Not needed in single-port production mode (step 5), since the UI and API are served from the same origin.
 
 ```bash
 # Run on a different port and database file

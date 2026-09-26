@@ -1,4 +1,7 @@
 import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
@@ -59,6 +62,8 @@ import * as bom from "./services/bom/index.js";
 import { createBomRouter } from "./services/bom/router-bom.js";
 import * as pdm from "./services/pdm/index.js";
 import { createPdmRouter } from "./services/pdm/router-pdm.js";
+import * as change from "./services/change/index.js";
+import { createChangeRouter } from "./services/change/router-change.js";
 import * as thread from "./services/thread/index.js";
 import { createThreadRouter } from "./services/thread/router-thread.js";
 import * as exchange from "./services/exchange/index.js";
@@ -77,6 +82,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function clientIp(req) {
   return req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() || req.ip;
+}
+
+// Cross-origin callers (the Vite dev server, or a future separate client
+// deployment) must be explicitly allow-listed. The single-port production
+// deploy (npm start, web/dist served from this same app) never needs CORS
+// at all since every request is same-origin.
+function corsOrigins() {
+  const configured = String(process.env.HELIX_CORS_ORIGINS || "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  if (configured.length) return configured;
+  return ["http://localhost:5173", "http://127.0.0.1:5173"];
 }
 
 function requestMeta(req) {
@@ -147,6 +165,31 @@ function wrap(fn) {
 export function createApp(db) {
   const app = express();
   app.disable("x-powered-by");
+  app.use(helmet());
+  app.use(
+    cors({
+      origin: corsOrigins(),
+      allowedHeaders: ["Content-Type", "Authorization", "X-Session-Token", "X-Tenant-Id"],
+    })
+  );
+
+  // Instantiated per-app (not module-level) so every createApp(db) call —
+  // including each test file's own instance — gets independent counters.
+  //
+  // Note: login/MFA/SSO/reset already have brute-force protection at the
+  // application layer (assertRateLimit in services/ratelimit.js — default
+  // 10 attempts/60s per ip+action+principal, admin-configurable). This
+  // limiter is deliberately generic instead of duplicating that: it caps
+  // overall API throughput per IP as a blunt abuse/DoS backstop across
+  // every route, which nothing previously covered.
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  app.use("/api", apiLimiter);
+
   app.use(
     express.json({
       limit: "1mb",
@@ -225,6 +268,11 @@ export function createApp(db) {
     /* PDM domain foundation is idempotent and must never block application boot */
   }
   try {
+    change.ensureChangeFoundation(db);
+  } catch {
+    /* Change Management foundation is idempotent and must never block application boot */
+  }
+  try {
     thread.ensureThreadFoundation(db);
   } catch {
     /* Digital Thread foundation is idempotent and must never block application boot */
@@ -244,11 +292,6 @@ export function createApp(db) {
   } catch {
     /* Data Observability foundation is idempotent and must never block application boot */
   }
-  app.use((req, res, next) => {
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    next();
-  });
-
   // Audit & History Framework: propagate a request/correlation id on every
   // request and capture failed access attempts automatically.
   app.use(audit.auditContext());
@@ -10134,6 +10177,11 @@ export function createApp(db) {
   const pdmRouter = createPdmRouter({ express, db, auth, can, wrap });
   app.use("/api/pdm", pdmRouter);
   app.use("/api/v1/pdm", pdmRouter);
+
+  // ── Change Management (ECR/ECO/ECN) ──────────────────────────────────────
+  const changeRouter = createChangeRouter({ express, db, auth, can, wrap });
+  app.use("/api/change", changeRouter);
+  app.use("/api/v1/change", changeRouter);
 
   // ── P1 Digital Thread ─────────────────────────────────────────────────────
   const threadRouter = createThreadRouter({ express, db, auth, can, wrap });
