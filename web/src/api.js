@@ -2581,3 +2581,309 @@ export const standardsExchange = {
   ensureFoundation: () => api("/api/v1/standards-exchange/foundation/ensure", { method: "POST" }),
   seed: () => api("/api/v1/standards-exchange/seed", { method: "POST" }),
 };
+
+export const reporting = {
+  meta: () => api("/api/v1/reporting/meta"),
+  health: () => api("/api/v1/reporting/health"),
+  metrics: () => api("/api/v1/reporting/metrics"),
+  observability: () => api("/api/v1/reporting/observability"),
+  configuration: () => api("/api/v1/reporting/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/reporting/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  dataSources: () => api("/api/v1/reporting/data-sources"),
+  semanticEntities: () => api("/api/v1/reporting/semantic/entities"),
+  semanticEntity: (code) => api(`/api/v1/reporting/semantic/entities/${encodeURIComponent(code)}`),
+
+  validateQuery: (query) => api("/api/v1/reporting/query/validate", { method: "POST", body: { query } }),
+  executeQuery: (query) => api("/api/v1/reporting/query/execute", { method: "POST", body: { query } }),
+  previewQuery: (query, parameters) =>
+    api("/api/v1/reporting/query/preview", { method: "POST", body: { query, parameters } }),
+
+  reports: (qs) => api(`/api/v1/reporting/reports${qs || ""}`),
+  report: (ref) => api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}`),
+  createReport: (body) => api("/api/v1/reporting/reports", { method: "POST", body }),
+  updateReport: (ref, body) =>
+    api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  publishReport: (ref) =>
+    api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}/publish`, { method: "POST" }),
+  setReportStatus: (ref, status) =>
+    api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  cloneReport: (ref, body) =>
+    api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}/clone`, { method: "POST", body }),
+  deleteReport: (ref) =>
+    api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  reportVersions: (ref) => api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}/versions`),
+  reportShares: (ref, shares) =>
+    api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}/shares`, { method: "POST", body: { shares } }),
+  previewReport: (ref, body) =>
+    api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}/preview`, { method: "POST", body }),
+  executeReport: (ref, body) =>
+    api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}/execute`, { method: "POST", body }),
+  exportReport: (ref, body) =>
+    api(`/api/v1/reporting/reports/${encodeURIComponent(ref)}/export`, { method: "POST", body }),
+
+  metricDefinitions: (qs) => api(`/api/v1/reporting/metric-definitions${qs || ""}`),
+  metricDefinition: (ref) => api(`/api/v1/reporting/metric-definitions/${encodeURIComponent(ref)}`),
+  createMetric: (body) => api("/api/v1/reporting/metric-definitions", { method: "POST", body }),
+  updateMetric: (ref, body) =>
+    api(`/api/v1/reporting/metric-definitions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setMetricStatus: (ref, status) =>
+    api(`/api/v1/reporting/metric-definitions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  computeMetric: (ref, body) =>
+    api(`/api/v1/reporting/metric-definitions/${encodeURIComponent(ref)}/compute`, { method: "POST", body }),
+  deleteMetric: (ref) =>
+    api(`/api/v1/reporting/metric-definitions/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  kpis: (qs) => api(`/api/v1/reporting/kpis${qs || ""}`),
+  kpi: (ref) => api(`/api/v1/reporting/kpis/${encodeURIComponent(ref)}`),
+  createKpi: (body) => api("/api/v1/reporting/kpis", { method: "POST", body }),
+  updateKpi: (ref, body) =>
+    api(`/api/v1/reporting/kpis/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setKpiStatus: (ref, status) =>
+    api(`/api/v1/reporting/kpis/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  kpiValue: (ref, qs) => api(`/api/v1/reporting/kpis/${encodeURIComponent(ref)}/value${qs || ""}`),
+  evaluateKpi: (ref, body) =>
+    api(`/api/v1/reporting/kpis/${encodeURIComponent(ref)}/evaluate`, { method: "POST", body }),
+  deleteKpi: (ref) => api(`/api/v1/reporting/kpis/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  dashboards: (qs) => api(`/api/v1/reporting/dashboards${qs || ""}`),
+  dashboard: (ref) => api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}`),
+  createDashboard: (body) => api("/api/v1/reporting/dashboards", { method: "POST", body }),
+  updateDashboard: (ref, body) =>
+    api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  publishDashboard: (ref) =>
+    api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}/publish`, { method: "POST" }),
+  setDashboardStatus: (ref, status) =>
+    api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  cloneDashboard: (ref, body) =>
+    api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}/clone`, { method: "POST", body }),
+  deleteDashboard: (ref) =>
+    api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  refreshDashboard: (ref, body) =>
+    api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}/refresh`, { method: "POST", body }),
+  dashboardVersions: (ref) => api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}/versions`),
+  dashboardWidgets: (ref) => api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}/widgets`),
+  addWidget: (ref, body) =>
+    api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}/widgets`, { method: "POST", body }),
+  reorderWidgets: (ref, order) =>
+    api(`/api/v1/reporting/dashboards/${encodeURIComponent(ref)}/widgets/reorder`, { method: "POST", body: { order } }),
+  updateWidget: (ref, body) =>
+    api(`/api/v1/reporting/widgets/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteWidget: (ref) =>
+    api(`/api/v1/reporting/widgets/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  drillDown: (ref, body) =>
+    api(`/api/v1/reporting/widgets/${encodeURIComponent(ref)}/drill-down`, { method: "POST", body }),
+
+  exports: (qs) => api(`/api/v1/reporting/exports${qs || ""}`),
+  exportJob: (ref) => api(`/api/v1/reporting/exports/${encodeURIComponent(ref)}`),
+  requestExport: (body) => api("/api/v1/reporting/exports", { method: "POST", body }),
+  runExport: (ref, body) =>
+    api(`/api/v1/reporting/exports/${encodeURIComponent(ref)}/run`, { method: "POST", body }),
+  downloadExport: (ref) =>
+    apiDownload(`/api/v1/reporting/exports/${encodeURIComponent(ref)}/download`),
+  deleteExport: (ref) =>
+    api(`/api/v1/reporting/exports/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  schedules: (qs) => api(`/api/v1/reporting/schedules${qs || ""}`),
+  schedule: (ref) => api(`/api/v1/reporting/schedules/${encodeURIComponent(ref)}`),
+  dueSchedules: () => api("/api/v1/reporting/schedules/due"),
+  createSchedule: (body) => api("/api/v1/reporting/schedules", { method: "POST", body }),
+  updateSchedule: (ref, body) =>
+    api(`/api/v1/reporting/schedules/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setScheduleStatus: (ref, status) =>
+    api(`/api/v1/reporting/schedules/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  runSchedule: (ref) =>
+    api(`/api/v1/reporting/schedules/${encodeURIComponent(ref)}/run`, { method: "POST" }),
+  deleteSchedule: (ref) =>
+    api(`/api/v1/reporting/schedules/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  biCapabilities: () => api("/api/v1/reporting/bi/capabilities"),
+  biConnections: (qs) => api(`/api/v1/reporting/bi/connections${qs || ""}`),
+  biConnection: (ref) => api(`/api/v1/reporting/bi/connections/${encodeURIComponent(ref)}`),
+  createBiConnection: (body) => api("/api/v1/reporting/bi/connections", { method: "POST", body }),
+  updateBiConnection: (ref, body) =>
+    api(`/api/v1/reporting/bi/connections/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteBiConnection: (ref) =>
+    api(`/api/v1/reporting/bi/connections/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  biDatasets: (qs) => api(`/api/v1/reporting/bi/datasets${qs || ""}`),
+  biDataset: (ref) => api(`/api/v1/reporting/bi/datasets/${encodeURIComponent(ref)}`),
+  createBiDataset: (body) => api("/api/v1/reporting/bi/datasets", { method: "POST", body }),
+  updateBiDataset: (ref, body) =>
+    api(`/api/v1/reporting/bi/datasets/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteBiDataset: (ref) =>
+    api(`/api/v1/reporting/bi/datasets/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  biDatasetData: (ref, qs) => api(`/api/v1/reporting/bi/datasets/${encodeURIComponent(ref)}/data${qs || ""}`),
+  biDatasetMetadata: (ref) => api(`/api/v1/reporting/bi/datasets/${encodeURIComponent(ref)}/metadata`),
+  publishBiDataset: (ref, body) =>
+    api(`/api/v1/reporting/bi/datasets/${encodeURIComponent(ref)}/publish`, { method: "POST", body }),
+  biPublishJobs: (qs) => api(`/api/v1/reporting/bi/publish-jobs${qs || ""}`),
+
+  executions: (qs) => api(`/api/v1/reporting/executions${qs || ""}`),
+  execution: (ref) => api(`/api/v1/reporting/executions/${encodeURIComponent(ref)}`),
+  executionSummary: () => api("/api/v1/reporting/executions/summary"),
+  history: (qs) => api(`/api/v1/reporting/history${qs || ""}`),
+  readModel: (qs) => api(`/api/v1/reporting/read-model${qs || ""}`),
+  readModelStatus: () => api("/api/v1/reporting/read-model/status"),
+
+  searchMeta: () => api("/api/v1/reporting/search-meta"),
+  reindexSearch: () => api("/api/v1/reporting/search/reindex", { method: "POST" }),
+
+  jobs: (qs) => api(`/api/v1/reporting/jobs${qs || ""}`),
+  job: (ref) => api(`/api/v1/reporting/jobs/${encodeURIComponent(ref)}`),
+  submitExecuteJob: (body) => api("/api/v1/reporting/jobs/execute", { method: "POST", body }),
+  submitExportJob: (body) => api("/api/v1/reporting/jobs/export", { method: "POST", body }),
+  submitScheduleRunJob: (body) => api("/api/v1/reporting/jobs/schedule-run", { method: "POST", body }),
+  submitKpiJob: (body) => api("/api/v1/reporting/jobs/kpi", { method: "POST", body }),
+  submitRefreshReadModelJob: (body) =>
+    api("/api/v1/reporting/jobs/refresh-read-model", { method: "POST", body }),
+  submitMaintenanceJob: () => api("/api/v1/reporting/jobs/maintenance", { method: "POST" }),
+
+  ensureFoundation: () => api("/api/v1/reporting/foundation/ensure", { method: "POST" }),
+  seed: () => api("/api/v1/reporting/seed", { method: "POST" }),
+};
+
+export const observability = {
+  meta: () => api("/api/v1/observability/meta"),
+  healthMeta: () => api("/api/v1/observability/health-meta"),
+  providers: () => api("/api/v1/observability/providers"),
+  provider: (code) => api(`/api/v1/observability/providers/${encodeURIComponent(code)}`),
+
+  overview: () => api("/api/v1/observability/overview"),
+  health: () => api("/api/v1/observability/health"),
+  healthTrend: (qs) => api(`/api/v1/observability/health/trend${qs || ""}`),
+  healthSnapshots: (qs) => api(`/api/v1/observability/health/snapshots${qs || ""}`),
+  runHealthCheck: () => api("/api/v1/observability/health/check", { method: "POST" }),
+  healthChecks: (qs) => api(`/api/v1/observability/health-checks${qs || ""}`),
+  healthCheck: (ref) => api(`/api/v1/observability/health-checks/${encodeURIComponent(ref)}`),
+  createHealthCheck: (body) => api("/api/v1/observability/health-checks", { method: "POST", body }),
+  updateHealthCheck: (ref, body) =>
+    api(`/api/v1/observability/health-checks/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteHealthCheck: (ref) =>
+    api(`/api/v1/observability/health-checks/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  dataVolume: () => api("/api/v1/observability/data-volume"),
+  quality: () => api("/api/v1/observability/quality"),
+  pipelines: () => api("/api/v1/observability/pipelines"),
+  failures: () => api("/api/v1/observability/failures"),
+  runs: (qs) => api(`/api/v1/observability/runs${qs || ""}`),
+  run: (ref) => api(`/api/v1/observability/runs/${encodeURIComponent(ref)}`),
+  collect: (body) => api("/api/v1/observability/collect", { method: "POST", body }),
+  collectAll: () => api("/api/v1/observability/collect/all", { method: "POST" }),
+
+  metrics: (qs) => api(`/api/v1/observability/metrics${qs || ""}`),
+  metric: (ref) => api(`/api/v1/observability/metrics/${encodeURIComponent(ref)}`),
+  metricHistory: (ref, qs) =>
+    api(`/api/v1/observability/metrics/${encodeURIComponent(ref)}/history${qs || ""}`),
+  metricObservations: (ref, qs) =>
+    api(`/api/v1/observability/metrics/${encodeURIComponent(ref)}/observations${qs || ""}`),
+  recordObservation: (ref, body) =>
+    api(`/api/v1/observability/metrics/${encodeURIComponent(ref)}/observations`, { method: "POST", body }),
+
+  metricDefinitions: (qs) => api(`/api/v1/observability/metric-definitions${qs || ""}`),
+  metricDefinition: (ref) => api(`/api/v1/observability/metric-definitions/${encodeURIComponent(ref)}`),
+  createMetric: (body) => api("/api/v1/observability/metric-definitions", { method: "POST", body }),
+  updateMetric: (ref, body) =>
+    api(`/api/v1/observability/metric-definitions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  setMetricStatus: (ref, status) =>
+    api(`/api/v1/observability/metric-definitions/${encodeURIComponent(ref)}/status`, { method: "POST", body: { status } }),
+  deleteMetric: (ref) =>
+    api(`/api/v1/observability/metric-definitions/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  metricVersions: (ref) => api(`/api/v1/observability/metric-definitions/${encodeURIComponent(ref)}/versions`),
+
+  thresholds: (qs) => api(`/api/v1/observability/thresholds${qs || ""}`),
+  threshold: (ref) => api(`/api/v1/observability/thresholds/${encodeURIComponent(ref)}`),
+  createThreshold: (body) => api("/api/v1/observability/thresholds", { method: "POST", body }),
+  updateThreshold: (ref, body) =>
+    api(`/api/v1/observability/thresholds/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteThreshold: (ref) =>
+    api(`/api/v1/observability/thresholds/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  assets: (qs) => api(`/api/v1/observability/assets${qs || ""}`),
+  asset: (ref) => api(`/api/v1/observability/assets/${encodeURIComponent(ref)}`),
+  createAsset: (body) => api("/api/v1/observability/assets", { method: "POST", body }),
+  freshnessDefinitions: (qs) => api(`/api/v1/observability/freshness-definitions${qs || ""}`),
+  freshnessDefinition: (ref) => api(`/api/v1/observability/freshness-definitions/${encodeURIComponent(ref)}`),
+  createFreshness: (body) => api("/api/v1/observability/freshness-definitions", { method: "POST", body }),
+  updateFreshness: (ref, body) =>
+    api(`/api/v1/observability/freshness-definitions/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteFreshness: (ref) =>
+    api(`/api/v1/observability/freshness-definitions/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  freshness: (qs) => api(`/api/v1/observability/freshness${qs || ""}`),
+  evaluateFreshness: () => api("/api/v1/observability/freshness/evaluate"),
+  runFreshnessCheck: () => api("/api/v1/observability/freshness/check", { method: "POST" }),
+
+  alertRules: (qs) => api(`/api/v1/observability/alert-rules${qs || ""}`),
+  alertRule: (ref) => api(`/api/v1/observability/alert-rules/${encodeURIComponent(ref)}`),
+  createAlertRule: (body) => api("/api/v1/observability/alert-rules", { method: "POST", body }),
+  updateAlertRule: (ref, body) =>
+    api(`/api/v1/observability/alert-rules/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteAlertRule: (ref) =>
+    api(`/api/v1/observability/alert-rules/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  alertRuleVersions: (ref) => api(`/api/v1/observability/alert-rules/${encodeURIComponent(ref)}/versions`),
+
+  alerts: (qs) => api(`/api/v1/observability/alerts${qs || ""}`),
+  alert: (ref) => api(`/api/v1/observability/alerts/${encodeURIComponent(ref)}`),
+  alertSummary: () => api("/api/v1/observability/alerts/summary"),
+  alertTrend: (qs) => api(`/api/v1/observability/alerts/trend${qs || ""}`),
+  alertEvents: (ref) => api(`/api/v1/observability/alerts/${encodeURIComponent(ref)}/events`),
+  acknowledgeAlert: (ref, body) =>
+    api(`/api/v1/observability/alerts/${encodeURIComponent(ref)}/acknowledge`, { method: "POST", body }),
+  suppressAlert: (ref, body) =>
+    api(`/api/v1/observability/alerts/${encodeURIComponent(ref)}/suppress`, { method: "POST", body }),
+  unsuppressAlert: (ref) =>
+    api(`/api/v1/observability/alerts/${encodeURIComponent(ref)}/unsuppress`, { method: "POST" }),
+  resolveAlert: (ref, body) =>
+    api(`/api/v1/observability/alerts/${encodeURIComponent(ref)}/resolve`, { method: "POST", body }),
+  closeAlert: (ref, body) =>
+    api(`/api/v1/observability/alerts/${encodeURIComponent(ref)}/close`, { method: "POST", body }),
+  commentAlert: (ref, body) =>
+    api(`/api/v1/observability/alerts/${encodeURIComponent(ref)}/comments`, { method: "POST", body }),
+
+  incidents: (qs) => api(`/api/v1/observability/incidents${qs || ""}`),
+  incident: (ref) => api(`/api/v1/observability/incidents/${encodeURIComponent(ref)}`),
+  incidentSummary: () => api("/api/v1/observability/incidents/summary"),
+  createIncident: (body) => api("/api/v1/observability/incidents", { method: "POST", body }),
+  updateIncident: (ref, body) =>
+    api(`/api/v1/observability/incidents/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+
+  slos: (qs) => api(`/api/v1/observability/slos${qs || ""}`),
+  slo: (ref) => api(`/api/v1/observability/slos/${encodeURIComponent(ref)}`),
+  sloSummary: () => api("/api/v1/observability/slos/summary"),
+  createSlo: (body) => api("/api/v1/observability/slos", { method: "POST", body }),
+  updateSlo: (ref, body) =>
+    api(`/api/v1/observability/slos/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteSlo: (ref) => api(`/api/v1/observability/slos/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  evaluateSlos: () => api("/api/v1/observability/slos/evaluate", { method: "POST" }),
+
+  dashboards: (qs) => api(`/api/v1/observability/dashboards${qs || ""}`),
+  dashboard: (ref) => api(`/api/v1/observability/dashboards/${encodeURIComponent(ref)}`),
+  defaultDashboard: () => api("/api/v1/observability/dashboards/default"),
+  renderDashboard: (ref) => api(`/api/v1/observability/dashboards/${encodeURIComponent(ref)}/render`),
+  createDashboard: (body) => api("/api/v1/observability/dashboards", { method: "POST", body }),
+  updateDashboard: (ref, body) =>
+    api(`/api/v1/observability/dashboards/${encodeURIComponent(ref)}`, { method: "PATCH", body }),
+  deleteDashboard: (ref) =>
+    api(`/api/v1/observability/dashboards/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  addWidget: (ref, body) =>
+    api(`/api/v1/observability/dashboards/${encodeURIComponent(ref)}/widgets`, { method: "POST", body }),
+
+  jobs: (qs) => api(`/api/v1/observability/jobs${qs || ""}`),
+  job: (ref) => api(`/api/v1/observability/jobs/${encodeURIComponent(ref)}`),
+  runMaintenanceJob: () => api("/api/v1/observability/jobs/maintenance", { method: "POST" }),
+  runSloJob: () => api("/api/v1/observability/jobs/slo", { method: "POST" }),
+
+  history: (qs) => api(`/api/v1/observability/history${qs || ""}`),
+  config: () => api("/api/v1/observability/config"),
+  setConfig: (key, value) =>
+    api(`/api/v1/observability/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  setRetention: (tier, retainDays) =>
+    api(`/api/v1/observability/retention/${encodeURIComponent(tier)}`, { method: "PUT", body: { retain_days: retainDays } }),
+
+  searchMeta: () => api("/api/v1/observability/search-meta"),
+  reindexSearch: () => api("/api/v1/observability/search/reindex", { method: "POST" }),
+  search: (body) => api("/api/v1/observability/search", { method: "POST", body }),
+
+  ensureFoundation: () => api("/api/v1/observability/seed", { method: "POST" }),
+  seed: () => api("/api/v1/observability/seed", { method: "POST" }),
+};

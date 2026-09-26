@@ -63,6 +63,10 @@ import * as thread from "./services/thread/index.js";
 import { createThreadRouter } from "./services/thread/router-thread.js";
 import * as exchange from "./services/exchange/index.js";
 import { createExchangeRouter } from "./services/exchange/router-exchange.js";
+import * as reporting from "./services/reporting/index.js";
+import { createReportingRouter } from "./services/reporting/router-reporting.js";
+import * as observability from "./services/observability/index.js";
+import { createObservabilityRouter } from "./services/observability/router-observability.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
@@ -229,6 +233,16 @@ export function createApp(db) {
     exchange.ensureExchangeFoundation(db);
   } catch {
     /* Standards & Exchange foundation is idempotent and must never block application boot */
+  }
+  try {
+    reporting.ensureReportingFoundation(db);
+  } catch {
+    /* Reporting & Analytics foundation is idempotent and must never block application boot */
+  }
+  try {
+    observability.ensureObservabilityFoundation(db);
+  } catch {
+    /* Data Observability foundation is idempotent and must never block application boot */
   }
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -10130,6 +10144,16 @@ export function createApp(db) {
   const exchangeRouter = createExchangeRouter({ express, db, auth, can, wrap });
   app.use("/api/standards-exchange", exchangeRouter);
   app.use("/api/v1/standards-exchange", exchangeRouter);
+
+  // ── P2 Reporting & Analytics ──────────────────────────────────────────────
+  const reportingRouter = createReportingRouter({ express, db, auth, can, wrap });
+  app.use("/api/reporting", reportingRouter);
+  app.use("/api/v1/reporting", reportingRouter);
+
+  // ── P2 Data Observability ────────────────────────────────────────────────
+  const observabilityRouter = createObservabilityRouter({ express, db, auth, can, wrap });
+  app.use("/api/observability", observabilityRouter);
+  app.use("/api/v1/observability", observabilityRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);

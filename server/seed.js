@@ -38,6 +38,8 @@ import * as bom from "./services/bom/index.js";
 import * as pdm from "./services/pdm/index.js";
 import * as thread from "./services/thread/index.js";
 import * as exchange from "./services/exchange/index.js";
+import * as reporting from "./services/reporting/index.js";
+import * as observability from "./services/observability/index.js";
 import { ACTIONS } from "./validation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1140,6 +1142,44 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.exchange.metrics", name: "Standards & Exchange metrics & health", parentCode: "iam.exchange" },
     { applicationCode: "iam", code: "iam.exchange.audit", name: "Standards & Exchange audit trail", parentCode: "iam.exchange" },
     { applicationCode: "iam", code: "iam.exchange.admin", name: "Standards & Exchange administration & configuration", parentCode: "iam.exchange" },
+    { applicationCode: "iam", code: "iam.reporting", name: "Reporting & Analytics service", kind: "module" },
+    { applicationCode: "iam", code: "iam.reporting.home", name: "Reporting & Analytics overview & home", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.reports", name: "Saved reports & report builder", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.builder", name: "Ad-hoc query builder & preview", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.dashboards", name: "Dashboards", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.dashboard_builder", name: "Dashboard & widget builder", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.kpis", name: "KPIs & targets", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.metrics", name: "Reusable metric definitions", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.data_sources", name: "Data sources & semantic layer", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.schedules", name: "Scheduled reports & distribution", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.exports", name: "Report exports & downloads", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.bi", name: "BI integration & datasets", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.jobs", name: "Reporting background jobs", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.history", name: "Reporting execution & change history", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.search", name: "Reporting search & discovery", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.observability", name: "Reporting metrics, cache & read model", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.audit", name: "Reporting audit trail", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.reporting.admin", name: "Reporting administration & configuration", parentCode: "iam.reporting" },
+    { applicationCode: "iam", code: "iam.observability", name: "Data Observability service", kind: "module" },
+    { applicationCode: "iam", code: "iam.observability.home", name: "Data Observability overview & home", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.overview", name: "Platform observability overview", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.health", name: "Health checks, snapshots & status", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.metrics", name: "Metric definitions & observations", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.data_volume", name: "Data volume & growth", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.freshness", name: "Data freshness & assets", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.quality", name: "Data quality signals", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.pipelines", name: "Pipeline throughput & latency", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.failures", name: "API, import, export & event failures", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.alerts", name: "Alert rules, alerts & lifecycle", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.incidents", name: "Incident tracking", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.slo", name: "SLO & SLA management", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.dashboards", name: "Observability dashboards", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.providers", name: "Telemetry providers", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.jobs", name: "Observability background jobs", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.history", name: "Observability change history", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.search", name: "Observability search & discovery", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.audit", name: "Observability audit trail", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.observability.admin", name: "Observability administration & configuration", parentCode: "iam.observability" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
@@ -1535,7 +1575,49 @@ function seedMissingCatalog(db) {
     "iam.exchange.audit",
     "iam.exchange.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes]) {
+  const reportingResourceCodes = [
+    "iam.reporting",
+    "iam.reporting.home",
+    "iam.reporting.reports",
+    "iam.reporting.builder",
+    "iam.reporting.dashboards",
+    "iam.reporting.dashboard_builder",
+    "iam.reporting.kpis",
+    "iam.reporting.metrics",
+    "iam.reporting.data_sources",
+    "iam.reporting.schedules",
+    "iam.reporting.exports",
+    "iam.reporting.bi",
+    "iam.reporting.jobs",
+    "iam.reporting.history",
+    "iam.reporting.search",
+    "iam.reporting.observability",
+    "iam.reporting.audit",
+    "iam.reporting.admin",
+  ];
+  const observabilityResourceCodes = [
+    "iam.observability",
+    "iam.observability.home",
+    "iam.observability.overview",
+    "iam.observability.health",
+    "iam.observability.metrics",
+    "iam.observability.data_volume",
+    "iam.observability.freshness",
+    "iam.observability.quality",
+    "iam.observability.pipelines",
+    "iam.observability.failures",
+    "iam.observability.alerts",
+    "iam.observability.incidents",
+    "iam.observability.slo",
+    "iam.observability.dashboards",
+    "iam.observability.providers",
+    "iam.observability.jobs",
+    "iam.observability.history",
+    "iam.observability.search",
+    "iam.observability.audit",
+    "iam.observability.admin",
+  ];
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -1657,6 +1739,23 @@ function reconcileReaderGrants(db) {
     ["iam.data_quality.exceptions", ["read", "create", "update", "execute"]],
     ["iam.data_quality.duplicates", ["read", "execute"]],
     ["iam.data_quality.remediation", ["read", "execute"]],
+    ["iam.observability.home", ["read"]],
+    ["iam.observability.overview", ["read"]],
+    ["iam.observability.health", ["read"]],
+    ["iam.observability.metrics", ["read"]],
+    ["iam.observability.data_volume", ["read"]],
+    ["iam.observability.freshness", ["read"]],
+    ["iam.observability.quality", ["read"]],
+    ["iam.observability.pipelines", ["read"]],
+    ["iam.observability.failures", ["read"]],
+    ["iam.observability.alerts", ["read", "execute"]],
+    ["iam.observability.incidents", ["read"]],
+    ["iam.observability.slo", ["read"]],
+    ["iam.observability.dashboards", ["read"]],
+    ["iam.observability.providers", ["read"]],
+    ["iam.observability.jobs", ["read"]],
+    ["iam.observability.history", ["read"]],
+    ["iam.observability.search", ["read"]],
   ];
   for (const [code, actions] of grants) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
@@ -3065,7 +3164,9 @@ export function seedDatabase(db) {
   const pdmResult = withEventSuppression(() => seedPdmDomain(db));
   const threadResult = withEventSuppression(() => seedThreadDomain(db));
   const exchangeResult = withEventSuppression(() => seedExchangeDomain(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult, ...threadResult, ...exchangeResult };
+  const reportingResult = withEventSuppression(() => seedReportingDomain(db));
+  const observabilityResult = withEventSuppression(() => seedObservabilityDomain(db));
+  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult, ...threadResult, ...exchangeResult, ...reportingResult, ...observabilityResult };
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -3187,6 +3288,28 @@ function seedExchangeDomain(db) {
     return { exchangeSeeded: true, ...result };
   } catch (err) {
     return { exchangeSeeded: false, exchangeError: err.message };
+  }
+}
+
+// Installs the P2 Reporting & Analytics foundation (event and job types, search
+// registrations, semantic layer, configuration) plus curated KPI definitions, a
+// demo report and an operations dashboard so the capability is visible on a
+// fresh install. Modules 20 is a platform service consumed by every domain.
+function seedReportingDomain(db) {
+  try {
+    const result = reporting.ensureReportingSeed(db);
+    return { reportingSeeded: true, ...result };
+  } catch (err) {
+    return { reportingSeeded: false, reportingError: err.message };
+  }
+}
+
+function seedObservabilityDomain(db) {
+  try {
+    const result = observability.ensureObservabilitySeed(db);
+    return { observabilitySeeded: true, ...result };
+  } catch (err) {
+    return { observabilitySeeded: false, observabilityError: err.message };
   }
 }
 

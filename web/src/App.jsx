@@ -29,6 +29,8 @@ const BomPage = React.lazy(() => import("./pages/BomPage.jsx"));
 const PdmPage = React.lazy(() => import("./pages/PdmPage.jsx"));
 const DigitalThreadPage = React.lazy(() => import("./pages/DigitalThreadPage.jsx"));
 const StandardsExchangePage = React.lazy(() => import("./pages/StandardsExchangePage.jsx"));
+const ReportingAnalyticsPage = React.lazy(() => import("./pages/ReportingAnalyticsPage.jsx"));
+const DataObservabilityPage = React.lazy(() => import("./pages/DataObservabilityPage.jsx"));
 const OrganizationsPage = React.lazy(() => import("./pages/OrganizationsPage.jsx"));
 const OrganizationDetailPage = React.lazy(() => import("./pages/OrganizationDetailPage.jsx"));
 const PlatformPage = React.lazy(() => import("./pages/PlatformPage.jsx"));
@@ -320,6 +322,16 @@ const PLATFORM_GROUPS = [
     items: [{ to: "/standards-exchange", label: "Exchange workspace", platformOrAdmin: true }],
   },
   {
+    key: "reporting-analytics",
+    label: "Reporting & analytics",
+    items: [{ to: "/reporting", label: "Analytics workspace", platformOrAdmin: true }],
+  },
+  {
+    key: "observability",
+    label: "Data observability",
+    items: [{ to: "/observability", label: "Observability workspace", platformOrAdmin: true }],
+  },
+  {
     key: "communication",
     label: "Communication",
     items: [
@@ -576,6 +588,8 @@ export default function App() {
         <Route path="/pdm" element={<PdmPage />} />
         <Route path="/digital-thread" element={<DigitalThreadPage />} />
         <Route path="/standards-exchange" element={<StandardsExchangePage />} />
+        <Route path="/reporting" element={<ReportingAnalyticsPage />} />
+        <Route path="/observability" element={<DataObservabilityPage />} />
         <Route path="/policy" element={<PolicyPage />} />
         <Route path="/authentication" element={<AuthenticationPage />} />
         <Route path="/sessions" element={<SessionsPage />} />

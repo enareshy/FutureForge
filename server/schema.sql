@@ -10393,3 +10393,943 @@ CREATE TABLE IF NOT EXISTS exchange_configuration (
 );
 
 CREATE INDEX IF NOT EXISTS idx_exchange_configuration_tenant ON exchange_configuration(tenant_id, key);
+
+-- ============================================================================
+-- Reporting & Analytics (P2 Module 20)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS reporting_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  report_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  site TEXT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  report_type TEXT NOT NULL DEFAULT 'TABULAR',
+  data_source TEXT NOT NULL DEFAULT 'OBJECT_MODEL',
+  entity TEXT NOT NULL DEFAULT '',
+  definition_json TEXT NOT NULL DEFAULT '{}',
+  visualization_json TEXT NOT NULL DEFAULT '{}',
+  security_scope_json TEXT NOT NULL DEFAULT '{}',
+  visibility TEXT NOT NULL DEFAULT 'PRIVATE',
+  visibility_subject INTEGER,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  immutable INTEGER NOT NULL DEFAULT 0,
+  published_at TEXT,
+  published_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_reports_tenant ON reporting_reports(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_reporting_reports_entity ON reporting_reports(tenant_id, entity);
+CREATE INDEX IF NOT EXISTS idx_reporting_reports_owner ON reporting_reports(tenant_id, owner_user_id);
+
+CREATE TABLE IF NOT EXISTS reporting_report_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  report_id INTEGER NOT NULL REFERENCES reporting_reports(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  change_summary TEXT NOT NULL DEFAULT '',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_report_versions_report ON reporting_report_versions(report_id, version);
+
+CREATE TABLE IF NOT EXISTS reporting_report_shares (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  report_id INTEGER NOT NULL REFERENCES reporting_reports(id) ON DELETE CASCADE,
+  subject_type TEXT NOT NULL DEFAULT 'USER',
+  subject_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_report_shares_report ON reporting_report_shares(report_id);
+CREATE INDEX IF NOT EXISTS idx_reporting_report_shares_subject ON reporting_report_shares(tenant_id, subject_type, subject_id);
+
+CREATE TABLE IF NOT EXISTS reporting_dashboards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dashboard_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  site TEXT,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  dashboard_type TEXT NOT NULL DEFAULT 'OPERATIONAL',
+  layout_json TEXT NOT NULL DEFAULT '{}',
+  visibility TEXT NOT NULL DEFAULT 'PRIVATE',
+  visibility_subject INTEGER,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  immutable INTEGER NOT NULL DEFAULT 0,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  published_at TEXT,
+  published_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_dashboards_tenant ON reporting_dashboards(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_reporting_dashboards_owner ON reporting_dashboards(tenant_id, owner_user_id);
+
+CREATE TABLE IF NOT EXISTS reporting_dashboard_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dashboard_id INTEGER NOT NULL REFERENCES reporting_dashboards(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  change_summary TEXT NOT NULL DEFAULT '',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_dashboard_versions_dashboard ON reporting_dashboard_versions(dashboard_id, version);
+
+CREATE TABLE IF NOT EXISTS reporting_dashboard_shares (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  dashboard_id INTEGER NOT NULL REFERENCES reporting_dashboards(id) ON DELETE CASCADE,
+  subject_type TEXT NOT NULL DEFAULT 'USER',
+  subject_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_dashboard_shares_dashboard ON reporting_dashboard_shares(dashboard_id);
+
+CREATE TABLE IF NOT EXISTS reporting_dashboard_widgets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  widget_ref TEXT NOT NULL UNIQUE,
+  dashboard_id INTEGER NOT NULL REFERENCES reporting_dashboards(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  widget_type TEXT NOT NULL DEFAULT 'TABLE',
+  title TEXT NOT NULL DEFAULT '',
+  report_id INTEGER REFERENCES reporting_reports(id) ON DELETE SET NULL,
+  kpi_id INTEGER,
+  metric_id INTEGER,
+  sequence INTEGER NOT NULL DEFAULT 1,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  layout_json TEXT NOT NULL DEFAULT '{}',
+  filters_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_widgets_dashboard ON reporting_dashboard_widgets(dashboard_id, sequence);
+
+CREATE TABLE IF NOT EXISTS reporting_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  metric_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  entity TEXT NOT NULL DEFAULT '',
+  aggregation TEXT NOT NULL DEFAULT 'COUNT',
+  attribute TEXT NOT NULL DEFAULT '',
+  filters_json TEXT NOT NULL DEFAULT '[]',
+  formula TEXT NOT NULL DEFAULT '',
+  unit TEXT NOT NULL DEFAULT 'NUMBER',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_metrics_tenant ON reporting_metrics(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS reporting_metric_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  metric_id INTEGER NOT NULL REFERENCES reporting_metrics(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  change_summary TEXT NOT NULL DEFAULT '',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_metric_versions_metric ON reporting_metric_versions(metric_id, version);
+
+CREATE TABLE IF NOT EXISTS reporting_kpis (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kpi_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  metric_code TEXT NOT NULL DEFAULT '',
+  entity TEXT NOT NULL DEFAULT '',
+  aggregation TEXT NOT NULL DEFAULT 'COUNT',
+  attribute TEXT NOT NULL DEFAULT '',
+  filters_json TEXT NOT NULL DEFAULT '[]',
+  formula TEXT NOT NULL DEFAULT '',
+  target REAL,
+  thresholds_json TEXT NOT NULL DEFAULT '{}',
+  direction TEXT NOT NULL DEFAULT 'HIGHER_IS_BETTER',
+  unit TEXT NOT NULL DEFAULT 'NUMBER',
+  frequency TEXT NOT NULL DEFAULT 'DAILY',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  security_scope_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_kpis_tenant ON reporting_kpis(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_reporting_kpis_entity ON reporting_kpis(tenant_id, entity);
+
+CREATE TABLE IF NOT EXISTS reporting_kpi_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kpi_id INTEGER NOT NULL REFERENCES reporting_kpis(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  change_summary TEXT NOT NULL DEFAULT '',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_kpi_versions_kpi ON reporting_kpi_versions(kpi_id, version);
+
+CREATE TABLE IF NOT EXISTS reporting_kpi_targets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kpi_id INTEGER NOT NULL REFERENCES reporting_kpis(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  period TEXT NOT NULL DEFAULT '',
+  target REAL,
+  thresholds_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_kpi_targets_kpi ON reporting_kpi_targets(kpi_id);
+
+CREATE TABLE IF NOT EXISTS reporting_kpi_values (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kpi_id INTEGER NOT NULL REFERENCES reporting_kpis(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  period TEXT NOT NULL DEFAULT '',
+  value REAL,
+  status TEXT NOT NULL DEFAULT 'OK',
+  target REAL,
+  direction TEXT NOT NULL DEFAULT 'HIGHER_IS_BETTER',
+  computed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_kpi_values_kpi ON reporting_kpi_values(kpi_id, computed_at);
+
+CREATE TABLE IF NOT EXISTS reporting_executions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  execution_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  report_id INTEGER REFERENCES reporting_reports(id) ON DELETE SET NULL,
+  report_code TEXT NOT NULL DEFAULT '',
+  dashboard_id INTEGER,
+  kpi_id INTEGER,
+  mode TEXT NOT NULL DEFAULT 'EXECUTE',
+  status TEXT NOT NULL DEFAULT 'COMPLETED',
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  parameters_json TEXT NOT NULL DEFAULT '{}',
+  query_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  row_count INTEGER,
+  duration_ms INTEGER,
+  cache_hit INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_executions_tenant ON reporting_executions(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_reporting_executions_report ON reporting_executions(tenant_id, report_code);
+
+CREATE TABLE IF NOT EXISTS reporting_exports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  export_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  report_id INTEGER REFERENCES reporting_reports(id) ON DELETE SET NULL,
+  execution_id INTEGER,
+  format TEXT NOT NULL DEFAULT 'CSV',
+  status TEXT NOT NULL DEFAULT 'QUEUED',
+  parameters_json TEXT NOT NULL DEFAULT '{}',
+  platform_job_id INTEGER,
+  row_count INTEGER,
+  size_bytes INTEGER,
+  storage_uri TEXT NOT NULL DEFAULT '',
+  file_name TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL DEFAULT '',
+  content_text TEXT,
+  error_message TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_exports_tenant ON reporting_exports(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS reporting_schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  schedule_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  name TEXT NOT NULL DEFAULT '',
+  target_type TEXT NOT NULL DEFAULT 'REPORT',
+  report_id INTEGER REFERENCES reporting_reports(id) ON DELETE CASCADE,
+  dashboard_id INTEGER REFERENCES reporting_dashboards(id) ON DELETE CASCADE,
+  kpi_id INTEGER REFERENCES reporting_kpis(id) ON DELETE CASCADE,
+  frequency TEXT NOT NULL DEFAULT 'DAILY',
+  cron TEXT NOT NULL DEFAULT '',
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  format TEXT NOT NULL DEFAULT 'CSV',
+  recipients_json TEXT NOT NULL DEFAULT '[]',
+  parameters_json TEXT NOT NULL DEFAULT '{}',
+  distribution_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  next_run_at TEXT,
+  last_run_at TEXT,
+  last_execution_id INTEGER,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_schedules_tenant ON reporting_schedules(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_reporting_schedules_next ON reporting_schedules(tenant_id, next_run_at);
+
+CREATE TABLE IF NOT EXISTS reporting_read_model (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  entity TEXT NOT NULL,
+  object_type TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL,
+  organization_id INTEGER,
+  classification TEXT NOT NULL DEFAULT '',
+  attributes_json TEXT NOT NULL DEFAULT '{}',
+  source_updated_at TEXT,
+  refreshed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_read_model_entity ON reporting_read_model(tenant_id, entity);
+CREATE INDEX IF NOT EXISTS idx_reporting_read_model_object ON reporting_read_model(tenant_id, entity, object_id);
+
+CREATE TABLE IF NOT EXISTS reporting_bi_connections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bi_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  provider TEXT NOT NULL DEFAULT 'GENERIC_REST',
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'PLANNED',
+  last_sync_at TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_bi_connections_tenant ON reporting_bi_connections(tenant_id, provider);
+
+CREATE TABLE IF NOT EXISTS reporting_bi_datasets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dataset_ref TEXT NOT NULL UNIQUE,
+  connection_id INTEGER NOT NULL REFERENCES reporting_bi_connections(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  name TEXT NOT NULL,
+  entity TEXT NOT NULL DEFAULT '',
+  definition_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  last_published_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_bi_datasets_tenant ON reporting_bi_datasets(tenant_id, connection_id);
+
+CREATE TABLE IF NOT EXISTS reporting_bi_publish_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  publish_ref TEXT NOT NULL,
+  dataset_id INTEGER NOT NULL REFERENCES reporting_bi_datasets(id) ON DELETE CASCADE,
+  connection_id INTEGER NOT NULL REFERENCES reporting_bi_connections(id) ON DELETE CASCADE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  operation TEXT NOT NULL DEFAULT 'PUBLISH',
+  status TEXT NOT NULL DEFAULT 'QUEUED',
+  platform_job_id INTEGER,
+  message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_bi_publish_jobs_tenant ON reporting_bi_publish_jobs(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS reporting_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_configuration_tenant ON reporting_configuration(tenant_id, key);
+
+CREATE TABLE IF NOT EXISTS reporting_cache (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cache_key TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER REFERENCES organizations(id),
+  scope TEXT NOT NULL DEFAULT '',
+  security_hash TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  expires_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_cache_tenant ON reporting_cache(tenant_id, scope);
+CREATE INDEX IF NOT EXISTS idx_reporting_cache_expires ON reporting_cache(expires_at);
+
+CREATE TABLE IF NOT EXISTS reporting_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  action TEXT NOT NULL,
+  entity_type TEXT NOT NULL DEFAULT 'report',
+  entity_id TEXT NOT NULL DEFAULT '',
+  entity_ref TEXT NOT NULL DEFAULT '',
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_history_tenant ON reporting_history(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_reporting_history_entity ON reporting_history(tenant_id, entity_type, entity_ref);
+
+CREATE TABLE IF NOT EXISTS reporting_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  handler_code TEXT NOT NULL,
+  job_type_code TEXT NOT NULL,
+  entity_type TEXT,
+  entity_ref TEXT,
+  platform_job_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'QUEUED',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 1,
+  progress_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  error_message TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  queued_at TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_jobs_tenant ON reporting_jobs(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_reporting_jobs_platform ON reporting_jobs(platform_job_id);
+
+-- ============================================================================
+-- Module 21 — Data Observability
+--
+-- A platform observability layer. It owns no business data: telemetry is
+-- collected from the existing platform services (objects, jobs, events, search,
+-- workflow, integration, data quality, import/export, audit) through the
+-- provider layer. Operational configuration (metric/threshold/alert/SLO/SLA
+-- definitions, dashboards) is separated from the high-write measurement and
+-- incident stores so the latter can migrate to a time-series backend later.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS observability_metric_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  metric_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'PLATFORM',
+  provider_code TEXT NOT NULL DEFAULT 'OBJECT_MODEL',
+  entity_code TEXT,
+  calculation TEXT NOT NULL DEFAULT 'COUNT',
+  attribute TEXT,
+  unit TEXT NOT NULL DEFAULT 'COUNT',
+  direction TEXT NOT NULL DEFAULT 'HIGHER_IS_WORSE',
+  frequency_seconds INTEGER NOT NULL DEFAULT 300,
+  aggregation TEXT NOT NULL DEFAULT 'AVG',
+  warning_threshold REAL,
+  critical_threshold REAL,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_metric_def_code ON observability_metric_definitions(tenant_id, code);
+CREATE INDEX IF NOT EXISTS idx_observability_metric_def_status ON observability_metric_definitions(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS observability_metric_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  metric_id INTEGER NOT NULL REFERENCES observability_metric_definitions(id),
+  tenant_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_metric_versions_metric ON observability_metric_versions(metric_id, version);
+
+CREATE TABLE IF NOT EXISTS observability_thresholds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  threshold_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  metric_code TEXT NOT NULL,
+  scope_json TEXT NOT NULL DEFAULT '{}',
+  operator TEXT NOT NULL DEFAULT 'GT',
+  warning_value REAL,
+  critical_value REAL,
+  direction TEXT NOT NULL DEFAULT 'INCREASING',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_thresholds_metric ON observability_thresholds(tenant_id, metric_code, status);
+
+CREATE TABLE IF NOT EXISTS observability_data_assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  asset_type TEXT NOT NULL DEFAULT 'TABLE',
+  provider_code TEXT NOT NULL DEFAULT 'PLATFORM',
+  entity_code TEXT,
+  source_table TEXT,
+  refresh_interval_seconds INTEGER NOT NULL DEFAULT 3600,
+  warn_age_seconds INTEGER,
+  critical_age_seconds INTEGER,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_assets_code ON observability_data_assets(tenant_id, code);
+
+CREATE TABLE IF NOT EXISTS observability_freshness_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  freshness_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  asset_code TEXT NOT NULL,
+  provider_code TEXT NOT NULL DEFAULT 'PLATFORM',
+  source_table TEXT,
+  entity_code TEXT,
+  max_age_seconds INTEGER NOT NULL DEFAULT 86400,
+  warn_age_seconds INTEGER,
+  critical_age_seconds INTEGER,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_freshness_code ON observability_freshness_definitions(tenant_id, code);
+
+CREATE TABLE IF NOT EXISTS observability_health_checks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  check_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT 'PLATFORM',
+  service_code TEXT,
+  provider_code TEXT NOT NULL DEFAULT 'PLATFORM',
+  metric_code TEXT,
+  check_type TEXT NOT NULL DEFAULT 'THRESHOLD',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  severity TEXT NOT NULL DEFAULT 'WARNING',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_health_checks_code ON observability_health_checks(tenant_id, code);
+
+CREATE TABLE IF NOT EXISTS observability_health_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'PLATFORM',
+  service_code TEXT,
+  status TEXT NOT NULL DEFAULT 'HEALTHY',
+  score REAL,
+  previous_status TEXT,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  run_id INTEGER,
+  captured_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_health_snapshots_tenant ON observability_health_snapshots(tenant_id, captured_at);
+CREATE INDEX IF NOT EXISTS idx_observability_health_snapshots_service ON observability_health_snapshots(tenant_id, service_code, captured_at);
+
+CREATE TABLE IF NOT EXISTS observability_slo_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slo_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'SLO',
+  metric_code TEXT NOT NULL,
+  entity_code TEXT,
+  target REAL NOT NULL,
+  comparison TEXT NOT NULL DEFAULT 'LTE',
+  window_seconds INTEGER NOT NULL DEFAULT 86400,
+  unit TEXT NOT NULL DEFAULT 'PERCENT',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_slo_code ON observability_slo_definitions(tenant_id, code, kind);
+
+CREATE TABLE IF NOT EXISTS observability_alert_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  metric_code TEXT NOT NULL,
+  condition_json TEXT NOT NULL DEFAULT '{}',
+  severity TEXT NOT NULL DEFAULT 'WARNING',
+  scope_json TEXT NOT NULL DEFAULT '{}',
+  for_seconds INTEGER NOT NULL DEFAULT 0,
+  cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+  dedup_key_template TEXT NOT NULL DEFAULT '',
+  auto_resolve INTEGER NOT NULL DEFAULT 1,
+  notification_json TEXT NOT NULL DEFAULT '{}',
+  service_code TEXT,
+  incident_severity TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_alert_rules_code ON observability_alert_rules(tenant_id, code);
+CREATE INDEX IF NOT EXISTS idx_observability_alert_rules_metric ON observability_alert_rules(tenant_id, metric_code, status);
+
+CREATE TABLE IF NOT EXISTS observability_alert_rule_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_id INTEGER NOT NULL REFERENCES observability_alert_rules(id),
+  tenant_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_alert_rule_versions_rule ON observability_alert_rule_versions(rule_id, version);
+
+CREATE TABLE IF NOT EXISTS observability_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alert_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  rule_id INTEGER REFERENCES observability_alert_rules(id),
+  rule_code TEXT,
+  metric_code TEXT NOT NULL,
+  service_code TEXT,
+  severity TEXT NOT NULL DEFAULT 'WARNING',
+  status TEXT NOT NULL DEFAULT 'OPEN',
+  value REAL,
+  threshold REAL,
+  comparison TEXT,
+  scope_json TEXT NOT NULL DEFAULT '{}',
+  dedup_key TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  occurrence_count INTEGER NOT NULL DEFAULT 1,
+  incident_id INTEGER REFERENCES observability_incidents(id),
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  acknowledged_at TEXT,
+  acknowledged_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  suppressed_until TEXT,
+  resolved_at TEXT,
+  resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  closed_at TEXT,
+  resolution TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_alerts_tenant ON observability_alerts(tenant_id, status, severity);
+CREATE INDEX IF NOT EXISTS idx_observability_alerts_dedup ON observability_alerts(tenant_id, dedup_key, status);
+CREATE INDEX IF NOT EXISTS idx_observability_alerts_metric ON observability_alerts(tenant_id, metric_code, last_seen_at);
+
+CREATE TABLE IF NOT EXISTS observability_alert_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alert_id INTEGER NOT NULL REFERENCES observability_alerts(id),
+  tenant_id INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  value REAL,
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  message TEXT NOT NULL DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_alert_events_alert ON observability_alert_events(alert_id, created_at);
+
+CREATE TABLE IF NOT EXISTS observability_incidents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  incident_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  severity TEXT NOT NULL DEFAULT 'HIGH',
+  status TEXT NOT NULL DEFAULT 'OPEN',
+  service_code TEXT,
+  module_code TEXT,
+  metric_code TEXT,
+  alert_id INTEGER,
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  opened_at TEXT NOT NULL,
+  acknowledged_at TEXT,
+  resolved_at TEXT,
+  closed_at TEXT,
+  resolution TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_incidents_tenant ON observability_incidents(tenant_id, status, severity);
+CREATE INDEX IF NOT EXISTS idx_observability_incidents_service ON observability_incidents(tenant_id, service_code);
+
+CREATE TABLE IF NOT EXISTS observability_observation_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  trigger_type TEXT NOT NULL DEFAULT 'MANUAL',
+  status TEXT NOT NULL DEFAULT 'RUNNING',
+  metric_count INTEGER NOT NULL DEFAULT 0,
+  observation_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  alerts_created INTEGER NOT NULL DEFAULT 0,
+  alerts_resolved INTEGER NOT NULL DEFAULT 0,
+  slo_breaches INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_runs_tenant ON observability_observation_runs(tenant_id, started_at);
+
+CREATE TABLE IF NOT EXISTS observability_observation_errors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER REFERENCES observability_observation_runs(id),
+  tenant_id INTEGER NOT NULL,
+  provider_code TEXT,
+  metric_code TEXT,
+  message TEXT NOT NULL DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_observation_errors_run ON observability_observation_errors(run_id);
+
+CREATE TABLE IF NOT EXISTS observability_metric_observations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  metric_id INTEGER REFERENCES observability_metric_definitions(id),
+  metric_code TEXT NOT NULL,
+  value REAL NOT NULL DEFAULT 0,
+  unit TEXT NOT NULL DEFAULT '',
+  dimension_json TEXT NOT NULL DEFAULT '{}',
+  dimension_hash TEXT NOT NULL DEFAULT '',
+  provider_code TEXT,
+  run_id INTEGER REFERENCES observability_observation_runs(id),
+  observed_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_observations_metric ON observability_metric_observations(tenant_id, metric_code, observed_at);
+CREATE INDEX IF NOT EXISTS idx_observability_observations_run ON observability_metric_observations(run_id);
+
+CREATE TABLE IF NOT EXISTS observability_dashboards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dashboard_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  organization_id INTEGER REFERENCES organizations(id),
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT 'PLATFORM',
+  is_default INTEGER NOT NULL DEFAULT 0,
+  reporting_dashboard_ref TEXT,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_dashboards_code ON observability_dashboards(tenant_id, code);
+CREATE INDEX IF NOT EXISTS idx_observability_dashboards_scope ON observability_dashboards(tenant_id, scope, status);
+
+CREATE TABLE IF NOT EXISTS observability_dashboard_widgets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  widget_ref TEXT NOT NULL UNIQUE,
+  dashboard_id INTEGER NOT NULL REFERENCES observability_dashboards(id),
+  tenant_id INTEGER NOT NULL,
+  widget_type TEXT NOT NULL DEFAULT 'METRIC_CARD',
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  metric_code TEXT,
+  provider_code TEXT,
+  visualization TEXT NOT NULL DEFAULT 'LINE',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  layout_json TEXT NOT NULL DEFAULT '{}',
+  sequence INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_widgets_dashboard ON observability_dashboard_widgets(dashboard_id, sequence);
+
+CREATE TABLE IF NOT EXISTS observability_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  action TEXT NOT NULL,
+  entity_type TEXT NOT NULL DEFAULT 'metric',
+  entity_id TEXT NOT NULL DEFAULT '',
+  entity_ref TEXT NOT NULL DEFAULT '',
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_history_tenant ON observability_history(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_observability_history_entity ON observability_history(tenant_id, entity_type, entity_ref);
+
+CREATE TABLE IF NOT EXISTS observability_configuration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL DEFAULT 'null',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_configuration_tenant ON observability_configuration(tenant_id, key);
+
+CREATE TABLE IF NOT EXISTS observability_retention_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  tier TEXT NOT NULL,
+  retain_days INTEGER NOT NULL DEFAULT 90,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_retention_tenant ON observability_retention_policies(tenant_id, tier);
+
+CREATE TABLE IF NOT EXISTS observability_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_ref TEXT NOT NULL UNIQUE,
+  tenant_id INTEGER NOT NULL REFERENCES organizations(id),
+  handler_code TEXT NOT NULL,
+  job_type_code TEXT NOT NULL,
+  entity_type TEXT,
+  entity_ref TEXT,
+  platform_job_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'QUEUED',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 1,
+  progress_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  error_message TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  queued_at TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_observability_jobs_tenant ON observability_jobs(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_observability_jobs_platform ON observability_jobs(platform_job_id);
