@@ -11498,3 +11498,64 @@ CREATE TABLE IF NOT EXISTS observability_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_observability_jobs_tenant ON observability_jobs(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_observability_jobs_platform ON observability_jobs(platform_job_id);
+
+-- ===========================================================================
+-- 037_deployment_editions — Deployment & Edition framework
+--
+-- One install = one deployment_profile row (id = 1). It records the topology
+-- the platform was installed as (Cloud SaaS, Private Cloud or Local/on-prem)
+-- together with the licensed edition and the commercial feature entitlements.
+-- `deployment_features` is the entitlement ledger: an administrator can enable,
+-- disable or annotate each platform feature, while `min_edition` and
+-- `allowed_modes` describe what the deployment is entitled to by contract. The
+-- effective flag is derived (see services/deployment/features.js) so the
+-- recorded contract and the operator override are never conflated.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS deployment_profile (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  mode TEXT NOT NULL DEFAULT 'local' CHECK (mode IN ('saas', 'private_cloud', 'local')),
+  edition TEXT NOT NULL DEFAULT 'enterprise' CHECK (edition IN ('community', 'standard', 'enterprise')),
+  installation_name TEXT NOT NULL DEFAULT 'Helix',
+  tenant_strategy TEXT NOT NULL DEFAULT 'multi' CHECK (tenant_strategy IN ('multi', 'single')),
+  self_registration INTEGER NOT NULL DEFAULT 0 CHECK (self_registration IN (0, 1)),
+  telemetry_enabled INTEGER NOT NULL DEFAULT 1 CHECK (telemetry_enabled IN (0, 1)),
+  support_email TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS deployment_features (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  feature_code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'platform',
+  description TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  min_edition TEXT NOT NULL DEFAULT 'community' CHECK (min_edition IN ('community', 'standard', 'enterprise')),
+  allowed_modes TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 100,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_deployment_features_category ON deployment_features(category, sort_order);
+
+CREATE TABLE IF NOT EXISTS deployment_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action TEXT NOT NULL,
+  entity_type TEXT NOT NULL DEFAULT 'profile',
+  entity_ref TEXT NOT NULL DEFAULT '',
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor_username TEXT NOT NULL DEFAULT '',
+  ip TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_deployment_history_created ON deployment_history(created_at);

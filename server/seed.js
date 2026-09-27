@@ -1188,11 +1188,15 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.observability.search", name: "Observability search & discovery", parentCode: "iam.observability" },
     { applicationCode: "iam", code: "iam.observability.audit", name: "Observability audit trail", parentCode: "iam.observability" },
     { applicationCode: "iam", code: "iam.observability.admin", name: "Observability administration & configuration", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.deployment", name: "Deployment & editions service", kind: "module" },
+    { applicationCode: "iam", code: "iam.deployment.profile", name: "Deployment profile, topology & edition", parentCode: "iam.deployment" },
+    { applicationCode: "iam", code: "iam.deployment.features", name: "Feature entitlements & editions", parentCode: "iam.deployment" },
+    { applicationCode: "iam", code: "iam.deployment.history", name: "Deployment change history", parentCode: "iam.deployment" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
   const platformRes = queryOne(db, "SELECT * FROM resources WHERE code = 'iam.platform'");
-  for (const code of ["iam.tenants", "iam.config", "iam.metadata"]) {
+  for (const code of ["iam.tenants", "iam.config", "iam.metadata", "iam.deployment.profile", "iam.deployment.features", "iam.deployment.history"]) {
     const res = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (platform && res) {
       const grantRes = code === "iam.metadata" ? res : res;

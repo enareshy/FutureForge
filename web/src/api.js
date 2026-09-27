@@ -213,6 +213,22 @@ export const iam = {
   effectivePermissions: (userId, qs) => api(`/api/authorization/effective/${userId}${qs || ""}`),
 };
 
+// Deployment & Edition framework: the deployment posture (Cloud SaaS / Private
+// Cloud / Local), the licensed edition and the feature entitlement ledger.
+export const deployment = {
+  meta: () => api("/api/deployment/meta"),
+  capabilities: () => api("/api/deployment/capabilities"),
+  health: () => api("/api/deployment/health"),
+  profile: () => api("/api/deployment/profile"),
+  updateProfile: (body) => api("/api/deployment/profile", { method: "PUT", body }),
+  features: () => api("/api/deployment/features"),
+  featureSummary: () => api("/api/deployment/features/summary"),
+  feature: (code) => api(`/api/deployment/features/${code}`),
+  updateFeature: (code, body) => api(`/api/deployment/features/${code}`, { method: "PUT", body }),
+  history: (qs) => api(`/api/deployment/history${qs || ""}`),
+  ensureFoundation: () => api("/api/deployment/foundation/ensure", { method: "POST" }),
+};
+
 export const metadata = {
   types: (qs) => api(`/api/metadata/types${qs || ""}`),
   typeTree: (qs) => api(`/api/metadata/types/tree${qs || ""}`),

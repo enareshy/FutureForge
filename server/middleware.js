@@ -2,6 +2,8 @@ import { HttpError } from "./validation.js";
 import { checkPermission } from "./services/authorization.js";
 import { writeAudit } from "./services/audit.js";
 import { emitDomainEvent } from "./services/events/emit.js";
+import { isFeatureEnabled } from "./services/deployment/index.js";
+import { featureDisabled } from "./services/deployment/errors.js";
 
 function contextOrg(req) {
   const raw =
@@ -58,5 +60,27 @@ export function requirePermission(db, resource, action) {
     }
     req.authz = result;
     next();
+  };
+}
+
+// Deployment feature gate. Modules the deployment is not entitled to (by
+// edition, topology or operator override) are rejected with a 403 that names
+// the feature, so the console can explain *why* a module is unavailable.
+// Deliberately cheap: entitlements are resolved once and cached per database.
+export function requireFeature(db, code) {
+  return (req, _res, next) => {
+    if (isFeatureEnabled(db, code)) return next();
+    const ip = req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() || req.ip;
+    if (req.actor) {
+      writeAudit(db, {
+        actor: req.actor,
+        action: "deployment.feature.denied",
+        resourceType: "deployment_feature",
+        resourceId: code,
+        details: { feature: code, path: req.originalUrl },
+        ip,
+      });
+    }
+    next(featureDisabled(code));
   };
 }

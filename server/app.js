@@ -64,6 +64,8 @@ import * as pdm from "./services/pdm/index.js";
 import { createPdmRouter } from "./services/pdm/router-pdm.js";
 import * as change from "./services/change/index.js";
 import { createChangeRouter } from "./services/change/router-change.js";
+import * as deployment from "./services/deployment/index.js";
+import { createDeploymentRouter } from "./services/deployment/router-deployment.js";
 import * as thread from "./services/thread/index.js";
 import { createThreadRouter } from "./services/thread/router-thread.js";
 import * as exchange from "./services/exchange/index.js";
@@ -76,7 +78,7 @@ import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, s
 import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
 import { writeAudit } from "./services/audit.js";
 import { effectiveAccess } from "./services/access.js";
-import { requirePermission } from "./middleware.js";
+import { requirePermission, requireFeature } from "./middleware.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -292,6 +294,11 @@ export function createApp(db) {
   } catch {
     /* Data Observability foundation is idempotent and must never block application boot */
   }
+  try {
+    deployment.ensureDeploymentFoundation(db);
+  } catch {
+    /* Deployment & Edition foundation is idempotent and must never block application boot */
+  }
   // Audit & History Framework: propagate a request/correlation id on every
   // request and capture failed access attempts automatically.
   app.use(audit.auditContext());
@@ -322,6 +329,7 @@ export function createApp(db) {
     auth,
     wrap((req, res) => {
       const currentTenant = req.tenantId ? tenants.publicTenant(tenants.getTenant(db, req.tenantId)) : null;
+      const capabilities = deployment.Features.resolveCapabilities(db);
       res.json({
         user: req.actor,
         access: effectiveAccess(db, req.actor.id),
@@ -329,6 +337,12 @@ export function createApp(db) {
         mfa: mfa.mfaStatus(db, req.actor.id),
         tenant: currentTenant,
         tenants: tenants.switchableTenants(db, req.actor).map(tenants.publicTenant),
+        deployment: {
+          mode: capabilities.mode,
+          edition: capabilities.edition,
+          features: capabilities.features,
+          summary: capabilities.summary,
+        },
       });
     })
   );
@@ -10195,13 +10209,18 @@ export function createApp(db) {
 
   // ── P2 Reporting & Analytics ──────────────────────────────────────────────
   const reportingRouter = createReportingRouter({ express, db, auth, can, wrap });
-  app.use("/api/reporting", reportingRouter);
-  app.use("/api/v1/reporting", reportingRouter);
+  app.use("/api/reporting", requireFeature(db, "reporting"), reportingRouter);
+  app.use("/api/v1/reporting", requireFeature(db, "reporting"), reportingRouter);
 
   // ── P2 Data Observability ────────────────────────────────────────────────
   const observabilityRouter = createObservabilityRouter({ express, db, auth, can, wrap });
-  app.use("/api/observability", observabilityRouter);
-  app.use("/api/v1/observability", observabilityRouter);
+  app.use("/api/observability", requireFeature(db, "observability"), observabilityRouter);
+  app.use("/api/v1/observability", requireFeature(db, "observability"), observabilityRouter);
+
+  // ── Deployment & Edition framework ───────────────────────────────────────
+  const deploymentRouter = createDeploymentRouter({ express, db, auth, can, wrap });
+  app.use("/api/deployment", deploymentRouter);
+  app.use("/api/v1/deployment", deploymentRouter);
 
   app.use("/api/integration", integrationRouter);
   app.use("/api/v1/integration", integrationRouter);
