@@ -13,8 +13,8 @@ import { normalizeText, normalizeUpper, paginate, parseObject, requireCode, requ
 export function getTemplateRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM ie_templates WHERE tenant_id = ? AND (template_ref = ? OR code = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), String(ref), normalizeUpper(ref), String(ref)]
+    "SELECT * FROM ie_templates WHERE tenant_id = ? AND (template_ref = ? OR code = ? OR id = ?)",
+    [Number(tenantId), String(ref), normalizeUpper(ref), Number(ref) || -1]
   );
 }
 
@@ -50,7 +50,7 @@ export function createTemplate(db, tenantId, input = {}, actor = null, ip = null
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM ie_templates WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM ie_templates WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, { actor, action: "data_exchange.template.create", resourceType: "ie_templates", resourceId: code, details: { direction }, ip });
   return publicTemplate(row);
 }
@@ -134,7 +134,7 @@ export function listTemplates(db, { tenantId, direction, objectType, status, q, 
   }
   const term = normalizeText(q);
   if (term) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${term}%`;
     params.push(like, like, like);
   }

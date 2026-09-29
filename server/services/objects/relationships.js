@@ -295,7 +295,7 @@ export function createRelationship(db, body, actor, tenantId, ip) {
     actor,
     action: "relationship.create",
     resourceType: "object_relationship",
-    resourceId: result.lastInsertRowid,
+    resourceId: result.lastInsertId,
     details: {
       type: plan.type.code,
       source: plan.sourceRow.code,
@@ -305,7 +305,7 @@ export function createRelationship(db, body, actor, tenantId, ip) {
     ip,
   });
   emitRelationshipIndex(db, plan.tenantId, plan.sourceRow.id, plan.targetRow.id);
-  const created = getRelationshipRow(db, result.lastInsertRowid);
+  const created = getRelationshipRow(db, result.lastInsertId);
   emitRelationshipEvent(db, created, "RelationshipCreated", actor);
   return publicRelationship(created);
 }

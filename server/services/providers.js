@@ -131,7 +131,7 @@ export function createProvider(db, body, actor, ip) {
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Provider code already exists");
     throw err;
   }
-  const row = queryOne(db, "SELECT * FROM auth_providers WHERE id = ?", [result.lastInsertRowid]);
+  const row = queryOne(db, "SELECT * FROM auth_providers WHERE id = ?", [result.lastInsertId]);
   writeAudit(db, {
     actor,
     action: "auth.provider.create",

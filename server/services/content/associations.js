@@ -40,7 +40,7 @@ function insertAssociation(db, input) {
       nowIso(),
     ]
   );
-  return queryOne(db, "SELECT * FROM content_associations WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM content_associations WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 export function createAssociation(db, input = {}, { actor = null, tenantId = null, ip = null } = {}) {

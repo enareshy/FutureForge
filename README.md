@@ -5,7 +5,7 @@ Enterprise identity and authorization fabric. Future platform modules consume pr
 ## Stack
 
 - Node.js + Express
-- SQLite (`node:sqlite`)
+- PostgreSQL 15+
 - Vite + React administration console
 - Node.js test runner
 
@@ -13,9 +13,10 @@ Enterprise identity and authorization fabric. Future platform modules consume pr
 
 ### Prerequisites
 
-- Node.js 22.22+ (tested on `v22.22.0`) or Node.js 24 LTS. The platform uses the built-in `node:sqlite`, so older Node 22.x builds may need `--experimental-sqlite`.
+- Node.js 22.22+ (tested on `v22.22.0`) or Node.js 24 LTS.
+- PostgreSQL 15 or newer, reachable from the API and worker processes.
 - npm (ships with Node) and git.
-- No database server required. SQLite is embedded and the database file is created automatically on first start.
+- A database and role for Helix (see step 3). The schema is created automatically on first start.
 
 ```bash
 node -v
@@ -51,19 +52,36 @@ cd FutureForge
 npm install
 ```
 
-### 3. Run in development mode (recommended)
+### 3. Prepare PostgreSQL (one-time)
+
+Create the role and database if they do not exist yet. The schema (495 tables), indexes and seed data are created automatically on first start, so this step only needs an empty database.
+
+```bash
+# Create a login role that may create the schema
+createuser --createdb helix
+
+# Set its password (match PGPASSWORD below)
+psql -c "ALTER ROLE helix WITH PASSWORD 'helix';"
+
+# Create the application database
+createdb -O helix helix
+```
+
+Connection settings are read from the environment (see step 7). The defaults match the commands above (`helix`/`helix` on `127.0.0.1:5432`).
+
+### 4. Run in development mode (recommended)
 
 ```bash
 # Start API on 3001 and the web console on 5173
 npm run dev
 ```
 
-The first start automatically creates `data/iam.db`, applies all migrations (`001_iam_core` through `021_event_messaging_framework`) and seeds demo data.
+The first start creates the schema, applies all migrations (`001_iam_core` through `037_deployment_editions`) and seeds demo data.
 
 - Web console: http://localhost:5173
 - API: http://localhost:3001
 
-### 4. Run a job worker
+### 5. Run a job worker
 
 The execution engine runs in separate worker processes that share the same
 database. Start at least one worker to execute queued and scheduled jobs:
@@ -81,7 +99,7 @@ node scripts/job-worker.js --demo
 
 Workers shut down gracefully on `SIGTERM`. See `docs/JOB_EXECUTION_OPERATIONS.md` for tuning, dead letters and troubleshooting. Workers also run the integration housekeeping sweep (queued messages, event fan-out and outbound webhooks); see `docs/INTEGRATION_OPERATIONS.md`. Workers drive the Event & Messaging Framework (outbox publish, delivery consumption, replay and retention); see `docs/EVENTS_OPERATIONS.md`. Workers also expire overdue number reservations and prune stale idempotency records; see `docs/NUMBERING_OPERATIONS.md`. Workers also expire ended effectivity and prune resolution bookkeeping; see `docs/VERSIONING_OPERATIONS.md`. Workers also process content security scans, renditions and retention, and run a content housekeeping sweep (expired upload sessions, stale check-out locks, retention evaluation and search reindexing); see `docs/CONTENT_MANAGEMENT_OPERATIONS.md`.
 
-### 5. Log in
+### 6. Log in
 
 - Super admin: `admin` / `HelixAdmin!42`
 - End user: `j.patel` / `HelixUser!42`
@@ -111,7 +129,7 @@ Where things live in the UI:
 - Product data section, **PDM domain** (`/pdm`): the product data management capability consumed across BOM/Manufacturing/Quality/Supplier — items and item numbers with part/product semantics, lifecycle-aware revisions with immutability and revise, datasets with content links, representations, design data, CAD associations, declarative revision rules and configuration rules with immutable versions, controlled and immutable baselines with members, typed relationships, reverse reference indexing with where-used and where-referenced analysis, bounded and cycle-safe product structure resolution, configurable validation rules over item/revision/dataset/tenant scopes, search, metrics/health, background jobs, change history/lineage and per-tenant configuration (see `docs/PDM_DESIGN.md` and `docs/PDM_API.md`).
 - Object detail page: Graph tab for relationships and the workflow progress graph.
 
-### 6. Production-style single port
+### 7. Production-style single port
 
 The Express server serves the built console when `web/dist` exists, so everything can run on one port.
 
@@ -125,16 +143,22 @@ npm start
 
 Then open http://localhost:3001.
 
-### 7. Configuration
+### 8. Configuration
 
 - `PORT` — API port, default `3001`.
-- `IAM_DB` — database file path, default `data/iam.db`.
+- `DATABASE_URL` — full PostgreSQL connection string, for example `postgres://helix:helix@127.0.0.1:5432/helix`. Takes precedence over the discrete variables below.
+- `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` — discrete PostgreSQL connection settings. Defaults are `127.0.0.1`, `5432`, `helix`, `helix`, `helix`.
+- `HELIX_DB_SCHEMA` — schema (namespace) used for the primary database. Default `public`; set a distinct value for schema-per-tenant single-database installs.
+- `PGSSL` — set to `true` to connect with TLS.
 - `HELIX_AUTH_SECRET` — key for AES-256-GCM secret encryption and HMAC signing. **Required when `NODE_ENV=production`** — the server refuses to start without it. Falls back to an insecure, publicly-known dev key otherwise (fine for local dev/tests only).
-- `HELIX_CORS_ORIGINS` — comma-separated list of allowed cross-origin callers. Defaults to the Vite dev server (`http://localhost:5173`). Not needed in single-port production mode (step 5), since the UI and API are served from the same origin.
+- `HELIX_CORS_ORIGINS` — comma-separated list of allowed cross-origin callers. Defaults to the Vite dev server (`http://localhost:5173`). Not needed in single-port production mode (step 7), since the UI and API are served from the same origin.
 
 ```bash
-# Run on a different port and database file
-PORT=4000 IAM_DB=./data/local.db npm start
+# Run on a different port against a different database
+PORT=4000 PGDATABASE=helix_local npm start
+
+# Or point at a managed database with a single URL
+DATABASE_URL=postgres://helix:secret@db.internal:5432/helix npm start
 ```
 
 On Windows PowerShell:
@@ -143,25 +167,38 @@ On Windows PowerShell:
 $env:PORT="4000"; npm start
 ```
 
-### 8. Reset the database
+### 9. Reset the database
 
-Stop the server, then remove `data/iam.db` (and any `data/iam.db-wal` / `data/iam.db-shm`). The next start recreates and seeds it. Migrations are safe to re-run and never drop data. To re-seed an existing database:
+Stop the API and all workers, then recreate the schema. The next start recreates the 495-table schema and seeds it. The seed is idempotent and migrations never drop data.
+
+```bash
+# Recreate an empty schema (destroys all data in it)
+psql -h 127.0.0.1 -U helix -d helix -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+
+# Start the API again; the schema and demo data are recreated automatically
+npm start
+```
+
+To re-seed an existing database without recreating it:
 
 ```bash
 # Re-run the idempotent seed
 npm run seed
 ```
 
-### 9. Access from other devices on your network
+### 10. Access from other devices on your network
 
 The dev server binds to `0.0.0.0`, so other devices can reach it via your laptop IP, for example `http://192.168.x.x:5173`. Vite allows `localhost`, IP addresses and `*.monkeycode-ai.live`; add more hostnames to `server.allowedHosts` in `vite.config.js` if needed.
 
-### 10. Troubleshooting
+### 11. Troubleshooting
 
 - Port already in use (`EADDRINUSE`): stop the other process, or change `PORT` and update `server.port` plus the `/api` proxy target in `vite.config.js`.
 - Blank page after `npm start`: run `npx vite build` first so `web/dist` exists.
-- `ExperimentalWarning: SQLite is an experimental feature`: harmless Node notice.
-- Login fails against an old database: reset it as described in step 7.
+- `ECONNREFUSED 127.0.0.1:5432`: PostgreSQL is not running or the connection settings are wrong. Start PostgreSQL and check `PGHOST`/`PGPORT` or `DATABASE_URL`.
+- `password authentication failed for user "helix"`: set the role password (`ALTER ROLE helix WITH PASSWORD '...'`) or update `PGPASSWORD`/`DATABASE_URL`.
+- `permission denied to create extension "citext"`: `citext` is a trusted extension in PostgreSQL 13+, so the database owner can create it. Ensure the configured role owns the database (or is a superuser).
+- `permission denied for schema public`: grant `CREATE` on the schema to the role, or run as the database owner.
+- Login fails against an old database: reset it as described in step 9.
 
 ## APIs
 

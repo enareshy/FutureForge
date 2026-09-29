@@ -54,14 +54,14 @@ export function getRevisionRow(db, tenantId, ref, { itemId = null } = {}) {
   if (itemId != null) {
     const byNumber = queryOne(
       db,
-      "SELECT * FROM pdm_item_revisions WHERE tenant_id = ? AND item_id = ? AND revision_number = ? COLLATE NOCASE",
+      "SELECT * FROM pdm_item_revisions WHERE tenant_id = ? AND item_id = ? AND lower(revision_number) = lower(?)",
       [Number(tenantId), Number(itemId), String(ref)]
     );
     if (byNumber) return byNumber;
   }
   return queryOne(
     db,
-    "SELECT * FROM pdm_item_revisions WHERE tenant_id = ? AND (revision_ref = ? OR revision_number = ? COLLATE NOCASE) ORDER BY revision_sequence DESC LIMIT 1",
+    "SELECT * FROM pdm_item_revisions WHERE tenant_id = ? AND (revision_ref = ? OR lower(revision_number) = lower(?)) ORDER BY revision_sequence DESC LIMIT 1",
     [Number(tenantId), String(ref), String(ref)]
   );
 }
@@ -102,7 +102,7 @@ export function listRevisions(db, { tenantId, itemId, itemRef, status, variantId
     params.push(normalizeUpper(variantCode, { max: 120 }));
   }
   if (q) {
-    clauses.push("(revision_number LIKE ? OR description LIKE ? OR configuration_context LIKE ?)");
+    clauses.push("(revision_number ILIKE ? OR description ILIKE ? OR configuration_context ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like);
   }
@@ -166,7 +166,7 @@ export function createRevision(db, tenantId, ref, body = {}, actor = null, ip = 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_item_revisions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_item_revisions WHERE id = ?", [Number(result.lastInsertId)]);
   const objectId = bridgeCreateObject(
     db,
     {

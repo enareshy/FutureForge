@@ -98,7 +98,7 @@ export function generationLatency(db, { tenantId = null } = {}) {
             MAX(duration_ms) AS max_ms,
             MIN(duration_ms) AS min_ms
      FROM audit_logs
-     WHERE action LIKE 'numbering.allocation.%' AND duration_ms IS NOT NULL ${clause}`,
+     WHERE action ILIKE 'numbering.allocation.%' AND duration_ms IS NOT NULL ${clause}`,
     params
   );
   return {

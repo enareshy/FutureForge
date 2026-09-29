@@ -78,7 +78,7 @@ export function listObjects(db, { tenantId, domainId, status, sourceId, classifi
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(object_type) LIKE ? OR LOWER(display_name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(object_type) ILIKE ? OR LOWER(display_name) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -132,7 +132,7 @@ export function createCatalogObject(db, input = {}, actor = null, tenantId = nul
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dc_catalog_objects WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_catalog_objects WHERE id = ?", [Number(result.lastInsertId)]);
   const entry = registerEntry(
     db,
     {
@@ -351,7 +351,7 @@ export function createAttribute(db, objectRefValue, input = {}, actor = null, te
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dc_catalog_attributes WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_catalog_attributes WHERE id = ?", [Number(result.lastInsertId)]);
   const entry = registerEntry(
     db,
     {

@@ -108,7 +108,7 @@ export function listPolicies(db, { tenantId, domainId, objectType, status, sever
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -171,7 +171,7 @@ export function createPolicy(db, input = {}, actor = null, tenantId = null, ip =
       ts,
     ]
   );
-  const id = Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertId);
   const row = queryOne(db, "SELECT * FROM dg_policies WHERE id = ?", [id]);
   run(
     db,

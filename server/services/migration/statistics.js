@@ -14,7 +14,7 @@ export function recordJobStatistics(db, { tenantId, jobId, packageId = null, pro
     "INSERT INTO mig_statistics (tenant_id, job_id, package_id, project_id, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     [Number(tenantId), jobId != null ? Number(jobId) : null, packageId != null ? Number(packageId) : null, projectId != null ? Number(projectId) : null, JSON.stringify(snapshot || {}), new Date().toISOString()]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listStatistics(db, { tenantId, jobId, projectId, packageId, page, pageSize } = {}) {

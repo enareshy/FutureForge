@@ -72,7 +72,7 @@ function scopeClauses({ tenantId, integrationType, direction, adapterType, statu
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -185,7 +185,7 @@ export function createDefinition(db, input = {}, actor = null, tenantId = null) 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM integration_definitions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM integration_definitions WHERE id = ?", [Number(result.lastInsertId)]);
   snapshotDefinition(db, row, actor, "Initial version");
   auditIntegration(db, { actor, action: "integration.definition.create", resourceType: "integration_definition", resourceId: row.id, details: { code: row.code, integration_type: row.integration_type } });
   return expandDefinition(db, row);
@@ -328,7 +328,7 @@ export function listExecutions(db, options = {}) {
     params.push(triggerType);
   }
   if (q) {
-    clauses.push("(LOWER(execution_ref) LIKE ? OR LOWER(integration_code) LIKE ? OR LOWER(correlation_id) LIKE ?)");
+    clauses.push("(LOWER(execution_ref) ILIKE ? OR LOWER(integration_code) ILIKE ? OR LOWER(correlation_id) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -368,7 +368,7 @@ function addStep(db, executionId, name, status, { message = "", detail = {} } = 
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [executionId, seq, name, status, message, toJson(detail, {}), ts, status === "running" ? null : ts]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function finishStep(db, stepId, status, { message = "", detail = {} } = {}) {
@@ -444,7 +444,7 @@ export async function executeIntegration(db, definitionRef, options = {}) {
       started,
     ]
   );
-  const executionId = Number(insert.lastInsertRowid);
+  const executionId = Number(insert.lastInsertId);
   const definition = expandDefinition(db, definitionRow);
   let recordCount = 0;
   let successCount = 0;

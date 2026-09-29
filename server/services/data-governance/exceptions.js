@@ -98,12 +98,12 @@ export function listExceptions(
     params.push(String(ruleCode).toUpperCase());
   }
   if (overdue) {
-    clauses.push(`due_date IS NOT NULL AND due_date < datetime('now') AND status NOT IN (${EXCEPTION_TERMINAL_STATUSES.map(() => "?").join(",")})`);
+    clauses.push(`due_date IS NOT NULL AND due_date < to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS') AND status NOT IN (${EXCEPTION_TERMINAL_STATUSES.map(() => "?").join(",")})`);
     params.push(...EXCEPTION_TERMINAL_STATUSES);
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(exception_ref) LIKE ? OR LOWER(object_id) LIKE ? OR LOWER(description) LIKE ? OR LOWER(rule_code) LIKE ?)");
+    clauses.push("(LOWER(exception_ref) ILIKE ? OR LOWER(object_id) ILIKE ? OR LOWER(description) ILIKE ? OR LOWER(rule_code) ILIKE ?)");
     params.push(like, like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -173,7 +173,7 @@ export function createException(db, input = {}, actor = null, tenantId = null, i
       ts,
     ]
   );
-  const row = requireException(db, Number(result.lastInsertRowid));
+  const row = requireException(db, Number(result.lastInsertId));
   addComment(db, row, { comment: normalizeText(input.comment) || "Exception created", status_change: "OPEN" }, actor);
   writeAudit(db, {
     actor,
@@ -343,7 +343,7 @@ function addComment(db, row, input = {}, actor = null) {
      VALUES (?, ?, ?, ?, ?, ?)`,
     [row.tenant_id, row.id, actor?.id ?? null, normalizeText(input.comment), normalizeText(input.status_change), nowIso()]
   );
-  return queryOne(db, "SELECT * FROM dg_exception_comments WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM dg_exception_comments WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 export function listExceptionComments(db, ref) {
@@ -355,7 +355,7 @@ export function listExceptionComments(db, ref) {
 // Called by the background maintenance handler; never blocks a request.
 export function escalateOverdueExceptions(db, { tenantId = null, limit = 500 } = {}) {
   const params = [];
-  let where = `status IN ('OPEN', 'ASSIGNED', 'IN_PROGRESS') AND due_date IS NOT NULL AND due_date < datetime('now')`;
+  let where = `status IN ('OPEN', 'ASSIGNED', 'IN_PROGRESS') AND due_date IS NOT NULL AND due_date < to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS')`;
   if (tenantId) {
     where += " AND tenant_id = ?";
     params.push(Number(tenantId));
@@ -404,7 +404,7 @@ export function exceptionSummary(db, { tenantId } = {}) {
     queryOne(
       db,
       `SELECT COUNT(*) AS c FROM dg_quality_exceptions
-        WHERE tenant_id = ? AND due_date IS NOT NULL AND due_date < datetime('now')
+        WHERE tenant_id = ? AND due_date IS NOT NULL AND due_date < to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS')
           AND status NOT IN (${EXCEPTION_TERMINAL_STATUSES.map(() => "?").join(",")})`,
       [Number(tenantId), ...EXCEPTION_TERMINAL_STATUSES]
     )?.c ?? 0

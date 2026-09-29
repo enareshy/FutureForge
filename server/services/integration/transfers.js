@@ -84,7 +84,7 @@ export function listTransfers(db, options = {}) {
     params.push(resourceType);
   }
   if (q) {
-    clauses.push("(LOWER(transfer_ref) LIKE ? OR LOWER(name) LIKE ? OR LOWER(filename) LIKE ?)");
+    clauses.push("(LOWER(transfer_ref) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(filename) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -141,7 +141,7 @@ function insertTransfer(db, input, actor, tenantId, direction) {
       ts,
     ]
   );
-  return queryOne(db, "SELECT * FROM integration_transfers WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM integration_transfers WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 // Parses + (optionally) transforms an import payload without persisting objects.

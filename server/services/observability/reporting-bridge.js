@@ -20,7 +20,8 @@ const KPI_WIDGETS = [
 
 export function reportingAvailable(db) {
   try {
-    return Boolean(queryOne(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reporting_dashboards'"));
+    const row = queryOne(db, "SELECT to_regclass(?) AS r", ["reporting_dashboards"]);
+    return Boolean(row?.r);
   } catch {
     return false;
   }

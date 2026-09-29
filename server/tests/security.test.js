@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne, run } from "../db.js";
+import { migrate, queryOne, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 import * as search from "../services/search.js";
@@ -65,7 +65,7 @@ describe("Data Security & Entitlement Model services", () => {
   let orgB;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     admin = actorRow(db, "admin");
@@ -260,7 +260,7 @@ describe("Data Security & Entitlement Model services", () => {
         db,
         `INSERT INTO search_index
            (tenant_id, organization_id, site_id, object_type, object_id, title, searchable_text, classification, indexed_at, updated_at)
-         VALUES (?, ?, NULL, 'secure_doc', ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+         VALUES (?, ?, NULL, 'secure_doc', ?, ?, ?, ?, to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'), to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))`,
         [tenantId, organizationId, objectId, title, `${title} secret memo`, classification]
       );
     insert("sd-1", "Alpha secret plan", orgA, "internal");
@@ -349,7 +349,7 @@ describe("Data Security REST APIs", () => {
   let tenantId;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const started = await listen(createApp(db));

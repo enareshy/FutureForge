@@ -40,7 +40,7 @@ function insertReminder(db, { ruleId, eventId, notificationId, tenantId, recipie
       nowIso(),
     ]
   );
-  return result.lastInsertRowid;
+  return result.lastInsertId;
 }
 
 // Schedules the first reminder for a rule that just produced a notification.
@@ -222,7 +222,7 @@ export function cancelRemindersForObject(db, { objectType, objectId, tenantId = 
   const result = run(
     db,
     `UPDATE notification_reminders SET status = 'cancelled'
-      WHERE status = 'pending' AND details_json LIKE ? AND details_json LIKE ? ${clause}`,
+      WHERE status = 'pending' AND details_json ILIKE ? AND details_json ILIKE ? ${clause}`,
     params
   );
   return { cancelled: result.changes };

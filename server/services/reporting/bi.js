@@ -39,7 +39,7 @@ export function createBiConnection(db, tenantId, input = {}, actor = null, ip = 
     [makeConnectionRef(normalized.provider), Number(tenantId), normalized.provider, normalized.name, normalized.description, stringifyJson(normalized.config), normalized.status, actor?.id ?? null, ts, ts]
   );
   writeAudit(db, { actor, action: "reporting.bi.connection.create", resourceType: "reporting_bi_connection", resourceId: normalized.name, details: { provider: normalized.provider }, sourceModule: "reporting", ip });
-  return getBiConnectionById(db, Number(tenantId), Number(result.lastInsertRowid));
+  return getBiConnectionById(db, Number(tenantId), Number(result.lastInsertId));
 }
 
 export function getBiConnectionById(db, tenantId, id) {
@@ -109,7 +109,7 @@ export function createBiDataset(db, tenantId, input = {}, actor = null, ip = nul
     [makeDatasetRef(normalized.name), connection.id, Number(tenantId), normalized.name, normalized.entity, stringifyJson(normalized.definition), normalized.status, ts, ts]
   );
   writeAudit(db, { actor, action: "reporting.bi.dataset.create", resourceType: "reporting_bi_dataset", resourceId: normalized.name, details: { entity: normalized.entity }, sourceModule: "reporting", ip });
-  return getBiDatasetById(db, Number(tenantId), Number(result.lastInsertRowid));
+  return getBiDatasetById(db, Number(tenantId), Number(result.lastInsertId));
 }
 
 export function getBiDatasetById(db, tenantId, id) {
@@ -183,7 +183,7 @@ export function publishDataset(db, tenantId, ref, context = {}, actor = null, ip
      VALUES (?, ?, ?, ?, 'PUBLISH', 'RUNNING', '', ?)`,
     [`BID-PUB-${Date.now()}`, dataset.id, connection.id, Number(tenantId), ts]
   );
-  const jobId = Number(jobResult.lastInsertRowid);
+  const jobId = Number(jobResult.lastInsertId);
   let status = "PUBLISHED";
   let message = "Dataset snapshot materialized";
   try {

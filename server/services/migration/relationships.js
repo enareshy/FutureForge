@@ -36,7 +36,7 @@ function recordRelationship(db, input = {}) {
       nowIso(),
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 // Migrates one relationship. `sourceSystem` scopes the identifier lookup. When

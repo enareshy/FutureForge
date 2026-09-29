@@ -13,7 +13,7 @@ import { buildSearchSecurityPredicate } from "../security/row-security.js";
 function collectTags(db, where, params, term, limit) {
   const rows = queryAll(
     db,
-    `SELECT tags_json FROM search_index i WHERE ${where} ${term ? "AND lower(i.tags_json) LIKE ?" : ""} LIMIT 2000`,
+    `SELECT tags_json FROM search_index i WHERE ${where} ${term ? "AND lower(i.tags_json) ILIKE ?" : ""} LIMIT 2000`,
     term ? [...params, `%${term}%`] : params
   );
   const counts = new Map();

@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as dc from "../services/data-catalog/index.js";
 import { SEARCH_REGISTRATIONS } from "../services/data-catalog/search.js";
@@ -16,7 +16,7 @@ function adminActor(db) {
 describe("Data catalog foundation and seed", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });
@@ -64,7 +64,7 @@ describe("Unified catalog registry", () => {
   let actor;
   const tenant = 1;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -117,7 +117,7 @@ describe("Objects, attributes, sources and consumers", () => {
   let actor;
   const tenant = 1;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -176,7 +176,7 @@ describe("Business glossary lifecycle", () => {
   let actor;
   const tenant = 1;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -224,7 +224,7 @@ describe("Lineage, classifications and ownership", () => {
   let consumer;
   const tenant = 1;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -271,7 +271,7 @@ describe("Configuration, import/export and job seams", () => {
   let actor;
   const tenant = 1;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);

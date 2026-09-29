@@ -90,7 +90,7 @@ export function createSlo(db, tenantId, input = {}, actor = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM observability_slo_definitions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM observability_slo_definitions WHERE id = ?", [Number(result.lastInsertId)]);
   recordHistory(db, { tenantId, action: `${kind}_CREATED`, entityType: "slo", entityId: row.id, entityRef: row.slo_ref, actor, summary: `${kind} ${code} created` });
   writeAudit(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.slo.create", resource_type: "observability_slo", resource_id: row.slo_ref, details: { code, kind } });
   return publicSlo(row);
@@ -164,7 +164,7 @@ function windowValues(db, tenantId, metricCode, windowSeconds) {
   if (!tableExists(db, "observability_metric_observations")) return [];
   return queryAll(
     db,
-    "SELECT value FROM observability_metric_observations WHERE tenant_id = ? AND metric_code = ? AND observed_at >= datetime('now', ?) ORDER BY observed_at ASC",
+    "SELECT value FROM observability_metric_observations WHERE tenant_id = ? AND metric_code = ? AND observed_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS') ORDER BY observed_at ASC",
     [Number(tenantId), String(metricCode), `-${Math.max(60, Number(windowSeconds))} seconds`]
   ).map((row) => Number(row.value));
 }
@@ -173,7 +173,7 @@ function recentBreachRecorded(db, tenantId, sloRefValue) {
   return Boolean(
     queryOne(
       db,
-      "SELECT id FROM observability_history WHERE tenant_id = ? AND entity_ref = ? AND action IN ('SLO_BREACHED', 'SLA_BREACHED') AND created_at >= datetime('now', '-1 day') LIMIT 1",
+      "SELECT id FROM observability_history WHERE tenant_id = ? AND entity_ref = ? AND action IN ('SLO_BREACHED', 'SLA_BREACHED') AND created_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') LIMIT 1",
       [Number(tenantId), String(sloRefValue)]
     )
   );

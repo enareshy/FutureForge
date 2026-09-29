@@ -134,9 +134,8 @@ export function normalizeText(value) {
   return String(value).toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-// Formats a Date (or parseable value) the same way SQLite's datetime('now')
-// does, so lexical comparisons between computed and stored timestamps are
-// consistent.
+// Formats a Date (or parseable value) as a UTC "YYYY-MM-DD HH:MM:SS" string so
+// lexical comparisons between computed and stored timestamps are consistent.
 export function toSqlDateTime(input) {
   const date = input instanceof Date ? input : new Date(input);
   if (!Number.isFinite(date.getTime())) return null;

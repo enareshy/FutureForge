@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { listHandlers } from "../services/job-execution/handlers.js";
 import * as constants from "../services/migration/constants.js";
@@ -236,7 +236,7 @@ describe("migration configuration", () => {
   let db;
   let actor;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -267,7 +267,7 @@ describe("migration configuration", () => {
 describe("migration audit", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });
@@ -298,7 +298,7 @@ describe("migration audit", () => {
 describe("migration foundation", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });

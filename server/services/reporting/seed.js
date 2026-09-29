@@ -117,6 +117,7 @@ export function seedReporting(db, tenantId) {
 }
 
 export function ensureReportingSeed(db, tenantId) {
+  withEventSuppression(() => ensureReportingFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM reporting_reports WHERE tenant_id = ? AND code = ?", [tenant, CROSS_DOMAIN_REPORT]);

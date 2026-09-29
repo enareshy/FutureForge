@@ -104,7 +104,7 @@ export function recordVersion(db, item, { changeSummary = "", versionNumber = nu
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_data_versions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_data_versions WHERE id = ?", [Number(result.lastInsertId)]);
   emitItemEvent(db, "ReferenceItemVersionCreated", item, { version_number: number, change_summary: normalizeText(changeSummary) }, actor);
   return publicVersion(row);
 }

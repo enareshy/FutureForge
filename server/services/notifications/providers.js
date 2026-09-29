@@ -184,9 +184,9 @@ export function createProvider(db, body = {}, actor = null, ip = null) {
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Provider code already exists");
     throw err;
   }
-  if (boolFlag(opts.is_default, 0) === 1) clearOtherDefaults(db, result.lastInsertRowid, body.channel || "email", opts.tenant_id ?? null);
-  writeAudit(db, { actor, action: "notification.provider.create", resourceType: "notification_provider", resourceId: result.lastInsertRowid, details: { code: body.code, channel: body.channel || "email", type }, ip });
-  return publicProvider(getProviderRow(db, result.lastInsertRowid));
+  if (boolFlag(opts.is_default, 0) === 1) clearOtherDefaults(db, result.lastInsertId, body.channel || "email", opts.tenant_id ?? null);
+  writeAudit(db, { actor, action: "notification.provider.create", resourceType: "notification_provider", resourceId: result.lastInsertId, details: { code: body.code, channel: body.channel || "email", type }, ip });
+  return publicProvider(getProviderRow(db, result.lastInsertId));
 }
 
 function clearOtherDefaults(db, keepId, channel, tenantId) {

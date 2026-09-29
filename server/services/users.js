@@ -46,7 +46,7 @@ export function listUsers(db, query) {
     params.push(Number(query.tenantId));
   }
   if (query.q) {
-    where.push("(username LIKE ? OR email LIKE ? OR employee_id LIKE ? OR display_name LIKE ?)");
+    where.push("(username ILIKE ? OR email ILIKE ? OR employee_id ILIKE ? OR display_name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like, like);
   }
@@ -168,11 +168,11 @@ export function createUser(db, body, actor, ip) {
     throw err;
   }
   run(db, "INSERT INTO password_history (user_id, password_hash, password_salt) VALUES (?, ?, ?)", [
-    result.lastInsertRowid,
+    result.lastInsertId,
     hash,
     salt,
   ]);
-  const user = getUser(db, result.lastInsertRowid);
+  const user = getUser(db, result.lastInsertId);
   if (orgId) orgs.syncHomeMembership(db, user.id, orgId);
   writeAudit(db, {
     actor,
@@ -342,7 +342,7 @@ export function resetPassword(db, id, password, actor, ip) {
 }
 
 export function authenticate(db, username, password, ip) {
-  const user = queryOne(db, "SELECT * FROM users WHERE username = ? COLLATE NOCASE", [username]);
+  const user = queryOne(db, "SELECT * FROM users WHERE username = ?", [username]);
   if (!user) throw new HttpError(401, "Invalid credentials");
   const policy = getPolicy(db);
   if (user.status === "inactive") {

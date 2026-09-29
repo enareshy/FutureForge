@@ -112,6 +112,7 @@ function resolveTenantId(db, tenantId) {
 }
 
 export function ensureBomSeed(db, tenantId) {
+  withEventSuppression(() => ensureBomFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM bom_headers WHERE tenant_id = ? AND bom_number = 'DEMO-EBOM-PUMP'", [tenant]);

@@ -38,8 +38,8 @@ const EDITABLE_STATUSES = new Set(["DRAFT"]);
 export function getExportDefinitionRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM ie_export_definitions WHERE tenant_id = ? AND (definition_ref = ? OR code = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), String(ref), normalizeUpper(ref), String(ref)]
+    "SELECT * FROM ie_export_definitions WHERE tenant_id = ? AND (definition_ref = ? OR code = ? OR id = ?)",
+    [Number(tenantId), String(ref), normalizeUpper(ref), Number(ref) || -1]
   );
 }
 
@@ -164,8 +164,15 @@ function normalizeDefinitionInput(input = {}, existing = null) {
 function snapshotVersion(db, row, actor, changeSummary) {
   run(
     db,
-    `INSERT OR REPLACE INTO ie_export_definition_versions (definition_id, tenant_id, version, status, snapshot_json, change_summary, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO ie_export_definition_versions (definition_id, tenant_id, version, status, snapshot_json, change_summary, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (definition_id, version) DO UPDATE SET
+       tenant_id = EXCLUDED.tenant_id,
+       status = EXCLUDED.status,
+       snapshot_json = EXCLUDED.snapshot_json,
+       change_summary = EXCLUDED.change_summary,
+       created_by = EXCLUDED.created_by,
+       created_at = EXCLUDED.created_at`,
     [row.id, row.tenant_id, row.version, row.status, JSON.stringify(withExportChildren(db, row)), normalizeText(changeSummary, { max: 500 }), actor?.id ?? null, nowIso()]
   );
 }
@@ -210,7 +217,7 @@ export function createExportDefinition(db, tenantId, input = {}, actor = null, i
       ts,
     ]
   );
-  const id = Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertId);
   writeFieldSelections(db, tenantId, id, fields);
   writeFilters(db, tenantId, id, filters);
   writeTransformations(db, tenantId, id, transformations);
@@ -348,7 +355,7 @@ export function listExportDefinitions(db, { tenantId, status, objectType, format
   }
   const term = normalizeText(q);
   if (term) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${term}%`;
     params.push(like, like, like);
   }

@@ -248,7 +248,7 @@ export async function completeUpload(db, uploadId, body = {}, actor, tenantId, i
           provider.kind, storageKey, provider.bucket, actor?.id ?? null, actor?.id ?? null, ts, ts,
         ]
       );
-      return findFileRow(db, insert.lastInsertRowid, scope);
+      return findFileRow(db, insert.lastInsertId, scope);
     });
   }
 

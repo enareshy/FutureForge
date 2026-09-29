@@ -173,7 +173,7 @@ function insertJob(db, fields) {
     `INSERT INTO jobs (${columns.join(", ")}) VALUES (${placeholders})`,
     columns.map((column) => fields[column])
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function resolveInitialStatus(normalized) {
@@ -376,7 +376,7 @@ export function listJobs(db, query = {}, tenantId = null) {
   }
   if (query.q) {
     const like = `%${query.q}%`;
-    where.push("(name LIKE ? OR description LIKE ? OR job_ref LIKE ? OR related_object_name LIKE ? OR message LIKE ? OR error_message LIKE ?)");
+    where.push("(name ILIKE ? OR description ILIKE ? OR job_ref ILIKE ? OR related_object_name ILIKE ? OR message ILIKE ? OR error_message ILIKE ?)");
     params.push(like, like, like, like, like, like);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -418,12 +418,11 @@ function applyStatusChange(db, jobRow, toStatus, options = {}) {
     params.push(truncate(options.workerId ?? options.worker_id, 200));
   }
   if (toStatus === "failed" || toStatus === "timed_out") {
-    fields.push("error_code = ?", "error_message = ?", "error_json = ?", "completed_at = ?");
+    fields.push("error_code = ?", "error_message = ?", "error_json = ?");
     params.push(
       truncate(options.errorCode || options.error_code || "", 100),
       truncate(options.errorMessage || options.error_message || "", 2000),
-      JSON.stringify(options.error || {}),
-      ts
+      JSON.stringify(options.error || {})
     );
   }
   if (isTerminalStatus(toStatus)) {

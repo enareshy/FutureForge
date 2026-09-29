@@ -1,7 +1,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 import * as auditService from "../services/audit.js";
@@ -59,7 +59,7 @@ describe("audit REST APIs", () => {
   let tenantId;
 
   before(async () => {
-    database = openDatabase(":memory:");
+    database = openTestDatabase();
     migrate(database);
     seedDatabase(database);
     tenantId = queryOne(database, "SELECT id FROM organizations WHERE code = 'helix'").id;
@@ -271,7 +271,7 @@ describe("audit REST APIs", () => {
     database
       .prepare(
         `INSERT INTO audit_logs (tenant_id, actor_username, action, event_type, source, status, resource_type, resource_id, created_at)
-         VALUES (?, 'system', 'object.create', 'CREATE', 'system', 'success', 'part', 'PART-ORBIT-1', datetime('now'))`
+         VALUES (?, 'system', 'object.create', 'CREATE', 'system', 'success', 'part', 'PART-ORBIT-1', to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))`
       )
       .run(other.id);
 
@@ -329,7 +329,7 @@ describe("audit REST API extensions", () => {
   let tenantId;
 
   before(async () => {
-    database = openDatabase(":memory:");
+    database = openTestDatabase();
     migrate(database);
     seedDatabase(database);
     tenantId = queryOne(database, "SELECT id FROM organizations WHERE code = 'helix'").id;

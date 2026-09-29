@@ -32,7 +32,7 @@ export function recordHistory(db, input = {}) {
       ts,
     ]
   );
-  return publicHistory(queryOne(db, "SELECT * FROM lc_history WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicHistory(queryOne(db, "SELECT * FROM lc_history WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function listHistory(db, { tenantId, objectType, objectId, action, from, to, page, pageSize } = {}) {

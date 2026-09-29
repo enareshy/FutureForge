@@ -82,7 +82,7 @@ export function createState(db, tenantId, input = {}, actor = null, ip = null) {
     details: { code },
     ip,
   });
-  return publicState(queryOne(db, "SELECT * FROM lc_states WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicState(queryOne(db, "SELECT * FROM lc_states WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateState(db, tenantId, code, patch = {}, actor = null, ip = null) {
@@ -199,7 +199,7 @@ export function createTransition(db, tenantId, input = {}, actor = null, ip = nu
     details: { from, to, action },
     ip,
   });
-  return publicTransition(queryOne(db, "SELECT * FROM lc_state_transitions WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicTransition(queryOne(db, "SELECT * FROM lc_state_transitions WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function setTransitionStatus(db, tenantId, id, status, actor = null, ip = null) {

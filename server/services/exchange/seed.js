@@ -140,6 +140,7 @@ export function seedExchange(db, tenantId) {
 }
 
 export function ensureExchangeSeed(db, tenantId) {
+  withEventSuppression(() => ensureExchangeFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM exchange_definitions WHERE tenant_id = ? AND code = ?", [tenant, IMPORT_DEFINITION]);

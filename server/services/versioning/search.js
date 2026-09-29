@@ -13,7 +13,7 @@ function revisionResolver() {
     code: "versioning_revision",
     table: "versioning_revisions",
     resolve(db, revisionId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM versioning_revisions WHERE id = ?", [Number(revisionId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, revision_ref, revision_code, object_type, object_id, name, description, status, lifecycle_state, effective_from, effective_to, revision_sequence, is_default, revision_metadata_json, updated_at FROM versioning_revisions WHERE id = ?", [Number(revisionId)]);
       if (!row) return null;
       if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
       const metadata = safeParse(row.revision_metadata_json, {});
@@ -64,7 +64,7 @@ function revisionResolver() {
       return queryAll(
         db,
         `SELECT id, tenant_id FROM versioning_revisions
-         WHERE (? IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
+         WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
         [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
       );
     },
@@ -76,7 +76,7 @@ function baselineResolver() {
     code: "versioning_baseline",
     table: "versioning_baselines",
     resolve(db, baselineId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM versioning_baselines WHERE id = ?", [Number(baselineId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, baseline_ref, code, name, description, status, owner_name, object_count, locked, frozen_at, context_json, updated_at FROM versioning_baselines WHERE id = ?", [Number(baselineId)]);
       if (!row) return null;
       if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
       const searchableText = [row.code, row.name, row.description, row.status, row.owner_name]
@@ -112,7 +112,7 @@ function baselineResolver() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(
         db,
-        `SELECT id, tenant_id FROM versioning_baselines WHERE (? IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
+        `SELECT id, tenant_id FROM versioning_baselines WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
         [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
       );
     },
@@ -124,7 +124,7 @@ function snapshotResolver() {
     code: "versioning_snapshot",
     table: "versioning_snapshots",
     resolve(db, snapshotId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM versioning_snapshots WHERE id = ?", [Number(snapshotId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, snapshot_ref, code, name, description, status, content_hash, object_count, context_json, created_at FROM versioning_snapshots WHERE id = ?", [Number(snapshotId)]);
       if (!row) return null;
       if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
       const searchableText = [row.code, row.name, row.description, row.status, row.content_hash]
@@ -159,7 +159,7 @@ function snapshotResolver() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(
         db,
-        `SELECT id, tenant_id FROM versioning_snapshots WHERE (? IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
+        `SELECT id, tenant_id FROM versioning_snapshots WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
         [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
       );
     },

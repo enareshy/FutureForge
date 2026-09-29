@@ -54,7 +54,7 @@ export function listVariants(db, { objectType, status, tenantId, q, page = 1, pa
     params.push(Number(tenantId));
   }
   if (q) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${String(q)}%`;
     params.push(like, like, like);
   }
@@ -82,7 +82,7 @@ export function createVariant(db, input = {}, actor = null, tenantId = null, ip 
   return transaction(db, () => {
     const existing = queryOne(
       db,
-      "SELECT id FROM versioning_variants WHERE code = ? AND (tenant_id IS NULL OR ? IS NULL OR tenant_id = ?)",
+      "SELECT id FROM versioning_variants WHERE code = ? AND (tenant_id IS NULL OR ?::bigint IS NULL OR tenant_id = ?)",
       [code, tenantId, tenantId]
     );
     if (existing) throw invalidEffectivity(`Variant ${code} already exists`);
@@ -109,7 +109,7 @@ export function createVariant(db, input = {}, actor = null, tenantId = null, ip 
         ts,
       ]
     );
-    const id = Number(result.lastInsertRowid);
+    const id = Number(result.lastInsertId);
     const options = Array.isArray(input.options) ? input.options : [];
     for (const option of options) upsertOption(db, id, option, actor);
     const rules = Array.isArray(input.rules) ? input.rules : [];
@@ -224,7 +224,7 @@ function upsertOption(db, variantId, option, actor) {
       ts,
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function addOption(db, ref, option = {}, actor = null, ip = null) {
@@ -291,7 +291,7 @@ export function addRule(db, ref, rule = {}, actor = null, ip = null) {
       ts,
     ]
   );
-  const id = Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertId);
   writeAudit(db, {
     actor,
     action: "versioning.variant.rule.create",
@@ -352,7 +352,7 @@ export function variantHistory(db, ref, { limit = 100 } = {}) {
   const rows = queryAll(
     db,
     `SELECT id, action, actor_id, actor_username AS actor_name, created_at, details FROM audit_logs
-     WHERE resource_type LIKE 'versioning_variant%' AND resource_id = ? ORDER BY created_at DESC LIMIT ?`,
+     WHERE resource_type ILIKE 'versioning_variant%' AND resource_id = ? ORDER BY created_at DESC LIMIT ?`,
     [String(row.id), Number(limit)]
   ).map((entry) => ({
     id: entry.id,

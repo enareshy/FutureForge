@@ -154,9 +154,14 @@ function resolveTenantId(db, tenantId) {
 }
 
 export function ensureMigrationSeed(db, tenantId) {
+  // Ensure the foundation (tables, configuration, job/event/search registrations
+  // and the in-process source-adapter catalogue) before the demo-project check.
+  // This keeps the runtime fully initialised for databases cloned from a seeded
+  // template, where the demo project already exists and seeding short-circuits.
+  const foundation = ensureMigrationFoundation(db);
   const tenant = resolveTenantId(db, tenantId);
-  if (!tenant) return { seeded: false, reason: "no_tenant" };
+  if (!tenant) return { foundation, seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM mig_projects WHERE tenant_id = ? AND code = 'LEGACY_TC_ONBOARD'", [tenant]);
-  if (existing) return { seeded: false, reason: "already_present" };
+  if (existing) return { foundation, seeded: false, reason: "already_present" };
   return seedMigration(db, tenant);
 }

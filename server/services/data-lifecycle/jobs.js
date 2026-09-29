@@ -32,7 +32,7 @@ export function ensureJobLedger(db, { jobRef: ref, tenantId, jobType, params = {
      VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?)`,
     [String(ref), Number(tenantId), jobType, Number(params.object_count || 0), JSON.stringify(params), createdBy, ts, ts]
   );
-  return queryOne(db, "SELECT * FROM lc_lifecycle_jobs WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM lc_lifecycle_jobs WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 export function finalizeJobLedger(db, { jobRef: ref, tenantId, status, result = {}, counts = {} }) {
@@ -75,10 +75,10 @@ export function listLifecycleJobs(db, { tenantId, status, jobType, page, pageSiz
 }
 
 export function getLifecycleJob(db, tenantId, ref) {
-  const row = queryOne(db, "SELECT * FROM lc_lifecycle_jobs WHERE tenant_id = ? AND (job_ref = ? OR CAST(id AS TEXT) = ?)", [
+  const row = queryOne(db, "SELECT * FROM lc_lifecycle_jobs WHERE tenant_id = ? AND (job_ref = ? OR id = ?)", [
     Number(tenantId),
     String(ref),
-    String(ref),
+    Number(ref) || -1,
   ]);
   return row ? publicLifecycleJob(row) : null;
 }

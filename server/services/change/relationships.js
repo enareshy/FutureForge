@@ -25,7 +25,7 @@ export function createRelationship(db, tenantId, body = {}, actor = null, ip = n
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [relationshipRef(), tenant, normalized.relationship_type, normalized.source_type, normalized.source_id, normalized.target_type, normalized.target_id, actor?.id ?? null, ts]
   );
-  return publicRelationship(queryOne(db, "SELECT * FROM change_relationships WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicRelationship(queryOne(db, "SELECT * FROM change_relationships WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function listRelationships(db, { tenantId, sourceType, sourceId, targetType, targetId, relationshipType } = {}) {

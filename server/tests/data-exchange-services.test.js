@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, queryAll, run, nowIso } from "../db.js";
+import { migrate, queryOne, queryAll, run, nowIso, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { EXCHANGE_HANDLER_CODES } from "../services/data-exchange/constants.js";
 import { DataExchangeError } from "../services/data-exchange/errors.js";
@@ -49,7 +49,7 @@ describe("data-exchange services", () => {
   };
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;

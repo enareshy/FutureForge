@@ -27,7 +27,7 @@ export function getFormatRow(db, tenantId, ref) {
   }
   return queryOne(
     db,
-    "SELECT * FROM exchange_formats WHERE tenant_id = ? AND (format_ref = ? OR code = ? COLLATE NOCASE)",
+    "SELECT * FROM exchange_formats WHERE tenant_id = ? AND (format_ref = ? OR lower(code) = lower(?))",
     [tenant, raw, raw]
   );
 }
@@ -123,7 +123,7 @@ export function createFormat(db, tenantId, body = {}, actor = null, ip = null) {
       ts,
     ]
   );
-  return publicFormat(queryOne(db, "SELECT * FROM exchange_formats WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicFormat(queryOne(db, "SELECT * FROM exchange_formats WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateFormat(db, tenantId, ref, body = {}, actor = null) {
@@ -225,7 +225,7 @@ export function listFormats(db, tenantId, query = {}) {
     params.push(normalizeUpper(query.direction));
   }
   if (query.q) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR standard_name LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR standard_name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -279,7 +279,7 @@ export function createFormatVersion(db, tenantId, formatRefValue, body = {}, act
       nowIso(),
     ]
   );
-  return publicFormatVersion(queryOne(db, "SELECT * FROM exchange_format_versions WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicFormatVersion(queryOne(db, "SELECT * FROM exchange_format_versions WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 // ── Adapter registry persistence ─────────────────────────────────────────────
@@ -396,7 +396,7 @@ export function listAdapters(db, tenantId) {
 
 export function getAdapter(db, tenantId, ref) {
   const tenant = Number(tenantId);
-  const row = queryOne(db, "SELECT * FROM exchange_adapters WHERE tenant_id = ? AND (code = ? COLLATE NOCASE OR id = ?)", [tenant, String(ref), Number(ref) || -1]);
+  const row = queryOne(db, "SELECT * FROM exchange_adapters WHERE tenant_id = ? AND (lower(code) = lower(?) OR id = ?)", [tenant, String(ref), Number(ref) || -1]);
   if (!row) throw adapterNotFound(ref);
   return publicAdapter(row);
 }

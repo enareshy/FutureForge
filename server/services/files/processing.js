@@ -26,7 +26,7 @@ export function upsertProcessing(db, {
   const ts = nowIso();
   const existing = queryOne(
     db,
-    "SELECT * FROM file_processing WHERE version_id IS ? AND processing_type = ?",
+    "SELECT * FROM file_processing WHERE version_id IS NOT DISTINCT FROM ? AND processing_type = ?",
     [versionId ?? null, type]
   );
   const attempts = attempt ?? ((existing?.attempts || 0) + 1);
@@ -51,7 +51,7 @@ export function upsertProcessing(db, {
       errorMessage || "", ts, completedAt, tenantId ?? null, ts, ts,
     ]
   );
-  return publicProcessing(queryOne(db, "SELECT * FROM file_processing WHERE id = ?", [insert.lastInsertRowid]));
+  return publicProcessing(queryOne(db, "SELECT * FROM file_processing WHERE id = ?", [insert.lastInsertId]));
 }
 
 // Runs the storage-side pipeline for a version. Performs no database writes and

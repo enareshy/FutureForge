@@ -54,7 +54,7 @@ export function recordContentEvent(db, {
       nowIso(),
     ]
   );
-  const rowId = Number(insert.lastInsertRowid);
+  const rowId = Number(insert.lastInsertId);
   let published = false;
   if (scope) {
     try {

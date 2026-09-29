@@ -102,7 +102,7 @@ export function persistSnapshot(db, tenantId, { result, definition, body = {}, a
       ts,
     ]
   );
-  const snapshotId = Number(insert.lastInsertRowid);
+  const snapshotId = Number(insert.lastInsertId);
   for (const node of result.nodes) {
     run(
       db,

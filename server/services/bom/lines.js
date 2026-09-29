@@ -90,7 +90,7 @@ export function listLines(db, { tenantId, revisionId, usage, optional, variantId
     clauses.push("line_status = 'ACTIVE'");
   }
   if (q) {
-    clauses.push("(child_object_id LIKE ? OR find_number LIKE ? OR reference_designator LIKE ?)");
+    clauses.push("(child_object_id ILIKE ? OR find_number ILIKE ? OR reference_designator ILIKE ?)");
     const like = `%${String(q).slice(0, 120)}%`;
     params.push(like, like, like);
   }
@@ -219,7 +219,7 @@ export function addLine(db, tenantId, revisionId, body = {}, actor = null, ip = 
       line.line_status, relationshipId, actor?.id ?? null, actor?.id ?? null, ts, ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM bom_lines WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM bom_lines WHERE id = ?", [Number(result.lastInsertId)]);
   if (Array.isArray(body.attributes_list)) setLineAttributes(db, tenant, row.id, body.attributes_list);
   bumpEpoch(tenant);
   invalidate(tenant);

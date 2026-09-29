@@ -162,7 +162,7 @@ export function createObjectType(db, input = {}, actor = null, tenantId = null, 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM numbering_object_types WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM numbering_object_types WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "numbering.object_type.create",

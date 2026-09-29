@@ -90,7 +90,7 @@ export const NUMBERING_ALLOCATION_SOURCE = {
     return queryAll(
       db,
       `SELECT id, tenant_id FROM numbering_allocations
-       WHERE (? IS NULL OR tenant_id = ?) AND id > ?
+       WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ?
        ORDER BY id LIMIT ?`,
       [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
     );

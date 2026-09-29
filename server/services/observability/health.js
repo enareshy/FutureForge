@@ -91,7 +91,7 @@ export function createHealthCheck(db, tenantId, input = {}, actor = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM observability_health_checks WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM observability_health_checks WHERE id = ?", [Number(result.lastInsertId)]);
   recordHistory(db, { tenantId, action: "HEALTH_CHECK_CREATED", entityType: "health_check", entityId: row.id, entityRef: row.check_ref, actor, summary: `Health check ${code} created` });
   writeAudit(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.health_check.create", resource_type: "observability_health_check", resource_id: row.check_ref, details: { code } });
   return publicHealthCheck(row);
@@ -316,7 +316,7 @@ export function persistHealthSnapshots(db, tenantId, evaluation, { runId = null,
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [healthSnapshotRef(), Number(tenantId), entry.scope, entry.service_code, entry.status, entry.score, previous?.status ?? null, stringifyJson(entry.details), runId ?? null, nowIso(), nowIso()]
     );
-    results.push({ snapshot_ref: result.lastInsertRowid, ...entry, changed, previous_status: previous?.status ?? null });
+    results.push({ snapshot_ref: result.lastInsertId, ...entry, changed, previous_status: previous?.status ?? null });
     if (changed) {
       publishObservabilityEvent(
         db,
@@ -324,7 +324,7 @@ export function persistHealthSnapshots(db, tenantId, evaluation, { runId = null,
           eventType: observabilityEventCode("HEALTH_CHANGED"),
           payload: { scope: entry.scope, service_code: entry.service_code, status: entry.status, previous_status: previous?.status ?? null },
           objectType: "observability_health",
-          objectId: result.lastInsertRowid,
+          objectId: result.lastInsertId,
           tenantId,
         },
         actor
@@ -371,7 +371,7 @@ export function healthTrend(db, tenantId, query = {}) {
   const hours = Math.max(1, Math.min(720, Number(query.hours) || 24));
   const rows = queryAll(
     db,
-    "SELECT status, captured_at FROM observability_health_snapshots WHERE tenant_id = ? AND scope = 'PLATFORM' AND captured_at >= datetime('now', ?) ORDER BY captured_at ASC",
+    "SELECT status, captured_at FROM observability_health_snapshots WHERE tenant_id = ? AND scope = 'PLATFORM' AND captured_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS') ORDER BY captured_at ASC",
     [Number(tenantId), `-${hours} hours`]
   );
   const buckets = { HEALTHY: 0, WARNING: 0, DEGRADED: 0, CRITICAL: 0, UNKNOWN: 0, MAINTENANCE: 0 };
@@ -381,7 +381,7 @@ export function healthTrend(db, tenantId, query = {}) {
 
 export function pruneHealthSnapshots(db, tenantId, retainDays) {
   const days = Math.max(1, Number(retainDays) || 90);
-  const result = run(db, "DELETE FROM observability_health_snapshots WHERE tenant_id = ? AND captured_at < datetime('now', ?)", [Number(tenantId), `-${days} days`]);
+  const result = run(db, "DELETE FROM observability_health_snapshots WHERE tenant_id = ? AND captured_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]);
   return Number(result.changes || 0);
 }
 

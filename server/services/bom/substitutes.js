@@ -105,7 +105,7 @@ export function addSubstitute(db, tenantId, revisionId, body = {}, actor = null,
       normalized.substitute_object_id, normalized.substitute_object_type, normalized.substitute_group, normalized.priority, normalized.ratio,
       normalized.status, normalized.notes, JSON.stringify(normalized.metadata || {}), actor?.id ?? null, ts, ts]
   );
-  const row = queryOne(db, "SELECT * FROM bom_substitutes WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM bom_substitutes WHERE id = ?", [Number(result.lastInsertId)]);
   bumpEpoch(tenant);
   invalidate(tenant);
   recordChange(db, { tenantId: tenant, entityType: "SUBSTITUTE", entityId: row.id, entityRef: `SUB-${row.id}`, action: "CREATED", status: row.status, after: publicSubstitute(row), actor, ip, details: { revision_id: revision.id } });

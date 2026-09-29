@@ -41,8 +41,8 @@ const MUTABLE = ["DRAFT", "INACTIVE"];
 export function getDefinitionRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM mig_definitions WHERE tenant_id = ? AND (definition_ref = ? OR CAST(id AS TEXT) = ? OR code = ?)",
-    [Number(tenantId), String(ref), String(ref), normalizeUpper(ref)]
+    "SELECT * FROM mig_definitions WHERE tenant_id = ? AND (definition_ref = ? OR id = ? OR code = ?)",
+    [Number(tenantId), String(ref), Number(ref) || -1, normalizeUpper(ref)]
   );
 }
 
@@ -92,7 +92,7 @@ export function createDefinition(db, tenantId, input = {}, actor = null, ip = nu
       ts,
     ]
   );
-  const definitionId = Number(result.lastInsertRowid);
+  const definitionId = Number(result.lastInsertId);
   replaceChildren(db, tenant, definitionId, input);
   const created = withDefinitionChildren(db, queryOne(db, "SELECT * FROM mig_definitions WHERE id = ?", [definitionId]));
   writeDefinitionVersion(db, created, actor, "Initial version");

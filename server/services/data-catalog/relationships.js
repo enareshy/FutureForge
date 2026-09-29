@@ -97,7 +97,7 @@ export function createRelationshipType(db, input = {}, actor = null, tenantId = 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dc_relationship_types WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_relationship_types WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "data_catalog.relationship_type.create",
@@ -207,7 +207,7 @@ export function createRelationship(db, input = {}, actor = null, tenantId = null
       ts,
     ]
   );
-  const row = getRelationshipRow(db, Number(result.lastInsertRowid));
+  const row = getRelationshipRow(db, Number(result.lastInsertId));
   writeAudit(db, {
     actor,
     action: "data_catalog.relationship.create",

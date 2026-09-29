@@ -98,7 +98,7 @@ export const CONTENT_SOURCE = {
     return queryAll(
       db,
       `SELECT id, tenant_id FROM content
-       WHERE (? IS NULL OR tenant_id = ?) AND id > ? AND deleted_at IS NULL
+       WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? AND deleted_at IS NULL
        ORDER BY id LIMIT ?`,
       [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
     );

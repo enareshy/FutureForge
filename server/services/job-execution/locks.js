@@ -2,9 +2,9 @@
 //
 // Locks are stored in `job_locks` so leadership and dedupe survive process
 // restarts. Acquisition is a single guarded upsert: a lock can be taken when it
-// is free, expired, or already owned by the caller. All operations are safe
-// under concurrent access because SQLite serialises writes and callers check
-// the returned row count.
+// is free, expired, or already owned by the caller. The upsert is a single
+// atomic statement, so concurrent workers cannot both take an unowned lock:
+// the losing statement's `WHERE` re-evaluation reports zero changed rows.
 
 import { queryOne, run, nowIso, randomUuid } from "../../db.js";
 import { parseSqlTime, sqlTimeAfterSeconds } from "./timezone.js";

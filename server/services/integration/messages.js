@@ -41,7 +41,7 @@ function whereFrom({ tenantId, queue, status, direction, integrationId, q } = {}
     params.push(Number(integrationId));
   }
   if (q) {
-    clauses.push("(LOWER(message_ref) LIKE ? OR LOWER(message_type) LIKE ? OR LOWER(correlation_id) LIKE ?)");
+    clauses.push("(LOWER(message_ref) ILIKE ? OR LOWER(message_type) ILIKE ? OR LOWER(correlation_id) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -112,7 +112,7 @@ export function enqueueMessage(db, input = {}, actor = null) {
       ts,
     ]
   );
-  return publicMessage(queryOne(db, "SELECT * FROM integration_messages WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicMessage(queryOne(db, "SELECT * FROM integration_messages WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function enqueueBatch(db, messages = [], actor = null) {

@@ -3,7 +3,7 @@ process.env.FILE_SCAN_PROVIDER = "heuristic";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, run } from "../db.js";
+import { migrate, queryOne, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as content from "../services/content.js";
 import * as search from "../services/search.js";
@@ -16,7 +16,7 @@ function adminActor(db) {
 }
 
 function seedTenant() {
-  const db = openDatabase(":memory:");
+  const db = openTestDatabase();
   migrate(db);
   seedDatabase(db);
   return db;

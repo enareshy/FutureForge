@@ -87,10 +87,10 @@ function ensureTenantLevel(db) {
      VALUES ('tenant', 'Tenant', 5, 1, 'tenants', 1, 1, '', ?, ?)`,
     [ts, ts]
   );
-  run(db, "INSERT OR IGNORE INTO hierarchy_parent_rules (child_code, parent_code) VALUES ('tenant', ?)", [ROOT_PARENT]);
-  run(db, "INSERT OR IGNORE INTO hierarchy_parent_rules (child_code, parent_code) VALUES ('enterprise', 'tenant')");
-  run(db, "INSERT OR IGNORE INTO hierarchy_parent_rules (child_code, parent_code) VALUES ('company', 'tenant')");
-  run(db, "INSERT OR IGNORE INTO hierarchy_parent_rules (child_code, parent_code) VALUES ('organization', 'tenant')");
+  run(db, "INSERT INTO hierarchy_parent_rules (child_code, parent_code) VALUES ('tenant', ?) ON CONFLICT DO NOTHING", [ROOT_PARENT]);
+  run(db, "INSERT INTO hierarchy_parent_rules (child_code, parent_code) VALUES ('enterprise', 'tenant') ON CONFLICT DO NOTHING");
+  run(db, "INSERT INTO hierarchy_parent_rules (child_code, parent_code) VALUES ('company', 'tenant') ON CONFLICT DO NOTHING");
+  run(db, "INSERT INTO hierarchy_parent_rules (child_code, parent_code) VALUES ('organization', 'tenant') ON CONFLICT DO NOTHING");
   const enterprise = queryOne(db, "SELECT allow_root FROM hierarchy_levels WHERE code = ?", ["enterprise"]);
   if (enterprise && enterprise.allow_root) {
     run(db, "UPDATE hierarchy_levels SET allow_root = 0, updated_at = ? WHERE code = 'enterprise'", [ts]);
@@ -129,8 +129,8 @@ export function ensureHierarchy(db) {
   for (const setting of DEFAULT_SETTINGS) {
     run(
       db,
-      `INSERT OR IGNORE INTO platform_settings (key, value, feature, description, updated_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO platform_settings (key, value, feature, description, updated_at)
+       VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       [setting.key, setting.value, setting.feature, setting.description, nowIso()]
     );
   }

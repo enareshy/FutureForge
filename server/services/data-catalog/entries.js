@@ -149,7 +149,7 @@ export function registerEntry(
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dc_entries WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_entries WHERE id = ?", [Number(result.lastInsertId)]);
   appendMetadataVersion(db, row, { change_summary: "entry created" }, actor);
   writeAudit(db, {
     actor,
@@ -321,7 +321,7 @@ export function listEntries(
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(display_name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(display_name) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like, like);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";

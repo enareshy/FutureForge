@@ -46,11 +46,11 @@ export function getOrCreateSequence(db, scheme, scopeInput, at = new Date()) {
   const columns = scopeColumns(scopeInput);
   run(
     db,
-    `INSERT OR IGNORE INTO numbering_sequences
+    `INSERT INTO numbering_sequences
        (scheme_id, scheme_version, scope_key, period_key, reset_policy, start_value, current_value, min_value, max_value,
         increment, padding, status, allocated_count, last_reset_at, tenant_id, organization_id, plant_id, site_id,
         classification, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, NULL, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
     [
       scheme.id,
       scheme.current_version,

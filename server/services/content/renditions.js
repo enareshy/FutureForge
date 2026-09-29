@@ -137,7 +137,7 @@ export function requestRendition(db, contentRow, { renditionType, sourceVersionI
   if (!type) throw Errors.renditionFailed("rendition_type is required");
   const existing = queryOne(
     db,
-    "SELECT * FROM content_renditions WHERE content_id = ? AND source_version_id IS ? AND rendition_type = ?",
+    "SELECT * FROM content_renditions WHERE content_id = ? AND source_version_id IS NOT DISTINCT FROM ? AND rendition_type = ?",
     [Number(contentRow.id), sourceVersionId ?? null, type]
   );
   if (existing) return publicRendition(existing);
@@ -159,7 +159,7 @@ export function requestRendition(db, contentRow, { renditionType, sourceVersionI
       nowIso(),
     ]
   );
-  const row = queryOne(db, "SELECT * FROM content_renditions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM content_renditions WHERE id = ?", [Number(result.lastInsertId)]);
   recordContentEvent(db, { eventType: "RenditionRequested", content: contentRow, renditionId: row.id, actor, tenantId, payload: { rendition_type: type } });
   return publicRendition(row);
 }

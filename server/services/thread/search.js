@@ -69,7 +69,7 @@ export function registerThreadSources() {
     code: "thread_definition",
     table: "thread_definitions",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM thread_definitions WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, code, name, description, thread_type, root_object_type, status, created_by FROM thread_definitions WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -99,7 +99,7 @@ export function registerThreadSources() {
     code: "thread_snapshot",
     table: "thread_snapshots",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM thread_snapshots WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, snapshot_ref, name, description, definition_code, root_object_type, status, created_by, node_count, edge_count FROM thread_snapshots WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -129,7 +129,7 @@ export function registerThreadSources() {
     code: "thread_baseline",
     table: "thread_baselines",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM thread_baselines WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, baseline_ref, name, description, definition_code, status, created_by, member_count FROM thread_baselines WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {

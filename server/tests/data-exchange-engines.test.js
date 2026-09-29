@@ -1,6 +1,6 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as Transform from "../services/data-exchange/engines/transform.js";
 import * as Mapping from "../services/data-exchange/engines/mapping.js";
@@ -27,7 +27,7 @@ import {
 let db;
 
 before(() => {
-  db = openDatabase(":memory:");
+  db = openTestDatabase();
   migrate(db);
   seedDatabase(db);
   ensureConnectors();

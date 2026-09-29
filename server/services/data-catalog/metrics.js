@@ -102,7 +102,7 @@ export function healthCheck(db, { tenantId } = {}) {
       queryOne(
         db,
         `SELECT COUNT(*) AS c FROM dc_sources WHERE tenant_id = ? AND (
-           LOWER(connection_reference) LIKE '%://%' OR LOWER(connection_reference) LIKE '%password=%'
+           LOWER(connection_reference) ILIKE '%://%' OR LOWER(connection_reference) ILIKE '%password=%'
          )`,
         [Number(tenantId)]
       )?.c || 0

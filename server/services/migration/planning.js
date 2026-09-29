@@ -17,8 +17,8 @@ import { topologicalOrder, resolveDependencies } from "./dependencies.js";
 export function getPlanRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM mig_plans WHERE tenant_id = ? AND (plan_ref = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), String(ref), String(ref)]
+    "SELECT * FROM mig_plans WHERE tenant_id = ? AND (plan_ref = ? OR id = ?)",
+    [Number(tenantId), String(ref), Number(ref) || -1]
   );
 }
 
@@ -61,8 +61,8 @@ export function generatePlan(db, tenantId, projectRef, { actor = null, packageId
   const tenant = Number(tenantId);
   const project = queryOne(
     db,
-    "SELECT * FROM mig_projects WHERE tenant_id = ? AND (project_ref = ? OR CAST(id AS TEXT) = ? OR code = ?)",
-    [tenant, String(projectRef), String(projectRef), normalizeText(projectRef, { max: 120 }).toUpperCase()]
+    "SELECT * FROM mig_projects WHERE tenant_id = ? AND (project_ref = ? OR id = ? OR code = ?)",
+    [tenant, String(projectRef), Number(projectRef) || -1, normalizeText(projectRef, { max: 120 }).toUpperCase()]
   );
   if (!project) throw invalidPlan(`Project not found: ${projectRef}`, { ref: projectRef });
 
@@ -94,7 +94,7 @@ export function generatePlan(db, tenantId, projectRef, { actor = null, packageId
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [makePlanRef(project.code), tenant, project.id, packageId != null ? Number(packageId) : null, status, JSON.stringify(summary), actor?.id ?? null, nowIso(), nowIso()]
   );
-  const planId = Number(result.lastInsertRowid);
+  const planId = Number(result.lastInsertId);
   let sequence = 0;
   for (const entry of readiness) {
     const pkg = hydrated.find((candidate) => Number(candidate.id) === Number(entry.package_id));
@@ -166,8 +166,8 @@ export function readinessReport(db, tenantId, projectRef) {
   const tenant = Number(tenantId);
   const project = queryOne(
     db,
-    "SELECT * FROM mig_projects WHERE tenant_id = ? AND (project_ref = ? OR CAST(id AS TEXT) = ? OR code = ?)",
-    [tenant, String(projectRef), String(projectRef), normalizeText(projectRef, { max: 120 }).toUpperCase()]
+    "SELECT * FROM mig_projects WHERE tenant_id = ? AND (project_ref = ? OR id = ? OR code = ?)",
+    [tenant, String(projectRef), Number(projectRef) || -1, normalizeText(projectRef, { max: 120 }).toUpperCase()]
   );
   if (!project) throw invalidPlan(`Project not found: ${projectRef}`, { ref: projectRef });
   const topology = topologicalOrder(db, tenant, project.id);

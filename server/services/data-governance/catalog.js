@@ -43,7 +43,7 @@ export function listCatalog(db, { tenantId, domainId, status, q, page, pageSize 
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(object_type) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(object_type) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -86,7 +86,7 @@ export function registerCatalogObject(db, input = {}, actor = null, tenantId = n
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dg_catalog_objects WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dg_catalog_objects WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "data_governance.catalog.register",
@@ -166,7 +166,7 @@ export function registerAttribute(db, objectRef, input = {}, actor = null) {
       ts,
     ]
   );
-  return publicCatalogAttribute(queryOne(db, "SELECT * FROM dg_catalog_attributes WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicCatalogAttribute(queryOne(db, "SELECT * FROM dg_catalog_attributes WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateAttribute(db, objectRef, attributeId, patch = {}) {

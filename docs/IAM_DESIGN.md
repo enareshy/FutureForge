@@ -5,7 +5,7 @@ Platform identity fabric. Future enterprise modules consume this submodule throu
 ## Stack
 
 - Runtime: Node.js (ESM), Express
-- Store: SQLite (`node:sqlite`) — zero extra DB infrastructure
+- Store: PostgreSQL 15+ — a single schema backing the API and all workers
 - Admin UI: Vite + React, reverse-proxied `/api` to the IAM service
 - Auth: central Authentication, SSO & MFA submodule (`docs/AUTHENTICATION_DESIGN.md`); opaque session tokens; passwords hashed with scrypt
 - Tests: Node.js built-in test runner

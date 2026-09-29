@@ -62,8 +62,8 @@ function configFor(db, tenantId) {
 export function getJobRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM mig_jobs WHERE tenant_id = ? AND (job_ref = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), String(ref), String(ref)]
+    "SELECT * FROM mig_jobs WHERE tenant_id = ? AND (job_ref = ? OR id = ?)",
+    [Number(tenantId), String(ref), Number(ref) || -1]
   );
 }
 
@@ -135,7 +135,7 @@ export function createMigrationJob(db, { tenantId, project = null, package: pack
       ts,
     ]
   );
-  const job = queryOne(db, "SELECT * FROM mig_jobs WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const job = queryOne(db, "SELECT * FROM mig_jobs WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, { actor, action: "migration.job.create", resourceType: "mig_jobs", resourceId: jobReference, details: { package: packageRow?.code || null, mode: job.mode, adapter: adapterType }, ip });
   return { job, existing: false };
 }
@@ -253,7 +253,7 @@ function recordError(db, entry) {
       nowIso(),
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function saveResult(db, entry) {
@@ -282,7 +282,7 @@ function saveResult(db, entry) {
       nowIso(),
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function sourceIdentity(record, source) {
@@ -553,7 +553,7 @@ export async function runMigrationJob(db, { jobId, params = {}, actor = null, ip
       `INSERT INTO mig_batches (job_id, tenant_id, batch_number, status, records, started_at, created_at) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?)`,
       [job.id, tenantId, batchNumber, slice.length, nowIso(), nowIso()]
     );
-    const batchId = Number(batchRow.lastInsertRowid);
+    const batchId = Number(batchRow.lastInsertId);
     for (let i = 0; i < slice.length; i += 1) {
       const recordNumber = offset + i + 1;
       const result = processRecord(db, {

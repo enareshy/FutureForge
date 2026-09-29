@@ -48,7 +48,7 @@ export function getDatasetRow(db, tenantId, ref) {
   }
   return queryOne(
     db,
-    "SELECT * FROM pdm_datasets WHERE tenant_id = ? AND (dataset_ref = ? OR dataset_number = ? COLLATE NOCASE)",
+    "SELECT * FROM pdm_datasets WHERE tenant_id = ? AND (dataset_ref = ? OR lower(dataset_number) = lower(?))",
     [Number(tenantId), String(ref), String(ref)]
   );
 }
@@ -83,7 +83,7 @@ export function listDatasets(db, { tenantId, itemId, revisionId, datasetType, st
     params.push(assertDatasetStatus(status));
   }
   if (q) {
-    clauses.push("(dataset_number LIKE ? OR name LIKE ? OR description LIKE ? OR content_reference LIKE ?)");
+    clauses.push("(dataset_number ILIKE ? OR name ILIKE ? OR description ILIKE ? OR content_reference ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like, like);
   }
@@ -138,7 +138,7 @@ export function createDataset(db, tenantId, body = {}, actor = null, ip = null) 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_datasets WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_datasets WHERE id = ?", [Number(result.lastInsertId)]);
   const objectId = bridgeCreateObject(
     db,
     { type: "pdm_dataset", code: row.dataset_number, name: row.name || row.dataset_number, description: row.description, data: { dataset_type: row.dataset_type }, status: row.status, organizationId: row.organization_id },

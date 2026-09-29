@@ -44,7 +44,7 @@ export function listCredentials(db, { tenantId, status, q } = {}) {
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     params.push(`%${q.toLowerCase()}%`, `%${q.toLowerCase()}%`);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -92,7 +92,7 @@ export function createCredential(db, input = {}, actor = null, tenantId = null) 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM integration_credentials WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM integration_credentials WHERE id = ?", [Number(result.lastInsertId)]);
   auditIntegration(db, { actor, action: "integration.credential.create", resourceType: "integration_credential", resourceId: row.id, details: { code: row.code, kind: row.kind, has_secret: Boolean(row.secret_enc) } });
   return publicCredential(row);
 }
@@ -166,7 +166,7 @@ export function listExternalSystems(db, { tenantId, systemType, environment, sta
     params.push(connectionStatus);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(base_url) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(base_url) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -239,7 +239,7 @@ export function createExternalSystem(db, input = {}, actor = null, tenantId = nu
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM external_systems WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM external_systems WHERE id = ?", [Number(result.lastInsertId)]);
   auditIntegration(db, { actor, action: "integration.system.create", resourceType: "external_system", resourceId: row.id, details: { code: row.code, type: row.system_type, environment: row.environment } });
   return publicExternalSystem(row);
 }

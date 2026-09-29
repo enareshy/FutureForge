@@ -64,7 +64,7 @@ export function createDeadLetter(db, { delivery, error, subscription = null } = 
       ts,
     ]
   );
-  return publicDeadLetter(queryOne(db, "SELECT * FROM event_dead_letters WHERE id = ?", [Number(result.lastInsertRowid)]), { includePayload: true });
+  return publicDeadLetter(queryOne(db, "SELECT * FROM event_dead_letters WHERE id = ?", [Number(result.lastInsertId)]), { includePayload: true });
 }
 
 export function listDeadLetters(db, { tenantId, status, eventTypeCode, handler, queueCode, q, from, to, page = 1, pageSize = 50 } = {}) {
@@ -99,7 +99,7 @@ export function listDeadLetters(db, { tenantId, status, eventTypeCode, handler, 
     params.push(to);
   }
   if (q) {
-    clauses.push("(LOWER(event_ref) LIKE ? OR LOWER(event_type_code) LIKE ? OR LOWER(error_message) LIKE ? OR LOWER(handler) LIKE ?)");
+    clauses.push("(LOWER(event_ref) ILIKE ? OR LOWER(event_type_code) ILIKE ? OR LOWER(error_message) ILIKE ? OR LOWER(handler) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like, like);
   }

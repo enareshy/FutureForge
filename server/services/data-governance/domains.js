@@ -101,7 +101,7 @@ export function listDomains(db, { tenantId, status, category, parentId, q, page,
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -178,7 +178,7 @@ export function createDomain(db, input = {}, actor = null, tenantId = null, ip =
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dg_domains WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dg_domains WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "data_governance.domain.create",

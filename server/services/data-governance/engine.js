@@ -273,7 +273,7 @@ function persistResult(db, { tenantId, domainId, resolved, score, trigger, actor
       nowIso(),
     ]
   );
-  return queryOne(db, "SELECT * FROM dg_quality_results WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM dg_quality_results WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 function persistViolation(db, { tenantId, domainId, resultId, resolved, failure }) {
@@ -304,7 +304,7 @@ function persistViolation(db, { tenantId, domainId, resultId, resolved, failure 
       nowIso(),
     ]
   );
-  return queryOne(db, "SELECT * FROM dg_quality_violations WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM dg_quality_violations WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 function raiseExceptionForFailure(db, { tenantId, domainId, resolved, failure, actor, ip }) {

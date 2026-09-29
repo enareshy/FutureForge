@@ -19,7 +19,7 @@ function trackJob(db, { tenantId, mode, scope, submittedBy, jobRef }) {
      VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)`,
     [Number(tenantId), String(mode).toUpperCase(), JSON.stringify(scope || {}), jobRef || "", submittedBy ?? null, nowIso(), nowIso(), nowIso()]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function completeJob(db, id, { status, stats }) {

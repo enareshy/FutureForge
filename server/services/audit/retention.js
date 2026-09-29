@@ -80,8 +80,8 @@ function archiveAndPurge(db, where, params, { archive = true } = {}) {
     for (const id of ids) {
       run(
         db,
-        `INSERT OR IGNORE INTO audit_logs_archive (${ARCHIVE_COLUMNS.join(", ")})
-         SELECT ${ARCHIVE_COLUMNS.join(", ")} FROM audit_logs WHERE id = ?`,
+        `INSERT INTO audit_logs_archive (${ARCHIVE_COLUMNS.join(", ")})
+         SELECT ${ARCHIVE_COLUMNS.join(", ")} FROM audit_logs WHERE id = ? ON CONFLICT DO NOTHING`,
         [id]
       );
     }
@@ -180,7 +180,7 @@ export function runRetention(db, { tenantId, policyId, actor, dryRun = false, no
       ]
     );
     runs.push({
-      id: Number(runResult.lastInsertRowid),
+      id: Number(runResult.lastInsertId),
       policy_id: policy.id,
       object_type: policy.object_type,
       cutoff,
@@ -322,12 +322,12 @@ export function createRetentionPolicy(db, body = {}, actor = null, tenantId = nu
     event_type: "CONFIGURATION_CHANGED",
     category: "configuration",
     object_type: "audit_retention_policy",
-    object_id: result.lastInsertRowid,
+    object_id: result.lastInsertId,
     object_name: input.name,
     details: { category: input.category, object_type: input.object_type, retention_days: input.retention_days },
     reason: body.reason,
   });
-  return getRetentionPolicy(db, result.lastInsertRowid, null);
+  return getRetentionPolicy(db, result.lastInsertId, null);
 }
 
 export function updateRetentionPolicy(db, id, body = {}, actor = null, tenantId = null) {
@@ -569,5 +569,5 @@ function recordRetentionRun(db, policy, { status = "success", dryRun = false, ac
       nowIso(),
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }

@@ -49,7 +49,7 @@ sessions   lifecycle             processors                 + search            
    └──────────┴──────────┴────┬─────┴──────────┴──────────┴──────────┴──────────┘
                               ▼
    Content storage provider (pluggable) · Virus scan provider (pluggable)
-   Audit · Event outbox · Search index · Background job engine (shared SQLite)
+   Audit · Event outbox · Search index · Background job engine (shared PostgreSQL)
 
 Business modules depend on the flat SDK in `server/services/content.js`
 (`createContent`, `initiateUploadSession`, `completeUploadSession`,

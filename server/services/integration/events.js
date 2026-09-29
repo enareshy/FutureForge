@@ -51,7 +51,7 @@ export function listEventTypes(db, { tenantId, category, status, q, page = 1, pa
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -103,8 +103,8 @@ export function createEventType(db, input = {}, actor = null, tenantId = null) {
       ts,
     ]
   );
-  auditIntegration(db, { actor, action: "integration.event_type.create", resourceType: "integration_event_type", resourceId: Number(result.lastInsertRowid), details: { code: input.code } });
-  return publicEventType(queryOne(db, "SELECT * FROM integration_event_types WHERE id = ?", [Number(result.lastInsertRowid)]));
+  auditIntegration(db, { actor, action: "integration.event_type.create", resourceType: "integration_event_type", resourceId: Number(result.lastInsertId), details: { code: input.code } });
+  return publicEventType(queryOne(db, "SELECT * FROM integration_event_types WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateEventType(db, refValue, input = {}, actor = null) {
@@ -173,7 +173,7 @@ export function listSubscriptions(db, { tenantId, eventTypeCode, status, subscri
     params.push(subscriberType);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -228,7 +228,7 @@ export function createSubscription(db, input = {}, actor = null, tenantId = null
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM integration_event_subscriptions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM integration_event_subscriptions WHERE id = ?", [Number(result.lastInsertId)]);
   auditIntegration(db, { actor, action: "integration.subscription.create", resourceType: "integration_event_subscription", resourceId: row.id, details: { code: row.code, event_type: row.event_type_code } });
   return publicSubscription(row);
 }
@@ -337,7 +337,7 @@ export function publishEvent(db, input = {}, actor = null) {
       ts,
     ]
   );
-  const eventId = Number(result.lastInsertRowid);
+  const eventId = Number(result.lastInsertId);
   const eventRow = queryOne(db, "SELECT * FROM integration_events WHERE id = ?", [eventId]);
 
   const subscriptions = queryAll(
@@ -358,7 +358,7 @@ export function publishEvent(db, input = {}, actor = null) {
        VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?)`,
       [eventId, sub.id, eventTypeCode, sub.subscriber_type, sub.target_ref || "", policy.max_attempts, toJson(payload, {}), eventRow.correlation_id, tenantId, ts, ts]
     );
-    deliveries.push(publicDelivery(queryOne(db, "SELECT * FROM integration_event_deliveries WHERE id = ?", [Number(insert.lastInsertRowid)])));
+    deliveries.push(publicDelivery(queryOne(db, "SELECT * FROM integration_event_deliveries WHERE id = ?", [Number(insert.lastInsertId)])));
   }
   run(db, "UPDATE integration_events SET subscriber_count = ?, updated_at = ? WHERE id = ?", [deliveries.length, nowIso(), eventId]);
 
@@ -382,7 +382,7 @@ export function listEvents(db, { tenantId, eventTypeCode, status, q, page = 1, p
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(event_ref) LIKE ? OR LOWER(event_type_code) LIKE ? OR LOWER(correlation_id) LIKE ?)");
+    clauses.push("(LOWER(event_ref) ILIKE ? OR LOWER(event_type_code) ILIKE ? OR LOWER(correlation_id) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }

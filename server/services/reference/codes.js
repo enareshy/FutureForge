@@ -160,7 +160,7 @@ export function createCode(db, item, input = {}, actor = null, tenantId = null, 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_codes WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_codes WHERE id = ?", [Number(result.lastInsertId)]);
   bumpCacheEpoch(db);
   writeAudit(db, {
     actor,

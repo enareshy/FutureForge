@@ -43,7 +43,7 @@ export function listAliases(db, { itemId, domainId, alias, aliasType, language, 
     params.push(Number(domainId));
   }
   if (alias) {
-    clauses.push("LOWER(alias) LIKE ?");
+    clauses.push("LOWER(alias) ILIKE ?");
     params.push(`%${String(alias).toLowerCase()}%`);
   }
   if (aliasType) {
@@ -110,7 +110,7 @@ export function createAlias(db, item, input = {}, actor = null, tenantId = null,
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_aliases WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_aliases WHERE id = ?", [Number(result.lastInsertId)]);
   bumpCacheEpoch(db);
   writeAudit(db, {
     actor,

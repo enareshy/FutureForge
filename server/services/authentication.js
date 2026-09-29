@@ -89,14 +89,14 @@ function resolveFederatedUser(db, provider, identity, ip) {
   const linked = providers.findIdentity(db, provider.id, identity.subject);
   if (linked) return users.getUser(db, linked.user_id);
   if (identity.email) {
-    const byEmail = queryOne(db, "SELECT * FROM users WHERE email = ? COLLATE NOCASE", [identity.email]);
+    const byEmail = queryOne(db, "SELECT * FROM users WHERE email = ?", [identity.email]);
     if (byEmail) {
       providers.linkIdentity(db, byEmail.id, provider.id, identity.subject, identity.email);
       return users.publicUser(byEmail);
     }
   }
   if (identity.username) {
-    const byName = queryOne(db, "SELECT * FROM users WHERE username = ? COLLATE NOCASE", [identity.username]);
+    const byName = queryOne(db, "SELECT * FROM users WHERE username = ?", [identity.username]);
     if (byName) {
       providers.linkIdentity(db, byName.id, provider.id, identity.subject, identity.email);
       return users.publicUser(byName);
@@ -213,7 +213,7 @@ export function requestPasswordReset(db, body, meta = {}) {
   if (!identifier) throw new HttpError(400, "username or email is required");
   const user = queryOne(
     db,
-    "SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE",
+    "SELECT * FROM users WHERE username = ? OR email = ?",
     [identifier, identifier]
   );
   if (user && user.status !== "inactive") {

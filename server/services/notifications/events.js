@@ -130,7 +130,7 @@ export function publish(db, event = {}, { actor = null, ip = null } = {}) {
         ts,
       ]
     );
-    const eventId = insert.lastInsertRowid;
+    const eventId = insert.lastInsertId;
     summary.published = true;
     summary.event_id = eventId;
     const eventRow = queryOne(db, "SELECT * FROM notification_events WHERE id = ?", [eventId]);
@@ -244,7 +244,7 @@ function insertNotification(db, { event, rule, template, recipient, channel, ren
       ts,
     ]
   );
-  return result.lastInsertRowid;
+  return result.lastInsertId;
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +324,7 @@ export function listEvents(db, query = {}, tenantId = null) {
     params.push(query.status);
   }
   if (query.q) {
-    where.push("(object_name LIKE ? OR event_type LIKE ? OR initiator_username LIKE ? OR payload_json LIKE ?)");
+    where.push("(object_name ILIKE ? OR event_type ILIKE ? OR initiator_username ILIKE ? OR payload_json ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like, like);
   }
@@ -386,7 +386,7 @@ export function simulateRule(db, ruleId, event, { actor = null, ip = null } = {}
       ts,
     ]
   );
-  const eventRow = queryOne(db, "SELECT * FROM notification_events WHERE id = ?", [insert.lastInsertRowid]);
+  const eventRow = queryOne(db, "SELECT * FROM notification_events WHERE id = ?", [insert.lastInsertId]);
   const summary = { notifications: [], skipped: [] };
   const created = applyRule(db, rule, eventRow, eventRow.tenant_id, { ip, summary });
   run(db, "UPDATE notification_events SET status = 'processed', rule_count = 1, notification_count = ? WHERE id = ?", [created, eventRow.id]);

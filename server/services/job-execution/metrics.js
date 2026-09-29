@@ -36,28 +36,28 @@ export function executionMetrics(db, tenantId = null) {
 
   const completedHour = queryOne(
     db,
-    `SELECT COUNT(*) AS c FROM jobs WHERE status = 'completed' AND completed_at >= datetime('now', '-1 hour') ${
+    `SELECT COUNT(*) AS c FROM jobs WHERE status = 'completed' AND completed_at >= to_char((now() at time zone 'utc') + interval '-1 hour','YYYY-MM-DD HH24:MI:SS') ${
       tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
     }`,
     tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
   ).c;
   const failedHour = queryOne(
     db,
-    `SELECT COUNT(*) AS c FROM jobs WHERE status = 'failed' AND completed_at >= datetime('now', '-1 hour') ${
+    `SELECT COUNT(*) AS c FROM jobs WHERE status = 'failed' AND completed_at >= to_char((now() at time zone 'utc') + interval '-1 hour','YYYY-MM-DD HH24:MI:SS') ${
       tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
     }`,
     tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
   ).c;
   const completedDay = queryOne(
     db,
-    `SELECT COUNT(*) AS c FROM jobs WHERE status = 'completed' AND completed_at >= datetime('now', '-1 day') ${
+    `SELECT COUNT(*) AS c FROM jobs WHERE status = 'completed' AND completed_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') ${
       tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
     }`,
     tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
   ).c;
   const failedDay = queryOne(
     db,
-    `SELECT COUNT(*) AS c FROM jobs WHERE status IN ('failed', 'timed_out') AND completed_at >= datetime('now', '-1 day') ${
+    `SELECT COUNT(*) AS c FROM jobs WHERE status IN ('failed', 'timed_out') AND completed_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') ${
       tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
     }`,
     tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
@@ -67,14 +67,14 @@ export function executionMetrics(db, tenantId = null) {
     db,
     `SELECT AVG(e.duration_ms) AS avg_ms, COUNT(*) AS c
        FROM job_executions e JOIN jobs j ON j.id = e.job_id
-      WHERE e.status = 'completed' AND e.finished_at >= datetime('now', '-1 day') ${
+      WHERE e.status = 'completed' AND e.finished_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') ${
         tenantId === null || tenantId === undefined ? "" : "AND COALESCE(j.tenant_id, 0) = ?"
       }`,
     tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
   );
   const retryRow = queryOne(
     db,
-    `SELECT COUNT(*) AS c FROM jobs WHERE retry_count > 0 AND created_at >= datetime('now', '-1 day') ${
+    `SELECT COUNT(*) AS c FROM jobs WHERE retry_count > 0 AND created_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') ${
       tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
     }`,
     tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]

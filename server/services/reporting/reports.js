@@ -196,7 +196,7 @@ export function createReport(db, tenantId, input = {}, actor = null, ip = null) 
       ts,
     ]
   );
-  const created = getReportById(db, Number(tenantId), Number(result.lastInsertRowid));
+  const created = getReportById(db, Number(tenantId), Number(result.lastInsertId));
   if (input.shares) replaceReportShares(db, Number(tenantId), created.id, input.shares);
   writeAudit(db, { actor, action: "reporting.report.create", resourceType: "reporting_report", resourceId: normalized.code, details: { entity: normalized.entity, report_type: normalized.report_type }, sourceModule: "reporting", ip });
   publishReportingEvent(db, { eventType: "ReportCreated", payload: { code: normalized.code, report_type: normalized.report_type }, objectType: "reporting_report", tenantId, organizationId: normalized.organization_id }, actor);

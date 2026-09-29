@@ -27,7 +27,7 @@ import {
 // sessions in uploads.js; locking in locks.js.
 
 export const SORTABLE_FILES = {
-  name: "f.name COLLATE NOCASE",
+  name: "lower(f.name)",
   created_at: "f.created_at",
   updated_at: "f.updated_at",
   size_bytes: "f.size_bytes",
@@ -103,7 +103,7 @@ export function listFiles(db, query = {}, actor, tenantId, { platformAll = false
   else if (query.onlyDeleted === "true" || query.only_deleted === "true") where.push("f.deleted_at IS NOT NULL");
 
   if (query.q) {
-    where.push("(f.name LIKE ? OR f.original_name LIKE ? OR f.description LIKE ? OR f.file_ref LIKE ?)");
+    where.push("(f.name ILIKE ? OR f.original_name ILIKE ? OR f.description ILIKE ? OR f.file_ref ILIKE ?)");
     const like = `%${String(query.q)}%`;
     params.push(like, like, like, like);
   }
@@ -121,7 +121,7 @@ export function listFiles(db, query = {}, actor, tenantId, { platformAll = false
     params.push(query.fileCategory || query.file_category);
   }
   if (query.mimeType || query.mime_type) {
-    where.push("f.mime_type LIKE ?");
+    where.push("f.mime_type ILIKE ?");
     params.push(`${query.mimeType || query.mime_type}%`);
   }
   if (query.extension) {
@@ -137,7 +137,7 @@ export function listFiles(db, query = {}, actor, tenantId, { platformAll = false
     params.push(query.securityClassification || query.security_classification);
   }
   if (query.tag) {
-    where.push("f.custom_metadata_json LIKE ?");
+    where.push("f.custom_metadata_json ILIKE ?");
     params.push(`%\"${String(query.tag)}\"%`);
   }
   if (query.organizationId || query.organization_id) {

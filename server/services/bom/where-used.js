@@ -75,7 +75,7 @@ export function uses(db, { tenantId, bomId = null, bomRef = null, revisionId = n
 }
 
 function resolveBomId(db, tenantId, bomRef) {
-  return Number(queryOne(db, "SELECT id FROM bom_headers WHERE tenant_id = ? AND (bom_ref = ? OR bom_number = ? COLLATE NOCASE)", [Number(tenantId), String(bomRef), String(bomRef)])?.id || 0);
+  return Number(queryOne(db, "SELECT id FROM bom_headers WHERE tenant_id = ? AND (bom_ref = ? OR lower(bom_number) = lower(?))", [Number(tenantId), String(bomRef), String(bomRef)])?.id || 0);
 }
 
 // Multi-level where-used: walks upward through consuming BOMs until no further

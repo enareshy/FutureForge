@@ -132,7 +132,7 @@ export function publishEvent(db, input = {}, actor = null, options = {}) {
         ts,
       ]
     );
-    const id = Number(result.lastInsertRowid);
+    const id = Number(result.lastInsertId);
     if (useOutbox) {
       enqueueOutbox(db, {
         event_ref: eventRef,
@@ -270,7 +270,7 @@ export function listEvents(db, { tenantId, eventTypeCode, eventVersion, sourceMo
     params.push(to);
   }
   if (q) {
-    clauses.push("(LOWER(event_ref) LIKE ? OR LOWER(event_type_code) LIKE ? OR LOWER(correlation_id) LIKE ? OR LOWER(source_object_id) LIKE ?)");
+    clauses.push("(LOWER(event_ref) ILIKE ? OR LOWER(event_type_code) ILIKE ? OR LOWER(correlation_id) ILIKE ? OR LOWER(source_object_id) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like, like);
   }
@@ -320,7 +320,7 @@ export function listDeliveries(db, { tenantId, eventId, eventRef, subscriptionId
     params.push(queueCode);
   }
   if (q) {
-    clauses.push("(LOWER(event_ref) LIKE ? OR LOWER(event_type_code) LIKE ? OR LOWER(handler) LIKE ? OR LOWER(subscriber) LIKE ?)");
+    clauses.push("(LOWER(event_ref) ILIKE ? OR LOWER(event_type_code) ILIKE ? OR LOWER(handler) ILIKE ? OR LOWER(subscriber) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like, like);
   }

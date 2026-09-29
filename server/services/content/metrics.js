@@ -95,7 +95,7 @@ export function storageSummary(db, { tenantId = null } = {}) {
     `SELECT COALESCE(SUM(repeated_bytes), 0) AS bytes FROM (
        SELECT (COUNT(*) - 1) * MAX(file_size) AS repeated_bytes FROM content
        ${clause} ${clause ? "AND" : "WHERE"} deleted_at IS NULL GROUP BY checksum, file_size HAVING COUNT(*) > 1
-     )`,
+     ) dedupe`,
     params
   );
   return {

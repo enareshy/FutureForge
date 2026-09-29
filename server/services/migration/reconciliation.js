@@ -14,8 +14,8 @@ import { normalizeUpper, paginate, assertReconciliationStrategy } from "./valida
 export function getReconciliationRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM mig_reconciliations WHERE tenant_id = ? AND (reconciliation_ref = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), String(ref), String(ref)]
+    "SELECT * FROM mig_reconciliations WHERE tenant_id = ? AND (reconciliation_ref = ? OR id = ?)",
+    [Number(tenantId), String(ref), Number(ref) || -1]
   );
 }
 
@@ -87,7 +87,7 @@ export function reconcileJob(db, { tenantId, jobId, strategy = "COUNT", counters
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [ref, job.id, tenant, normalizedStrategy, source, Number(derived.processed || 0), successful, Number(derived.failed || 0), Number(derived.duplicates || 0), Number(derived.rejected || 0), successful, variance, percent, status, JSON.stringify(report), nowIso(), nowIso()]
     );
-    reconciliationId = Number(result.lastInsertRowid);
+    reconciliationId = Number(result.lastInsertId);
   }
   persistExceptions(db, { reconciliationId, tenantId: tenant, jobId: job.id, strategy: normalizedStrategy, variance, source });
 
@@ -197,7 +197,7 @@ export function listReconciliations(db, { tenantId, jobId, status, page, pageSiz
 }
 
 export function reconcileJobByRef(db, tenantId, jobRef, { strategy = "COUNT" } = {}) {
-  const job = queryOne(db, "SELECT * FROM mig_jobs WHERE tenant_id = ? AND (job_ref = ? OR CAST(id AS TEXT) = ?)", [Number(tenantId), String(jobRef), String(jobRef)]);
+  const job = queryOne(db, "SELECT * FROM mig_jobs WHERE tenant_id = ? AND (job_ref = ? OR id = ?)", [Number(tenantId), String(jobRef), Number(jobRef) || -1]);
   if (!job) throw reconciliationNotFound(jobRef);
   return reconcileJob(db, { tenantId, jobId: job.id, strategy });
 }

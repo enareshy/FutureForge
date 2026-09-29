@@ -105,7 +105,7 @@ export function checkOutFile(db, reference, body = {}, actor, tenantId, ip) {
       String(body.reason || "").slice(0, 500), expiryFrom(minutes), ts, ts]
   );
   run(db, "UPDATE files SET status = 'checked_out', updated_by = ?, updated_at = ? WHERE id = ?", [actor?.id ?? null, ts, file.id]);
-  const lock = findLockRow(db, insert.lastInsertRowid);
+  const lock = findLockRow(db, insert.lastInsertId);
   recordFileEvent(db, {
     eventType: "FileCheckedOut", file: findFileRow(db, file.id, scope), actor, tenantId: scope,
     payload: { lock_id: lock.id, expires_at: lock.expires_at },

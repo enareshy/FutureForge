@@ -30,7 +30,7 @@ export function recordHistory(db, { tenantId, action, entityType = "metric", ent
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [Number(tenantId), String(action), String(entityType), String(entityId ?? ""), String(entityRef ?? ""), actor?.id ?? null, String(summary || ""), stringifyJson(detail), nowIso()]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listHistory(db, tenantId, query = {}) {
@@ -53,6 +53,6 @@ export function listHistory(db, tenantId, query = {}) {
 
 export function pruneHistory(db, tenantId, retainDays) {
   const days = Math.max(1, Number(retainDays) || 180);
-  const result = run(db, "DELETE FROM observability_history WHERE tenant_id = ? AND created_at < datetime('now', ?)", [Number(tenantId), `-${days} days`]);
+  const result = run(db, "DELETE FROM observability_history WHERE tenant_id = ? AND created_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]);
   return Number(result.changes || 0);
 }

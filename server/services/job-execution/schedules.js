@@ -145,7 +145,7 @@ export function listSchedules(db, query = {}, tenantId = null) {
   }
   if (query.q) {
     const like = `%${query.q}%`;
-    where.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    where.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     params.push(like, like, like);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -261,7 +261,7 @@ export function createSchedule(db, input = {}, actor = null, ip = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM job_schedules WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM job_schedules WHERE id = ?", [Number(result.lastInsertId)]);
   recordEngineAudit(db, {
     tenantId: row.tenant_id,
     entityType: "schedule",
@@ -500,8 +500,8 @@ export function sweepSchedules(db, { limit = 50 } = {}) {
         if (activeJobs.length && schedule.concurrency_policy === "skip") {
           run(
             db,
-            `INSERT OR IGNORE INTO job_schedule_runs (schedule_id, job_id, scheduled_for, status, detail_json, created_at, updated_at)
-             VALUES (?, NULL, ?, 'skipped', ?, ?, ?)`,
+            `INSERT INTO job_schedule_runs (schedule_id, job_id, scheduled_for, status, detail_json, created_at, updated_at)
+             VALUES (?, NULL, ?, 'skipped', ?, ?, ?) ON CONFLICT DO NOTHING`,
             [schedule.id, scheduledFor, JSON.stringify({ reason: "previous_run_active", active_job_ids: activeJobs.map((job) => job.id) }), nowIso(), nowIso()]
           );
           advanceNextRun(db, schedule, scheduledFor);
@@ -517,8 +517,8 @@ export function sweepSchedules(db, { limit = 50 } = {}) {
 
         const insert = run(
           db,
-          `INSERT OR IGNORE INTO job_schedule_runs (schedule_id, job_id, scheduled_for, status, detail_json, created_at, updated_at)
-           VALUES (?, NULL, ?, 'pending', '{}', ?, ?)`,
+          `INSERT INTO job_schedule_runs (schedule_id, job_id, scheduled_for, status, detail_json, created_at, updated_at)
+           VALUES (?, NULL, ?, 'pending', '{}', ?, ?) ON CONFLICT DO NOTHING`,
           [schedule.id, scheduledFor, nowIso(), nowIso()]
         );
         if (insert.changes !== 1) {
@@ -526,7 +526,7 @@ export function sweepSchedules(db, { limit = 50 } = {}) {
           advanceNextRun(db, schedule, scheduledFor);
           continue;
         }
-        const runId = Number(insert.lastInsertRowid);
+        const runId = Number(insert.lastInsertId);
         const job = submitScheduleJob(db, schedule, scheduledFor);
         run(
           db,
@@ -624,11 +624,11 @@ export function runScheduleNow(db, ref, { actor = null, ip = null } = {}) {
   const now = nowIso();
   const insert = run(
     db,
-    `INSERT OR IGNORE INTO job_schedule_runs (schedule_id, job_id, scheduled_for, status, detail_json, created_at, updated_at)
-     VALUES (?, NULL, ?, 'pending', ?, ?, ?)`,
+    `INSERT INTO job_schedule_runs (schedule_id, job_id, scheduled_for, status, detail_json, created_at, updated_at)
+     VALUES (?, NULL, ?, 'pending', ?, ?, ?) ON CONFLICT DO NOTHING`,
     [row.id, now, JSON.stringify({ manual: true, actor_id: actor?.id ?? null }), now, now]
   );
-  const runId = insert.changes === 1 ? Number(insert.lastInsertRowid) : queryOne(db, "SELECT id FROM job_schedule_runs WHERE schedule_id = ? AND scheduled_for = ?", [row.id, now])?.id;
+  const runId = insert.changes === 1 ? Number(insert.lastInsertId) : queryOne(db, "SELECT id FROM job_schedule_runs WHERE schedule_id = ? AND scheduled_for = ?", [row.id, now])?.id;
   const job = submitScheduleJob(db, row, `manual:${now}`);
   run(db, "UPDATE job_schedule_runs SET job_id = ?, status = 'enqueued', updated_at = ? WHERE id = ?", [job.id, nowIso(), runId]);
   run(

@@ -120,7 +120,7 @@ export function createEdge(db, input = {}, actor = null, tenantId = null, ip = n
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_hierarchy WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_hierarchy WHERE id = ?", [Number(result.lastInsertId)]);
   rebuildItemPath(db, childId);
   rebuildDescendantPaths(db, childId);
   bumpCacheEpoch(db);

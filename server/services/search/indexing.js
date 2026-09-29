@@ -47,9 +47,11 @@ function replaceRelationships(db, doc) {
     if (rel.target_id === undefined || rel.target_id === null || rel.target_id === "") continue;
     run(
       db,
-      `INSERT OR REPLACE INTO search_relationships
+      `INSERT INTO search_relationships
          (tenant_id, source_type, source_id, target_type, target_id, relationship_type, direction, label, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (tenant_id, source_type, source_id, target_type, target_id, relationship_type, direction)
+       DO UPDATE SET label = EXCLUDED.label, updated_at = EXCLUDED.updated_at`,
       [
         Number(doc.tenantId),
         String(doc.objectType),

@@ -141,6 +141,7 @@ function resolveTenantId(db, tenantId) {
 }
 
 export function ensureDataLifecycleSeed(db, tenantId) {
+  withEventSuppression(() => ensureLifecycleFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM lc_policies WHERE tenant_id = ? AND code = 'CUSTOMER_RETENTION'", [tenant]);

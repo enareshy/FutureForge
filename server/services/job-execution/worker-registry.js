@@ -132,7 +132,7 @@ export function listWorkers(db, query = {}) {
     params.push(String(query.status));
   }
   if (query.queue) {
-    where.push("queues_json LIKE ?");
+    where.push("queues_json ILIKE ?");
     params.push(`%${String(query.queue)}%`);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";

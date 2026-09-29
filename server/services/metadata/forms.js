@@ -90,7 +90,7 @@ export function listForms(db, query = {}, tenantId = null) {
     params.push(query.status);
   }
   if (query.q) {
-    where.push("(f.code LIKE ? OR f.name LIKE ? OR f.description LIKE ?)");
+    where.push("(f.code ILIKE ? OR f.name ILIKE ? OR f.description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -158,7 +158,7 @@ export function createForm(db, body, actor, ip, tenantId) {
     }
     throw err;
   }
-  const row = getFormRow(db, result.lastInsertRowid);
+  const row = getFormRow(db, result.lastInsertId);
   recordVersion(db, "form", row.id, getForm(db, row.id, tenantId), actor, "create");
   writeAudit(db, {
     actor,
@@ -313,8 +313,8 @@ export function replaceLayout(db, id, body, actor, ip, tenantId) {
         ts,
       ]
     );
-    nodeIds.set(node.code, result.lastInsertRowid);
-    nodeIds.set(String(node.code), result.lastInsertRowid);
+    nodeIds.set(node.code, result.lastInsertId);
+    nodeIds.set(String(node.code), result.lastInsertId);
   }
   for (const field of incomingFields) {
     const attr = field.attribute_id

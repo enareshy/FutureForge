@@ -29,7 +29,7 @@ export function getDefinitionRow(db, tenantId, ref) {
     const byId = queryOne(db, "SELECT * FROM exchange_definitions WHERE id = ? AND tenant_id = ?", [Number(raw), tenant]);
     if (byId) return byId;
   }
-  return queryOne(db, "SELECT * FROM exchange_definitions WHERE tenant_id = ? AND (definition_ref = ? OR code = ? COLLATE NOCASE)", [tenant, raw, raw]);
+  return queryOne(db, "SELECT * FROM exchange_definitions WHERE tenant_id = ? AND (definition_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
 }
 
 export function requireDefinitionRow(db, tenantId, ref) {
@@ -119,7 +119,7 @@ export function createDefinition(db, tenantId, body = {}, actor = null, ip = nul
       toJson(input.metadata, {}), actor?.id ?? null, actor?.id ?? null, ts, ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM exchange_definitions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM exchange_definitions WHERE id = ?", [Number(result.lastInsertId)]);
   insertDefinitionVersion(db, tenant, row, { status: row.status, approvalStatus: row.approval_status, changeSummary: "Initial version", actor });
   return publicDefinition(row);
 }
@@ -217,7 +217,7 @@ export function listDefinitions(db, tenantId, query = {}) {
     params.push(normalizeUpper(query.format_code));
   }
   if (query.q) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }

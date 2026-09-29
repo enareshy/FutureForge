@@ -40,7 +40,7 @@ export function listInboundWebhooks(db, { tenantId, status, q, page = 1, pageSiz
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(path) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(path) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -97,7 +97,7 @@ export function createInboundWebhook(db, input = {}, actor = null, tenantId = nu
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM integration_webhook_endpoints WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM integration_webhook_endpoints WHERE id = ?", [Number(result.lastInsertId)]);
   auditIntegration(db, { actor, action: "integration.webhook.inbound.create", resourceType: "integration_webhook_endpoint", resourceId: row.id, details: { code: row.code } });
   return publicInboundWebhook(row);
 }
@@ -215,7 +215,7 @@ export function receiveInboundWebhook(db, pathOrCode, { headers = {}, body = {},
     run(db, "UPDATE integration_webhook_endpoints SET failure_count = failure_count + 1, updated_at = ? WHERE id = ?", [nowIso(), endpoint.id]);
     auditIntegration(db, { actor, action: "integration.webhook.rejected", resourceType: "integration_webhook_endpoint", resourceId: endpoint.id, details: { reason: check.reason }, status: "failure" });
     log("warn", "integration.webhook.rejected", { endpoint: endpoint.code, reason: check.reason });
-    throw new HttpError(401, `Webhook rejected: ${check.reason}`, { receipt_id: Number(receipt.lastInsertRowid) });
+    throw new HttpError(401, `Webhook rejected: ${check.reason}`, { receipt_id: Number(receipt.lastInsertId) });
   }
 
   // Replay / duplicate protection by signature.
@@ -230,7 +230,7 @@ export function receiveInboundWebhook(db, pathOrCode, { headers = {}, body = {},
         [endpoint.id, signature, endpoint.event_type_code || "", toJson(body, {}), "duplicate signature", correlation, endpoint.tenant_id ?? null, receivedAt]
       );
       auditIntegration(db, { actor, action: "integration.webhook.duplicate", resourceType: "integration_webhook_endpoint", resourceId: endpoint.id, details: {} });
-      return { duplicate: true, receipt_id: Number(receipt.lastInsertRowid) };
+      return { duplicate: true, receipt_id: Number(receipt.lastInsertId) };
     }
   }
 
@@ -241,7 +241,7 @@ export function receiveInboundWebhook(db, pathOrCode, { headers = {}, body = {},
      VALUES (?, ?, ?, ?, 'accepted', '', ?, ?, ?)`,
     [endpoint.id, signature, endpoint.event_type_code || "", toJson(body, {}), correlation, endpoint.tenant_id ?? null, receivedAt]
   );
-  const receiptId = Number(receipt.lastInsertRowid);
+  const receiptId = Number(receipt.lastInsertId);
   run(
     db,
     "UPDATE integration_webhook_endpoints SET receive_count = receive_count + 1, last_received_at = ?, updated_at = ? WHERE id = ?",
@@ -304,7 +304,7 @@ export function listOutboundWebhooks(db, { tenantId, status, q, page = 1, pageSi
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(url) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(url) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -358,7 +358,7 @@ export function createOutboundWebhook(db, input = {}, actor = null, tenantId = n
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM integration_webhook_subscriptions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM integration_webhook_subscriptions WHERE id = ?", [Number(result.lastInsertId)]);
   auditIntegration(db, { actor, action: "integration.webhook.outbound.create", resourceType: "integration_webhook_subscription", resourceId: row.id, details: { code: row.code } });
   return publicOutboundWebhook(row);
 }

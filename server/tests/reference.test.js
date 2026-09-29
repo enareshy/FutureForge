@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 import * as reference from "../services/reference.js";
@@ -16,7 +16,7 @@ function adminActor(db) {
 describe("Reference data foundation and mandatory domains", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });
@@ -62,7 +62,7 @@ describe("Reference domain ownership, governance and versioning", () => {
   let db;
   let actor;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -103,7 +103,7 @@ describe("Reference items, codes, aliases, translations and versions", () => {
   let actor;
   let domain;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -163,7 +163,7 @@ describe("Reference hierarchy, relationships and search", () => {
   let db;
   let actor;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -223,7 +223,7 @@ describe("Reference resolution, scope precedence and effectivity", () => {
   let db;
   let actor;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -292,7 +292,7 @@ describe("Reference approvals, change requests and bulk resolution", () => {
   let db;
   let actor;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -354,7 +354,7 @@ describe("Reference import and export", () => {
   let db;
   let actor;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -391,7 +391,7 @@ describe("Reference import and export", () => {
 describe("Reference metrics and health", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });
@@ -415,7 +415,7 @@ describe("Reference data REST API", () => {
   let port;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const app = createApp(db);

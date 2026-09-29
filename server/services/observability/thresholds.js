@@ -96,7 +96,7 @@ export function createThreshold(db, tenantId, input = {}, actor = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM observability_thresholds WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM observability_thresholds WHERE id = ?", [Number(result.lastInsertId)]);
   recordHistory(db, { tenantId, action: "THRESHOLD_CREATED", entityType: "threshold", entityId: row.id, entityRef: row.threshold_ref, actor, summary: `Threshold ${code} created` });
   writeAudit(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.threshold.create", resource_type: "observability_threshold", resource_id: row.threshold_ref, details: { metric_code: row.metric_code } });
   return publicThreshold(row);

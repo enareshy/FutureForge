@@ -67,7 +67,7 @@ export function listRules(db, query = {}, tenantId = null) {
     params.push(query.sourceModule || query.source_module);
   }
   if (query.q) {
-    where.push("(r.code LIKE ? OR r.name LIKE ?)");
+    where.push("(r.code ILIKE ? OR r.name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like);
   }
@@ -145,8 +145,8 @@ export function createRule(db, body = {}, actor = null, ip = null, reqTenantId =
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Rule code already exists in this scope");
     throw err;
   }
-  writeAudit(db, { actor, action: "notification.rule.create", resourceType: "notification_rule", resourceId: result.lastInsertRowid, details: { code: body.code, event_type: eventType }, ip });
-  return publicRule(getRuleRow(db, result.lastInsertRowid));
+  writeAudit(db, { actor, action: "notification.rule.create", resourceType: "notification_rule", resourceId: result.lastInsertId, details: { code: body.code, event_type: eventType }, ip });
+  return publicRule(getRuleRow(db, result.lastInsertId));
 }
 
 export function updateRule(db, id, body = {}, actor = null, ip = null, tenantId = null) {

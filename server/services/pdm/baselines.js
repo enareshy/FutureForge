@@ -24,7 +24,7 @@ export function getBaselineRow(db, tenantId, ref) {
     const row = queryOne(db, "SELECT * FROM pdm_baselines WHERE id = ? AND tenant_id = ?", [id, Number(tenantId)]);
     if (row) return row;
   }
-  return queryOne(db, "SELECT * FROM pdm_baselines WHERE tenant_id = ? AND (baseline_ref = ? OR baseline_number = ? COLLATE NOCASE)", [Number(tenantId), String(ref), String(ref)]);
+  return queryOne(db, "SELECT * FROM pdm_baselines WHERE tenant_id = ? AND (baseline_ref = ? OR lower(baseline_number) = lower(?))", [Number(tenantId), String(ref), String(ref)]);
 }
 
 export function requireBaselineRow(db, tenantId, ref) {
@@ -49,7 +49,7 @@ export function listBaselines(db, { tenantId, status, itemId, q, page, pageSize 
     params.push(Number(itemId));
   }
   if (q) {
-    clauses.push("(baseline_number LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(baseline_number ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like);
   }
@@ -95,7 +95,7 @@ export function createBaseline(db, tenantId, body = {}, actor = null, ip = null)
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_baselines WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_baselines WHERE id = ?", [Number(result.lastInsertId)]);
   const members = Array.isArray(body.members) ? body.members : [];
   if (members.length) addMembersInternal(db, tenant, row.id, members);
   if (normalized.source_revision_id && !members.length) {

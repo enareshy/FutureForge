@@ -175,7 +175,7 @@ export function publishGovernanceVersion(db, domain, input = {}, actor = null, i
     ts,
     Number(domain.id),
   ]);
-  const created = publicGovernance(queryOne(db, "SELECT * FROM reference_governance_policies WHERE id = ?", [Number(result.lastInsertRowid)]));
+  const created = publicGovernance(queryOne(db, "SELECT * FROM reference_governance_policies WHERE id = ?", [Number(result.lastInsertId)]));
   bumpCacheEpoch(db);
   writeAudit(db, {
     actor,

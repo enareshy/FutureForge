@@ -76,7 +76,7 @@ export function deliveryMetrics(db, { tenantId = null, from = null, to = null } 
   );
   const queueRow = queryOne(
     db,
-    `SELECT AVG((julianday(sent_at) - julianday(created_at)) * 86400) AS avg_queue_seconds
+    `SELECT AVG(EXTRACT(EPOCH FROM (sent_at::timestamp - created_at::timestamp))) AS avg_queue_seconds
        FROM delivery_requests ${clause}${clause ? " AND" : "WHERE"} sent_at IS NOT NULL`,
     params
   );
@@ -89,7 +89,7 @@ export function deliveryMetrics(db, { tenantId = null, from = null, to = null } 
 
   const timeseries = queryAll(
     db,
-    `SELECT substr(created_at, 1, 10) AS day, status, COUNT(*) AS count
+    `SELECT left(created_at, 10) AS day, status, COUNT(*) AS count
        FROM delivery_requests ${clause}
       GROUP BY day, status ORDER BY day`,
     params

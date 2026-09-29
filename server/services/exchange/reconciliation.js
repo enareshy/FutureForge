@@ -62,7 +62,7 @@ export function recordReconciliation(db, tenantId, { transactionRef = "", counts
       nowIso(),
     ]
   );
-  return publicReconciliation(queryOne(db, "SELECT * FROM exchange_reconciliations WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicReconciliation(queryOne(db, "SELECT * FROM exchange_reconciliations WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function getReconciliation(db, tenantId, ref) {

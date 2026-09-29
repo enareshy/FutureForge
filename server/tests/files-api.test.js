@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 import { registerFileProcessingHandlers } from "../services/files.js";
@@ -66,7 +66,7 @@ describe("Document & File Management REST APIs", () => {
   let userId;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     registerFileProcessingHandlers();

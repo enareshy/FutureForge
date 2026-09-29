@@ -175,7 +175,7 @@ export function listQueues(db, query = {}, tenantId = null) {
   if (query.paused === "true" || query.paused === true) where.push("paused = 1");
   if (query.q) {
     const like = `%${query.q}%`;
-    where.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    where.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     params.push(like, like, like);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -227,7 +227,7 @@ export function createQueue(db, input = {}, actor = null, ip = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM job_queues WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM job_queues WHERE id = ?", [Number(result.lastInsertId)]);
   recordEngineAudit(db, {
     tenantId: row.tenant_id,
     entityType: "queue",
@@ -361,7 +361,7 @@ function executionsLastMinute(db, canonical) {
     db,
     `SELECT COUNT(*) AS c FROM job_executions
       WHERE queue IN (${placeholders})
-        AND started_at >= datetime('now', '-60 seconds')`,
+        AND started_at >= to_char((now() at time zone 'utc') + interval '-60 seconds','YYYY-MM-DD HH24:MI:SS')`,
     aliases
   );
   return row?.c || 0;

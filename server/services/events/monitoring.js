@@ -29,7 +29,7 @@ export function throughputTimeseries(db, { tenantId = null, windowHours = 24, bu
   const rows = queryAll(
     db,
     `SELECT
-       strftime('%Y-%m-%dT%H:%M:00', created_at) AS bucket,
+       to_char(created_at::timestamp, 'YYYY-MM-DD"T"HH24:MI:00') AS bucket,
        COUNT(*) AS published
      FROM event_records
      WHERE created_at >= ? ${clause}
@@ -39,7 +39,7 @@ export function throughputTimeseries(db, { tenantId = null, windowHours = 24, bu
   const deliveryRows = queryAll(
     db,
     `SELECT
-       strftime('%Y-%m-%dT%H:%M:00', updated_at) AS bucket,
+       to_char(updated_at::timestamp, 'YYYY-MM-DD"T"HH24:MI:00') AS bucket,
        SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) AS delivered,
        SUM(CASE WHEN status IN ('failed','dead_letter') THEN 1 ELSE 0 END) AS failed,
        SUM(CASE WHEN status = 'retry' THEN 1 ELSE 0 END) AS retrying

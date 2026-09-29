@@ -69,8 +69,8 @@ export function jobMetrics(db, tenantId = null) {
 
   const duration = queryOne(
     db,
-    `SELECT AVG((julianday(completed_at) - julianday(started_at)) * 86400.0) AS avg_seconds,
-            MAX((julianday(completed_at) - julianday(started_at)) * 86400.0) AS max_seconds
+    `SELECT AVG(EXTRACT(EPOCH FROM (completed_at::timestamp - started_at::timestamp))) AS avg_seconds,
+            MAX(EXTRACT(EPOCH FROM (completed_at::timestamp - started_at::timestamp))) AS max_seconds
        FROM jobs
       ${clause ? `${clause} AND` : "WHERE"} completed_at IS NOT NULL AND started_at IS NOT NULL`,
     params
@@ -123,13 +123,13 @@ export function jobTimeseries(db, tenantId = null, { days = 14 } = {}) {
   const limit = Math.max(1, Math.min(90, Number(days) || 14));
   const rows = queryAll(
     db,
-    `SELECT date(created_at) AS day,
+    `SELECT left(created_at, 10) AS day,
             COUNT(*) AS c,
             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
             SUM(CASE WHEN status IN ('failed', 'timed_out') THEN 1 ELSE 0 END) AS failed
        FROM jobs
-      ${clause ? `${clause} AND` : "WHERE"} created_at >= date('now', ?)
-      GROUP BY date(created_at) ORDER BY day ASC`,
+      ${clause ? `${clause} AND` : "WHERE"} created_at >= to_char((now() at time zone 'utc') + (?::interval), 'YYYY-MM-DD')
+      GROUP BY left(created_at, 10) ORDER BY day ASC`,
     [...params, `-${limit} days`]
   );
   return rows.map((row) => ({

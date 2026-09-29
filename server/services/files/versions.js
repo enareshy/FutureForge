@@ -110,7 +110,7 @@ export async function createVersion(db, fileReference, input = {}, { actor, tena
         comment, actor?.id ?? null, ts, ts,
       ]
     );
-    const versionId = Number(insert.lastInsertRowid);
+    const versionId = Number(insert.lastInsertId);
     if (previous) {
       run(db, "UPDATE file_versions SET is_current = 0, updated_at = ? WHERE id = ?", [ts, previous.id]);
     }

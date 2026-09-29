@@ -66,7 +66,7 @@ export function listClassifications(db, { tenantId, category, securityClassifica
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -102,7 +102,7 @@ export function createClassification(db, input = {}, actor = null, tenantId = nu
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dc_classifications WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_classifications WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "data_catalog.classification.create",
@@ -207,7 +207,7 @@ export function assignClassification(db, entryRefValue, input = {}, actor = null
       "INSERT INTO dc_classification_assignments (tenant_id, entry_id, classification_id, classification_code, security_classification, assigned_by, assigned_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       [entry.tenant_id, entry.id, classification.id, classification.code, securityClassification, actor?.id ?? null, ts]
     );
-    assignmentId = Number(result.lastInsertRowid);
+    assignmentId = Number(result.lastInsertId);
   }
   // The entry carries the strongest (highest-ranked) bound classification so
   // security-aware consumers see a single effective value.

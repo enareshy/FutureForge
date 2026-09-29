@@ -48,7 +48,7 @@ function insertEscalation(db, fields) {
     `INSERT INTO delivery_escalations (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
     columns.map((column) => fields[column])
   );
-  return result.lastInsertRowid;
+  return result.lastInsertId;
 }
 
 export function scheduleEscalation(db, input = {}, { actor = null, ip = null } = {}) {

@@ -101,7 +101,7 @@ export function createVersion(db, revisionRefValue, input = {}, actor = null, ip
         ts,
       ]
     );
-    const row = queryOne(db, "SELECT * FROM versioning_versions WHERE id = ?", [Number(result.lastInsertRowid)]);
+    const row = queryOne(db, "SELECT * FROM versioning_versions WHERE id = ?", [Number(result.lastInsertId)]);
     writeAudit(db, {
       actor,
       action: "versioning.version.create",

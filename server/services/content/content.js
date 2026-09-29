@@ -88,7 +88,7 @@ export function listContent(db, {
   }
   if (!includeDeleted) where.push("deleted_at IS NULL");
   if (q) {
-    where.push("(file_name LIKE ? OR original_file_name LIKE ? OR content_key LIKE ? OR content_id LIKE ?)");
+    where.push("(file_name ILIKE ? OR original_file_name ILIKE ? OR content_key ILIKE ? OR content_id ILIKE ?)");
     const like = `%${String(q)}%`;
     params.push(like, like, like, like);
   }
@@ -172,7 +172,7 @@ function insertContentRow(db, input) {
       ts,
     ]
   );
-  return queryOne(db, "SELECT * FROM content WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM content WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 // Creates the content entity + first immutable version from an already-stored

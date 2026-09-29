@@ -35,7 +35,7 @@ export function getOrderRow(db, tenantId, ref) {
   }
   return queryOne(
     db,
-    "SELECT * FROM change_orders WHERE tenant_id = ? AND (order_ref = ? OR order_number = ? COLLATE NOCASE)",
+    "SELECT * FROM change_orders WHERE tenant_id = ? AND (order_ref = ? OR lower(order_number) = lower(?))",
     [Number(tenantId), String(ref), String(ref)]
   );
 }
@@ -62,7 +62,7 @@ export function listOrders(db, { tenantId, status, changeRequestId, q, page, pag
     params.push(Number(changeRequestId));
   }
   if (q) {
-    clauses.push("(order_number LIKE ? OR title LIKE ? OR description LIKE ?)");
+    clauses.push("(order_number ILIKE ? OR title ILIKE ? OR description ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like);
   }
@@ -106,7 +106,7 @@ export function createOrder(db, tenantId, body = {}, actor = null, ip = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM change_orders WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM change_orders WHERE id = ?", [Number(result.lastInsertId)]);
   recordChange(db, { tenantId: tenant, entityType: "ORDER", entityId: row.id, entityRef: row.order_ref, action: "CREATED", version: 1, status: row.status, after: publicOrder(row), actor, ip });
   publishChangeEvent(db, { eventType: "ChangeOrderCreated", objectType: "change_order", objectId: row.id, tenantId: tenant, organizationId: row.organization_id, payload: { order_ref: row.order_ref, order_number: row.order_number } }, actor);
   return publicOrder(row);

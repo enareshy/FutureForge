@@ -28,7 +28,7 @@ export function getValidationRuleRow(db, tenantId, ref) {
     const row = queryOne(db, "SELECT * FROM pdm_validation_rules WHERE id = ? AND tenant_id = ?", [id, Number(tenantId)]);
     if (row) return row;
   }
-  return queryOne(db, "SELECT * FROM pdm_validation_rules WHERE tenant_id = ? AND code = ? COLLATE NOCASE", [Number(tenantId), String(ref)]);
+  return queryOne(db, "SELECT * FROM pdm_validation_rules WHERE tenant_id = ? AND lower(code) = lower(?)", [Number(tenantId), String(ref)]);
 }
 
 export function listValidationRules(db, { tenantId, status = null, ruleType = null, page, pageSize } = {}) {
@@ -92,7 +92,7 @@ export function createValidationRule(db, tenantId, body = {}, actor = null, ip =
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_validation_rules WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_validation_rules WHERE id = ?", [Number(result.lastInsertId)]);
   recordChange(db, { tenantId: tenant, entityType: "VALIDATION_RULE", entityId: row.id, entityRef: row.rule_ref, action: "CREATED", status: row.status, after: publicValidationRule(row), actor, ip });
   return publicValidationRule(row);
 }
@@ -359,7 +359,7 @@ function persistResult(db, tenantId, { scope, target, issues, executed, duration
       nowIso(),
     ]
   );
-  const resultId = Number(result.lastInsertRowid);
+  const resultId = Number(result.lastInsertId);
   for (const issue of issues) {
     run(
       db,
@@ -436,7 +436,7 @@ function requireItemForValidation(db, tenantId, ref) {
   const id = Number(ref);
   const row = Number.isInteger(id) && String(id) === String(ref).trim()
     ? queryOne(db, "SELECT * FROM pdm_items WHERE tenant_id = ? AND id = ?", [Number(tenantId), id])
-    : queryOne(db, "SELECT * FROM pdm_items WHERE tenant_id = ? AND (item_ref = ? OR item_number = ? COLLATE NOCASE)", [Number(tenantId), String(ref), String(ref)]);
+    : queryOne(db, "SELECT * FROM pdm_items WHERE tenant_id = ? AND (item_ref = ? OR lower(item_number) = lower(?))", [Number(tenantId), String(ref), String(ref)]);
   if (!row) throw ruleNotFound(`item ${ref}`);
   return row;
 }
@@ -456,7 +456,7 @@ function requireRevisionForValidation(db, tenantId, ref, itemId) {
 }
 
 function requireDatasetForValidation(db, tenantId, ref) {
-  const row = queryOne(db, "SELECT * FROM pdm_datasets WHERE tenant_id = ? AND (id = ? OR dataset_ref = ? OR dataset_number = ? COLLATE NOCASE)", [Number(tenantId), Number(ref) || -1, String(ref), String(ref)]);
+  const row = queryOne(db, "SELECT * FROM pdm_datasets WHERE tenant_id = ? AND (id = ? OR dataset_ref = ? OR lower(dataset_number) = lower(?))", [Number(tenantId), Number(ref) || -1, String(ref), String(ref)]);
   if (!row) throw ruleNotFound(`dataset ${ref}`);
   return row;
 }

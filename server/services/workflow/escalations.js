@@ -102,8 +102,8 @@ export function createEscalationRule(db, body, actor = null, ip = null, reqTenan
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Escalation rule code already exists in this scope");
     throw err;
   }
-  writeAudit(db, { actor, action: "workflow.escalation_rule.create", resourceType: "workflow_escalation_rule", resourceId: result.lastInsertRowid, details: { code: body.code }, ip });
-  return publicEscalationRule(getEscalationRuleRow(db, result.lastInsertRowid));
+  writeAudit(db, { actor, action: "workflow.escalation_rule.create", resourceType: "workflow_escalation_rule", resourceId: result.lastInsertId, details: { code: body.code }, ip });
+  return publicEscalationRule(getEscalationRuleRow(db, result.lastInsertId));
 }
 
 export function updateEscalationRule(db, id, body, actor = null, ip = null, tenantId = null) {

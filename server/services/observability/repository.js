@@ -52,7 +52,8 @@ export function paged(db, table, { where = [], params = [], orderBy = "id DESC",
 
 export function tableExists(db, table) {
   try {
-    return Boolean(queryOne(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [table]));
+    const row = queryOne(db, "SELECT to_regclass(?) AS r", [table]);
+    return Boolean(row?.r);
   } catch {
     return false;
   }
@@ -60,7 +61,12 @@ export function tableExists(db, table) {
 
 export function columnExists(db, table, column) {
   try {
-    return queryAll(db, `PRAGMA table_info(${table})`).some((row) => String(row.name) === String(column));
+    const row = queryOne(
+      db,
+      "SELECT 1 AS present FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+      [table, column]
+    );
+    return Boolean(row);
   } catch {
     return false;
   }

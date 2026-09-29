@@ -35,7 +35,7 @@ export function recordExecution(db, execution = {}) {
       ts,
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listExecutions(db, tenantId, query = {}) {
@@ -98,7 +98,7 @@ export function recordHistory(db, entry = {}) {
       ts,
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listHistory(db, tenantId, query = {}) {

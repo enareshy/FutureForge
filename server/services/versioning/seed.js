@@ -45,7 +45,7 @@ function ensureDefinition(db, input, assignment) {
 }
 
 export function seedVersioning(db) {
-  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM versioning_revisions WHERE object_id LIKE 'PART-DEMO-%'");
+  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM versioning_revisions WHERE object_id ILIKE 'PART-DEMO-%'");
   if (Number(existing?.c ?? 0) > 0) return { seeded: false };
 
   // Date effectivity: Revision A Jan-Jun, Revision B Jul-open.

@@ -39,7 +39,7 @@ export function getConfigurationRuleRow(db, tenantId, ref) {
     const row = queryOne(db, "SELECT * FROM pdm_configuration_rules WHERE id = ? AND tenant_id = ?", [id, Number(tenantId)]);
     if (row) return row;
   }
-  return queryOne(db, "SELECT * FROM pdm_configuration_rules WHERE tenant_id = ? AND (rule_ref = ? OR code = ? COLLATE NOCASE)", [Number(tenantId), String(ref), String(ref)]);
+  return queryOne(db, "SELECT * FROM pdm_configuration_rules WHERE tenant_id = ? AND (rule_ref = ? OR lower(code) = lower(?))", [Number(tenantId), String(ref), String(ref)]);
 }
 
 export function requireConfigurationRuleRow(db, tenantId, ref) {
@@ -64,7 +64,7 @@ export function listConfigurationRules(db, { tenantId, status, ruleType, q, page
     params.push(String(ruleType).toUpperCase());
   }
   if (q) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like);
   }
@@ -106,13 +106,13 @@ export function createConfigurationRule(db, tenantId, body = {}, actor = null, i
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_configuration_rules WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_configuration_rules WHERE id = ?", [Number(result.lastInsertId)]);
   const version = run(
     db,
     "INSERT INTO pdm_configuration_rule_versions (tenant_id, rule_id, version_number, rule_type, config_json, status, change_note, created_by, created_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)",
     [tenant, row.id, row.rule_type, row.config_json, row.status, "Initial version", actor?.id ?? null, ts]
   );
-  updateRow(db, "pdm_configuration_rules", row.id, { current_version_id: Number(version.lastInsertRowid) }, { columns: ["current_version_id"] });
+  updateRow(db, "pdm_configuration_rules", row.id, { current_version_id: Number(version.lastInsertId) }, { columns: ["current_version_id"] });
   const finalRow = queryOne(db, "SELECT * FROM pdm_configuration_rules WHERE id = ?", [row.id]);
   bumpEpoch(tenant);
   invalidate(tenant);
@@ -187,7 +187,7 @@ export function publishConfigurationRuleVersion(db, tenantId, ref, body = {}, ac
     db,
     "pdm_configuration_rules",
     row.id,
-    { current_version_id: Number(inserted.lastInsertRowid), version_number: nextVersion, config_json: JSON.stringify(config), rule_type: body.rule_type ? String(body.rule_type).toUpperCase() : row.rule_type, version: bumpVersion(row), updated_by: actor?.id ?? null },
+    { current_version_id: Number(inserted.lastInsertId), version_number: nextVersion, config_json: JSON.stringify(config), rule_type: body.rule_type ? String(body.rule_type).toUpperCase() : row.rule_type, version: bumpVersion(row), updated_by: actor?.id ?? null },
     { columns: UPDATE_COLUMNS }
   );
   const updated = queryOne(db, "SELECT * FROM pdm_configuration_rules WHERE id = ?", [row.id]);

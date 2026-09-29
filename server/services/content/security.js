@@ -88,7 +88,7 @@ function recordScan(db, { content, versionId, outcome, scanType = "upload" }) {
       ts,
     ]
   );
-  return queryOne(db, "SELECT * FROM content_security_scans WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM content_security_scans WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 // Applies the scan outcome to an existing content row + version, quarantining on

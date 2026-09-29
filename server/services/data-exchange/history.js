@@ -58,7 +58,7 @@ export function recordHistory(db, input = {}) {
         base.created_at,
       ]
     );
-    return publicHistory(queryOne(db, `SELECT * FROM ${table} WHERE id = ?`, [Number(result.lastInsertRowid)]));
+    return publicHistory(queryOne(db, `SELECT * FROM ${table} WHERE id = ?`, [Number(result.lastInsertId)]));
   }
 
   const result = run(
@@ -81,7 +81,7 @@ export function recordHistory(db, input = {}) {
       base.created_at,
     ]
   );
-  return publicHistory(queryOne(db, `SELECT * FROM ${table} WHERE id = ?`, [Number(result.lastInsertRowid)]));
+  return publicHistory(queryOne(db, `SELECT * FROM ${table} WHERE id = ?`, [Number(result.lastInsertId)]));
 }
 
 export function listHistory(db, { tenantId, direction = null, definitionId, jobId, action, from, to, page, pageSize } = {}) {

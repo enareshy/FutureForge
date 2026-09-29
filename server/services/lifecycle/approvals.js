@@ -137,7 +137,7 @@ export function listRules(db, query = {}, tenantId) {
     params.push(Number(query.transitionId || query.transition_id));
   }
   if (query.q) {
-    where.push("(r.code LIKE ? OR r.name LIKE ? OR r.description LIKE ?)");
+    where.push("(r.code ILIKE ? OR r.name ILIKE ? OR r.description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -281,16 +281,16 @@ export function createRule(db, body, actor, ip, reqTenantId) {
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Approval rule code already exists in this scope");
     throw err;
   }
-  insertSteps(db, result.lastInsertRowid, steps);
+  insertSteps(db, result.lastInsertId, steps);
   writeAudit(db, {
     actor,
     action: "lifecycle.approval_rule.create",
     resourceType: "approval_rule",
-    resourceId: result.lastInsertRowid,
+    resourceId: result.lastInsertId,
     details: { code: body.code, kind, steps: steps.length },
     ip,
   });
-  return getRule(db, result.lastInsertRowid, tenantId);
+  return getRule(db, result.lastInsertId, tenantId);
 }
 
 export function updateRule(db, id, body, actor, ip, tenantId) {
@@ -512,7 +512,7 @@ export function requestRelease(db, row, transition, fromState, toState, body, ac
       ts,
     ]
   );
-  const releaseId = result.lastInsertRowid;
+  const releaseId = result.lastInsertId;
   let created = 0;
   const approverIds = new Set();
   for (const step of steps) {

@@ -104,7 +104,7 @@ export function createDashboard(db, tenantId, input = {}, actor = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM observability_dashboards WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM observability_dashboards WHERE id = ?", [Number(result.lastInsertId)]);
   for (const [index, widget] of (Array.isArray(input.widgets) ? input.widgets : []).entries()) {
     run(
       db,
@@ -213,7 +213,7 @@ export function addWidget(db, tenantId, dashboardRef, input = {}, actor = null) 
     ]
   );
   recordHistory(db, { tenantId, action: "WIDGET_ADDED", entityType: "dashboard", entityId: dashboard.id, entityRef: dashboard.dashboard_ref, actor, summary: `Widget added to ${dashboard.code}` });
-  return publicWidget(queryOne(db, "SELECT * FROM observability_dashboard_widgets WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicWidget(queryOne(db, "SELECT * FROM observability_dashboard_widgets WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateWidget(db, tenantId, ref, input = {}, actor = null) {

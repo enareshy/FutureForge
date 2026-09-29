@@ -94,7 +94,7 @@ export function createAsset(db, tenantId, input = {}, actor = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM observability_data_assets WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM observability_data_assets WHERE id = ?", [Number(result.lastInsertId)]);
   recordHistory(db, { tenantId, action: "ASSET_CREATED", entityType: "asset", entityId: row.id, entityRef: row.asset_ref, actor, summary: `Data asset ${code} created` });
   writeAudit(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.asset.create", resource_type: "observability_asset", resource_id: row.asset_ref, details: { code } });
   return publicAsset(row);
@@ -155,7 +155,7 @@ export function createFreshness(db, tenantId, input = {}, actor = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM observability_freshness_definitions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM observability_freshness_definitions WHERE id = ?", [Number(result.lastInsertId)]);
   recordHistory(db, { tenantId, action: "FRESHNESS_CREATED", entityType: "freshness", entityId: row.id, entityRef: row.freshness_ref, actor, summary: `Freshness ${code} created` });
   writeAudit(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.freshness.create", resource_type: "observability_freshness", resource_id: row.freshness_ref, details: { code } });
   return publicFreshness(row);

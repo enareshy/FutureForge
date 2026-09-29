@@ -43,7 +43,7 @@ export function getDesignDataRow(db, tenantId, ref) {
     const row = queryOne(db, "SELECT * FROM pdm_design_data WHERE id = ? AND tenant_id = ?", [id, Number(tenantId)]);
     if (row) return row;
   }
-  return queryOne(db, "SELECT * FROM pdm_design_data WHERE tenant_id = ? AND (design_data_ref = ? OR code = ? COLLATE NOCASE)", [Number(tenantId), String(ref), String(ref)]);
+  return queryOne(db, "SELECT * FROM pdm_design_data WHERE tenant_id = ? AND (design_data_ref = ? OR lower(code) = lower(?))", [Number(tenantId), String(ref), String(ref)]);
 }
 
 export function requireDesignDataRow(db, tenantId, ref) {
@@ -80,7 +80,7 @@ export function listDesignData(db, { tenantId, itemId, revisionId, datasetId, da
     params.push(String(status).toUpperCase());
   }
   if (q) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ? OR external_reference LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ? OR external_reference ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like, like);
   }
@@ -134,7 +134,7 @@ export function createDesignData(db, tenantId, body = {}, actor = null, ip = nul
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_design_data WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_design_data WHERE id = ?", [Number(result.lastInsertId)]);
   bumpEpoch(tenant);
   invalidate(tenant);
   recordChange(db, { tenantId: tenant, entityType: "DESIGN_DATA", entityId: row.id, entityRef: row.design_data_ref, action: "LINKED", version: 1, status: row.status, after: publicDesignData(row), actor, ip, details: { revision_id: row.revision_id, dataset_id: row.dataset_id } });

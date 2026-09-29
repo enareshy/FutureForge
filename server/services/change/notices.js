@@ -23,7 +23,7 @@ export function getNoticeRow(db, tenantId, ref) {
   }
   return queryOne(
     db,
-    "SELECT * FROM change_notices WHERE tenant_id = ? AND (notice_ref = ? OR notice_number = ? COLLATE NOCASE)",
+    "SELECT * FROM change_notices WHERE tenant_id = ? AND (notice_ref = ? OR lower(notice_number) = lower(?))",
     [Number(tenantId), String(ref), String(ref)]
   );
 }
@@ -88,7 +88,7 @@ export function createNotice(db, tenantId, body = {}, actor = null, ip = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM change_notices WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM change_notices WHERE id = ?", [Number(result.lastInsertId)]);
   createRelationship(db, tenant, { relationship_type: "PRODUCES_NOTICE", source_type: "change_order", source_id: String(order.id), target_type: "change_notice", target_id: String(row.id) }, actor, ip);
   recordChange(db, { tenantId: tenant, entityType: "NOTICE", entityId: row.id, entityRef: row.notice_ref, action: "CREATED", version: 1, status: row.status, after: publicNotice(row), actor, ip });
   publishChangeEvent(db, { eventType: "ChangeNoticeCreated", objectType: "change_notice", objectId: row.id, tenantId: tenant, organizationId: row.organization_id, payload: { notice_ref: row.notice_ref, notice_number: row.notice_number } }, actor);

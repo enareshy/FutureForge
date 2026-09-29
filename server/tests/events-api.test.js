@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne, run } from "../db.js";
+import { migrate, queryOne, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -58,7 +58,7 @@ describe("Event & Messaging Framework REST APIs", () => {
   let userToken;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const started = await listen(createApp(db));
@@ -331,7 +331,7 @@ describe("Event & Messaging Framework REST APIs", () => {
          VALUES (?, 'WidgetApiBulk', 1, 'test', 'test.api-bulk', 1, 'technical', 'manual', ?, '{}', 'internal', 'open', ?, ?, ?)`,
         [`EVT-API-BULK-${i}`, ts, tenantId, ts, ts]
       );
-      ids.push(Number(result.lastInsertRowid));
+      ids.push(Number(result.lastInsertId));
     }
 
     const result = await request(port, "POST", "/api/events/dead-letters/bulk-retry", { ...auth(), body: { ids } });
@@ -473,7 +473,7 @@ describe("Event & Messaging Framework REST APIs", () => {
              failure_at, payload_json, security_classification, status, tenant_id, created_at, updated_at)
            VALUES (?, 'AliasWidget', 1, 'test', 'test.alias', 1, 'technical', 'manual', ?, '{}', 'internal', 'open', ?, ?, ?)`,
           [eventRefValue, ts, tenantId, ts, ts]
-        ).lastInsertRowid
+        ).lastInsertId
       );
     const retryId = insertDeadLetter("EVT-API-ALIAS-RETRY");
     const retried = await request(port, "POST", `/api/v1/events/dead-letters/${retryId}/retry`, { ...auth(), body: {} });

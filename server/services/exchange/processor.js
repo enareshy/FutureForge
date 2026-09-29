@@ -187,7 +187,7 @@ function insertTransaction(db, tenantId, opts, actor) {
       ts,
     ]
   );
-  return queryOne(db, "SELECT * FROM exchange_transactions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM exchange_transactions WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 function updateTransaction(db, id, patch = {}) {

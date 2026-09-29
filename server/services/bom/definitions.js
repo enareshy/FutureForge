@@ -47,7 +47,7 @@ export function getBomRow(db, tenantId, ref) {
   }
   return queryOne(
     db,
-    "SELECT * FROM bom_headers WHERE tenant_id = ? AND (bom_ref = ? OR bom_number = ? COLLATE NOCASE)",
+    "SELECT * FROM bom_headers WHERE tenant_id = ? AND (bom_ref = ? OR lower(bom_number) = lower(?))",
     [Number(tenantId), String(ref), String(ref)]
   );
 }
@@ -90,7 +90,7 @@ export function listBoms(db, { tenantId, status, bomType, organizationId, plantI
     params.push(Number(ownerUserId));
   }
   if (q) {
-    clauses.push("(bom_number LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(bom_number ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like);
   }
@@ -137,7 +137,7 @@ export function createBom(db, tenantId, body = {}, actor = null, ip = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM bom_headers WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM bom_headers WHERE id = ?", [Number(result.lastInsertId)]);
   bumpEpoch(tenant);
   invalidate(tenant);
   recordChange(db, { tenantId: tenant, entityType: "BOM", entityId: row.id, entityRef: row.bom_ref, action: "CREATED", version: 1, status: row.status, after: publicBom(row), actor, ip });

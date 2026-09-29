@@ -214,7 +214,7 @@ export function createPolicy(db, body, actor = null, tenantId = null) {
       ts,
     ]
   );
-  return getPolicy(db, result.lastInsertRowid, null);
+  return getPolicy(db, result.lastInsertId, null);
 }
 
 export function updatePolicy(db, id, body, tenantId = null) {

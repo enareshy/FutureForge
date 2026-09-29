@@ -13,7 +13,7 @@ export function listRoles(db, query = {}) {
   const where = [];
   const params = [];
   if (query.q) {
-    where.push("(name LIKE ? OR code LIKE ? OR description LIKE ?)");
+    where.push("(name ILIKE ? OR code ILIKE ? OR description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -66,7 +66,7 @@ export function createRole(db, body, actor, ip) {
     }
     throw err;
   }
-  const role = getRole(db, result.lastInsertRowid);
+  const role = getRole(db, result.lastInsertId);
   writeAudit(db, {
     actor,
     action: "role.create",

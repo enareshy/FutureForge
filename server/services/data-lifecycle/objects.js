@@ -156,7 +156,7 @@ export function registerObjectLifecycle(db, tenantId, input = {}, actor = null, 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM lc_object_lifecycle WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM lc_object_lifecycle WHERE id = ?", [Number(result.lastInsertId)]);
   const scheduled = applySchedule(db, tid, row, policyRow, resolveAnchor(input, basis), basis);
 
   writeAudit(db, {
@@ -217,7 +217,7 @@ export function listObjectLifecycles(db, query = {}) {
   }
   const term = normalizeText(query.q, { max: 200 });
   if (term) {
-    clauses.push("(object_id LIKE ? OR object_ref LIKE ? OR object_type LIKE ?)");
+    clauses.push("(object_id ILIKE ? OR object_ref ILIKE ? OR object_type ILIKE ?)");
     const like = `%${term}%`;
     params.push(like, like, like);
   }

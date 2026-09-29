@@ -119,7 +119,7 @@ export function listRelationshipTypes(db, query = {}, tenantId) {
     params.push(Number(query.targetTypeId || query.target_type_id));
   }
   if (query.q) {
-    where.push("(rt.code LIKE ? OR rt.name LIKE ? OR rt.description LIKE ?)");
+    where.push("(rt.code ILIKE ? OR rt.name ILIKE ? OR rt.description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -228,7 +228,7 @@ export function createRelationshipType(db, body, actor, ip, reqTenantId, query =
     }
     throw err;
   }
-  const row = getRelationshipTypeRow(db, result.lastInsertRowid);
+  const row = getRelationshipTypeRow(db, result.lastInsertId);
   writeAudit(db, {
     actor,
     action: "relationship_type.create",

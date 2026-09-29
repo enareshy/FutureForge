@@ -160,11 +160,11 @@ export function createMatchRule(db, input = {}, actor = null, tenantId = null, i
     actor,
     action: "data_quality.duplicate_rule.create",
     resourceType: "dg_duplicate_match_rule",
-    resourceId: Number(result.lastInsertRowid),
+    resourceId: Number(result.lastInsertId),
     details: { code, strategy, attributes },
     ip,
   });
-  return publicDuplicateRule(getMatchRuleRow(db, Number(result.lastInsertRowid)));
+  return publicDuplicateRule(getMatchRuleRow(db, Number(result.lastInsertId)));
 }
 
 export function updateMatchRule(db, ref, patch = {}, actor = null) {
@@ -225,7 +225,7 @@ function upsertCandidate(db, { tenantId, domainId, objectType, objectId, matched
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dg_duplicate_candidates WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dg_duplicate_candidates WHERE id = ?", [Number(result.lastInsertId)]);
   publishGovernanceEvent(db, {
     eventType: "DuplicateCandidateDetected",
     tenantId: Number(tenantId),

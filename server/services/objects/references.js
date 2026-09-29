@@ -169,7 +169,7 @@ export function createReference(db, body, actor, tenantId, ip) {
     actor,
     action: "reference.create",
     resourceType: "object_reference",
-    resourceId: result.lastInsertRowid,
+    resourceId: result.lastInsertId,
     details: {
       source: sourceRow.code,
       target: targetRow?.code ?? externalRef,
@@ -178,7 +178,7 @@ export function createReference(db, body, actor, tenantId, ip) {
     },
     ip,
   });
-  return getReference(db, result.lastInsertRowid, tenantId);
+  return getReference(db, result.lastInsertId, tenantId);
 }
 
 export function updateReference(db, id, body, actor, tenantId, ip) {

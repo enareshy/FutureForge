@@ -124,9 +124,10 @@ curl -sS -X POST http://localhost:3001/api/versioning/effectivity/validate \
 
 Resolution batch-loads revisions, assignments, definitions and values in a bounded
 number of queries, so bulk resolution avoids N+1 access; callers should prefer the
-bulk endpoint for product structures. SQLite serialises writers, so correctness
-comes from transactions, optimistic `version` columns and unique constraints rather
-than raw throughput. The engine holds no lock across an HTTP request, so moving to a
-networked database later changes the connection, not the algorithm. Cacheable
+bulk endpoint for product structures. PostgreSQL gives concurrent writers per
+connection, so correctness comes from transactions, optimistic `version` columns
+and unique constraints rather than from a single global write lock. The engine
+holds no lock across an HTTP request, so the algorithm is independent of the
+database connection. Cacheable
 resolution results are currently recorded for observability; callers that require
 sub-millisecond lookups should cache by `objectType|objectId|context|policy`.

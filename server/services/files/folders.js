@@ -24,7 +24,7 @@ export function listFolders(db, query = {}, tenantId) {
     params.push(Number(query.parentId));
   }
   if (query.q) {
-    where.push("(f.name LIKE ? OR f.description LIKE ?)");
+    where.push("(f.name ILIKE ? OR f.description ILIKE ?)");
     params.push(`%${query.q}%`, `%${query.q}%`);
   }
   if (query.includeDeleted !== "true") where.push("f.deleted_at IS NULL");
@@ -35,7 +35,7 @@ export function listFolders(db, query = {}, tenantId) {
         (SELECT COUNT(*) FROM folders c WHERE c.parent_id = f.id AND c.deleted_at IS NULL) AS child_count,
         (SELECT COUNT(*) FROM files x WHERE x.folder_id = f.id AND x.deleted_at IS NULL) AS file_count
      FROM folders f ${clause}
-     ORDER BY f.name COLLATE NOCASE LIMIT ? OFFSET ?`,
+     ORDER BY lower(f.name) LIMIT ? OFFSET ?`,
     [...params, pageSize, offset]
   ).map((row) => ({ ...publicFolder(row), child_count: row.child_count, file_count: row.file_count }));
   const total = queryOne(db, `SELECT COUNT(*) AS c FROM folders f ${clause}`, params).c;
@@ -48,7 +48,7 @@ export function folderTree(db, tenantId, { rootId = null } = {}) {
     db,
     `SELECT f.*,
         (SELECT COUNT(*) FROM files x WHERE x.folder_id = f.id AND x.deleted_at IS NULL) AS file_count
-     FROM folders f WHERE f.tenant_id = ? AND f.deleted_at IS NULL ORDER BY f.name COLLATE NOCASE`,
+     FROM folders f WHERE f.tenant_id = ? AND f.deleted_at IS NULL ORDER BY lower(f.name)`,
     [Number(tenantId)]
   );
   const byId = new Map();
@@ -116,7 +116,7 @@ export function createFolder(db, body = {}, actor, tenantId, ip) {
       classification, actor?.id ?? null, actor?.id ?? null, ts, ts,
     ]
   );
-  const row = findFolderRow(db, insert.lastInsertRowid, scope);
+  const row = findFolderRow(db, insert.lastInsertId, scope);
   auditFile(db, {
     actor, tenantId: scope, organizationId: row.organization_id, action: "files.folder.create",
     file: null, objectType: "folder", objectId: row.id, objectName: row.name,
@@ -234,7 +234,7 @@ export function listFolderFiles(db, reference, query = {}, tenantId) {
   const rows = queryAll(
     db,
     `SELECT * FROM files WHERE folder_id = ? AND deleted_at IS NULL
-     ORDER BY name COLLATE NOCASE LIMIT ? OFFSET ?`,
+     ORDER BY lower(name) LIMIT ? OFFSET ?`,
     [folder.id, pageSize, offset]
   ).map(publicFile);
   const total = queryOne(db, "SELECT COUNT(*) AS c FROM files WHERE folder_id = ? AND deleted_at IS NULL", [folder.id]).c;

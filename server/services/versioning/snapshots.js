@@ -44,7 +44,7 @@ export function listSnapshots(db, { status, tenantId, q, page = 1, pageSize = 50
     params.push(Number(tenantId));
   }
   if (q) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${String(q)}%`;
     params.push(like, like, like);
   }
@@ -76,7 +76,7 @@ export function createSnapshot(db, input = {}, actor = null, tenantId = null, ip
   return transaction(db, () => {
     const existing = queryOne(
       db,
-      "SELECT id FROM versioning_snapshots WHERE code = ? AND (tenant_id IS NULL OR ? IS NULL OR tenant_id = ?)",
+      "SELECT id FROM versioning_snapshots WHERE code = ? AND (tenant_id IS NULL OR ?::bigint IS NULL OR tenant_id = ?)",
       [code, tenantId, tenantId]
     );
     if (existing) throw invalidEffectivity(`Snapshot ${code} already exists`);
@@ -103,7 +103,7 @@ export function createSnapshot(db, input = {}, actor = null, tenantId = null, ip
         ts,
       ]
     );
-    const id = Number(result.lastInsertRowid);
+    const id = Number(result.lastInsertId);
     const entries = [];
     for (const entry of objects) {
       const objectType = normalizeText(entry.objectType ?? entry.object_type);
@@ -138,7 +138,7 @@ export function createSnapshot(db, input = {}, actor = null, tenantId = null, ip
           JSON.stringify(entry.metadata ?? {}),
           ts,
         ]
-      ).lastInsertRowid;
+      ).lastInsertId;
       entries.push({ object_type: objectType, object_id: objectId, revision_id: revision?.id ?? null, version_id: version?.id ?? null, rowId });
     }
     const hash = contentHash(entries);

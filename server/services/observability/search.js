@@ -82,7 +82,7 @@ export function registerObservabilitySources() {
     code: "observability_metric",
     table: "observability_metric_definitions",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM observability_metric_definitions WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, metric_ref, code, name, description, category, provider_code, calculation, unit, status, owner_user_id, created_by FROM observability_metric_definitions WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -112,7 +112,7 @@ export function registerObservabilitySources() {
     code: "observability_alert",
     table: "observability_alerts",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM observability_alerts WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, alert_ref, rule_code, metric_code, service_code, severity, status, message, created_by FROM observability_alerts WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -142,7 +142,7 @@ export function registerObservabilitySources() {
     code: "observability_incident",
     table: "observability_incidents",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM observability_incidents WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, incident_ref, title, description, severity, status, service_code, metric_code, owner_user_id, created_by FROM observability_incidents WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -172,7 +172,7 @@ export function registerObservabilitySources() {
     code: "observability_dashboard",
     table: "observability_dashboards",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM observability_dashboards WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, dashboard_ref, code, name, description, scope, status, owner_user_id, created_by FROM observability_dashboards WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {

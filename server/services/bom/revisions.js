@@ -36,14 +36,14 @@ export function getRevisionRow(db, tenantId, ref, { bomId = null } = {}) {
   if (bomId != null) {
     const byNumber = queryOne(
       db,
-      "SELECT * FROM bom_revisions WHERE tenant_id = ? AND bom_id = ? AND revision_number = ? COLLATE NOCASE",
+      "SELECT * FROM bom_revisions WHERE tenant_id = ? AND bom_id = ? AND lower(revision_number) = lower(?)",
       [Number(tenantId), Number(bomId), String(ref)]
     );
     if (byNumber) return byNumber;
   }
   return queryOne(
     db,
-    "SELECT * FROM bom_revisions WHERE tenant_id = ? AND (revision_ref = ? OR revision_number = ? COLLATE NOCASE) ORDER BY revision_sequence DESC LIMIT 1",
+    "SELECT * FROM bom_revisions WHERE tenant_id = ? AND (revision_ref = ? OR lower(revision_number) = lower(?)) ORDER BY revision_sequence DESC LIMIT 1",
     [Number(tenantId), String(ref), String(ref)]
   );
 }
@@ -84,7 +84,7 @@ export function listRevisions(db, { tenantId, bomId, bomRef, status, variantId, 
     params.push(normalizeUpper(variantCode, { max: 120 }));
   }
   if (q) {
-    clauses.push("(revision_number LIKE ? OR configuration_context LIKE ?)");
+    clauses.push("(revision_number ILIKE ? OR configuration_context ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like);
   }
@@ -143,7 +143,7 @@ export function createRevision(db, tenantId, ref, body = {}, actor = null, ip = 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM bom_revisions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM bom_revisions WHERE id = ?", [Number(result.lastInsertId)]);
   setCurrentRevisionIfUnset(db, header, row, actor);
   bumpEpoch(tenant);
   invalidate(tenant);
@@ -249,7 +249,7 @@ export function reviseRevision(db, tenantId, ref, body = {}, actor = null, ip = 
         line.attributes_json, line.notes, line.line_status, actor?.id ?? null, actor?.id ?? null, now, now,
       ]
     );
-    idMap.set(line.id, Number(result.lastInsertRowid));
+    idMap.set(line.id, Number(result.lastInsertId));
   }
   const substitutes = queryAll(db, "SELECT * FROM bom_substitutes WHERE bom_revision_id = ?", [source.id]);
   for (const sub of substitutes) {

@@ -52,9 +52,9 @@ function tabClause(tab) {
     case "unread":
       return "n.read_at IS NULL";
     case "tasks":
-      return "(e.event_type LIKE 'task.%' OR e.event_type LIKE 'workflow.task%' OR e.source_module = 'workflow')";
+      return "(e.event_type ILIKE 'task.%' OR e.event_type ILIKE 'workflow.task%' OR e.source_module = 'workflow')";
     case "approvals":
-      return "(e.event_type LIKE '%approval%' OR e.event_type LIKE '%release%')";
+      return "(e.event_type ILIKE '%approval%' OR e.event_type ILIKE '%release%')";
     case "system":
       return "(e.source_module IN ('platform', 'system', 'admin') OR n.channel = 'in_app' AND e.event_type IS NULL)";
     default:
@@ -92,7 +92,7 @@ export function listInbox(db, userId, tenantId, query = {}) {
   const tab = query.tab && query.tab !== "all" ? tabClause(query.tab) : null;
   if (tab) where.push(`(${tab})`);
   if (query.q) {
-    where.push("(n.subject LIKE ? OR n.body LIKE ? OR n.object_name LIKE ?)");
+    where.push("(n.subject ILIKE ? OR n.body ILIKE ? OR n.object_name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -244,7 +244,7 @@ export function listHistory(db, query = {}, tenantId = null) {
     params.push(query.to);
   }
   if (query.q) {
-    where.push("(n.subject LIKE ? OR n.body LIKE ? OR n.object_name LIKE ? OR u.username LIKE ?)");
+    where.push("(n.subject ILIKE ? OR n.body ILIKE ? OR n.object_name ILIKE ? OR u.username ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like, like);
   }

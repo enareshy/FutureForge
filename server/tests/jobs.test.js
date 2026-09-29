@@ -1,6 +1,6 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, queryAll } from "../db.js";
+import { migrate, queryOne, queryAll, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as j from "../services/jobs.js";
 
@@ -11,7 +11,7 @@ describe("background job management services", () => {
   let admin;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;

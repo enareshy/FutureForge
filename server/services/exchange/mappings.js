@@ -28,7 +28,7 @@ export function getMappingRow(db, tenantId, ref) {
     const byId = queryOne(db, "SELECT * FROM exchange_mappings WHERE id = ? AND tenant_id = ?", [Number(raw), tenant]);
     if (byId) return byId;
   }
-  return queryOne(db, "SELECT * FROM exchange_mappings WHERE tenant_id = ? AND (mapping_ref = ? OR code = ? COLLATE NOCASE)", [tenant, raw, raw]);
+  return queryOne(db, "SELECT * FROM exchange_mappings WHERE tenant_id = ? AND (mapping_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
 }
 
 export function requireMappingRow(db, tenantId, ref) {
@@ -114,7 +114,7 @@ export function createMapping(db, tenantId, body = {}, actor = null) {
       actor?.id ?? null, actor?.id ?? null, ts, ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM exchange_mappings WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM exchange_mappings WHERE id = ?", [Number(result.lastInsertId)]);
   insertMappingVersion(db, tenant, row, { changeSummary: "Initial version", actor });
   return publicMapping(row);
 }
@@ -184,7 +184,7 @@ export function listMappings(db, tenantId, query = {}) {
     params.push(normalizeUpper(query.direction));
   }
   if (query.q) {
-    clauses.push("(code LIKE ? OR name LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like);
   }

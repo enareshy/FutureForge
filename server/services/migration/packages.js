@@ -32,8 +32,8 @@ const MUTABLE = ["DRAFT", "READY", "BLOCKED", "FAILED"];
 export function getPackageRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM mig_packages WHERE tenant_id = ? AND (package_ref = ? OR CAST(id AS TEXT) = ? OR code = ?)",
-    [Number(tenantId), String(ref), String(ref), normalizeUpper(ref)]
+    "SELECT * FROM mig_packages WHERE tenant_id = ? AND (package_ref = ? OR id = ? OR code = ?)",
+    [Number(tenantId), String(ref), Number(ref) || -1, normalizeUpper(ref)]
   );
 }
 
@@ -78,7 +78,7 @@ export function createPackage(db, tenantId, input = {}, actor = null, ip = null)
       ts,
     ]
   );
-  const packageId = Number(result.lastInsertRowid);
+  const packageId = Number(result.lastInsertId);
   syncPackageDependencies(db, tenant, packageId);
   const created = queryOne(db, "SELECT * FROM mig_packages WHERE id = ?", [packageId]);
   writePackageVersion(db, created, actor, "Initial version");

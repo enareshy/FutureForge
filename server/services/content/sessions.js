@@ -76,7 +76,7 @@ export function initiateUploadSession(db, input = {}, { actor = null, tenantId =
       ts,
     ]
   );
-  return publicUpload(queryOne(db, "SELECT * FROM content_upload_sessions WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicUpload(queryOne(db, "SELECT * FROM content_upload_sessions WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function getUploadSession(db, reference, tenantId = null) {

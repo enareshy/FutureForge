@@ -26,7 +26,7 @@ export function listApiCatalog(db, { tenantId, apiGroup, status, q, page = 1, pa
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(path) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(path) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -82,7 +82,7 @@ export function createCatalogEntry(db, input = {}, actor = null, tenantId = null
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM integration_api_catalog WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM integration_api_catalog WHERE id = ?", [Number(result.lastInsertId)]);
   auditIntegration(db, { actor, action: "integration.api.catalog.create", resourceType: "integration_api_catalog", resourceId: row.id, details: { code: row.code, version: row.version } });
   return publicApiCatalog(row);
 }
@@ -158,7 +158,7 @@ export function listApiClients(db, { tenantId, status, clientType, q, page = 1, 
     params.push(clientType);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -212,7 +212,7 @@ export function createApiClient(db, input = {}, actor = null, tenantId = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM integration_api_clients WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM integration_api_clients WHERE id = ?", [Number(result.lastInsertId)]);
   auditIntegration(db, { actor, action: "integration.api.client.create", resourceType: "integration_api_client", resourceId: row.id, details: { code: row.code } });
   return publicApiClient(row, { apiKey: key.raw });
 }

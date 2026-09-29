@@ -57,7 +57,7 @@ export function insertNode(db, versionId, node) {
       ts,
     ]
   );
-  return getNodeRow(db, result.lastInsertRowid);
+  return getNodeRow(db, result.lastInsertId);
 }
 
 export function updateNode(db, id, patch) {
@@ -123,7 +123,7 @@ export function insertTransition(db, versionId, edge) {
       ts,
     ]
   );
-  return getTransitionRow(db, result.lastInsertRowid);
+  return getTransitionRow(db, result.lastInsertId);
 }
 
 export function updateTransition(db, id, patch) {

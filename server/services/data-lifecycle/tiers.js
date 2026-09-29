@@ -56,7 +56,7 @@ export function setTierPolicy(db, tenantId, stateCode, dataTier, { description =
     [Number(tenantId), code, tier, normalizeText(description), ts, ts]
   );
   writeAudit(db, { actor, action: "data_lifecycle.tier.create", resourceType: "lc_tier_policies", resourceId: code, details: { data_tier: tier }, ip });
-  return publicTierPolicy(queryOne(db, "SELECT * FROM lc_tier_policies WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicTierPolicy(queryOne(db, "SELECT * FROM lc_tier_policies WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 // Resolution order: explicit tenant mapping, then the platform default map.

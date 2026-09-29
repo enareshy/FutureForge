@@ -1,6 +1,6 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, queryAll, run } from "../db.js";
+import { migrate, queryOne, queryAll, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as audit from "../services/audit.js";
 
@@ -14,7 +14,7 @@ describe("audit framework services", () => {
   let tenantId;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = queryOne(db, "SELECT id, username, display_name FROM users WHERE username = 'admin'");
@@ -337,7 +337,7 @@ describe("audit framework extensions", () => {
   let tenantId;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = queryOne(db, "SELECT id, username, display_name FROM users WHERE username = 'admin'");
@@ -499,7 +499,7 @@ describe("audit framework extensions", () => {
       `INSERT INTO audit_logs (tenant_id, actor_username, actor_type, action, event_type, category, source,
          security_classification, retention_category, resource_type, resource_id, status, created_at)
        VALUES (?, 'system', 'system', 'compliance.record', 'ADMIN_ACTION', 'compliance', 'system',
-         'confidential', 'extended', 'compliance_record', 'C-OLD', 'success', datetime('now', '-800 days'))`,
+         'confidential', 'extended', 'compliance_record', 'C-OLD', 'success', to_char((now() at time zone 'utc') + interval '-800 days','YYYY-MM-DD HH24:MI:SS'))`,
       [tenantId]
     );
     const policy = audit.createRetentionPolicy(

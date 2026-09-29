@@ -45,7 +45,7 @@ export function publicStatus(row) {
 
 const STATUS_SELECT = `
   SELECT s.*,
-    (SELECT group_concat(a.type_id || ':' || t.code, ',')
+    (SELECT string_agg(a.type_id::text || ':' || t.code, ',')
        FROM status_type_availability a
        JOIN metadata_types t ON t.id = a.type_id
       WHERE a.status_id = s.id) AS available_type_codes
@@ -111,7 +111,7 @@ export function listStatuses(db, query = {}, tenantId) {
     params.push(typeId);
   }
   if (query.q) {
-    where.push("(s.code LIKE ? OR s.name LIKE ? OR s.label LIKE ? OR s.description LIKE ?)");
+    where.push("(s.code ILIKE ? OR s.name ILIKE ? OR s.label ILIKE ? OR s.description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like, like);
   }
@@ -142,7 +142,7 @@ function normalizeAvailability(db, body, tenantId, actor) {
 function replaceAvailability(db, statusId, typeIds) {
   run(db, "DELETE FROM status_type_availability WHERE status_id = ?", [statusId]);
   for (const typeId of typeIds) {
-    run(db, "INSERT OR IGNORE INTO status_type_availability (status_id, type_id, created_at) VALUES (?, ?, ?)", [
+    run(db, "INSERT INTO status_type_availability (status_id, type_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", [
       statusId,
       typeId,
       nowIso(),
@@ -191,11 +191,11 @@ export function createStatus(db, body, actor, ip, reqTenantId, query = {}) {
     }
     throw err;
   }
-  if (availability) replaceAvailability(db, result.lastInsertRowid, availability);
+  if (availability) replaceAvailability(db, result.lastInsertId, availability);
   if ((body.is_default || body.isDefault) && tenantId) {
-    run(db, "UPDATE lifecycle_statuses SET is_default = 0 WHERE tenant_id = ? AND id != ?", [tenantId, result.lastInsertRowid]);
+    run(db, "UPDATE lifecycle_statuses SET is_default = 0 WHERE tenant_id = ? AND id != ?", [tenantId, result.lastInsertId]);
   }
-  const row = getStatusRow(db, result.lastInsertRowid);
+  const row = getStatusRow(db, result.lastInsertId);
   writeAudit(db, {
     actor,
     action: "lifecycle.status.create",

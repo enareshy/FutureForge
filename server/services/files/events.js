@@ -52,7 +52,7 @@ export function recordFileEvent(db, {
       nowIso(),
     ]
   );
-  const row = { id: Number(insert.lastInsertRowid) };
+  const row = { id: Number(insert.lastInsertId) };
   let summary = null;
   if (eventTenant) {
     try {

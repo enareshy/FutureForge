@@ -69,7 +69,7 @@ export function recordHistory(db, jobId, entry = {}) {
       ts,
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listHistory(db, jobId, query = {}) {

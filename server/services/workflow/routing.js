@@ -53,7 +53,7 @@ export function listRoutingRules(db, query = {}, tenantId) {
     params.push(String(query.nodeType || query.node_type));
   }
   if (query.q) {
-    where.push("(r.code LIKE ? OR r.name LIKE ?)");
+    where.push("(r.code ILIKE ? OR r.name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like);
   }
@@ -110,8 +110,8 @@ export function createRoutingRule(db, body, actor = null, ip = null, reqTenantId
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Routing rule code already exists in this scope");
     throw err;
   }
-  writeAudit(db, { actor, action: "workflow.routing_rule.create", resourceType: "workflow_routing_rule", resourceId: result.lastInsertRowid, details: { code: body.code }, ip });
-  return publicRoutingRule(getRoutingRuleRow(db, result.lastInsertRowid));
+  writeAudit(db, { actor, action: "workflow.routing_rule.create", resourceType: "workflow_routing_rule", resourceId: result.lastInsertId, details: { code: body.code }, ip });
+  return publicRoutingRule(getRoutingRuleRow(db, result.lastInsertId));
 }
 
 export function updateRoutingRule(db, id, body, actor = null, ip = null, tenantId = null) {

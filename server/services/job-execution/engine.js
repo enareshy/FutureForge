@@ -62,7 +62,7 @@ function activeLeaseOwners(db, aliases) {
 function executionsLastMinute(db, aliases) {
   const row = queryOne(
     db,
-    `SELECT COUNT(*) AS c FROM job_executions WHERE queue IN (${inClause(aliases)}) AND started_at >= datetime('now', '-60 seconds')`,
+    `SELECT COUNT(*) AS c FROM job_executions WHERE queue IN (${inClause(aliases)}) AND started_at >= to_char((now() at time zone 'utc') + interval '-60 seconds','YYYY-MM-DD HH24:MI:SS')`,
     aliases
   );
   return row?.c || 0;
@@ -200,7 +200,7 @@ function createExecutionRow(db, job, attempt, workerId, queue) {
      VALUES (?, ?, ?, ?, 'running', ?, ?)`,
     [job.id, attempt, workerId, queue, nowIso(), nowIso()]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function recordStep(db, executionId, name, update = {}) {
@@ -641,7 +641,7 @@ export function recoverStaleJobs(db) {
     `SELECT * FROM jobs
       WHERE status IN ('running', 'cancel_requested')
         AND (lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at <= ?)
-        AND (heartbeat_at IS NULL OR heartbeat_at <= datetime(?, '-30 seconds'))`,
+        AND (heartbeat_at IS NULL OR heartbeat_at <= to_char((?::timestamp) + interval '-30 seconds','YYYY-MM-DD HH24:MI:SS'))`,
     [now, now]
   );
   const summary = { recovered: 0, failed: 0, cancelled: 0 };
@@ -678,7 +678,7 @@ export function recoverStaleJobs(db) {
     run(
       db,
       `UPDATE job_workers SET active_jobs = 0, status = 'offline', updated_at = ?
-        WHERE status NOT IN ('offline', 'stopped') AND (last_heartbeat IS NULL OR last_heartbeat <= datetime(?, '-90 seconds'))`,
+        WHERE status NOT IN ('offline', 'stopped') AND (last_heartbeat IS NULL OR last_heartbeat <= to_char((?::timestamp) + interval '-90 seconds','YYYY-MM-DD HH24:MI:SS'))`,
       [now, now]
     );
   }
@@ -694,7 +694,7 @@ export function reapTimedOutJobs(db) {
       WHERE status IN ('running', 'cancel_requested')
         AND timeout_seconds > 0
         AND started_at IS NOT NULL
-        AND datetime(started_at, '+' || timeout_seconds || ' seconds') <= datetime(?)`,
+        AND to_char((started_at::timestamp) + ((timeout_seconds)::text || ' seconds')::interval,'YYYY-MM-DD HH24:MI:SS') <= to_char((?::timestamp),'YYYY-MM-DD HH24:MI:SS')`,
     [now]
   );
   const summary = { timed_out: 0, retried: 0 };

@@ -56,7 +56,7 @@ export function listSubscriptions(db, { tenantId, eventTypeCode, subscriber, sta
     params.push(handler);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(subscriber) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(subscriber) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -125,7 +125,7 @@ export function createSubscription(db, input = {}, actor = null, tenantId = null
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM event_subscriptions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM event_subscriptions WHERE id = ?", [Number(result.lastInsertId)]);
   auditEvent(db, { actor, action: "event.subscription.create", resourceType: "event_subscription", resourceId: row.id, details: { code: row.code, event_type: row.event_type_code } });
   return publicSubscription(row);
 }

@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -57,7 +57,7 @@ describe("Deployment & Edition framework REST APIs", () => {
   let readerToken;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const started = await listen(createApp(db));

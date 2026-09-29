@@ -228,7 +228,7 @@ export function createObject(db, body, actor, tenantId, ip) {
     }
     throw err;
   }
-  const row = applyInitialLifecycle(db, getObjectRow(db, result.lastInsertRowid), actor) || getObjectRow(db, result.lastInsertRowid);
+  const row = applyInitialLifecycle(db, getObjectRow(db, result.lastInsertId), actor) || getObjectRow(db, result.lastInsertId);
   recordObjectVersion(db, row, "create", body.change_summary || "Object created", actor?.id);
   recordObjectChange(db, {
     actor,
@@ -465,7 +465,7 @@ export function checkoutObject(db, reference, body, actor, tenantId, ip) {
     db,
     `SELECT ck.*, u.username AS locked_by_username FROM object_checkouts ck
      LEFT JOIN users u ON u.id = ck.locked_by WHERE ck.id = ?`,
-    [result.lastInsertRowid]
+    [result.lastInsertId]
   );
   return { object: publicObject(getObjectRow(db, row.id)), checkout: publicCheckout(checkout) };
 }

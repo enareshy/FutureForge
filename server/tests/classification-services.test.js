@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { ClassificationError } from "../services/classification/errors.js";
 import * as Definitions from "../services/classification/definitions.js";
@@ -43,7 +43,7 @@ describe("classification services", () => {
   };
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;

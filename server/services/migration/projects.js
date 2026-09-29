@@ -23,8 +23,8 @@ const MUTABLE = ["DRAFT", "PLANNED", "READY", "PAUSED", "FAILED"];
 export function getProjectRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM mig_projects WHERE tenant_id = ? AND (project_ref = ? OR CAST(id AS TEXT) = ? OR code = ?)",
-    [Number(tenantId), String(ref), String(ref), normalizeUpper(ref)]
+    "SELECT * FROM mig_projects WHERE tenant_id = ? AND (project_ref = ? OR id = ? OR code = ?)",
+    [Number(tenantId), String(ref), Number(ref) || -1, normalizeUpper(ref)]
   );
 }
 
@@ -58,7 +58,7 @@ export function createProject(db, tenantId, input = {}, actor = null, ip = null)
       ts,
     ]
   );
-  const project = queryOne(db, "SELECT * FROM mig_projects WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const project = queryOne(db, "SELECT * FROM mig_projects WHERE id = ?", [Number(result.lastInsertId)]);
   writeProjectVersion(db, project, actor, "Initial version");
   writeAudit(db, { actor, action: "migration.project.create", resourceType: "mig_projects", resourceId: project.project_ref, details: { code }, ip });
   return publicProject(project);

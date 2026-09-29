@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne, run } from "../db.js";
+import { migrate, queryOne, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 import * as search from "../services/search.js";
@@ -59,7 +59,7 @@ describe("Enterprise Search Foundation v1", () => {
   let tenantId;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     admin = queryOne(db, "SELECT * FROM users WHERE username = 'admin'");

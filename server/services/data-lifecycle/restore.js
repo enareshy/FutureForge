@@ -23,10 +23,10 @@ export { publicRestoreRecord };
 const DEFAULT_TARGET = Object.freeze({ ARCHIVED: "INACTIVE", COLD_STORAGE: "ARCHIVED" });
 
 export function getRestoreRow(db, tenantId, ref) {
-  return queryOne(db, "SELECT * FROM lc_restore_records WHERE tenant_id = ? AND (restore_ref = ? OR CAST(id AS TEXT) = ?)", [
+  return queryOne(db, "SELECT * FROM lc_restore_records WHERE tenant_id = ? AND (restore_ref = ? OR id = ?)", [
     Number(tenantId),
     String(ref),
-    String(ref),
+    Number(ref) || -1,
   ]);
 }
 
@@ -119,7 +119,7 @@ export function requestRestore(db, { tenantId, archiveRef = null, objectType, ob
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM lc_restore_records WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM lc_restore_records WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "data_lifecycle.restore.request",

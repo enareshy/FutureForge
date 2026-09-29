@@ -75,7 +75,7 @@ export function requestExport(db, tenantId, reportRefValue, input = {}, actor = 
      VALUES (?, ?, ?, NULL, ?, 'QUEUED', ?, ?, NULL, ?)`,
     [makeExportRef(), Number(tenantId), report.id, format, stringifyJson(input.parameters || {}), actor?.id ?? null, ts]
   );
-  const exportId = Number(result.lastInsertRowid);
+  const exportId = Number(result.lastInsertId);
   const created = publicExport(queryOne(db, "SELECT * FROM reporting_exports WHERE id = ?", [exportId]));
   if (input.async) return { async: true, ...created };
   return { async: false, ...executeExport(db, tenantId, created.export_ref, { parameters: input.parameters || {}, enableCache: false }, actor, ip) };

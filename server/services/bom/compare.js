@@ -138,7 +138,7 @@ export function compare(db, tenantId, body = {}, actor = null, ip = null) {
     [comparisonRef(), tenant, null, leftKind, leftId, rightKind, rightId, scope, JSON.stringify(summary), summary.added, summary.removed,
       summary.modified, summary.unchanged, summary.matched, 0, actor?.id ?? null, ts]
   );
-  const comparisonId = Number(insert.lastInsertRowid);
+  const comparisonId = Number(insert.lastInsertId);
   for (const result of results) {
     run(
       db,

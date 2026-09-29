@@ -114,7 +114,7 @@ export function listTypes(db, query = {}, tenantId = null) {
     params.push(query.module);
   }
   if (query.q) {
-    where.push("(t.code LIKE ? OR t.name LIKE ? OR t.description LIKE ?)");
+    where.push("(t.code ILIKE ? OR t.name ILIKE ? OR t.description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -169,7 +169,7 @@ export function createType(db, body, actor, ip, tenantId) {
     }
     throw err;
   }
-  const row = getTypeRow(db, result.lastInsertRowid);
+  const row = getTypeRow(db, result.lastInsertId);
   recordVersion(db, "type", row.id, row, actor, "create");
   writeAudit(db, {
     actor,

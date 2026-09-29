@@ -33,7 +33,7 @@ export function matchSubscriptions(db, event) {
 }
 
 // Routes an event: creates deliveries for matching subscriptions. Safe to call
-// twice for the same event (INSERT OR IGNORE on event_id + subscription_id) so
+// twice for the same event (conflict-ignore on event_id + subscription_id) so
 // outbox replay and manual routing converge instead of duplicating.
 export function routeEvent(db, event, _options = {}) {
   const subscriptions = matchSubscriptions(db, event);
@@ -45,12 +45,12 @@ export function routeEvent(db, event, _options = {}) {
     const maxAttempts = dlq.enabled ? Math.max(retry.max_attempts, 1) : retry.max_attempts;
     const result = run(
       db,
-      `INSERT OR IGNORE INTO event_deliveries
+      `INSERT INTO event_deliveries
         (event_id, event_ref, subscription_id, event_type_code, event_version, subscriber, handler, topic_code, queue_code,
          consumer_group, partition_key, sequence_number, priority, status, attempts, max_attempts, available_at,
          payload_json, correlation_id, causation_id, trace_id, idempotency_key, security_classification,
          tenant_id, organization_id, plant_id, site_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       [
         event.id,
         event.event_ref,
@@ -82,7 +82,7 @@ export function routeEvent(db, event, _options = {}) {
       ]
     );
     if (Number(result.changes || 0) > 0) {
-      deliveries.push(queryOne(db, "SELECT * FROM event_deliveries WHERE id = ?", [Number(result.lastInsertRowid)]));
+      deliveries.push(queryOne(db, "SELECT * FROM event_deliveries WHERE id = ?", [Number(result.lastInsertId)]));
     }
   }
   run(db, "UPDATE event_records SET subscriber_count = ?, status = ?, updated_at = ? WHERE id = ?", [
@@ -155,7 +155,7 @@ export function enqueueMessage(db, queueCode, message = {}, options = {}) {
       ts,
     ]
   );
-  return queryOne(db, "SELECT * FROM event_deliveries WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM event_deliveries WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 // Priority-ordered routing statistics for the dashboard.

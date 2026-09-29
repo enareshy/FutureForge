@@ -22,9 +22,9 @@ export function recordReference(db, tenantId, input = {}) {
   try {
     run(
       db,
-      `INSERT OR IGNORE INTO pdm_references
+      `INSERT INTO pdm_references
          (reference_ref, tenant_id, organization_id, source_type, source_id, source_ref, target_type, target_id, target_ref, category, relationship_type, metadata_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       [
         referenceRef(),
         Number(tenantId),

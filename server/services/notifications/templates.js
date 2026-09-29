@@ -99,7 +99,7 @@ export function listTemplates(db, query = {}, tenantId = null) {
     params.push(query.locale);
   }
   if (query.q) {
-    where.push("(t.code LIKE ? OR t.name LIKE ? OR t.subject LIKE ?)");
+    where.push("(t.code ILIKE ? OR t.name ILIKE ? OR t.subject ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -163,7 +163,7 @@ export function createTemplate(db, body = {}, actor = null, ip = null, reqTenant
     }
     throw err;
   }
-  const row = getTemplateRow(db, result.lastInsertRowid);
+  const row = getTemplateRow(db, result.lastInsertId);
   snapshotVersion(db, row, actor?.id ?? null, ts);
   writeAudit(db, {
     actor,

@@ -65,7 +65,7 @@ function recordJob(db, { tenantId, handlerCode, jobTypeCode, entityType = null, 
      VALUES (?, ?, ?, ?, ?, ?, ?, 'QUEUED', 0, 1, '{}', ?, ?, ?, ?)`,
     [makeJobRef(), Number(tenantId), handlerCode, jobTypeCode, entityType, entityRef, platformJob?.id ?? null, actor?.id ?? null, ts, ts, ts]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function submit(db, { tenantId, jobTypeCode, handlerCode, handlerInput, entityType = null, entityRef = null, actor = null, ip = null, priority = "normal", queue = REPORTING_QUEUE, idempotencyKey = null }) {

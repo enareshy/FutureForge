@@ -49,7 +49,7 @@ export function recordDeploymentChange(db, input = {}) {
   } catch {
     // Auditing must never fail the business write.
   }
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function publicHistory(row) {

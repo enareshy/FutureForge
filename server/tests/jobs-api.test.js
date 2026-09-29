@@ -1,7 +1,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 import * as jobs from "../services/jobs.js";
@@ -58,7 +58,7 @@ describe("background job REST APIs", () => {
   let otherTenantId;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;

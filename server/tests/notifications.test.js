@@ -1,6 +1,6 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, queryAll, run } from "../db.js";
+import { migrate, queryOne, queryAll, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as n from "../services/notifications.js";
 
@@ -13,7 +13,7 @@ describe("notification framework services", () => {
   let operator;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;
@@ -306,7 +306,7 @@ describe("notification framework services", () => {
       assert.equal(reminder.status, "fired");
       const repeat = queryOne(
         db,
-        "SELECT * FROM notification_reminders WHERE status = 'pending' AND level = 1 AND details_json LIKE '%Overdue task%' ORDER BY id DESC LIMIT 1"
+        "SELECT * FROM notification_reminders WHERE status = 'pending' AND level = 1 AND details_json ILIKE '%Overdue task%' ORDER BY id DESC LIMIT 1"
       );
       assert.ok(repeat);
       assert.equal(repeat.level, 1);

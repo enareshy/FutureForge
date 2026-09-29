@@ -103,7 +103,7 @@ export function listDomains(db, { tenantId, status, category, q, page, pageSize 
     params.push(String(category));
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -164,7 +164,7 @@ export function createDomain(db, input = {}, actor = null, tenantId = null, ip =
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_domains WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_domains WHERE id = ?", [Number(result.lastInsertId)]);
   ensureDefaultGovernance(db, row);
   bumpCacheEpoch(db);
   writeAudit(db, {

@@ -143,7 +143,7 @@ export function listRules(db, query = {}, tenantId = null) {
     params.push(Number(query.formId || query.form_id));
   }
   if (query.q) {
-    where.push("(r.code LIKE ? OR r.name LIKE ? OR r.description LIKE ?)");
+    where.push("(r.code ILIKE ? OR r.name ILIKE ? OR r.description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -205,7 +205,7 @@ export function createRule(db, body, actor, ip, tenantId) {
     }
     throw err;
   }
-  const row = getRuleRow(db, result.lastInsertRowid);
+  const row = getRuleRow(db, result.lastInsertId);
   recordVersion(db, "rule", row.id, publicRule(row), actor, "create");
   writeAudit(db, {
     actor,

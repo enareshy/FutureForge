@@ -57,12 +57,12 @@ export function addArtifact(db, jobId, input = {}, actor = null, ip = null) {
   recordHistory(db, jobId, {
     event_type: "result",
     message: `Artifact registered: ${name}`,
-    detail: { artifact_id: Number(result.lastInsertRowid), kind },
+    detail: { artifact_id: Number(result.lastInsertId), kind },
     actor_id: actor?.id ?? null,
     actor_type: actor ? "user" : "engine",
     source: "engine",
   });
-  return publicArtifact(queryOne(db, "SELECT * FROM job_artifacts WHERE id = ?", [result.lastInsertRowid]));
+  return publicArtifact(queryOne(db, "SELECT * FROM job_artifacts WHERE id = ?", [result.lastInsertId]));
 }
 
 export function listArtifacts(db, jobId) {

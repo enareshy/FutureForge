@@ -1,7 +1,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -56,7 +56,7 @@ describe("workflow REST APIs", () => {
   let database;
 
   before(async () => {
-    database = openDatabase(":memory:");
+    database = openTestDatabase();
     migrate(database);
     seedDatabase(database);
     const started = await listen(createApp(database));

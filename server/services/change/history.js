@@ -55,7 +55,7 @@ export function recordChange(db, input = {}) {
   } catch {
     // Auditing must never fail the business write.
   }
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listHistory(db, { tenantId, entityType, entityId, entityRef, page, pageSize } = {}) {

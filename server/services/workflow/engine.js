@@ -121,7 +121,7 @@ export function listInstances(db, query = {}, tenantId) {
     params.push(Number(query.parentInstanceId || query.parent_instance_id));
   }
   if (query.q) {
-    where.push("(i.code LIKE ? OR i.title LIKE ?)");
+    where.push("(i.code ILIKE ? OR i.title ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like);
   }
@@ -213,7 +213,7 @@ export function startInstance(db, body = {}, actor = null, tenantId = null, ip =
         ts,
       ]
     );
-    instanceId = result.lastInsertRowid;
+    instanceId = result.lastInsertId;
     recordEvent(db, {
       instanceId,
       eventType: "workflow.started",
@@ -284,7 +284,7 @@ function activateNode(db, instance, node, { fromNodeId = null, actor = null } = 
     ]
   );
   run(db, "UPDATE workflow_instances SET current_node_id = ?, updated_at = ? WHERE id = ?", [node.id, ts, instance.id]);
-  return queryOne(db, "SELECT * FROM workflow_instance_nodes WHERE id = ?", [result.lastInsertRowid]);
+  return queryOne(db, "SELECT * FROM workflow_instance_nodes WHERE id = ?", [result.lastInsertId]);
 }
 
 function completeToken(db, token, outcome, extraData = {}) {

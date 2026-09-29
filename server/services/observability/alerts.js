@@ -121,7 +121,7 @@ export function createAlertRule(db, tenantId, input = {}, actor = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM observability_alert_rules WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM observability_alert_rules WHERE id = ?", [Number(result.lastInsertId)]);
   recordHistory(db, { tenantId, action: "ALERT_RULE_CREATED", entityType: "alert_rule", entityId: row.id, entityRef: row.rule_ref, actor, summary: `Alert rule ${code} created` });
   writeAudit(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.alert_rule.create", resource_type: "observability_alert_rule", resource_id: row.rule_ref, details: { code } });
   return publicAlertRule(row);
@@ -390,7 +390,7 @@ export function commentAlert(db, tenantId, ref, { message = "" } = {}, actor = n
 
 export function pruneAlerts(db, tenantId, retainDays) {
   const days = Math.max(1, Number(retainDays) || 365);
-  const result = run(db, "DELETE FROM observability_alerts WHERE tenant_id = ? AND status IN ('RESOLVED', 'CLOSED') AND updated_at < datetime('now', ?)", [Number(tenantId), `-${days} days`]);
+  const result = run(db, "DELETE FROM observability_alerts WHERE tenant_id = ? AND status IN ('RESOLVED', 'CLOSED') AND updated_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]);
   return Number(result.changes || 0);
 }
 
@@ -437,7 +437,7 @@ function findOpenByDedup(db, tenantId, key) {
 function recentTerminalByDedup(db, tenantId, key, cooldownSeconds) {
   return queryOne(
     db,
-    `SELECT * FROM observability_alerts WHERE tenant_id = ? AND dedup_key = ? AND status IN ('RESOLVED', 'CLOSED') AND updated_at >= datetime('now', ?) ORDER BY id DESC LIMIT 1`,
+    `SELECT * FROM observability_alerts WHERE tenant_id = ? AND dedup_key = ? AND status IN ('RESOLVED', 'CLOSED') AND updated_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS') ORDER BY id DESC LIMIT 1`,
     [Number(tenantId), key, `-${Math.max(0, Number(cooldownSeconds) || 0)} seconds`]
   );
 }
@@ -552,7 +552,7 @@ export function applyAlertRules(db, tenantId, metric, observation, { actor = nul
             ts,
           ]
         );
-        let alert = reload(db, Number(insert.lastInsertRowid));
+        let alert = reload(db, Number(insert.lastInsertId));
         recordAlertEvent(db, alert, "CREATED", { value: Number(value), message: alert.message, detail: { band: classified.band, threshold: condition.value } });
         summary.created += 1;
         publishObservabilityEvent(db, { eventType: observabilityEventCode("THRESHOLD_BREACHED"), payload: { alert_ref: alert.alert_ref, metric_code: metric.code, severity, value, threshold: condition.value, band: classified.band }, objectType: "observability_alert", objectId: alert.id, tenantId }, actor);
@@ -609,7 +609,7 @@ export function alertTrend(db, tenantId, query = {}) {
   const hours = Math.max(1, Math.min(720, Number(query.hours) || 24));
   const rows = queryAll(
     db,
-    "SELECT strftime('%Y-%m-%dT%H:00:00Z', created_at) AS bucket, severity, COUNT(*) AS c FROM observability_alerts WHERE tenant_id = ? AND created_at >= datetime('now', ?) GROUP BY bucket, severity ORDER BY bucket ASC",
+    "SELECT to_char(created_at::timestamp, 'YYYY-MM-DD\"T\"HH24:00:00\"Z\"') AS bucket, severity, COUNT(*) AS c FROM observability_alerts WHERE tenant_id = ? AND created_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS') GROUP BY bucket, severity ORDER BY bucket ASC",
     [Number(tenantId), `-${hours} hours`]
   );
   const buckets = {};

@@ -20,7 +20,7 @@ function insertRequest(db, fields) {
     `INSERT INTO delivery_requests (${columns.join(", ")}) VALUES (${placeholders})`,
     columns.map((column) => fields[column])
   );
-  return result.lastInsertRowid;
+  return result.lastInsertId;
 }
 
 export function publicRequest(row) {
@@ -251,7 +251,7 @@ export function listRequests(db, query = {}, tenantId = null) {
   }
   if (query.q) {
     const like = `%${query.q}%`;
-    where.push("(subject LIKE ? OR recipient_address LIKE ? OR recipient_name LIKE ? OR error_message LIKE ? OR request_ref LIKE ? OR object_name LIKE ?)");
+    where.push("(subject ILIKE ? OR recipient_address ILIKE ? OR recipient_name ILIKE ? OR error_message ILIKE ? OR request_ref ILIKE ? OR object_name ILIKE ?)");
     params.push(like, like, like, like, like, like);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";

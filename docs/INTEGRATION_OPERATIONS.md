@@ -39,7 +39,8 @@ continues without an operator submitting jobs manually.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `IAM_DB` | `data/iam.db` | Database file shared by API and worker |
+| `DATABASE_URL` | — | Full PostgreSQL connection string (takes precedence over `PG*`) |
+| `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` | `127.0.0.1` / `5432` / `helix` / `helix` / `helix` | Discrete PostgreSQL connection settings shared by API and worker |
 | `HELIX_AUTH_SECRET` | — | Key for AES-256-GCM credential encryption and HMAC signing |
 | `INTEGRATION_MAINTENANCE_MS` | `15000` | Worker housekeeping interval |
 | `INTEGRATION_ALLOW_PRIVATE_HOSTS` | `false` | Allow SSRF guard to call private/internal hosts |

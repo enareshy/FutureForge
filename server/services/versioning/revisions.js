@@ -51,7 +51,7 @@ export function listRevisions(db, { objectType, objectId, status, tenantId, q, p
     params.push(Number(tenantId));
   }
   if (q) {
-    clauses.push("(revision_code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(revision_code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${String(q)}%`;
     params.push(like, like, like);
   }
@@ -171,7 +171,7 @@ export function createRevision(db, input = {}, actor = null, tenantId = null, ip
         ts,
       ]
     );
-    const row = queryOne(db, "SELECT * FROM versioning_revisions WHERE id = ?", [Number(result.lastInsertRowid)]);
+    const row = queryOne(db, "SELECT * FROM versioning_revisions WHERE id = ?", [Number(result.lastInsertId)]);
     writeAudit(db, {
       actor,
       action: "versioning.revision.create",
@@ -447,7 +447,7 @@ export function createRelationship(db, revisionRefValue, input = {}, actor = nul
      VALUES (?, ?, ?, ?, ?, ?)`,
     [from.id, to.id, relationshipType, normalizeText(input.description), actor?.id ?? null, nowIso()]
   );
-  const row = queryOne(db, "SELECT * FROM versioning_revision_relationships WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM versioning_revision_relationships WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "versioning.revision.relationship.create",

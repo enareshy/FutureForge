@@ -47,7 +47,7 @@ export function metricsSnapshot(db, { tenantId, bomType = null } = {}) {
       `SELECT COUNT(*) AS c FROM (
          SELECT bom_revision_id, parent_object_id, find_number FROM bom_lines
           WHERE tenant_id = ? AND find_number <> ''
-          GROUP BY bom_revision_id, parent_object_id, find_number HAVING COUNT(*) > 1)`,
+          GROUP BY bom_revision_id, parent_object_id, find_number HAVING COUNT(*) > 1) dup`,
       [tenant]
     ),
     obsolete_revisions_with_active_lines: count(

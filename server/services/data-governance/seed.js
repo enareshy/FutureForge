@@ -98,6 +98,10 @@ function resolveTenantId(db, tenantId) {
 }
 
 export function ensureDataGovernanceSeed(db, tenantId) {
+  // Install the in-process foundation (event/job/search registrations) even when
+  // the demo data already exists, so databases cloned from a seeded template are
+  // fully initialised. The data insert below remains idempotent.
+  withEventSuppression(() => ensureDataGovernanceFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM dg_domains WHERE tenant_id = ? AND code = 'MASTER_DATA'", [tenant]);

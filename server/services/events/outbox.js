@@ -38,11 +38,12 @@ export function enqueueOutbox(db, input = {}) {
       ts,
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
-// Atomically claims a batch for one worker. SQLite is single-writer, so an
-// UPDATE-then-SELECT claim is sufficient without advisory locks.
+// Atomically claims a batch for one worker. The guarded UPDATE returns exactly
+// the rows this statement transitioned to `publishing`, so concurrent workers
+// can never observe another worker's claims.
 export function claimOutboxRows(db, { limit = 50, worker = "event-outbox" } = {}) {
   const ts = nowIso();
   const candidate = queryAll(
@@ -55,13 +56,16 @@ export function claimOutboxRows(db, { limit = 50, worker = "event-outbox" } = {}
   if (!candidate.length) return [];
   const ids = candidate.map((r) => r.id);
   const placeholders = ids.map(() => "?").join(",");
-  run(
+  return queryAll(
     db,
-    `UPDATE event_outbox SET status = 'publishing', locked_by = ?, locked_at = ?, updated_at = ?
-     WHERE id IN (${placeholders}) AND status IN ('pending','failed')`,
+    `WITH claimed AS (
+       UPDATE event_outbox SET status = 'publishing', locked_by = ?, locked_at = ?, updated_at = ?
+        WHERE id IN (${placeholders}) AND status IN ('pending','failed')
+        RETURNING *
+     )
+     SELECT * FROM claimed ORDER BY created_at`,
     [worker, ts, ts, ...ids]
   );
-  return queryAll(db, `SELECT * FROM event_outbox WHERE locked_by = ? AND status = 'publishing' ORDER BY created_at`, [worker]);
 }
 
 // Publishes a single claimed outbox row by routing its event. Any error is
@@ -157,7 +161,7 @@ export function listOutbox(db, { tenantId, status, eventTypeCode, q, page = 1, p
     params.push(eventTypeCode);
   }
   if (q) {
-    clauses.push("(LOWER(event_ref) LIKE ? OR LOWER(event_type_code) LIKE ? OR LOWER(correlation_id) LIKE ?)");
+    clauses.push("(LOWER(event_ref) ILIKE ? OR LOWER(event_type_code) ILIKE ? OR LOWER(correlation_id) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }

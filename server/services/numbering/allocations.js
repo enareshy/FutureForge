@@ -144,9 +144,9 @@ function rememberIdempotent(db, { key, tenantId, operation, requestHash, allocat
   const ts = nowIso();
   run(
     db,
-    `INSERT OR IGNORE INTO numbering_idempotency
+    `INSERT INTO numbering_idempotency
        (idempotency_key, tenant_id, operation, request_hash, allocation_id, response_json, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
     [
       String(key),
       tenantId ?? null,
@@ -526,7 +526,7 @@ function insertAllocation(db, { scheme, request, actor, scopeKey, number, sequen
         ts,
       ]
     );
-    return getAllocationRow(db, Number(result.lastInsertRowid));
+    return getAllocationRow(db, Number(result.lastInsertId));
   } catch (error) {
     if (/UNIQUE constraint failed/i.test(String(error?.message || ""))) {
       throw numberAlreadyExists(number);
@@ -833,7 +833,7 @@ export function listAllocations(db, query = {}) {
     params.push(String(query.to).replace("T", " ").slice(0, 19));
   }
   if (query.q) {
-    clauses.push("(LOWER(number) LIKE ? OR LOWER(allocation_ref) LIKE ? OR LOWER(object_id) LIKE ? OR LOWER(object_ref) LIKE ?)");
+    clauses.push("(LOWER(number) ILIKE ? OR LOWER(allocation_ref) ILIKE ? OR LOWER(object_id) ILIKE ? OR LOWER(object_ref) ILIKE ?)");
     const like = `%${String(query.q).toLowerCase()}%`;
     params.push(like, like, like, like);
   }
@@ -962,12 +962,12 @@ export function metricsSnapshot(db, { tenantId = null, from = null, to = null } 
   const month = today.slice(0, 7);
   const generatedToday = queryOne(
     db,
-    `SELECT COUNT(*) AS c FROM numbering_allocations WHERE requested_at LIKE ?${tenantClause}`,
+    `SELECT COUNT(*) AS c FROM numbering_allocations WHERE requested_at ILIKE ?${tenantClause}`,
     [`${today}%`, ...params]
   ).c;
   const generatedMonth = queryOne(
     db,
-    `SELECT COUNT(*) AS c FROM numbering_allocations WHERE requested_at LIKE ?${tenantClause}`,
+    `SELECT COUNT(*) AS c FROM numbering_allocations WHERE requested_at ILIKE ?${tenantClause}`,
     [`${month}%`, ...params]
   ).c;
   const sequences = queryOne(
@@ -988,7 +988,7 @@ export function metricsSnapshot(db, { tenantId = null, from = null, to = null } 
   ).c;
   const errors = queryOne(
     db,
-    `SELECT COUNT(*) AS c FROM audit_logs WHERE action LIKE 'numbering.allocation.%' AND status = 'failure'${tenantClause.replace("tenant_id", "tenant_id")}`,
+    `SELECT COUNT(*) AS c FROM audit_logs WHERE action ILIKE 'numbering.allocation.%' AND status = 'failure'${tenantClause.replace("tenant_id", "tenant_id")}`,
     params
   ).c;
   const utilization = sequences.bounded_capacity

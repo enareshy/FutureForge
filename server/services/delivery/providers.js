@@ -123,7 +123,7 @@ export function resolveProviderChain(db, { channel, tenantId = null, exclude = [
     `SELECT * FROM notification_providers
       WHERE channel = ? AND enabled = 1 AND COALESCE(status, 'active') = 'active'
       ORDER BY
-        CASE WHEN ? IS NOT NULL AND tenant_id = ? THEN 0 ELSE 1 END,
+        CASE WHEN ?::bigint IS NOT NULL AND tenant_id = ? THEN 0 ELSE 1 END,
         is_default DESC,
         priority ASC,
         (type = 'store') DESC,
@@ -166,7 +166,7 @@ export function recordProviderFailure(db, { provider, requestId = null, tenantId
       nowIso(),
     ]
   );
-  return queryOne(db, "SELECT * FROM delivery_provider_failures WHERE id = ?", [result.lastInsertRowid]);
+  return queryOne(db, "SELECT * FROM delivery_provider_failures WHERE id = ?", [result.lastInsertId]);
 }
 
 export function listProviderFailures(db, query = {}, tenantId = null) {

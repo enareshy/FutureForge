@@ -91,11 +91,11 @@ export function createSavedFilter(db, body = {}, actor = null, tenantId = null) 
     event_type: "CREATE",
     category: "administration",
     object_type: "audit_saved_filter",
-    object_id: result.lastInsertRowid,
+    object_id: result.lastInsertId,
     object_name: input.name,
     details: { scope: input.scope, shared: !!input.shared },
   });
-  return publicSavedFilter(getSavedFilterRow(db, result.lastInsertRowid));
+  return publicSavedFilter(getSavedFilterRow(db, result.lastInsertId));
 }
 
 export function updateSavedFilter(db, id, body = {}, actor = null, tenantId = null) {

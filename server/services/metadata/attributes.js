@@ -179,7 +179,7 @@ export function listAttributes(db, query = {}, tenantId = null) {
     params.push(query.status);
   }
   if (query.q) {
-    where.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    where.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -248,7 +248,7 @@ export function createAttribute(db, body, actor, ip, tenantId) {
     }
     throw err;
   }
-  const row = getAttributeRow(db, result.lastInsertRowid);
+  const row = getAttributeRow(db, result.lastInsertId);
   recordVersion(db, "attribute", row.id, row, actor, "create");
   writeAudit(db, {
     actor,

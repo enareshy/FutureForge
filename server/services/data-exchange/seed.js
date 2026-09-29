@@ -132,6 +132,7 @@ function resolveTenantId(db, tenantId) {
 }
 
 export function ensureDataExchangeSeed(db, tenantId) {
+  withEventSuppression(() => ensureExchangeFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM ie_import_definitions WHERE tenant_id = ? AND code = 'PART_IMPORT'", [tenant]);

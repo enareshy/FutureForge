@@ -104,7 +104,7 @@ export function listDefinitions(db, { dimension, typeCode, status, tenantId, q, 
     params.push(Number(tenantId));
   }
   if (q) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${String(q)}%`;
     params.push(like, like, like);
   }
@@ -219,8 +219,8 @@ function replaceValues(db, definitionId, rows) {
   for (const row of rows) {
     run(
       db,
-      `INSERT OR IGNORE INTO versioning_effectivity_values (definition_id, dimension, value, operator, value_type, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO versioning_effectivity_values (definition_id, dimension, value, operator, value_type, created_at)
+       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       [definitionId, row.dimension, row.value, row.operator, row.value_type, nowIso()]
     );
   }
@@ -282,7 +282,7 @@ export function createDefinition(db, input = {}, actor = null, tenantId = null, 
   return transaction(db, () => {
     const existing = queryOne(
       db,
-      "SELECT id FROM versioning_effectivity_definitions WHERE code = ? AND (tenant_id IS NULL OR ? IS NULL OR tenant_id = ?)",
+      "SELECT id FROM versioning_effectivity_definitions WHERE code = ? AND (tenant_id IS NULL OR ?::bigint IS NULL OR tenant_id = ?)",
       [data.code, tenantId, tenantId]
     );
     if (existing) throw invalidEffectivity(`Effectivity definition ${data.code} already exists`);
@@ -361,7 +361,7 @@ export function createDefinition(db, input = {}, actor = null, tenantId = null, 
         ts,
       ]
     );
-    const id = Number(result.lastInsertRowid);
+    const id = Number(result.lastInsertId);
     replaceValues(db, id, values);
     const created = queryOne(db, "SELECT * FROM versioning_effectivity_definitions WHERE id = ?", [id]);
     writeAudit(db, {
@@ -612,7 +612,7 @@ export function createAssignment(db, definitionRefValue, input = {}, actor = nul
         ts,
       ]
     );
-    const row = queryOne(db, "SELECT * FROM versioning_effectivity_assignments WHERE id = ?", [Number(result.lastInsertRowid)]);
+    const row = queryOne(db, "SELECT * FROM versioning_effectivity_assignments WHERE id = ?", [Number(result.lastInsertId)]);
     writeAudit(db, {
       actor,
       action: "versioning.effectivity.assign",

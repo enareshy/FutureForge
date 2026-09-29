@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, queryAll } from "../db.js";
+import { migrate, queryOne, queryAll, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import {
   Observability,
@@ -27,7 +27,7 @@ describe("Data Observability core services", () => {
   let admin;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenant = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;

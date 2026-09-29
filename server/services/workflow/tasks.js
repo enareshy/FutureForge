@@ -227,8 +227,8 @@ export function listTasks(db, query = {}, tenantId, actor, { scope = "mine" } = 
         `(t.assignee_type = 'user' AND t.assignee_id IN (
             SELECT from_user_id FROM workflow_delegations
              WHERE to_user_id = ? AND status = 'active'
-               AND (starts_at IS NULL OR starts_at <= datetime('now'))
-               AND (ends_at IS NULL OR ends_at >= datetime('now'))))`
+               AND (starts_at IS NULL OR starts_at <= to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))
+               AND (ends_at IS NULL OR ends_at >= to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))))`
       );
       params.push(ctx.userId);
     }
@@ -279,7 +279,7 @@ export function listTasks(db, query = {}, tenantId, actor, { scope = "mine" } = 
     where.push("t.escalated = 1");
   }
   if (query.q) {
-    where.push("(t.title LIKE ? OR t.description LIKE ? OR t.code LIKE ?)");
+    where.push("(t.title ILIKE ? OR t.description ILIKE ? OR t.code ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -363,7 +363,7 @@ export function createTask(db, {
       ts,
     ]
   );
-  const row = getTaskRow(db, result.lastInsertRowid);
+  const row = getTaskRow(db, result.lastInsertId);
   recordEvent(db, {
     instanceId: instance.id,
     taskId: row.id,
@@ -561,11 +561,11 @@ export function delegateTask(db, id, body = {}, actor = null, tenantId = null, i
     eventType: "task.delegated",
     actorId: actor?.id ?? null,
     message: `Task delegated to ${target.username}`,
-    details: { delegation_id: result.lastInsertRowid, to_user_id: target.id, reassign: body.reassign !== false },
+    details: { delegation_id: result.lastInsertId, to_user_id: target.id, reassign: body.reassign !== false },
     tenantId: row.tenant_id,
   });
   writeAudit(db, { actor, action: "workflow.task.delegate", resourceType: "workflow_task", resourceId: row.id, details: { to_user_id: target.id }, ip });
-  return { delegation_id: result.lastInsertRowid, task: getTask(db, row.id, tenantId, actor) };
+  return { delegation_id: result.lastInsertId, task: getTask(db, row.id, tenantId, actor) };
 }
 
 // ---------------------------------------------------------------------------
@@ -582,7 +582,7 @@ export function addSubtask(db, taskId, body = {}, actor = null, tenantId = null)
     "INSERT INTO workflow_task_subtasks (task_id, title, status, display_order, created_at, updated_at) VALUES (?, ?, 'todo', ?, ?, ?)",
     [row.id, String(body.title).trim(), Number(body.display_order ?? order) || order, nowIso(), nowIso()]
   );
-  return publicSubtask(queryOne(db, "SELECT * FROM workflow_task_subtasks WHERE id = ?", [result.lastInsertRowid]));
+  return publicSubtask(queryOne(db, "SELECT * FROM workflow_task_subtasks WHERE id = ?", [result.lastInsertId]));
 }
 
 export function updateSubtask(db, taskId, subtaskId, body = {}, actor = null, tenantId = null) {
@@ -634,14 +634,14 @@ export function addComment(db, taskId, body = {}, actor = null, tenantId = null)
     eventType: "task.comment",
     actorId: actor?.id ?? null,
     message: "Comment added",
-    details: { comment_id: result.lastInsertRowid },
+    details: { comment_id: result.lastInsertId },
     tenantId: row.tenant_id,
   });
   return publicComment(
     queryOne(
       db,
       `SELECT c.*, u.username AS author_username FROM workflow_task_comments c LEFT JOIN users u ON u.id = c.author_id WHERE c.id = ?`,
-      [result.lastInsertRowid]
+      [result.lastInsertId]
     )
   );
 }
@@ -666,7 +666,7 @@ export function addAttachment(db, taskId, body = {}, actor = null, tenantId = nu
     "INSERT INTO workflow_task_attachments (task_id, filename, url, content_type, size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     [row.id, body.filename, body.url, body.content_type || "", Number(body.size ?? 0) || 0, actor?.id ?? null, nowIso()]
   );
-  return publicAttachment(queryOne(db, "SELECT * FROM workflow_task_attachments WHERE id = ?", [result.lastInsertRowid]));
+  return publicAttachment(queryOne(db, "SELECT * FROM workflow_task_attachments WHERE id = ?", [result.lastInsertId]));
 }
 
 export function listAttachments(db, taskId, tenantId) {
@@ -737,8 +737,8 @@ export function createDelegation(db, body = {}, actor = null, tenantId = null, i
      VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
     [actor?.id ?? null, target.id, body.starts_at ?? ts, body.ends_at ?? null, body.reason || "", Number(tenantId), ts, ts]
   );
-  writeAudit(db, { actor, action: "workflow.delegation.create", resourceType: "workflow_delegation", resourceId: result.lastInsertRowid, details: { to_user_id: target.id }, ip });
-  return publicDelegation(queryOne(db, `${DELEGATION_SELECT} WHERE d.id = ?`, [result.lastInsertRowid]));
+  writeAudit(db, { actor, action: "workflow.delegation.create", resourceType: "workflow_delegation", resourceId: result.lastInsertId, details: { to_user_id: target.id }, ip });
+  return publicDelegation(queryOne(db, `${DELEGATION_SELECT} WHERE d.id = ?`, [result.lastInsertId]));
 }
 
 export function revokeDelegation(db, id, actor = null, tenantId = null, ip = null) {

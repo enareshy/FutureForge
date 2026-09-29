@@ -109,7 +109,7 @@ export function createBaseline(db, tenantId, body = {}, actor = null, ip = null)
       ts,
     ]
   );
-  const baselineId = Number(result.lastInsertRowid);
+  const baselineId = Number(result.lastInsertId);
   const memberCount = copyMembersFromSnapshot(db, baselineId, snapshotRow.id);
   run(db, "UPDATE thread_baselines SET member_count = ? WHERE id = ?", [memberCount, baselineId]);
   if (IMMUTABLE_BASELINE_STATUSES.includes(status)) {

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node scripts/dev.js",
     "start": "node server/index.js",
-    "test": "node --test --test-reporter=spec server/tests/*.test.js",
+    "test": "node --test --test-concurrency=1 --test-reporter=spec server/tests/*.test.js",
     "worker": "node scripts/job-worker.js",
     "seed": "node server/seed.js"
   },
@@ -15,7 +15,8 @@
     "cors": "^2.8.6",
     "express": "^4.21.2",
     "express-rate-limit": "^8.7.0",
-    "helmet": "^8.3.0"
+    "helmet": "^8.3.0",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

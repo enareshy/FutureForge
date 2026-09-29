@@ -104,7 +104,7 @@ export function listTerms(db, { tenantId, domainId, status, approvalStatus, clas
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(definition) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(definition) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -184,7 +184,7 @@ export function createTerm(db, input = {}, actor = null, tenantId = null, ip = n
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dc_business_terms WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_business_terms WHERE id = ?", [Number(result.lastInsertId)]);
   const entry = registerEntry(
     db,
     {
@@ -496,7 +496,7 @@ export function upsertDefinition(db, termRefValue, input = {}, actor = null, ten
       "INSERT INTO dc_term_definitions (tenant_id, term_id, definition_type, definition, created_by, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       [term.tenant_id, term.id, definitionType, definition, actor?.id ?? null, actor?.id ?? null, ts, ts]
     );
-    id = Number(result.lastInsertRowid);
+    id = Number(result.lastInsertId);
   }
   if (definitionType === "BUSINESS") {
     run(db, "UPDATE dc_business_terms SET definition = ?, updated_at = ? WHERE id = ?", [definition, ts, term.id]);
@@ -537,7 +537,7 @@ export function addSynonym(db, termRefValue, input = {}, actor = null, tenantId 
     "INSERT INTO dc_term_synonyms (tenant_id, term_id, synonym, synonym_type, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)",
     [term.tenant_id, term.id, synonym, synonymType, nowIso()]
   );
-  return publicTermSynonym(queryOne(db, "SELECT * FROM dc_term_synonyms WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicTermSynonym(queryOne(db, "SELECT * FROM dc_term_synonyms WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function removeSynonym(db, termRefValue, synonym, actor = null, tenantId = null) {
@@ -574,7 +574,7 @@ export function addRelation(db, termRefValue, input = {}, actor = null, tenantId
     objectId: term.id,
     payload: { id: term.id, relation: relationshipType, related_term_id: related.id },
   }, actor);
-  return publicTermRelation(queryOne(db, "SELECT * FROM dc_term_relations WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicTermRelation(queryOne(db, "SELECT * FROM dc_term_relations WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function removeRelation(db, relationId, actor = null, tenantId = null) {
@@ -606,7 +606,7 @@ export function addMapping(db, termRefValue, input = {}, actor = null, tenantId 
     actor,
     action: "data_catalog.term.map",
     resourceType: "dc_term_mapping",
-    resourceId: Number(result.lastInsertRowid),
+    resourceId: Number(result.lastInsertId),
     details: { term_id: term.id, target_type: targetType, target_id: targetEntry.id },
     ip,
   });
@@ -617,7 +617,7 @@ export function addMapping(db, termRefValue, input = {}, actor = null, tenantId 
     objectId: term.id,
     payload: { id: term.id, mapped_target_type: targetType, mapped_target_id: targetEntry.id },
   }, actor);
-  return publicTermMapping(queryOne(db, "SELECT * FROM dc_term_mappings WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicTermMapping(queryOne(db, "SELECT * FROM dc_term_mappings WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function removeMapping(db, mappingId, actor = null, tenantId = null) {

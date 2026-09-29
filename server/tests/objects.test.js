@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as objects from "../services/objects.js";
 import { HttpError } from "../validation.js";
@@ -9,7 +9,7 @@ const ACTOR = { id: 1, username: "admin" };
 const IP = "127.0.0.1";
 
 function setup() {
-  const db = openDatabase(":memory:");
+  const db = openTestDatabase();
   migrate(db);
   seedDatabase(db);
   const tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;

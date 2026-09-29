@@ -84,7 +84,7 @@ export function listTemplates(db, query = {}, tenantId) {
     params.push(query.channel);
   }
   if (query.q) {
-    where.push("(t.code LIKE ? OR t.name LIKE ?)");
+    where.push("(t.code ILIKE ? OR t.name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like);
   }
@@ -132,8 +132,8 @@ export function createTemplate(db, body, actor = null, ip = null, reqTenantId = 
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Notification template code already exists in this scope");
     throw err;
   }
-  writeAudit(db, { actor, action: "workflow.notification_template.create", resourceType: "workflow_notification_template", resourceId: result.lastInsertRowid, details: { code: body.code }, ip });
-  return publicTemplate(getTemplateRow(db, result.lastInsertRowid));
+  writeAudit(db, { actor, action: "workflow.notification_template.create", resourceType: "workflow_notification_template", resourceId: result.lastInsertId, details: { code: body.code }, ip });
+  return publicTemplate(getTemplateRow(db, result.lastInsertId));
 }
 
 export function updateTemplate(db, id, body, actor = null, ip = null, tenantId = null) {
@@ -234,7 +234,7 @@ export function dispatch(db, { instance = null, task = null, template = null, ch
   if (task?.id) {
     run(db, "UPDATE workflow_tasks SET updated_at = ? WHERE id = ?", [ts, task.id]);
   }
-  return publicNotification(queryOne(db, "SELECT * FROM workflow_notifications WHERE id = ?", [result.lastInsertRowid]));
+  return publicNotification(queryOne(db, "SELECT * FROM workflow_notifications WHERE id = ?", [result.lastInsertId]));
 }
 
 export function sendToAssignees(db, { instance = null, task = null, template = null, target = {}, recipients = [], payload = {}, subject, body, tenantId }) {
@@ -287,7 +287,7 @@ export function listNotifications(db, query = {}, tenantId) {
     where.push("n.read_at IS NULL");
   }
   if (query.q) {
-    where.push("(n.subject LIKE ? OR n.body LIKE ?)");
+    where.push("(n.subject ILIKE ? OR n.body ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like);
   }

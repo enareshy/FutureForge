@@ -74,7 +74,7 @@ export function createMetric(db, tenantId, input = {}, actor = null, ip = null) 
   );
   writeAudit(db, { actor, action: "reporting.metric.create", resourceType: "reporting_metric", resourceId: normalized.code, details: { entity: normalized.entity }, sourceModule: "reporting", ip });
   publishReportingEvent(db, { eventType: "MetricUpdated", payload: { code: normalized.code, action: "created" }, objectType: "reporting_metric", tenantId, organizationId: normalized.organization_id }, actor);
-  return getMetricById(db, Number(tenantId), Number(result.lastInsertRowid));
+  return getMetricById(db, Number(tenantId), Number(result.lastInsertId));
 }
 
 export function getMetricById(db, tenantId, id) {

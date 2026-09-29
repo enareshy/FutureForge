@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -57,7 +57,7 @@ describe("Data Governance & Data Quality REST APIs", () => {
   let readerToken;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const started = await listen(createApp(db));
@@ -183,7 +183,7 @@ describe("Data Governance & Data Quality REST APIs", () => {
     const otherOrg = db.prepare("SELECT id FROM organizations WHERE id <> 1 ORDER BY id LIMIT 1").get();
     assert.ok(otherOrg, "expected a second organization to exist");
     db.prepare(
-      "INSERT INTO dg_domains (domain_ref, tenant_id, code, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'))"
+      "INSERT INTO dg_domains (domain_ref, tenant_id, code, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'), to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))"
     ).run("DG-DOM-other", otherOrg.id, "OTHER_TENANT_DOMAIN", "Other tenant domain");
 
     const domains = await request(port, "GET", "/api/v1/data-governance/domains", { token: adminToken });

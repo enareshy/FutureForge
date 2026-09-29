@@ -57,7 +57,7 @@ export function getValidationProfileRow(db, tenantId, ref) {
     const byId = queryOne(db, "SELECT * FROM exchange_validation_profiles WHERE id = ? AND tenant_id = ?", [Number(raw), tenant]);
     if (byId) return byId;
   }
-  return queryOne(db, "SELECT * FROM exchange_validation_profiles WHERE tenant_id = ? AND (profile_ref = ? OR code = ? COLLATE NOCASE)", [tenant, raw, raw]);
+  return queryOne(db, "SELECT * FROM exchange_validation_profiles WHERE tenant_id = ? AND (profile_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
 }
 
 export function requireValidationProfileRow(db, tenantId, ref) {
@@ -115,7 +115,7 @@ export function createValidationProfile(db, tenantId, body = {}, actor = null) {
       toJson(levels, []), status, toJson(body.metadata || {}, {}), actor?.id ?? null, actor?.id ?? null, ts, ts,
     ]
   );
-  const profileRow = queryOne(db, "SELECT * FROM exchange_validation_profiles WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const profileRow = queryOne(db, "SELECT * FROM exchange_validation_profiles WHERE id = ?", [Number(result.lastInsertId)]);
   if (Array.isArray(body.rules) && body.rules.length) insertRules(db, tenant, profileRow.id, body.rules);
   return getValidationProfile(db, tenant, profileRow.id);
 }
@@ -184,7 +184,7 @@ export function listValidationProfiles(db, tenantId, query = {}) {
     params.push(normalizeUpper(query.status));
   }
   if (query.q) {
-    clauses.push("(code LIKE ? OR name LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like);
   }
@@ -288,6 +288,6 @@ export function runValidation(db, tenantId, {
 }
 
 function getAdapterCode(db, tenantId, formatCode) {
-  const row = queryOne(db, "SELECT adapter_code FROM exchange_formats WHERE tenant_id = ? AND code = ? COLLATE NOCASE", [Number(tenantId), normalizeUpper(formatCode)]);
+  const row = queryOne(db, "SELECT adapter_code FROM exchange_formats WHERE tenant_id = ? AND lower(code) = lower(?)", [Number(tenantId), normalizeUpper(formatCode)]);
   return row?.adapter_code || null;
 }

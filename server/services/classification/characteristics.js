@@ -103,7 +103,7 @@ export function createCharacteristic(db, tenantId, body = {}, actor = null, ip =
       ts,
     ]
   );
-  const id = Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertId);
   invalidate(tenantId);
   const row = queryOne(db, "SELECT * FROM cla_characteristics WHERE id = ?", [id]);
   recordChange(db, { tenantId, entityType: "CHARACTERISTIC", entityId: id, entityRef: normalized.code, action: "CREATED", version: 1, status: normalized.status, after: publicCharacteristic(row), actor, ip });
@@ -131,7 +131,7 @@ export function listCharacteristics(db, { tenantId, dataType, status, q, searcha
     params.push(searchable ? 1 : 0);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -257,7 +257,7 @@ export function listAllowedValues(db, tenantId, characteristicRef, { status = nu
     params.push(normalizeUpper(status));
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(display_name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(display_name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -298,7 +298,7 @@ export function createAllowedValue(db, tenantId, characteristicRef, body = {}, a
     ]
   );
   invalidate(tenantId);
-  return publicAllowedValue(queryOne(db, "SELECT * FROM cla_allowed_values WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicAllowedValue(queryOne(db, "SELECT * FROM cla_allowed_values WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateAllowedValue(db, tenantId, ref, body = {}, actor = null, ip = null) {
@@ -388,7 +388,7 @@ export function createGroup(db, tenantId, body = {}, actor = null, ip = null) {
     ]
   );
   invalidate(tenantId);
-  return publicGroup(queryOne(db, "SELECT * FROM cla_characteristic_groups WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicGroup(queryOne(db, "SELECT * FROM cla_characteristic_groups WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function listGroups(db, { tenantId, status, q } = {}) {
@@ -399,7 +399,7 @@ export function listGroups(db, { tenantId, status, q } = {}) {
     params.push(normalizeUpper(status));
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -448,7 +448,7 @@ export function addGroupMember(db, tenantId, groupRef, characteristicRef2, { seq
     [Number(tenantId), group.id, characteristic.id, sequence != null ? Number(sequence) : count, nowIso()]
   );
   invalidate(tenantId);
-  return publicGroupMember(queryOne(db, "SELECT * FROM cla_characteristic_group_members WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicGroupMember(queryOne(db, "SELECT * FROM cla_characteristic_group_members WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function removeGroupMember(db, tenantId, groupRef, characteristicRef2) {
@@ -521,7 +521,7 @@ export function addClassCharacteristic(db, tenantId, classRef, body = {}, actor 
     ]
   );
   invalidate(tenantId);
-  const row = queryOne(db, "SELECT * FROM cla_class_characteristics WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM cla_class_characteristics WHERE id = ?", [Number(result.lastInsertId)]);
   recordChange(db, { tenantId, entityType: "CLASS_CHARACTERISTIC", entityId: row.id, entityRef: `${classRow.code}:${characteristic.code}`, action: "CREATED", after: publicClassCharacteristic(row), actor, ip });
   return publicClassCharacteristic(row);
 }

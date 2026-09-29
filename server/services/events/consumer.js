@@ -122,7 +122,7 @@ function recordAttempt(db, delivery, { status, step = "", durationMs = null, err
       nowIso(),
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 // Attempts a single delivery. Returns a small result object the caller can
@@ -216,7 +216,7 @@ export async function processDelivery(db, delivery, { worker = DEFAULT_WORKER, i
       [attempts, finish, durationMs, finish, delivery.id]
     );
     if (delivery.idempotency_key) {
-      run(db, "INSERT OR IGNORE INTO event_idempotency (key, delivery_id, event_id, consumer, created_at) VALUES (?, ?, ?, ?, ?)", [
+      run(db, "INSERT INTO event_idempotency (key, delivery_id, event_id, consumer, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", [
         delivery.idempotency_key,
         delivery.id,
         delivery.event_id ?? null,

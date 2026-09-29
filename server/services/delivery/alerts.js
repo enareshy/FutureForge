@@ -33,7 +33,7 @@ export function createAlert(db, { type = "delivery_failed", severity = "warning"
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
     [type, severity, tenantId ?? null, providerId ?? null, providerCode || "", requestId ?? null, channel || "", String(message || ""), nowIso()]
   );
-  return publicAlert(queryOne(db, "SELECT * FROM delivery_alerts WHERE id = ?", [result.lastInsertRowid]));
+  return publicAlert(queryOne(db, "SELECT * FROM delivery_alerts WHERE id = ?", [result.lastInsertId]));
 }
 
 export function listAlerts(db, query = {}, tenantId = null) {

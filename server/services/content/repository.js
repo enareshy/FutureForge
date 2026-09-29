@@ -418,9 +418,9 @@ export function findRenditionRow(db, contentId, reference) {
 }
 
 export function findUploadRow(db, upload, tenantId = null) {
-  const row = queryOne(db, "SELECT * FROM content_upload_sessions WHERE upload_id = ? OR CAST(id AS TEXT) = ?", [
+  const row = queryOne(db, "SELECT * FROM content_upload_sessions WHERE upload_id = ? OR id = ?", [
     String(upload || ""),
-    String(upload || ""),
+    Number(upload) || -1,
   ]);
   if (!row) throw Errors.sessionNotFound();
   if (tenantId !== null && tenantId !== undefined && Number(row.tenant_id) !== Number(tenantId)) {

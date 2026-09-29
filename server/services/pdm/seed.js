@@ -213,6 +213,7 @@ function resolveTenantId(db, tenantId) {
 }
 
 export function ensurePdmSeed(db, tenantId) {
+  withEventSuppression(() => ensurePdmFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM pdm_items WHERE tenant_id = ? AND item_number = 'DEMO-PUMP-ASSY'", [tenant]);

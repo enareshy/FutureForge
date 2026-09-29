@@ -24,10 +24,10 @@ import { notifyLifecycleEvent } from "./notifications.js";
 export { publicRecoveryRecord };
 
 export function getRecoveryRow(db, tenantId, ref) {
-  return queryOne(db, "SELECT * FROM lc_recovery_records WHERE tenant_id = ? AND (recovery_ref = ? OR CAST(id AS TEXT) = ?)", [
+  return queryOne(db, "SELECT * FROM lc_recovery_records WHERE tenant_id = ? AND (recovery_ref = ? OR id = ?)", [
     Number(tenantId),
     String(ref),
-    String(ref),
+    Number(ref) || -1,
   ]);
 }
 
@@ -72,7 +72,7 @@ export function requestRecovery(db, { tenantId, providerCode = null, recoveryPoi
      VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?)`,
     [ref, tid, provider, normalizeText(recoveryPointRef, { max: 200 }), normalizeText(scope, { max: 200 }), normalizeText(objectType, { max: 120 }), objectId != null ? String(objectId) : null, JSON.stringify(details || {}), actor?.id ?? null, ts]
   );
-  const row = queryOne(db, "SELECT * FROM lc_recovery_records WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM lc_recovery_records WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, { actor, action: "data_lifecycle.recovery.request", resourceType: "lc_recovery_records", resourceId: ref, details: { provider, scope: row.scope }, ip });
   return publicRecoveryRecord(row);
 }

@@ -165,6 +165,7 @@ function resolveTenantId(db, tenantId) {
 }
 
 export function ensureClassificationSeed(db, tenantId) {
+  withEventSuppression(() => ensureClassificationFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM cla_classifications WHERE tenant_id = ? AND code = 'MECH_COMPONENTS'", [tenant]);

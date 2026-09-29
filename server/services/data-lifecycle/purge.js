@@ -23,10 +23,10 @@ import { notifyLifecycleEvent, notifyPurgeBlocked } from "./notifications.js";
 export { publicPurgeRecord };
 
 export function getPurgeRow(db, tenantId, ref) {
-  return queryOne(db, "SELECT * FROM lc_purge_records WHERE tenant_id = ? AND (purge_ref = ? OR CAST(id AS TEXT) = ?)", [
+  return queryOne(db, "SELECT * FROM lc_purge_records WHERE tenant_id = ? AND (purge_ref = ? OR id = ?)", [
     Number(tenantId),
     String(ref),
-    String(ref),
+    Number(ref) || -1,
   ]);
 }
 
@@ -159,7 +159,7 @@ export async function executePurge(db, { tenantId, objectType, objectId, reason 
       ts,
     ]
   );
-  const purgeRow = queryOne(db, "SELECT * FROM lc_purge_records WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const purgeRow = queryOne(db, "SELECT * FROM lc_purge_records WHERE id = ?", [Number(result.lastInsertId)]);
 
   writeAudit(db, {
     actor,

@@ -56,7 +56,7 @@ function insertReminder(db, fields) {
     `INSERT INTO delivery_reminders (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
     columns.map((column) => fields[column])
   );
-  return result.lastInsertRowid;
+  return result.lastInsertId;
 }
 
 export function scheduleReminder(db, input = {}, { actor = null, ip = null } = {}) {
@@ -132,7 +132,7 @@ export function listReminders(db, query = {}, tenantId = null) {
   }
   if (query.q) {
     const like = `%${query.q}%`;
-    where.push("(object_name LIKE ? OR details_json LIKE ?)");
+    where.push("(object_name ILIKE ? OR details_json ILIKE ?)");
     params.push(like, like);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";

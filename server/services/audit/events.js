@@ -212,7 +212,7 @@ export function resolveActionType(db, action) {
   if (!code) return null;
   const row = queryOne(
     db,
-    "SELECT code, category, event_type, mandatory FROM audit_action_types WHERE code = ? COLLATE NOCASE AND active = 1",
+    "SELECT code, category, event_type, mandatory FROM audit_action_types WHERE lower(code) = lower(?) AND active = 1",
     [code]
   );
   if (!row) return null;
@@ -389,7 +389,7 @@ export function capture(db, input = {}) {
         nowIso(),
       ]
     );
-    const eventId = Number(result.lastInsertRowid);
+    const eventId = Number(result.lastInsertId);
     if (changedFields.length) captureChanges(db, eventId, tenantId, storedBefore, storedAfter, changedFields);
     const outcome = {
       id: eventId,

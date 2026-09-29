@@ -36,10 +36,10 @@ export function getLatestArchiveRow(db, { tenantId, objectType, objectId }) {
 }
 
 export function getArchiveRow(db, tenantId, ref) {
-  return queryOne(db, "SELECT * FROM lc_archive_records WHERE tenant_id = ? AND (archive_ref = ? OR CAST(id AS TEXT) = ?)", [
+  return queryOne(db, "SELECT * FROM lc_archive_records WHERE tenant_id = ? AND (archive_ref = ? OR id = ?)", [
     Number(tenantId),
     String(ref),
-    String(ref),
+    Number(ref) || -1,
   ]);
 }
 
@@ -74,7 +74,7 @@ export function listArchiveRecords(db, { tenantId, objectType, objectId, status,
   }
   const term = normalizeText(q, { max: 200 });
   if (term) {
-    clauses.push("(object_id LIKE ? OR object_ref LIKE ? OR archive_ref LIKE ?)");
+    clauses.push("(object_id ILIKE ? OR object_ref ILIKE ? OR archive_ref ILIKE ?)");
     const like = `%${term}%`;
     params.push(like, like, like);
   }
@@ -226,7 +226,7 @@ export async function archiveObject(db, { tenantId, objectType, objectId, reason
       ts,
     ]
   );
-  const archiveId = Number(result.lastInsertRowid);
+  const archiveId = Number(result.lastInsertId);
 
   // Move the ledger to ARCHIVED, honouring the transition graph where possible.
   try {

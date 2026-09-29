@@ -33,11 +33,11 @@ export { publicPolicy, publicPolicyVersion };
 const SCOPE_RANK = Object.freeze({ OBJECT: 100, OBJECT_TYPE: 80, ORGANIZATION: 60, TENANT: 40, PLATFORM: 20 });
 
 export function getPolicyRow(db, tenantId, ref) {
-  return queryOne(db, "SELECT * FROM lc_policies WHERE tenant_id = ? AND (policy_ref = ? OR code = ? OR CAST(id AS TEXT) = ?)", [
+  return queryOne(db, "SELECT * FROM lc_policies WHERE tenant_id = ? AND (policy_ref = ? OR code = ? OR id = ?)", [
     Number(tenantId),
     String(ref),
     normalizeUpper(ref),
-    String(ref),
+    Number(ref) || -1,
   ]);
 }
 
@@ -144,7 +144,7 @@ export function createPolicy(db, tenantId, input = {}, actor = null, ip = null) 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM lc_policies WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM lc_policies WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, { actor, action: "data_lifecycle.policy.create", resourceType: "lc_policies", resourceId: code, details: { code, scope_type: normalized.scope_type }, ip });
   return publicPolicy(row);
 }
@@ -152,8 +152,14 @@ export function createPolicy(db, tenantId, input = {}, actor = null, ip = null) 
 function snapshotPolicyVersion(db, row, actor, changeSummary) {
   run(
     db,
-    `INSERT OR REPLACE INTO lc_policy_versions (policy_id, tenant_id, version, snapshot_json, change_summary, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO lc_policy_versions (policy_id, tenant_id, version, snapshot_json, change_summary, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (policy_id, version) DO UPDATE SET
+       tenant_id = EXCLUDED.tenant_id,
+       snapshot_json = EXCLUDED.snapshot_json,
+       change_summary = EXCLUDED.change_summary,
+       created_by = EXCLUDED.created_by,
+       created_at = EXCLUDED.created_at`,
     [row.id, row.tenant_id, row.version, JSON.stringify(publicPolicy(row)), normalizeText(changeSummary), actor?.id ?? null, nowIso()]
   );
 }
@@ -256,7 +262,7 @@ export function listPolicies(db, { tenantId, status, scopeType, objectType, life
   }
   const term = normalizeText(q);
   if (term) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${term}%`;
     params.push(like, like, like);
   }

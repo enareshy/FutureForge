@@ -81,7 +81,7 @@ export function createIncident(db, tenantId, input = {}, actor = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM observability_incidents WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM observability_incidents WHERE id = ?", [Number(result.lastInsertId)]);
   recordHistory(db, { tenantId, action: "INCIDENT_CREATED", entityType: "incident", entityId: row.id, entityRef: row.incident_ref, actor, summary: `Incident opened: ${row.title}` });
   writeAudit(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.incident.create", resource_type: "observability_incident", resource_id: row.incident_ref, details: { severity } });
   publishObservabilityEvent(db, { eventType: observabilityEventCode("INCIDENT_CREATED"), payload: { incident_ref: row.incident_ref, severity, service_code: row.service_code }, objectType: "observability_incident", objectId: row.id, tenantId }, actor);
@@ -194,6 +194,6 @@ export function incidentSummary(db, tenantId) {
 
 export function pruneIncidents(db, tenantId, retainDays) {
   const days = Math.max(1, Number(retainDays) || 730);
-  const result = run(db, "DELETE FROM observability_incidents WHERE tenant_id = ? AND status IN ('RESOLVED', 'CLOSED') AND updated_at < datetime('now', ?)", [Number(tenantId), `-${days} days`]);
+  const result = run(db, "DELETE FROM observability_incidents WHERE tenant_id = ? AND status IN ('RESOLVED', 'CLOSED') AND updated_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]);
   return Number(result.changes || 0);
 }

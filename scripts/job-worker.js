@@ -1,6 +1,6 @@
 // Job Scheduling & Execution Engine worker process.
 //
-// Runs a durable worker loop against the shared SQLite database: it reclaims
+// Runs a durable worker loop against the shared PostgreSQL database: it reclaims
 // expired leases, sweeps due schedules, claims ready jobs, invokes the
 // registered handler and records the outcome (retry / dead-letter / complete).
 //
@@ -8,7 +8,8 @@
 //   node scripts/job-worker.js [--queues=A,B] [--concurrency=4] [--demo]
 //
 // Environment:
-//   IAM_DB                     database path (default ./data/iam.db)
+//   DATABASE_URL / PGHOST / PGPORT / PGUSER / PGPASSWORD / PGDATABASE
+//                              PostgreSQL connection settings
 //   JOB_WORKER_QUEUES          comma separated queue restriction, e.g. IMPORT,DEFAULT
 //   JOB_WORKER_CONCURRENCY     max parallel jobs (default 4)
 //   JOB_WORKER_POLL_MS         idle poll interval (default 1000)
@@ -17,8 +18,6 @@
 //   JOB_WORKER_DRAIN_MS        graceful shutdown budget (default 30000)
 //   JOB_DEMO_HANDLERS=1        register the bundled demo handlers (local demos only)
 
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { openDatabase, migrate } from "../server/db.js";
 import { ensureDefaultQueues, createWorker, registerDemoHandlers } from "../server/services/job-execution.js";
 import { registerFileProcessingHandlers, expireUploads, releaseExpiredLocks } from "../server/services/files.js";
@@ -38,8 +37,6 @@ import { registerMigrationHandlers, runMigrationMaintenance, ensureMigrationJobT
 import { registerClassificationHandlers, runClassificationMaintenance, ensureClassificationJobTypes } from "../server/services/classification/index.js";
 import { registerBomHandlers, runBomMaintenance, ensureBomJobTypes } from "../server/services/bom/index.js";
 import { registerPdmHandlers, runPdmMaintenance, ensurePdmJobTypes } from "../server/services/pdm/index.js";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function parseArgs(argv) {
   const args = { queues: "", concurrency: 0, poll: 0, heartbeat: 0, maintenance: 0, drain: 0, name: "", id: "", demo: false };
@@ -62,7 +59,7 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const dbPath = process.env.IAM_DB || join(root, "data", "iam.db");
+const dbLabel = process.env.PGDATABASE || "helix";
 const queuesCsv = args.queues || process.env.JOB_WORKER_QUEUES || "";
 
 function positive(value, fallback) {
@@ -78,7 +75,7 @@ function log(level, message, detail = {}) {
   else console.log(serialized);
 }
 
-const db = openDatabase(dbPath);
+const db = openDatabase();
 migrate(db);
 ensureDefaultQueues(db);
 
@@ -511,7 +508,7 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 await worker.start();
 log("info", "Worker started", {
   id: worker.id,
-  db: dbPath,
+  db: dbLabel,
   concurrency: worker.concurrency,
   queues: worker.queues || "all",
   demo_handlers: demo,

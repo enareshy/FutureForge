@@ -35,7 +35,7 @@ export function getRuleRow(db, tenantId, ref) {
     const row = queryOne(db, "SELECT * FROM bom_validation_rules WHERE id = ? AND tenant_id = ?", [id, Number(tenantId)]);
     if (row) return row;
   }
-  return queryOne(db, "SELECT * FROM bom_validation_rules WHERE tenant_id = ? AND (rule_ref = ? OR code = ? COLLATE NOCASE)", [Number(tenantId), String(ref), String(ref)]);
+  return queryOne(db, "SELECT * FROM bom_validation_rules WHERE tenant_id = ? AND (rule_ref = ? OR lower(code) = lower(?))", [Number(tenantId), String(ref), String(ref)]);
 }
 
 export function requireRuleRow(db, tenantId, ref) {
@@ -98,7 +98,7 @@ export function createValidationRule(db, tenantId, body = {}, actor = null, ip =
       ruleType, severity, JSON.stringify(parseObject(body.config ?? body.config_json, {})), normalizeUpper(body.status ?? "ACTIVE"),
       toInt(body.sequence, 100), actor?.id ?? null, actor?.id ?? null, ts, ts]
   );
-  const row = queryOne(db, "SELECT * FROM bom_validation_rules WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM bom_validation_rules WHERE id = ?", [Number(result.lastInsertId)]);
   recordChange(db, { tenantId: tenant, entityType: "RULE", entityId: row.id, entityRef: row.rule_ref, action: "CREATED", status: row.status, after: publicValidationRule(row), actor, ip });
   return publicValidationRule(row);
 }
@@ -351,7 +351,7 @@ export function validateRevision(db, tenantId, revisionId, { scope = "REVISION",
     [validationRef(), tenant, revision.organization_id, revision.bom_id, revision.id, normalizeUpper(scope), status, rules.length,
       issues.length, errorCount, warningCount, duration, actor?.id ?? null, ts]
   );
-  const resultId = Number(insert.lastInsertRowid);
+  const resultId = Number(insert.lastInsertId);
   for (const item of issues) {
     run(
       db,

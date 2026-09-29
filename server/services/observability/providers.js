@@ -7,8 +7,8 @@
 //
 // Safety: every query is parameter-bound, tenant columns are only referenced
 // when they actually exist, and user-defined ("generic") metrics may only
-// reference columns validated via PRAGMA table_info against a whitelist of
-// platform tables. No value is ever interpolated into SQL.
+// reference columns validated against a whitelist of platform tables via the
+// information schema. No value is ever interpolated into SQL.
 import { queryAll, queryOne } from "../../db.js";
 import { columnExists, tableExists } from "./repository.js";
 import { PROVIDER_CATALOG, providerByCode } from "./constants.js";
@@ -51,7 +51,7 @@ function count(db, table, tenantId, extra = null) {
 
 function countSince(db, table, tenantId, { sinceColumn = "created_at", extra = null } = {}) {
   if (!tableExists(db, table)) return 0;
-  const parts = combine([tenantClause(db, table, tenantId), { sql: `${sinceColumn} >= datetime('now', ${WINDOW_24H})`, params: [] }, extra]);
+  const parts = combine([tenantClause(db, table, tenantId), { sql: `${sinceColumn} >= to_char((now() at time zone 'utc') + (${WINDOW_24H})::interval,'YYYY-MM-DD HH24:MI:SS')`, params: [] }, extra]);
   return Number(scalar(db, `SELECT COUNT(*) AS value FROM ${table} ${whereSql(parts)}`, parts.params) || 0);
 }
 
@@ -59,7 +59,7 @@ function countStatuses(db, table, tenantId, column, values, { sinceColumn = null
   if (!tableExists(db, table) || !columnExists(db, table, column)) return 0;
   const placeholders = values.map(() => "?").join(", ");
   const statusClause = { sql: `${column} IN (${placeholders})`, params: values };
-  const sinceClause = sinceColumn && columnExists(db, table, sinceColumn) ? { sql: `${sinceColumn} >= datetime('now', ${WINDOW_24H})`, params: [] } : null;
+  const sinceClause = sinceColumn && columnExists(db, table, sinceColumn) ? { sql: `${sinceColumn} >= to_char((now() at time zone 'utc') + (${WINDOW_24H})::interval,'YYYY-MM-DD HH24:MI:SS')`, params: [] } : null;
   const parts = combine([tenantClause(db, table, tenantId), statusClause, sinceClause, extra]);
   return Number(scalar(db, `SELECT COUNT(*) AS value FROM ${table} ${whereSql(parts)}`, parts.params) || 0);
 }
@@ -72,13 +72,13 @@ function percent(numerator, denominator) {
 function ageSeconds(db, table, tenantId, column = "updated_at") {
   if (!tableExists(db, table) || !columnExists(db, table, column)) return null;
   const parts = combine([tenantClause(db, table, tenantId)]);
-  const value = scalar(db, `SELECT (julianday('now') - julianday(MAX(${column}))) * 86400 AS value FROM ${table} ${whereSql(parts)}`, parts.params);
+  const value = scalar(db, `SELECT EXTRACT(EPOCH FROM (now() at time zone 'utc') - MAX(${column})::timestamp) AS value FROM ${table} ${whereSql(parts)}`, parts.params);
   return value === null || value === undefined || Number.isNaN(value) ? null : Math.max(0, Number(value));
 }
 
 function mappedFilters(db, table, filters) {
   if (!Array.isArray(filters) || !filters.length) return { sql: "", params: [] };
-  const ops = { EQ: "=", NEQ: "!=", GT: ">", GTE: ">=", LT: "<", LTE: "<=", LIKE: "LIKE", IN: "IN", NOT_IN: "NOT IN", IS_NULL: "IS NULL", IS_NOT_NULL: "IS NOT NULL" };
+  const ops = { EQ: "=", NEQ: "!=", GT: ">", GTE: ">=", LT: "<", LTE: "<=", LIKE: "ILIKE", ILIKE: "ILIKE", IN: "IN", NOT_IN: "NOT IN", IS_NULL: "IS NULL", IS_NOT_NULL: "IS NOT NULL" };
   const clauses = [];
   const params = [];
   for (const filter of filters) {
@@ -213,7 +213,7 @@ const IMPLEMENTATIONS = {
           const parts = combine([
             tenantClause(db, "workflow_tasks", tenantId),
             { sql: "status IN ('unassigned', 'assigned', 'in_progress', 'blocked', 'awaiting_approval')", params: [] },
-            { sql: "due_at IS NOT NULL AND due_at < datetime('now')", params: [] },
+            { sql: "due_at IS NOT NULL AND due_at < to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS')", params: [] },
           ]);
           return Number(scalar(db, `SELECT COUNT(*) AS value FROM workflow_tasks ${whereSql(parts)}`, parts.params) || 0);
         }
@@ -240,9 +240,9 @@ const IMPLEMENTATIONS = {
           const parts = combine([
             tenantClause(db, "jobs", tenantId),
             { sql: "completed_at IS NOT NULL AND started_at IS NOT NULL", params: [] },
-            { sql: "completed_at >= datetime('now', '-24 hours')", params: [] },
+            { sql: "completed_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] },
           ]);
-          const value = scalar(db, `SELECT AVG((julianday(completed_at) - julianday(started_at)) * 86400) AS value FROM jobs ${whereSql(parts)}`, parts.params);
+          const value = scalar(db, `SELECT AVG(EXTRACT(EPOCH FROM (completed_at::timestamp - started_at::timestamp))) AS value FROM jobs ${whereSql(parts)}`, parts.params);
           return value === null ? null : Math.max(0, Number(value.toFixed(2)));
         }
         default:
@@ -279,7 +279,7 @@ const IMPLEMENTATIONS = {
         }
         case "IMPORT_THROUGHPUT": {
           if (!tableExists(db, "ie_import_jobs")) return 0;
-          const parts = combine([tenantClause(db, "ie_import_jobs", tenantId), { sql: "created_at >= datetime('now', '-24 hours')", params: [] }]);
+          const parts = combine([tenantClause(db, "ie_import_jobs", tenantId), { sql: "created_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] }]);
           return Number(scalar(db, `SELECT COALESCE(SUM(success_count), 0) AS value FROM ie_import_jobs ${whereSql(parts)}`, parts.params) || 0);
         }
         case "EXPORT_THROUGHPUT":
@@ -312,7 +312,7 @@ const IMPLEMENTATIONS = {
           if (!tableExists(db, "integration_api_usage")) return null;
           const parts = combine([
             tenantClause(db, "integration_api_usage", tenantId),
-            { sql: "created_at >= datetime('now', '-24 hours')", params: [] },
+            { sql: "created_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] },
             { sql: "duration_ms IS NOT NULL", params: [] },
           ]);
           const value = scalar(db, `SELECT AVG(duration_ms) AS value FROM integration_api_usage ${whereSql(parts)}`, parts.params);
@@ -341,7 +341,7 @@ const IMPLEMENTATIONS = {
     measure(db, tenantId, metric) {
       if (metric.code !== "SERVICE_AVAILABILITY") return null;
       if (!tableExists(db, "observability_observation_runs")) return 100;
-      const parts = combine([tenantClause(db, "observability_observation_runs", tenantId), { sql: "started_at >= datetime('now', '-24 hours')", params: [] }]);
+      const parts = combine([tenantClause(db, "observability_observation_runs", tenantId), { sql: "started_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] }]);
       const row = queryOne(db, `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN error_count > 0 THEN 1 ELSE 0 END), 0) AS errored FROM observability_observation_runs ${whereSql(parts)}`, parts.params);
       const total = Number(row?.total || 0);
       if (!total) return 100;
@@ -353,13 +353,13 @@ const IMPLEMENTATIONS = {
 
 function apiTotal(db, tenantId) {
   if (!tableExists(db, "integration_api_usage")) return 0;
-  const parts = combine([tenantClause(db, "integration_api_usage", tenantId), { sql: "created_at >= datetime('now', '-24 hours')", params: [] }]);
+  const parts = combine([tenantClause(db, "integration_api_usage", tenantId), { sql: "created_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] }]);
   return Number(scalar(db, `SELECT COUNT(*) AS value FROM integration_api_usage ${whereSql(parts)}`, parts.params) || 0);
 }
 
 function apiFailures(db, tenantId) {
   if (!tableExists(db, "integration_api_usage") || !columnExists(db, "integration_api_usage", "status_code")) return 0;
-  const parts = combine([tenantClause(db, "integration_api_usage", tenantId), { sql: "status_code >= 500", params: [] }, { sql: "created_at >= datetime('now', '-24 hours')", params: [] }]);
+  const parts = combine([tenantClause(db, "integration_api_usage", tenantId), { sql: "status_code >= 500", params: [] }, { sql: "created_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] }]);
   return Number(scalar(db, `SELECT COUNT(*) AS value FROM integration_api_usage ${whereSql(parts)}`, parts.params) || 0);
 }
 

@@ -104,7 +104,7 @@ export function createResolutionPolicy(db, input = {}, actor = null, tenantId = 
         ts,
       ]
     );
-    const id = Number(result.lastInsertRowid);
+    const id = Number(result.lastInsertId);
     const row = queryOne(db, "SELECT * FROM versioning_resolution_policies WHERE id = ?", [id]);
     writeAudit(db, {
       actor,

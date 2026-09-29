@@ -67,7 +67,7 @@ function createRun(db, tenantId, { trigger = "MANUAL", actor = null } = {}) {
      VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?)`,
     [runRef(), Number(tenantId), String(trigger).toUpperCase(), nowIso(), actor?.id ?? null, nowIso(), nowIso()]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function recordRunError(db, tenantId, runId, { providerCode, metricCode, message, detail = {} }) {
@@ -200,9 +200,9 @@ export function getRun(db, tenantId, ref) {
 
 export function pruneRuns(db, tenantId, retainDays) {
   const days = Math.max(1, Number(retainDays) || 30);
-  const runIds = queryAll(db, "SELECT id FROM observability_observation_runs WHERE tenant_id = ? AND started_at < datetime('now', ?)", [Number(tenantId), `-${days} days`]).map((row) => row.id);
+  const runIds = queryAll(db, "SELECT id FROM observability_observation_runs WHERE tenant_id = ? AND started_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]).map((row) => row.id);
   for (const id of runIds) run(db, "DELETE FROM observability_observation_errors WHERE run_id = ?", [id]);
-  const result = run(db, "DELETE FROM observability_observation_runs WHERE tenant_id = ? AND started_at < datetime('now', ?)", [Number(tenantId), `-${days} days`]);
+  const result = run(db, "DELETE FROM observability_observation_runs WHERE tenant_id = ? AND started_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]);
   return Number(result.changes || 0);
 }
 

@@ -4,7 +4,7 @@ process.env.FILE_SCAN_PROVIDER = "heuristic";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -62,7 +62,7 @@ describe("File & Content Management REST APIs", () => {
   let userToken;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const started = await listen(createApp(db));

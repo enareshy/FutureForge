@@ -27,11 +27,11 @@ import { notifyLegalHold } from "./notifications.js";
 export { publicLegalHold };
 
 export function getLegalHoldRow(db, tenantId, ref) {
-  return queryOne(db, "SELECT * FROM lc_legal_holds WHERE tenant_id = ? AND (hold_ref = ? OR code = ? OR CAST(id AS TEXT) = ?)", [
+  return queryOne(db, "SELECT * FROM lc_legal_holds WHERE tenant_id = ? AND (hold_ref = ? OR code = ? OR id = ?)", [
     Number(tenantId),
     String(ref),
     normalizeUpper(ref),
-    String(ref),
+    Number(ref) || -1,
   ]);
 }
 
@@ -84,7 +84,7 @@ export function listLegalHolds(db, { tenantId, status, scopeType, objectType, or
   }
   const term = normalizeText(q, { max: 200 });
   if (term) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR reason LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR reason ILIKE ?)");
     const like = `%${term}%`;
     params.push(like, like, like);
   }
@@ -138,7 +138,7 @@ export function createLegalHold(db, tenantId, input = {}, actor = null, ip = nul
       ts,
     ]
   );
-  const holdId = Number(result.lastInsertRowid);
+  const holdId = Number(result.lastInsertId);
 
   const targets = [...objectIds];
   if (input.object_id !== undefined && input.object_id !== null && String(input.object_id) !== "") {
@@ -150,7 +150,7 @@ export function createLegalHold(db, tenantId, input = {}, actor = null, ip = nul
     if (!holderType || holderId === undefined || holderId === null) continue;
     run(
       db,
-      "INSERT OR IGNORE INTO lc_legal_hold_objects (hold_id, tenant_id, object_type, object_id, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO lc_legal_hold_objects (hold_id, tenant_id, object_type, object_id, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
       [holdId, tid, holderType, String(holderId), ts]
     );
     syncObjectHoldStatus(db, tid, holderType, holderId);

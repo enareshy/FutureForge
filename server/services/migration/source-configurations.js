@@ -17,8 +17,8 @@ import { normalizeText, normalizeUpper, parseObject, paginate, requireCode, asse
 export function getSourceConfigurationRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM mig_source_configurations WHERE tenant_id = ? AND (source_ref = ? OR CAST(id AS TEXT) = ? OR code = ?)",
-    [Number(tenantId), String(ref), String(ref), normalizeUpper(ref)]
+    "SELECT * FROM mig_source_configurations WHERE tenant_id = ? AND (source_ref = ? OR id = ? OR code = ?)",
+    [Number(tenantId), String(ref), Number(ref) || -1, normalizeUpper(ref)]
   );
 }
 
@@ -51,7 +51,7 @@ export function createSourceConfiguration(db, tenantId, input = {}, actor = null
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM mig_source_configurations WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM mig_source_configurations WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "migration.source.create",

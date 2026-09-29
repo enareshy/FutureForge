@@ -92,7 +92,7 @@ export function createKpi(db, tenantId, input = {}, actor = null, ip = null) {
   );
   writeAudit(db, { actor, action: "reporting.kpi.create", resourceType: "reporting_kpi", resourceId: normalized.code, details: { entity: normalized.entity }, sourceModule: "reporting", ip });
   publishReportingEvent(db, { eventType: "KpiUpdated", payload: { code: normalized.code, action: "created" }, objectType: "reporting_kpi", tenantId }, actor);
-  return getKpiById(db, Number(tenantId), Number(result.lastInsertRowid));
+  return getKpiById(db, Number(tenantId), Number(result.lastInsertId));
 }
 
 export function getKpiById(db, tenantId, id) {

@@ -27,7 +27,7 @@ export function getTransformationRow(db, tenantId, ref) {
     const byId = queryOne(db, "SELECT * FROM exchange_transformations WHERE id = ? AND tenant_id = ?", [Number(raw), tenant]);
     if (byId) return byId;
   }
-  return queryOne(db, "SELECT * FROM exchange_transformations WHERE tenant_id = ? AND (transformation_ref = ? OR code = ? COLLATE NOCASE)", [tenant, raw, raw]);
+  return queryOne(db, "SELECT * FROM exchange_transformations WHERE tenant_id = ? AND (transformation_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
 }
 
 export function requireTransformationRow(db, tenantId, ref) {
@@ -102,7 +102,7 @@ export function createTransformation(db, tenantId, body = {}, actor = null) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?, ?, ?)`,
     [transformationRef(input.code), tenant, input.code, input.name, input.description, input.direction, input.stage, toJson(input.steps, []), input.status, toJson(input.metadata, {}), actor?.id ?? null, actor?.id ?? null, ts, ts]
   );
-  const row = queryOne(db, "SELECT * FROM exchange_transformations WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM exchange_transformations WHERE id = ?", [Number(result.lastInsertId)]);
   insertTransformationVersion(db, tenant, row, { changeSummary: "Initial version", actor });
   return publicTransformation(row);
 }
@@ -164,7 +164,7 @@ export function listTransformations(db, tenantId, query = {}) {
     params.push(normalizeUpper(query.direction));
   }
   if (query.q) {
-    clauses.push("(code LIKE ? OR name LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like);
   }

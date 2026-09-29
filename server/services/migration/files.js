@@ -46,7 +46,7 @@ function recordFile(db, entry) {
       nowIso(),
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function normalizeUpperToken(value) {

@@ -35,7 +35,7 @@ export function createApplication(db, body, actor, ip) {
     }
     throw err;
   }
-  const app = getApplication(db, result.lastInsertRowid);
+  const app = getApplication(db, result.lastInsertId);
   writeAudit(db, {
     actor,
     action: "application.create",
@@ -55,7 +55,7 @@ export function listResources(db, query = {}) {
     params.push(Number(query.applicationId));
   }
   if (query.q) {
-    where.push("(code LIKE ? OR name LIKE ?)");
+    where.push("(code ILIKE ? OR name ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like);
   }
@@ -128,7 +128,7 @@ export function createResource(db, body, actor, ip) {
     }
     throw err;
   }
-  const resource = getResource(db, result.lastInsertRowid);
+  const resource = getResource(db, result.lastInsertId);
   writeAudit(db, {
     actor,
     action: "resource.create",
@@ -219,7 +219,7 @@ export function listPermissions(db, query = {}) {
     params.push(query.action);
   }
   if (query.q) {
-    where.push("(p.code LIKE ? OR p.name LIKE ? OR r.code LIKE ?)");
+    where.push("(p.code ILIKE ? OR p.name ILIKE ? OR r.code ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -278,7 +278,7 @@ export function createPermission(db, body, actor, ip) {
     }
     throw err;
   }
-  const permission = getPermission(db, result.lastInsertRowid);
+  const permission = getPermission(db, result.lastInsertId);
   writeAudit(db, {
     actor,
     action: "permission.create",

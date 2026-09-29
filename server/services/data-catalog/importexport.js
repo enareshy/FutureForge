@@ -35,7 +35,7 @@ function createImportRun(db, { tenantId, resourceType, format, dryRun, transferR
       nowIso(),
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function completeImportRun(db, id, { status, stats, errors }) {

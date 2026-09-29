@@ -113,7 +113,7 @@ export function createApprovalsForNode(db, { instance, instanceNode, node, actor
           ts,
         ]
       );
-      const row = queryOne(db, `${APPROVAL_SELECT} WHERE a.id = ?`, [result.lastInsertRowid]);
+      const row = queryOne(db, `${APPROVAL_SELECT} WHERE a.id = ?`, [result.lastInsertId]);
       created.push(row);
       dispatch(db, {
         instance,
@@ -198,8 +198,8 @@ export function listApprovals(db, query = {}, tenantId, actor, { scope = "mine" 
       `(a.approver_id = ? OR a.approver_id IN (
           SELECT from_user_id FROM workflow_delegations
            WHERE to_user_id = ? AND status = 'active'
-             AND (starts_at IS NULL OR starts_at <= datetime('now'))
-             AND (ends_at IS NULL OR ends_at >= datetime('now'))))`
+             AND (starts_at IS NULL OR starts_at <= to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))
+             AND (ends_at IS NULL OR ends_at >= to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))))`
     );
     params.push(actor.id, actor.id);
   }

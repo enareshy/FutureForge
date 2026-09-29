@@ -162,7 +162,7 @@ export function listItems(db, { domainId, domainCode, status, scopeKey, scopeTyp
     params.push(normalizeText(code), normalizeUpper(code));
   }
   if (q) {
-    clauses.push("(LOWER(i.code) LIKE ? OR LOWER(i.name) LIKE ? OR LOWER(i.description) LIKE ?)");
+    clauses.push("(LOWER(i.code) ILIKE ? OR LOWER(i.name) ILIKE ? OR LOWER(i.description) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -290,7 +290,7 @@ export function createItem(db, input = {}, actor = null, tenantId = null, ip = n
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_data_items WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_data_items WHERE id = ?", [Number(result.lastInsertId)]);
   if (input.parent_id ?? input.parentId) {
     if (!governance.hierarchy_enabled) throw invalidItem("Hierarchy is disabled for this domain by governance");
     createEdge(db, { parentId: input.parent_id ?? input.parentId, childId: row.id, relationship_type: input.relationship_type || "parent_child" }, actor, tenantId, ip);

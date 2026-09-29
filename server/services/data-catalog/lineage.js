@@ -126,7 +126,7 @@ export function createLineage(db, input = {}, actor = null, tenantId = null, ip 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dc_lineage WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_lineage WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "data_catalog.lineage.create",

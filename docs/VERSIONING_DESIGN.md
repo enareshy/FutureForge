@@ -45,7 +45,7 @@ Revisions    Versions   Effectivities   Resolution   Policies     Baselines/    
    │            │            │              │            │             │                │
    └────────────┴────────────┴──────┬───────┴────────────┴─────────────┴────────────────┘
                                     ▼
-        Audit · Event outbox · Search index · Background jobs (SQLite, shared)
+        Audit · Event outbox · Search index · Background jobs (PostgreSQL, shared)
 
 Business modules depend on the flat SDK in `server/services/versioning.js`
 (`resolveEffectivity`, `resolveEffectivityBulk`, `validateEffectivity`,

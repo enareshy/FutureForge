@@ -82,7 +82,7 @@ export function listOrganizations(db, query = {}) {
     }
   }
   if (query.q) {
-    where.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    where.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -240,9 +240,9 @@ export function createOrganization(db, body, actor, ip) {
       ]
     );
     if (kind === "tenant") {
-      run(db, "UPDATE organizations SET tenant_id = ? WHERE id = ?", [result.lastInsertRowid, result.lastInsertRowid]);
+      run(db, "UPDATE organizations SET tenant_id = ? WHERE id = ?", [result.lastInsertId, result.lastInsertId]);
     }
-    const org = getOrganization(db, result.lastInsertRowid);
+    const org = getOrganization(db, result.lastInsertId);
     if (actor) {
       writeAudit(db, {
         actor,
@@ -576,7 +576,7 @@ export function organizationTree(db, query = {}) {
     params.push(query.status);
   }
   if (query.q) {
-    where.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    where.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }

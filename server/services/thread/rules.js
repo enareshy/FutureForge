@@ -128,8 +128,8 @@ export function createRule(db, tenantId, body = {}, actor = null, ip = null) {
     ]
   );
   bumpEpoch(tenant);
-  writeAudit(db, { actor, action: "thread.rule.create", resourceType: "thread_traceability_rule", resourceId: result.lastInsertRowid, details: { code: normalized.code }, ip });
-  const rule = getRule(db, tenant, result.lastInsertRowid);
+  writeAudit(db, { actor, action: "thread.rule.create", resourceType: "thread_traceability_rule", resourceId: result.lastInsertId, details: { code: normalized.code }, ip });
+  const rule = getRule(db, tenant, result.lastInsertId);
   recordChange(db, { tenantId: tenant, entityType: "RULE", entityId: rule.id, entityRef: rule.code, action: "CREATED", status: rule.status, after: rule, summary: `Rule ${rule.code} created`, actor, ip });
   return rule;
 }

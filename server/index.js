@@ -1,12 +1,8 @@
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { openDatabase, migrate } from "./db.js";
 import { seedDatabase } from "./seed.js";
 import { createApp } from "./app.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3001);
-const dbPath = process.env.IAM_DB || join(__dirname, "..", "data", "iam.db");
 
 if (process.env.NODE_ENV === "production" && !process.env.HELIX_AUTH_SECRET) {
   console.error(
@@ -18,7 +14,7 @@ if (process.env.NODE_ENV === "production" && !process.env.HELIX_AUTH_SECRET) {
   process.exit(1);
 }
 
-const db = openDatabase(dbPath);
+const db = openDatabase();
 migrate(db);
 seedDatabase(db);
 

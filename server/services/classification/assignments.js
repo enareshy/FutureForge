@@ -232,7 +232,7 @@ export function assignClass(db, tenantId, body = {}, actor = null, ip = null) {
         ts,
       ]
     );
-    id = Number(result.lastInsertRowid);
+    id = Number(result.lastInsertId);
   }
 
   const assignmentRow = queryOne(db, "SELECT * FROM cla_assignments WHERE id = ?", [id]);
@@ -275,7 +275,7 @@ export function listAssignments(db, { tenantId, objectType, objectId, classId, c
     params.push(normalizeUpper(status));
   }
   if (q) {
-    clauses.push("(a.assignment_ref LIKE ? OR a.object_id LIKE ? OR c.code LIKE ?)");
+    clauses.push("(a.assignment_ref ILIKE ? OR a.object_id ILIKE ? OR c.code ILIKE ?)");
     const like = `%${String(q).trim()}%`;
     params.push(like, like, like);
   }

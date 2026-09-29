@@ -1,5 +1,5 @@
 // Search provider abstraction. The relational provider is the default and
-// compiles declarative queries into parameterised SQLite. Alternative engines
+// compiles declarative queries into parameterised PostgreSQL. Alternative engines
 // (for example a dedicated index server) can be registered under a new name
 // without changing the search service or its callers.
 import { queryAll, queryOne } from "../../db.js";
@@ -61,7 +61,7 @@ function columnExpression(field) {
     if (!/^[A-Za-z0-9_. -]+$/.test(name)) {
       throw new HttpError(400, `Invalid attribute filter "${field}"`);
     }
-    return `json_extract(i.attributes_json, '$."${name.replace(/"/g, "")}"')`;
+    return `(i.attributes_json::jsonb ->> '${name}')`;
   }
   if (!FILTERABLE_COLUMNS.includes(field)) {
     throw new HttpError(400, `Field "${field}" is not filterable`);
@@ -111,19 +111,19 @@ function compileFilter(filter, state) {
     case "lte":
       return push(`${expr} <= ?`, [coerce(value)]);
     case "contains":
-      return push(`lower(${expr}) LIKE ?`, [`%${normalizeText(value)}%`]);
+      return push(`lower(${expr}) ILIKE ?`, [`%${normalizeText(value)}%`]);
     case "not_contains":
-      return push(`(${expr} IS NULL OR lower(${expr}) NOT LIKE ?)`, [`%${normalizeText(value)}%`]);
+      return push(`(${expr} IS NULL OR lower(${expr}) NOT ILIKE ?)`, [`%${normalizeText(value)}%`]);
     case "starts_with":
-      return push(`lower(${expr}) LIKE ?`, [`${normalizeText(value)}%`]);
+      return push(`lower(${expr}) ILIKE ?`, [`${normalizeText(value)}%`]);
     case "ends_with":
-      return push(`lower(${expr}) LIKE ?`, [`%${normalizeText(value)}`]);
+      return push(`lower(${expr}) ILIKE ?`, [`%${normalizeText(value)}`]);
     case "wildcard": {
       const pattern = String(value ?? "")
         .replace(/[%_\\]/g, (ch) => `\\${ch}`)
         .replace(/\*/g, "%")
         .replace(/\?/g, "_");
-      return push(`lower(${expr}) LIKE ? ESCAPE '\\'`, [normalizeText(pattern)]);
+      return push(`lower(${expr}) ILIKE ? ESCAPE '\\'`, [normalizeText(pattern)]);
     }
     case "in": {
       const list = Array.isArray(value) ? value : [value];
@@ -178,7 +178,7 @@ function compileTags(tags, state) {
   const expressions = [];
   for (const tag of tags) {
     state.params.push(`%"${normalizeText(tag)}"%`);
-    expressions.push("lower(i.tags_json) LIKE ?");
+    expressions.push("lower(i.tags_json) ILIKE ?");
   }
   return expressions.length ? `(${expressions.join(" AND ")})` : null;
 }
@@ -274,7 +274,7 @@ export function compileWhere(query, { allowedTypes, tenantId, scope, organizatio
   const terms = tokenize(query.text);
   for (const term of terms) {
     state.params.push(`%${term}%`);
-    clauses.push("i.searchable_text LIKE ?");
+    clauses.push("i.searchable_text ILIKE ?");
   }
 
   for (const status of query.statuses || []) {
@@ -454,13 +454,13 @@ export const relationalProvider = {
     const params = [...compiled.params];
     let where = compiled.where;
     if (term) {
-      where += " AND lower(i.title) LIKE ?";
+      where += " AND lower(i.title) ILIKE ?";
       params.push(`%${term}%`);
     }
     const limit = Math.max(1, Math.min(Number(context.limit) || 10, 50));
     const titles = queryAll(
       db,
-      `SELECT i.title AS value, i.object_type, COUNT(*) AS count
+      `SELECT MIN(i.title) AS value, MIN(i.object_type) AS object_type, COUNT(*) AS count
        FROM search_index i WHERE ${where}
        GROUP BY lower(i.title) ORDER BY count DESC, lower(i.title) ASC LIMIT ?`,
       [...params, limit]
@@ -517,9 +517,6 @@ export const relationalProvider = {
   },
 };
 
-// The relational provider is also exposed under the `sqlite` name used by the
-// spec's initial implementation; both names resolve to the same engine.
-registerSearchProvider("sqlite", relationalProvider);
 registerSearchProvider(DEFAULT_PROVIDER, relationalProvider);
 
 const ATTRIBUTE_FACETS = new Set(["tags"]);

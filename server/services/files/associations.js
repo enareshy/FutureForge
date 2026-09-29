@@ -89,7 +89,7 @@ export function createAssociation(db, fileReference, body = {}, actor, tenantId,
       scope, file.organization_id, actor?.id ?? null, ts, ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM file_associations WHERE id = ?", [insert.lastInsertRowid]);
+  const row = queryOne(db, "SELECT * FROM file_associations WHERE id = ?", [insert.lastInsertId]);
   recordFileEvent(db, {
     eventType: "FileAssociated", file, actor, tenantId: scope,
     payload: { association_id: row.id, business_object_type: type, business_object_id: id, relationship_type: relationship },

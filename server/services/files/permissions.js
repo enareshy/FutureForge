@@ -206,7 +206,7 @@ export function grantPermission(db, body = {}, actor, tenantId, ip) {
     objectType: resourceType, objectId: resource.id, objectName: resource.name,
     details: { principal_type: principalType, principal_id: principalId, permission, effect }, ip,
   });
-  return publicPermission(queryOne(db, "SELECT * FROM file_permissions WHERE id = ?", [insert.lastInsertRowid]));
+  return publicPermission(queryOne(db, "SELECT * FROM file_permissions WHERE id = ?", [insert.lastInsertId]));
 }
 
 export function revokePermission(db, id, actor, tenantId, ip) {

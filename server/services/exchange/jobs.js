@@ -36,7 +36,7 @@ function recordJob(db, { tenantId, handlerCode, platformJob, transactionRef = ""
      VALUES (?, ?, ?, ?, ?, 'QUEUED', 0, 1, '{}', ?, ?, ?)`,
     [makeJobRef(), Number(tenantId), String(transactionRef || ""), handlerCode, platformJob?.id ?? null, ts, ts, ts]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function updateJob(db, exchangeJobId, patch = {}) {

@@ -28,7 +28,7 @@ function whereFrom({ tenantId, status, integrationId, errorCategory, q } = {}) {
     params.push(errorCategory);
   }
   if (q) {
-    clauses.push("(LOWER(reason) LIKE ? OR LOWER(correlation_id) LIKE ? OR LOWER(error_code) LIKE ?)");
+    clauses.push("(LOWER(reason) ILIKE ? OR LOWER(correlation_id) ILIKE ? OR LOWER(error_code) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -68,7 +68,7 @@ export function createDeadLetter(db, input = {}) {
       ts,
     ]
   );
-  return publicDeadLetter(queryOne(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicDeadLetter(queryOne(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function listDeadLetters(db, options = {}) {

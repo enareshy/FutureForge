@@ -22,10 +22,10 @@ const OBJECT_SELECT = `
     cb.username AS created_username,
     (SELECT COUNT(*) FROM object_checkouts ck
        WHERE ck.object_id = o.id AND ck.released_at IS NULL
-         AND (ck.expires_at IS NULL OR ck.expires_at > datetime('now'))) AS active_lock_count,
+         AND (ck.expires_at IS NULL OR ck.expires_at > to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))) AS active_lock_count,
     (SELECT ck.locked_by FROM object_checkouts ck
        WHERE ck.object_id = o.id AND ck.released_at IS NULL
-         AND (ck.expires_at IS NULL OR ck.expires_at > datetime('now'))
+         AND (ck.expires_at IS NULL OR ck.expires_at > to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))
        ORDER BY ck.id DESC LIMIT 1) AS lock_owner_id
   FROM objects o
   JOIN metadata_types t ON t.id = o.object_type_id
@@ -184,7 +184,7 @@ export function listObjectRows(db, query = {}, tenantId) {
     }
   }
   if (query.tag) {
-    where.push("o.tags_json LIKE ?");
+    where.push("o.tags_json ILIKE ?");
     params.push(`%${String(query.tag)}%`);
   }
   if (query.code) {
@@ -192,7 +192,7 @@ export function listObjectRows(db, query = {}, tenantId) {
     params.push(String(query.code));
   }
   if (query.q) {
-    where.push("(o.code LIKE ? OR o.name LIKE ? OR o.description LIKE ? OR o.external_ref LIKE ?)");
+    where.push("(o.code ILIKE ? OR o.name ILIKE ? OR o.description ILIKE ? OR o.external_ref ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like, like);
   }
@@ -213,7 +213,7 @@ export function activeCheckoutRow(db, objectId) {
     db,
     `SELECT * FROM object_checkouts
      WHERE object_id = ? AND released_at IS NULL
-       AND (expires_at IS NULL OR expires_at > datetime('now'))
+       AND (expires_at IS NULL OR expires_at > to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))
      ORDER BY id DESC LIMIT 1`,
     [Number(objectId)]
   );

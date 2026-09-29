@@ -41,7 +41,7 @@ export function listConfigurationContexts(db, { status, tenantId, variantId, q, 
     params.push(Number(variantId));
   }
   if (q) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${String(q)}%`;
     params.push(like, like, like);
   }
@@ -82,7 +82,7 @@ export function createConfigurationContext(db, input = {}, actor = null, tenantI
   return transaction(db, () => {
     const existing = queryOne(
       db,
-      "SELECT id FROM versioning_configuration_contexts WHERE code = ? AND (tenant_id IS NULL OR ? IS NULL OR tenant_id = ?)",
+      "SELECT id FROM versioning_configuration_contexts WHERE code = ? AND (tenant_id IS NULL OR ?::bigint IS NULL OR tenant_id = ?)",
       [code, tenantId, tenantId]
     );
     if (existing) throw invalidConfigurationContext(`Configuration context ${code} already exists`);
@@ -121,7 +121,7 @@ export function createConfigurationContext(db, input = {}, actor = null, tenantI
         ts,
       ]
     );
-    const id = Number(result.lastInsertRowid);
+    const id = Number(result.lastInsertId);
     const row = queryOne(db, "SELECT * FROM versioning_configuration_contexts WHERE id = ?", [id]);
     writeAudit(db, {
       actor,

@@ -143,7 +143,7 @@ export function listTopics(db, { tenantId, status, q, page = 1, pageSize = 50 } 
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -193,7 +193,7 @@ export function createTopic(db, input = {}, actor = null, tenantId = null) {
       ts,
     ]
   );
-  return publicTopic(queryOne(db, "SELECT * FROM event_topics WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicTopic(queryOne(db, "SELECT * FROM event_topics WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateTopic(db, refValue, input = {}) {
@@ -245,7 +245,7 @@ export function listQueues(db, { tenantId, status, q, page = 1, pageSize = 50 } 
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -297,7 +297,7 @@ export function createQueue(db, input = {}, actor = null, tenantId = null) {
       ts,
     ]
   );
-  return publicQueue(queryOne(db, "SELECT * FROM event_queues WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicQueue(queryOne(db, "SELECT * FROM event_queues WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateQueue(db, refValue, input = {}) {
@@ -466,7 +466,7 @@ export function createConsumerGroup(db, input = {}, actor = null, tenantId = nul
       ts,
     ]
   );
-  return publicConsumerGroup(queryOne(db, "SELECT * FROM event_consumer_groups WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicConsumerGroup(queryOne(db, "SELECT * FROM event_consumer_groups WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateConsumerGroup(db, refValue, input = {}) {

@@ -26,8 +26,8 @@ const CREDENTIAL_TYPES = ["TOKEN", "API_KEY", "USERNAME_PASSWORD", "OAUTH2", "CE
 function getConfigRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM ie_connector_configurations WHERE tenant_id = ? AND (config_ref = ? OR code = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), String(ref), normalizeUpper(ref), String(ref)]
+    "SELECT * FROM ie_connector_configurations WHERE tenant_id = ? AND (config_ref = ? OR code = ? OR id = ?)",
+    [Number(tenantId), String(ref), normalizeUpper(ref), Number(ref) || -1]
   );
 }
 
@@ -87,7 +87,7 @@ export function createConnectorConfiguration(db, tenantId, input = {}, actor = n
     ]
   );
   writeAudit(db, { actor, action: "data_exchange.connector.create", resourceType: "ie_connector_configurations", resourceId: code, details: { connector_type: connectorType }, ip });
-  return publicConnectorConfiguration(queryOne(db, "SELECT * FROM ie_connector_configurations WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicConnectorConfiguration(queryOne(db, "SELECT * FROM ie_connector_configurations WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateConnectorConfiguration(db, tenantId, ref, patch = {}, actor = null, ip = null) {
@@ -144,7 +144,7 @@ export function listConnectorConfigurations(db, { tenantId, connectorType, direc
   }
   const term = normalizeText(q);
   if (term) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${term}%`;
     params.push(like, like, like);
   }
@@ -208,7 +208,7 @@ export function createCredentialReference(db, tenantId, input = {}, actor = null
     ]
   );
   writeAudit(db, { actor, action: "data_exchange.credential.create", resourceType: "ie_connector_credential_references", resourceId: code, details: { credential_type: credentialType }, ip });
-  return publicCredentialReference(queryOne(db, "SELECT * FROM ie_connector_credential_references WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicCredentialReference(queryOne(db, "SELECT * FROM ie_connector_credential_references WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function listCredentialReferences(db, { tenantId, status, page, pageSize } = {}) {
@@ -228,8 +228,8 @@ export function listCredentialReferences(db, { tenantId, status, page, pageSize 
 export function setCredentialReferenceStatus(db, tenantId, ref, status, actor = null, ip = null) {
   const row = queryOne(
     db,
-    "SELECT * FROM ie_connector_credential_references WHERE tenant_id = ? AND (code = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), normalizeUpper(ref), String(ref)]
+    "SELECT * FROM ie_connector_credential_references WHERE tenant_id = ? AND (code = ? OR id = ?)",
+    [Number(tenantId), normalizeUpper(ref), Number(ref) || -1]
   );
   if (!row) throw connectorNotFound(ref);
   const next = normalizeText(status, { max: 16 }).toLowerCase();

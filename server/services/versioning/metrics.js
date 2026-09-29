@@ -135,7 +135,7 @@ export function dashboardSummary(db, { tenantId = null, from = null, to = null }
   const upcoming = queryAll(
     db,
     `SELECT revision_ref, object_type, object_id, revision_code, effective_from FROM versioning_revisions
-     WHERE effective_from IS NOT NULL AND effective_from > date('now') AND status != 'archived'${filter.clause}
+     WHERE effective_from IS NOT NULL AND effective_from > to_char(now() at time zone 'utc', 'YYYY-MM-DD') AND status != 'archived'${filter.clause}
      ORDER BY effective_from LIMIT 10`,
     filter.params
   ).map((row) => ({
@@ -148,7 +148,7 @@ export function dashboardSummary(db, { tenantId = null, from = null, to = null }
   const expired = queryAll(
     db,
     `SELECT revision_ref, object_type, object_id, revision_code, effective_to FROM versioning_revisions
-     WHERE effective_to IS NOT NULL AND effective_to < date('now') AND status != 'archived'${filter.clause}
+     WHERE effective_to IS NOT NULL AND effective_to < to_char(now() at time zone 'utc', 'YYYY-MM-DD') AND status != 'archived'${filter.clause}
      ORDER BY effective_to DESC LIMIT 10`,
     filter.params
   ).map((row) => ({

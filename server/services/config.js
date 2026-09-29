@@ -145,9 +145,9 @@ export function ensureDefinitions(db) {
   for (const def of DEFAULT_DEFINITIONS) {
     run(
       db,
-      `INSERT OR IGNORE INTO config_definitions
+      `INSERT INTO config_definitions
         (key, value_type, default_value, min_value, max_value, scopes, system_only, feature, description, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       [
         def.key,
         def.value_type,

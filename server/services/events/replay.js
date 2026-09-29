@@ -159,7 +159,7 @@ export function createReplay(db, input = {}, actor = null, tenantId = null) {
       ts,
     ]
   );
-  const replayId = Number(result.lastInsertRowid);
+  const replayId = Number(result.lastInsertId);
   auditEvent(db, {
     actor,
     action: dryRun ? "event.replay.preview" : "event.replay.create",
@@ -213,7 +213,7 @@ function insertReplayDelivery(db, event, subscription, replayRef) {
       ts,
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 // Resolves a replay by numeric id or public replay_ref, so both the job engine
@@ -316,7 +316,7 @@ export function listReplays(db, { tenantId, status, scopeType, q, page = 1, page
     params.push(scopeType);
   }
   if (q) {
-    clauses.push("(LOWER(replay_ref) LIKE ? OR LOWER(scope_type) LIKE ?)");
+    clauses.push("(LOWER(replay_ref) ILIKE ? OR LOWER(scope_type) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }

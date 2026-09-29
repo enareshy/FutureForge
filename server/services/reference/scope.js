@@ -108,7 +108,7 @@ export function createScopePolicy(db, input = {}, actor = null, tenantId = null,
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_scope_policies WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_scope_policies WHERE id = ?", [Number(result.lastInsertId)]);
   bumpCacheEpoch(db);
   writeAudit(db, { actor, action: "reference.scope.create", resourceType: "reference_scope_policy", resourceId: row.id, details: { code }, ip });
   return publicScopePolicy(row);

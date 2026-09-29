@@ -148,7 +148,7 @@ export function buildEventFilters(filters = {}, scope = {}) {
   if (filters.q) {
     const like = likeTerm(filters.q);
     where.push(
-      `(${col("actor_username")} LIKE ? OR ${col("object_name")} LIKE ? OR ${col("action")} LIKE ? OR ${col("resource_id")} LIKE ? OR ${col("details")} LIKE ? OR ${col("error_message")} LIKE ?)`
+      `(${col("actor_username")} ILIKE ? OR ${col("object_name")} ILIKE ? OR ${col("action")} ILIKE ? OR ${col("resource_id")} ILIKE ? OR ${col("details")} ILIKE ? OR ${col("error_message")} ILIKE ?)`
     );
     params.push(like, like, like, like, like, like);
   }
@@ -266,7 +266,7 @@ export function auditSummary(db, filters = {}, scope = {}) {
   );
   const byDay = queryAll(
     db,
-    `SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count FROM audit_logs ${clause}
+    `SELECT left(created_at, 10) AS day, COUNT(*) AS count FROM audit_logs ${clause}
      GROUP BY day ORDER BY day DESC LIMIT 30`,
     params
   );
@@ -405,20 +405,20 @@ export function auditMetrics(db, filters = {}, scope = {}) {
     params
   );
   const byDayClause = where.length
-    ? `WHERE ${where.join(" AND ")} AND created_at >= datetime('now', '-30 days')`
-    : "WHERE created_at >= datetime('now', '-30 days')";
+    ? `WHERE ${where.join(" AND ")} AND created_at >= to_char((now() at time zone 'utc') + interval '-30 days','YYYY-MM-DD HH24:MI:SS')`
+    : "WHERE created_at >= to_char((now() at time zone 'utc') + interval '-30 days','YYYY-MM-DD HH24:MI:SS')";
   const byDay = queryAll(
     db,
-    `SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count FROM audit_logs ${byDayClause}
+    `SELECT left(created_at, 10) AS day, COUNT(*) AS count FROM audit_logs ${byDayClause}
      GROUP BY day ORDER BY day ASC`,
     params
   );
   const growth = queryAll(
     db,
     `SELECT
-        SUM(CASE WHEN created_at >= datetime('now', '-1 day') THEN 1 ELSE 0 END) AS last_24h,
-        SUM(CASE WHEN created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS last_7d,
-        SUM(CASE WHEN created_at >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS last_30d
+        SUM(CASE WHEN created_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') THEN 1 ELSE 0 END) AS last_24h,
+        SUM(CASE WHEN created_at >= to_char((now() at time zone 'utc') + interval '-7 days','YYYY-MM-DD HH24:MI:SS') THEN 1 ELSE 0 END) AS last_7d,
+        SUM(CASE WHEN created_at >= to_char((now() at time zone 'utc') + interval '-30 days','YYYY-MM-DD HH24:MI:SS') THEN 1 ELSE 0 END) AS last_30d
      FROM audit_logs ${clause}`,
     params
   )[0] || {};

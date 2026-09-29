@@ -81,8 +81,8 @@ function upsertState(db, tenantId, { consistency, lastEventType, processedDelta 
 function recordProcessed(db, tenantId, { eventId = null, eventType = "", objectType = "", objectId = "", status = "PROCESSED", error = "" }) {
   run(
     db,
-    `INSERT OR IGNORE INTO thread_events_processed (tenant_id, projection_key, event_id, event_type, object_type, object_id, status, error, processed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO thread_events_processed (tenant_id, projection_key, event_id, event_type, object_type, object_id, status, error, processed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
     [Number(tenantId), PROJECTION_KEY, eventId != null ? Number(eventId) : null, eventType || "", objectType || "", objectId || "", status, error || "", nowIso()]
   );
 }

@@ -72,7 +72,7 @@ export function listSources(db, { tenantId, sourceType, status, classification, 
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(system) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(system) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -133,7 +133,7 @@ export function createSource(db, input = {}, actor = null, tenantId = null, ip =
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dc_sources WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_sources WHERE id = ?", [Number(result.lastInsertId)]);
   const entry = registerEntry(
     db,
     {
@@ -314,7 +314,7 @@ export function addSourceMapping(db, sourceRefValue, input = {}, actor = null, t
     actor,
     action: "data_catalog.source.map",
     resourceType: "dc_source_mapping",
-    resourceId: Number(result.lastInsertRowid),
+    resourceId: Number(result.lastInsertId),
     details: { source_id: source.id, mapping_type: mappingType, target_entry_id: targetEntry?.id ?? null },
     ip,
   });
@@ -325,7 +325,7 @@ export function addSourceMapping(db, sourceRefValue, input = {}, actor = null, t
     objectId: source.id,
     payload: { source_id: source.id, target_entry_id: targetEntry?.id ?? null, mapping_type: mappingType },
   }, actor);
-  return publicSourceMapping(queryOne(db, "SELECT * FROM dc_source_mappings WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicSourceMapping(queryOne(db, "SELECT * FROM dc_source_mappings WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateSourceMapping(db, mappingId, patch = {}, actor = null, tenantId = null, ip = null) {

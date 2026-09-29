@@ -43,7 +43,7 @@ export function recordDeadLetter(db, { job, queue, category, reason, errorCode =
     ]
   );
   run(db, "UPDATE jobs SET dead_lettered_at = ?, updated_at = ? WHERE id = ?", [ts, ts, job.id]);
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function safeJson(value) {
@@ -119,7 +119,7 @@ export function listDeadLetters(db, query = {}, tenantId = null) {
   }
   if (query.q) {
     const like = `%${query.q}%`;
-    where.push("(j.job_ref LIKE ? OR d.error_message LIKE ? OR d.reason LIKE ?)");
+    where.push("(j.job_ref ILIKE ? OR d.error_message ILIKE ? OR d.reason ILIKE ?)");
     params.push(like, like, like);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";

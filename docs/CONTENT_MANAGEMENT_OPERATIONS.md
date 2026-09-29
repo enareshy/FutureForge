@@ -107,7 +107,7 @@ Operational alarms worth configuring:
 
 ## Backup and recovery
 
-- Back up the SQLite database (content metadata, versions, associations,
+- Back up the PostgreSQL database (content metadata, versions, associations,
   retention, locks) and the storage backend together; they form one logical
   unit.
 - Restore order: storage backend first, database second. Content whose bytes

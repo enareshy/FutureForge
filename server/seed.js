@@ -1,6 +1,6 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openDatabase, migrate, queryOne, queryAll, run, nowIso } from "./db.js";
+import { openDatabase, migrate, queryOne, queryAll, run, nowIso, transaction, refreshFromTemplate, registerTestSeed, TEST_SEED_MARKER } from "./db.js";
 import * as users from "./services/users.js";
 import * as groups from "./services/groups.js";
 import * as roles from "./services/roles.js";
@@ -3093,6 +3093,42 @@ function seedJobs(db) {
 // Ensures the logical execution queues and a representative set of recurring
 // schedules exist. Queues are system configuration and are only created when
 // missing; admin edits are never overwritten.
+const JOB_SCHEDULE_SAMPLES = [
+  {
+    code: "NIGHTLY_SEARCH_REINDEX",
+    name: "Nightly search reindex",
+    description: "Rebuild the full-text search index every night at 02:00 UTC.",
+    job_type_code: "SEARCH_INDEXING",
+    queue: "SEARCH_INDEXING",
+    schedule_type: "cron",
+    cron_expression: "0 2 * * *",
+    timezone: "UTC",
+    catchup_policy: "skip",
+  },
+  {
+    code: "HOURLY_ERP_SYNC",
+    name: "Hourly ERP sync",
+    description: "Synchronize the item master with the ERP system every hour.",
+    job_type_code: "DATA_SYNC",
+    queue: "INTEGRATION",
+    schedule_type: "interval",
+    interval_seconds: 3600,
+    failure_policy: "continue",
+  },
+  {
+    code: "WEEKLY_COST_ROLLUP",
+    name: "Weekly cost rollup",
+    description: "Roll up approved cost records into the weekly report on Mondays.",
+    job_type_code: "REPORT_GENERATION",
+    queue: "REPORTING",
+    schedule_type: "weekly",
+    weekdays: [1],
+    daily_time: "06:00",
+    timezone: "UTC",
+    max_retries: 2,
+  },
+];
+
 function seedJobEngine(db) {
   const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
   const admin = queryOne(db, "SELECT id, username, display_name, email FROM users WHERE username = 'admin'");
@@ -3104,41 +3140,7 @@ function seedJobEngine(db) {
   const existing = queryOne(db, "SELECT COUNT(*) AS c FROM job_schedules").c;
   if (existing > 0) return { jobEngineSeeded: true, queuesSeeded: jobExecution.LOGICAL_QUEUES.length };
 
-  const samples = [
-    {
-      code: "NIGHTLY_SEARCH_REINDEX",
-      name: "Nightly search reindex",
-      description: "Rebuild the full-text search index every night at 02:00 UTC.",
-      job_type_code: "SEARCH_INDEXING",
-      queue: "SEARCH_INDEXING",
-      schedule_type: "cron",
-      cron_expression: "0 2 * * *",
-      timezone: "UTC",
-      catchup_policy: "skip",
-    },
-    {
-      code: "HOURLY_ERP_SYNC",
-      name: "Hourly ERP sync",
-      description: "Synchronize the item master with the ERP system every hour.",
-      job_type_code: "DATA_SYNC",
-      queue: "INTEGRATION",
-      schedule_type: "interval",
-      interval_seconds: 3600,
-      failure_policy: "continue",
-    },
-    {
-      code: "WEEKLY_COST_ROLLUP",
-      name: "Weekly cost rollup",
-      description: "Roll up approved cost records into the weekly report on Mondays.",
-      job_type_code: "REPORT_GENERATION",
-      queue: "REPORTING",
-      schedule_type: "weekly",
-      weekdays: [1],
-      daily_time: "06:00",
-      timezone: "UTC",
-      max_retries: 2,
-    },
-  ];
+  const samples = JOB_SCHEDULE_SAMPLES;
   let created = 0;
   for (const sample of samples) {
     try {
@@ -3151,44 +3153,100 @@ function seedJobEngine(db) {
   return { jobEngineSeeded: true, queuesSeeded: jobExecution.LOGICAL_QUEUES.length, schedulesSeeded: created };
 }
 
+// Re-anchors every active schedule's next run to the current time. Test
+// databases cloned from the pre-seeded template carry a `next_run_at` computed
+// when the template was built, which may already be in the past; re-anchoring
+// keeps time-based behaviour deterministic without changing production boots.
+export function rescheduleJobSchedules(db) {
+  const rows = queryAll(db, "SELECT * FROM job_schedules WHERE status = 'active' AND enabled = 1");
+  let updated = 0;
+  for (const row of rows) {
+    const patch = { schedule_type: row.schedule_type, timezone: row.timezone };
+    if (row.schedule_type === "cron") {
+      patch.cron_expression = row.cron_expression;
+    } else if (row.schedule_type === "interval") {
+      patch.interval_seconds = row.interval_seconds;
+    } else if (row.schedule_type === "weekly") {
+      try {
+        patch.weekdays = JSON.parse(row.weekdays_json || "[]");
+      } catch {
+        patch.weekdays = [];
+      }
+      if (!Array.isArray(patch.weekdays) || patch.weekdays.length === 0) patch.weekdays = [1];
+      patch.daily_time = row.daily_time;
+    } else if (row.schedule_type === "monthly") {
+      patch.day_of_month = row.day_of_month;
+      patch.daily_time = row.daily_time;
+    } else {
+      continue;
+    }
+    jobExecution.updateSchedule(db, row.id, patch, null);
+    updated += 1;
+  }
+  return updated;
+}
+
 export function seedDatabase(db) {
-  hierarchy.ensureHierarchy(db);
-  config.ensureDefinitions(db);
-  providers.ensureDefaultProviders(db);
-  const identity = seedIdentity(db);
-  const authz = seedAuthz(db);
-  seedMissingCatalog(db);
-  seedMissingHierarchy(db);
-  tenants.backfillTenants(db);
-  seedMetadata(db);
-  seedObjects(db);
-  seedLifecycle(db);
-  seedWorkflow(db);
-  seedAudit(db);
-  seedNotifications(db);
-  seedDelivery(db);
-  seedJobs(db);
-  seedJobEngine(db);
-  const searchResult = seedSearch(db);
-  const integrationResult = seedIntegration(db);
-  const eventsResult = seedEvents(db);
-  const numberingResult = withEventSuppression(() => seedNumbering(db));
-  const versioningResult = withEventSuppression(() => seedVersioning(db));
-  const referenceResult = withEventSuppression(() => seedReference(db));
-  const contentResult = withEventSuppression(() => seedContent(db));
-  const dataGovernanceResult = withEventSuppression(() => seedDataGovernance(db));
-  const dataCatalogResult = withEventSuppression(() => seedDataCatalog(db));
-  const dataLifecycleResult = withEventSuppression(() => seedDataLifecycle(db));
-  const dataExchangeResult = withEventSuppression(() => seedDataExchange(db));
-  const migrationResult = withEventSuppression(() => seedMigrationFramework(db));
-  const classificationResult = withEventSuppression(() => seedClassificationFramework(db));
-  const bomResult = withEventSuppression(() => seedBomEngine(db));
-  const pdmResult = withEventSuppression(() => seedPdmDomain(db));
-  const threadResult = withEventSuppression(() => seedThreadDomain(db));
-  const exchangeResult = withEventSuppression(() => seedExchangeDomain(db));
-  const reportingResult = withEventSuppression(() => seedReportingDomain(db));
-  const observabilityResult = withEventSuppression(() => seedObservabilityDomain(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult, ...threadResult, ...exchangeResult, ...reportingResult, ...observabilityResult };
+  // Test databases are backed by the pre-seeded template: replace the (possibly
+  // still unmaterialised) clone with the seeded one instead of replaying every
+  // seed statement. The template is always fully seeded, so no marker check is
+  // needed — and skipping it avoids materialising the schema clone first.
+  if (db.__seedTemplate) {
+    refreshFromTemplate(db, db.__seedTemplate);
+    // The ensure/initialize steps below are idempotent: on the seeded clone they
+    // find everything already present, so they only refresh in-process state
+    // (search/index registration, migration adapters, job handlers, ...) without
+    // rewriting data.
+    const result = runSeed(db);
+    // Time-sensitive seed rows (recurring schedules) must be re-anchored to the
+    // clone's current time; the template froze them when it was built.
+    rescheduleJobSchedules(db);
+    return result;
+  }
+  return runSeed(db);
+}
+
+function runSeed(db) {
+  return transaction(db, () => {
+    hierarchy.ensureHierarchy(db);
+    config.ensureDefinitions(db);
+    providers.ensureDefaultProviders(db);
+    const identity = seedIdentity(db);
+    const authz = seedAuthz(db);
+    seedMissingCatalog(db);
+    seedMissingHierarchy(db);
+    tenants.backfillTenants(db);
+    seedMetadata(db);
+    seedObjects(db);
+    seedLifecycle(db);
+    seedWorkflow(db);
+    seedAudit(db);
+    seedNotifications(db);
+    seedDelivery(db);
+    seedJobs(db);
+    seedJobEngine(db);
+    const searchResult = seedSearch(db);
+    const integrationResult = seedIntegration(db);
+    const eventsResult = seedEvents(db);
+    const numberingResult = withEventSuppression(() => seedNumbering(db));
+    const versioningResult = withEventSuppression(() => seedVersioning(db));
+    const referenceResult = withEventSuppression(() => seedReference(db));
+    const contentResult = withEventSuppression(() => seedContent(db));
+    const dataGovernanceResult = withEventSuppression(() => seedDataGovernance(db));
+    const dataCatalogResult = withEventSuppression(() => seedDataCatalog(db));
+    const dataLifecycleResult = withEventSuppression(() => seedDataLifecycle(db));
+    const dataExchangeResult = withEventSuppression(() => seedDataExchange(db));
+    const migrationResult = withEventSuppression(() => seedMigrationFramework(db));
+    const classificationResult = withEventSuppression(() => seedClassificationFramework(db));
+    const bomResult = withEventSuppression(() => seedBomEngine(db));
+    const pdmResult = withEventSuppression(() => seedPdmDomain(db));
+    const threadResult = withEventSuppression(() => seedThreadDomain(db));
+    const exchangeResult = withEventSuppression(() => seedExchangeDomain(db));
+    const reportingResult = withEventSuppression(() => seedReportingDomain(db));
+    const observabilityResult = withEventSuppression(() => seedObservabilityDomain(db));
+    run(db, "INSERT INTO seed_state (name) VALUES (?) ON CONFLICT DO NOTHING", [TEST_SEED_MARKER]);
+    return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult, ...threadResult, ...exchangeResult, ...reportingResult, ...observabilityResult };
+  });
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -3459,9 +3517,12 @@ function seedContent(db) {
   }
 }
 
+// Lets the test-database layer build its pre-seeded template without a
+// circular import between db.js and seed.js.
+registerTestSeed(seedDatabase);
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const path = process.env.IAM_DB || join(__dirname, "..", "data", "iam.db");
-  const db = openDatabase(path);
+  const db = openDatabase();
   migrate(db);
   const result = seedDatabase(db);
   console.log(result.seeded || result.authzSeeded ? "Seeded IAM database" : "IAM database already populated");

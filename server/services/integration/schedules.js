@@ -27,7 +27,7 @@ function whereFrom({ tenantId, integrationId, status, q } = {}) {
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -149,7 +149,7 @@ export function createSchedule(db, input = {}, actor = null, tenantId = null) {
       ts,
     ]
   );
-  let row = queryOne(db, "SELECT * FROM integration_schedules WHERE id = ?", [Number(result.lastInsertRowid)]);
+  let row = queryOne(db, "SELECT * FROM integration_schedules WHERE id = ?", [Number(result.lastInsertId)]);
   materializeEngineSchedule(db, row, actor);
   row = queryOne(db, "SELECT * FROM integration_schedules WHERE id = ?", [row.id]);
   auditIntegration(db, { actor, action: "integration.schedule.create", resourceType: "integration_schedule", resourceId: row.id, details: { code: row.code, schedule_type: row.schedule_type } });

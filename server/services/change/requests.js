@@ -26,7 +26,7 @@ export function getRequestRow(db, tenantId, ref) {
   }
   return queryOne(
     db,
-    "SELECT * FROM change_requests WHERE tenant_id = ? AND (request_ref = ? OR request_number = ? COLLATE NOCASE)",
+    "SELECT * FROM change_requests WHERE tenant_id = ? AND (request_ref = ? OR lower(request_number) = lower(?))",
     [Number(tenantId), String(ref), String(ref)]
   );
 }
@@ -53,7 +53,7 @@ export function listRequests(db, { tenantId, status, category, q, page, pageSize
     params.push(String(category).toUpperCase());
   }
   if (q) {
-    clauses.push("(request_number LIKE ? OR title LIKE ? OR description LIKE ?)");
+    clauses.push("(request_number ILIKE ? OR title ILIKE ? OR description ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like);
   }
@@ -97,7 +97,7 @@ export function createRequest(db, tenantId, body = {}, actor = null, ip = null) 
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM change_requests WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM change_requests WHERE id = ?", [Number(result.lastInsertId)]);
   recordChange(db, { tenantId: tenant, entityType: "REQUEST", entityId: row.id, entityRef: row.request_ref, action: "CREATED", version: 1, status: row.status, after: publicRequest(row), actor, ip });
   publishChangeEvent(db, { eventType: "ChangeRequestCreated", objectType: "change_request", objectId: row.id, tenantId: tenant, organizationId: row.organization_id, payload: { request_ref: row.request_ref, request_number: row.request_number } }, actor);
   return publicRequest(row);

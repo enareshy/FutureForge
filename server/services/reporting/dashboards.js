@@ -151,7 +151,7 @@ export function createDashboard(db, tenantId, input = {}, actor = null, ip = nul
       ts,
     ]
   );
-  const dashboardId = Number(result.lastInsertRowid);
+  const dashboardId = Number(result.lastInsertId);
   if (normalized.is_default) clearDefaultDashboard(db, Number(tenantId), dashboardId);
   if (input.shares) replaceDashboardShares(db, Number(tenantId), dashboardId, input.shares);
   for (const widget of input.widgets || []) addWidget(db, tenantId, dashboardId, widget, actor);
@@ -308,8 +308,8 @@ export function addWidget(db, tenantId, dashboardRef_, input = {}, actor = null)
       ts,
     ]
   );
-  writeAudit(db, { actor, action: "reporting.widget.create", resourceType: "reporting_widget", resourceId: String(result.lastInsertRowid), details: { dashboard: dashboard.code, widget_type: widgetType }, sourceModule: "reporting" });
-  return getWidget(db, Number(tenantId), Number(result.lastInsertRowid));
+  writeAudit(db, { actor, action: "reporting.widget.create", resourceType: "reporting_widget", resourceId: String(result.lastInsertId), details: { dashboard: dashboard.code, widget_type: widgetType }, sourceModule: "reporting" });
+  return getWidget(db, Number(tenantId), Number(result.lastInsertId));
 }
 
 export function updateWidget(db, tenantId, ref, input = {}, actor = null) {

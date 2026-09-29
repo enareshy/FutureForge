@@ -31,7 +31,7 @@ function whereFrom({ tenantId, externalSystemId, externalObjectType, internalObj
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(external_object_id) LIKE ? OR LOWER(internal_object_id) LIKE ?)");
+    clauses.push("(LOWER(external_object_id) ILIKE ? OR LOWER(internal_object_id) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -153,7 +153,7 @@ export function upsertMapping(db, input = {}, actor = null, tenantId = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM external_object_mappings WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM external_object_mappings WHERE id = ?", [Number(result.lastInsertId)]);
   auditIntegration(db, { actor, action: "integration.mapping.create", resourceType: "external_object_mapping", resourceId: row.id, details: { conflict: Boolean(conflictStatus) }, status: conflictStatus ? "failure" : "success" });
   return { ...publicMapping(row), conflict: Boolean(conflictStatus) };
 }

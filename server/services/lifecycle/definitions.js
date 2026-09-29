@@ -96,7 +96,7 @@ export function listDefinitions(db, query = {}, tenantId) {
     params.push(query.module);
   }
   if (query.q) {
-    where.push("(d.code LIKE ? OR d.name LIKE ? OR d.description LIKE ?)");
+    where.push("(d.code ILIKE ? OR d.name ILIKE ? OR d.description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -154,7 +154,7 @@ function createVersionRow(db, definitionId, version, actor, notes = "", status =
      VALUES (?, ?, ?, ?, '{}', ?, ?, ?)`,
     [definitionId, version, status, notes || "", actor?.id ?? null, ts, ts]
   );
-  return getVersionRow(db, result.lastInsertRowid);
+  return getVersionRow(db, result.lastInsertId);
 }
 
 export function createDefinition(db, body, actor, ip, reqTenantId, query = {}) {
@@ -177,16 +177,16 @@ export function createDefinition(db, body, actor, ip, reqTenantId, query = {}) {
     }
     throw err;
   }
-  const version = createVersionRow(db, result.lastInsertRowid, 1, actor, "Initial draft");
+  const version = createVersionRow(db, result.lastInsertId, 1, actor, "Initial draft");
   writeAudit(db, {
     actor,
     action: "lifecycle.definition.create",
     resourceType: "lifecycle_definition",
-    resourceId: result.lastInsertRowid,
+    resourceId: result.lastInsertId,
     details: { code: body.code, version: version.version, tenant_id: tenantId ?? null },
     ip,
   });
-  return { definition: getDefinition(db, result.lastInsertRowid, tenantId), version: publicVersion(version) };
+  return { definition: getDefinition(db, result.lastInsertId, tenantId), version: publicVersion(version) };
 }
 
 export function updateDefinition(db, id, body, actor, ip, tenantId) {
@@ -299,7 +299,7 @@ function copyVersionGraph(db, sourceVersionId, targetVersionId) {
         nowIso(),
       ]
     );
-    stateMap.set(state.id, result.lastInsertRowid);
+    stateMap.set(state.id, result.lastInsertId);
   }
   for (const t of queryAll(db, "SELECT * FROM lifecycle_transitions WHERE lifecycle_version_id = ? ORDER BY display_order, id", [sourceVersionId])) {
     run(
@@ -503,10 +503,10 @@ export function createState(db, body, actor, ip, tenantId) {
     throw err;
   }
   if (body.is_initial || body.isInitial) {
-    run(db, "UPDATE lifecycle_states SET is_initial = 0 WHERE lifecycle_version_id = ? AND id != ?", [context.version.id, result.lastInsertRowid]);
+    run(db, "UPDATE lifecycle_states SET is_initial = 0 WHERE lifecycle_version_id = ? AND id != ?", [context.version.id, result.lastInsertId]);
   }
-  writeAudit(db, { actor, action: "lifecycle.state.create", resourceType: "lifecycle_state", resourceId: result.lastInsertRowid, details: { code: body.code }, ip });
-  return publicState(getStateRow(db, result.lastInsertRowid));
+  writeAudit(db, { actor, action: "lifecycle.state.create", resourceType: "lifecycle_state", resourceId: result.lastInsertId, details: { code: body.code }, ip });
+  return publicState(getStateRow(db, result.lastInsertId));
 }
 
 export function updateState(db, id, body, actor, ip, tenantId) {
@@ -698,8 +698,8 @@ export function createTransition(db, body, actor, ip, tenantId) {
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Transition code already exists in this lifecycle version");
     throw err;
   }
-  writeAudit(db, { actor, action: "lifecycle.transition.create", resourceType: "lifecycle_transition", resourceId: result.lastInsertRowid, details: { code: body.code }, ip });
-  return publicTransition(getTransitionRow(db, result.lastInsertRowid));
+  writeAudit(db, { actor, action: "lifecycle.transition.create", resourceType: "lifecycle_transition", resourceId: result.lastInsertId, details: { code: body.code }, ip });
+  return publicTransition(getTransitionRow(db, result.lastInsertId));
 }
 
 export function updateTransition(db, id, body, actor, ip, tenantId) {
@@ -838,7 +838,7 @@ export function createAssignment(db, body, actor, ip, reqTenantId) {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [type.id, definition.id, published.id, body.is_default === false || body.isDefault === false ? 0 : 1, body.status || "active", tenantId ?? null, ts, ts]
     );
-    id = result.lastInsertRowid;
+    id = result.lastInsertId;
   }
   writeAudit(db, {
     actor,

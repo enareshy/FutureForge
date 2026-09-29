@@ -113,7 +113,7 @@ export function createRetentionPolicy(db, input = {}, actor = null, tenantId = n
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM event_retention_policies WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM event_retention_policies WHERE id = ?", [Number(result.lastInsertId)]);
   auditEvent(db, { actor, action: "event.retention.create", resourceType: "event_retention_policy", resourceId: row.id, details: { code: row.code, action: row.action } });
   return publicRetentionPolicy(row);
 }

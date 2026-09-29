@@ -86,6 +86,7 @@ function resolveTenantId(db, tenantId) {
 }
 
 export function ensureThreadSeed(db, tenantId) {
+  withEventSuppression(() => ensureThreadFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM thread_baselines WHERE tenant_id = ? AND name = ?", [tenant, DEMO_BASELINE]);

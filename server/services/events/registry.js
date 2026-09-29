@@ -86,7 +86,7 @@ export function listEventTypes(db, { tenantId, category, status, sourceModule, q
     params.push(sourceModule);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like);
   }
@@ -151,7 +151,7 @@ export function createEventType(db, input = {}, actor = null, tenantId = null) {
       ts,
     ]
   );
-  const typeId = Number(result.lastInsertRowid);
+  const typeId = Number(result.lastInsertId);
   run(
     db,
     `INSERT INTO event_schemas (event_type_id, version, status, compatibility, schema_json, example_json, notes, created_by, created_at, updated_at)
@@ -293,7 +293,7 @@ export function addVersion(db, refValue, input = {}, actor = null) {
     ]);
   }
   auditEvent(db, { actor, action: "event.schema.version", resourceType: "event_registry", resourceId: row.id, details: { code: row.code, version, compatibility } });
-  return { version: publicSchemaVersion(queryOne(db, "SELECT * FROM event_schemas WHERE id = ?", [Number(result.lastInsertRowid)])), comparison };
+  return { version: publicSchemaVersion(queryOne(db, "SELECT * FROM event_schemas WHERE id = ?", [Number(result.lastInsertId)])), comparison };
 }
 
 export function setVersionStatus(db, refValue, version, status, actor = null) {

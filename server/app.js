@@ -103,6 +103,22 @@ function requestMeta(req) {
   return { ip: clientIp(req), userAgent: req.headers["user-agent"] || "" };
 }
 
+// Express `trust proxy`. The app is normally reached through a local reverse
+// proxy (the Vite dev proxy, or the single-port production front end), which
+// sets X-Forwarded-For; without this, express-rate-limit rejects the header and
+// req.ip is the proxy address. The default trusts only loopback/private proxies
+// so a directly exposed client can never spoof its address. Override with
+// HELIX_TRUST_PROXY (a hop count, `true`, or an Express trust-proxy value such
+// as `loopback` or a CIDR list) when running behind additional infrastructure.
+function trustProxySetting() {
+  const raw = String(process.env.HELIX_TRUST_PROXY ?? "").trim();
+  if (!raw) return "loopback";
+  if (/^(true|yes)$/i.test(raw)) return true;
+  if (/^(false|no)$/i.test(raw)) return false;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  return raw;
+}
+
 function requireAuth(db) {
   return (req, res, next) => {
     const header = req.headers.authorization || "";
@@ -167,6 +183,7 @@ function wrap(fn) {
 export function createApp(db) {
   const app = express();
   app.disable("x-powered-by");
+  app.set("trust proxy", trustProxySetting());
   app.use(helmet());
   app.use(
     cors({
@@ -6937,7 +6954,7 @@ export function createApp(db) {
 
   // ── Search & Discovery (versioned canonical API, /api/v1/search) ──────────
   // Provider-independent Enterprise Search Foundation surface. The canonical
-  // contract never exposes SQLite/provider syntax to callers.
+  // contract never exposes storage-engine/provider syntax to callers.
   const v1SearchTenant = (req) => searchTenant(req);
   const v1SearchInput = (req) => (req.method === "GET" ? { ...req.query } : { ...(req.body || {}) });
 

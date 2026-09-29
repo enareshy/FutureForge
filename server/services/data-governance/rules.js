@@ -122,7 +122,7 @@ export function listRules(db, { tenantId, domainId, policyId, objectType, dimens
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -187,7 +187,7 @@ export function createRule(db, input = {}, actor = null, tenantId = null, ip = n
       ts,
     ]
   );
-  const id = Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertId);
   const row = queryOne(db, "SELECT * FROM dg_rules WHERE id = ?", [id]);
   run(
     db,
@@ -325,8 +325,8 @@ export function activeRulesForObject(db, tenantId, objectType) {
     db,
     `SELECT * FROM dg_rules
       WHERE tenant_id = ? AND object_type = ? AND status = 'active'
-        AND (effective_from IS NULL OR effective_from <= datetime('now'))
-        AND (effective_to IS NULL OR effective_to >= datetime('now'))
+        AND (effective_from IS NULL OR effective_from <= to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))
+        AND (effective_to IS NULL OR effective_to >= to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))
       ORDER BY code`,
     [Number(tenantId), String(objectType).toLowerCase()]
   );

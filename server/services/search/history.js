@@ -9,7 +9,7 @@ export function recordSearchHistory(db, input = {}, actor, tenantId) {
   const tenant = Number(tenantId ?? actor?.tenant_id ?? 0);
   const query = String(input.query || "").slice(0, 400);
   if (!query) return null;
-  run(
+  const inserted = run(
     db,
     `INSERT INTO search_history
        (tenant_id, user_id, query_text, strategy, scope, filters_json, result_count, duration_ms, saved_search_id, executed_at)
@@ -27,7 +27,7 @@ export function recordSearchHistory(db, input = {}, actor, tenantId) {
       nowIso(),
     ]
   );
-  const row = queryOne(db, "SELECT * FROM search_history WHERE id = last_insert_rowid()");
+  const row = queryOne(db, "SELECT * FROM search_history WHERE id = ?", [inserted.lastInsertId]);
   return publicHistoryEntry(row);
 }
 
@@ -39,7 +39,7 @@ export function listSearchHistory(db, { tenantId, actorId, limit = 20, q = "" } 
     params.push(Number(actorId));
   }
   if (q) {
-    where += " AND lower(query_text) LIKE ?";
+    where += " AND lower(query_text) ILIKE ?";
     params.push(`%${String(q).toLowerCase()}%`);
   }
   const rows = queryAll(

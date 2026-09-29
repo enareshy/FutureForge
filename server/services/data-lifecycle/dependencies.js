@@ -66,7 +66,7 @@ export function recordDependency(db, tenantId, input = {}, actor = null, ip = nu
     ]
   );
   writeAudit(db, { actor, action: "data_lifecycle.dependency.record", resourceType: "lc_dependencies", resourceId: `${objectType}:${objectId}`, details: { depends_on: `${dependsOnType}:${dependsOnId}` }, ip });
-  return publicDependency(queryOne(db, "SELECT * FROM lc_dependencies WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicDependency(queryOne(db, "SELECT * FROM lc_dependencies WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function resolveDependency(db, tenantId, id, actor = null, ip = null) {

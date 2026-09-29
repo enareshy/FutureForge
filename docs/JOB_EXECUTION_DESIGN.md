@@ -139,7 +139,7 @@ under the scheduler lock:
 
 - **Exactly-once materialisation**: `job_schedule_runs` has a
   `UNIQUE(schedule_id, scheduled_for)` constraint and insertions use
-  `INSERT OR IGNORE`, so concurrent schedulers cannot double-fire.
+  `ON CONFLICT DO NOTHING`, so concurrent schedulers cannot double-fire.
 - **Catch-up** (`catchup_policy`): `skip` (default) drops missed occurrences,
   `run_once` fires one makeup run, `run_all` materialises every missed
   occurrence.
@@ -216,7 +216,7 @@ so the timeline and dashboard stay consistent.
 
 ## 10. Reliability
 
-- **Durable queue** - all state is in SQLite (WAL) with a `busy_timeout`, so
+- **Durable queue** - all state is in PostgreSQL, so
   jobs survive API/worker restarts and multiple processes coordinate safely.
 - **Idempotency** - submission idempotency and schedule-occurrence uniqueness
   are both enforced at the database level.
@@ -307,7 +307,9 @@ node scripts/job-worker.js --queues=IMPORT,REPORTING --concurrency=8
 node scripts/job-worker.js --demo
 ```
 
-Configuration is also available through `IAM_DB`, `JOB_WORKER_QUEUES`,
+Configuration is also available through the PostgreSQL connection settings
+(`DATABASE_URL`, or `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`),
+`JOB_WORKER_QUEUES`,
 `JOB_WORKER_CONCURRENCY`, `JOB_WORKER_POLL_MS`, `JOB_WORKER_HEARTBEAT_MS`,
 `JOB_WORKER_MAINTENANCE_MS` and `JOB_WORKER_DRAIN_MS`. Production deployments
 register their real handlers and leave `JOB_DEMO_HANDLERS` unset.

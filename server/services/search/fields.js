@@ -15,7 +15,7 @@ import {
 import { ATTRIBUTE_PREFIX, CONDITION_COUNT_MAX, isValidIdentifier } from "./validation.js";
 
 // Columns that map directly to physical index columns. Every other canonical
-// field is treated as an object-specific attribute (json_extract in the
+// field is treated as an object-specific attribute (JSONB extraction in the
 // relational provider).
 export const DIRECT_FIELDS = new Set([
   "object_type",

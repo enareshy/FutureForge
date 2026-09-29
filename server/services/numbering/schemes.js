@@ -234,7 +234,7 @@ export function listSchemes(db, { tenantId, objectType, status, q, scopeType, pa
     params.push(String(scopeType));
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -289,7 +289,7 @@ export function createScheme(db, body = {}, actor = null, tenantId = null, ip = 
     `INSERT INTO numbering_schemes (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
     values
   );
-  const scheme = queryOne(db, "SELECT * FROM numbering_schemes WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const scheme = queryOne(db, "SELECT * FROM numbering_schemes WHERE id = ?", [Number(result.lastInsertId)]);
   insertVersion(db, scheme, scheme.current_version, scheme.status === "active" ? "active" : "draft", "Initial version", actor);
   writeAudit(db, {
     actor,

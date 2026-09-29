@@ -123,7 +123,7 @@ export function assignOwnership(db, entryRefValue, input = {}, actor = null, ten
     "INSERT INTO dc_ownership (tenant_id, entry_id, relationship, ownership_kind, subject_type, subject_id, is_primary, status, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
     [entry.tenant_id, entry.id, relationship, ownershipKind, subjectType, Number(subjectId), input.is_primary ? 1 : 0, actor?.id ?? null, ts, ts]
   );
-  const row = queryOne(db, "SELECT * FROM dc_ownership WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_ownership WHERE id = ?", [Number(result.lastInsertId)]);
 
   // Mirror primary owner/steward onto the entry and its registry row so the
   // unified catalog list can show accountability without a join.

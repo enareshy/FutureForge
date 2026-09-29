@@ -182,7 +182,7 @@ export function createImport(db, input = {}, actor = null, tenantId = null, ip =
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_imports WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_imports WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "reference.import.validate",
@@ -364,7 +364,7 @@ export function createExport(db, input = {}, actor = null, tenantId = null, ip =
      VALUES (?, ?, ?, 'ready', ?, ?, ?, ?, ?, ?, ?, NULL)`,
     [exportRef(), Number(domain.id), format, JSON.stringify(filters), row_count, content, actor?.id ?? null, tenantId ?? null, ts, ts]
   );
-  const row = queryOne(db, "SELECT * FROM reference_exports WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_exports WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "reference.export.create",

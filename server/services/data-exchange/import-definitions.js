@@ -48,8 +48,8 @@ const EDITABLE_STATUSES = new Set(["DRAFT"]);
 export function getImportDefinitionRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM ie_import_definitions WHERE tenant_id = ? AND (definition_ref = ? OR code = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), String(ref), normalizeUpper(ref), String(ref)]
+    "SELECT * FROM ie_import_definitions WHERE tenant_id = ? AND (definition_ref = ? OR code = ? OR id = ?)",
+    [Number(tenantId), String(ref), normalizeUpper(ref), Number(ref) || -1]
   );
 }
 
@@ -222,8 +222,15 @@ function snapshotVersion(db, row, actor, changeSummary) {
   const snapshot = withImportChildren(db, row);
   run(
     db,
-    `INSERT OR REPLACE INTO ie_import_definition_versions (definition_id, tenant_id, version, status, snapshot_json, change_summary, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO ie_import_definition_versions (definition_id, tenant_id, version, status, snapshot_json, change_summary, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (definition_id, version) DO UPDATE SET
+       tenant_id = EXCLUDED.tenant_id,
+       status = EXCLUDED.status,
+       snapshot_json = EXCLUDED.snapshot_json,
+       change_summary = EXCLUDED.change_summary,
+       created_by = EXCLUDED.created_by,
+       created_at = EXCLUDED.created_at`,
     [row.id, row.tenant_id, row.version, row.status, JSON.stringify(snapshot), normalizeText(changeSummary, { max: 500 }), actor?.id ?? null, nowIso()]
   );
 }
@@ -276,7 +283,7 @@ export function createImportDefinition(db, tenantId, input = {}, actor = null, i
       ts,
     ]
   );
-  const id = Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertId);
   writeMappings(db, tenantId, id, mappings);
   writeTransformations(db, tenantId, id, transformations);
   writeRules(db, tenantId, id, rules);
@@ -437,7 +444,7 @@ export function listImportDefinitions(db, { tenantId, status, targetObjectType, 
   }
   const term = normalizeText(q);
   if (term) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${term}%`;
     params.push(like, like, like);
   }

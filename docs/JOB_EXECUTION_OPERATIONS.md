@@ -43,7 +43,8 @@ node scripts/job-worker.js --demo
 
 Supported flags: `--queues`, `--concurrency`, `--poll`, `--heartbeat`,
 `--maintenance`, `--drain`, `--name`, `--id`, `--demo`. The same settings are
-available as environment variables: `IAM_DB`, `JOB_WORKER_QUEUES`,
+available as environment variables: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`,
+`PGDATABASE` (or `DATABASE_URL`), `JOB_WORKER_QUEUES`,
 `JOB_WORKER_CONCURRENCY`, `JOB_WORKER_POLL_MS`, `JOB_WORKER_HEARTBEAT_MS`,
 `JOB_WORKER_MAINTENANCE_MS`, `JOB_WORKER_DRAIN_MS`, `JOB_DEMO_HANDLERS`.
 
@@ -247,4 +248,4 @@ changes are audited.
 | Job stuck in `cancel_requested` | The handler has not reached a cancellation checkpoint; the engine finalises it at timeout or lease recovery. |
 | Schedule did not fire | Check `enabled`/status, `start_at`/`end_at`, `max_executions` and `next_run_at`; missed windows obey `catchup_policy`. |
 | Schedule fired twice | Occurrences are unique per `scheduled_for`; verify no external system submits the same job type directly. |
-| `SQLITE_BUSY` under load | Set a higher `busy_timeout` or run workers against the shared database over WAL (already enabled). |
+| `deadlock detected` / `could not serialize access` under load | Two workers contended for the same rows. The engine retries idempotent claims; reduce worker concurrency or check for long-running transactions. |

@@ -48,7 +48,7 @@ export function createRule(db, tenantId, body = {}, actor = null, ip = null) {
     ]
   );
   invalidate(tenantId);
-  const row = queryOne(db, "SELECT * FROM cla_rules WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM cla_rules WHERE id = ?", [Number(result.lastInsertId)]);
   recordChange(db, { tenantId, entityType: "RULE", entityId: row.id, entityRef: row.rule_ref, action: "CREATED", after: publicRule(row), actor, ip });
   return publicRule(row);
 }

@@ -93,7 +93,7 @@ export function createRetentionPolicy(db, input = {}, { actor = null, tenantId =
         nowIso(),
       ]
     );
-    const row = queryOne(db, "SELECT * FROM content_retention_policies WHERE id = ?", [Number(result.lastInsertRowid)]);
+    const row = queryOne(db, "SELECT * FROM content_retention_policies WHERE id = ?", [Number(result.lastInsertId)]);
     auditContent(db, { actor, tenantId: scope, action: "content.retention_policy.created", objectType: "content_retention_policy", objectId: row.id, objectName: code, details: { retention_days: row.retention_days, disposition }, ip });
     return publicRetentionPolicy(row);
   });
@@ -162,7 +162,7 @@ export function ensureRetentionRecord(db, content, { actor = null, policy = null
      VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)`,
     [content.tenant_id, Number(content.id), Number(resolved.id), start, end, resolved.disposition, actor?.id ?? null, nowIso(), nowIso()]
   );
-  return publicRetentionRecord(queryOne(db, "SELECT * FROM content_retention_records WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicRetentionRecord(queryOne(db, "SELECT * FROM content_retention_records WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function retentionForContent(db, content) {
@@ -196,7 +196,7 @@ export function applyLegalHold(db, content, { reason = "", caseRef = "", actor =
       [scope, Number(content.id), normalizeText(reason), normalizeText(caseRef), actor?.id ?? null, ts, ts]
     );
     run(db, "UPDATE content_retention_records SET legal_hold = 1, updated_at = ? WHERE content_id = ?", [ts, Number(content.id)]);
-    const row = queryOne(db, "SELECT * FROM content_legal_holds WHERE id = ?", [Number(result.lastInsertRowid)]);
+    const row = queryOne(db, "SELECT * FROM content_legal_holds WHERE id = ?", [Number(result.lastInsertId)]);
     recordContentEvent(db, { eventType: "ContentLegalHoldApplied", content, actor, tenantId: scope, payload: { reason, case_ref: caseRef } });
     auditContent(db, { actor, tenantId: scope, action: "content.legal_hold.applied", content, details: { reason, case_ref: caseRef }, ip });
     return publicLegalHold(row);

@@ -126,7 +126,7 @@ export function listDefinitions(db, query = {}, tenantId) {
     params.push(query.category);
   }
   if (query.q) {
-    where.push("(d.code LIKE ? OR d.name LIKE ? OR d.description LIKE ?)");
+    where.push("(d.code ILIKE ? OR d.name ILIKE ? OR d.description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -166,7 +166,7 @@ export function createDefinition(db, body, actor = null, ip = null, reqTenantId 
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Workflow code already exists in this scope");
     throw err;
   }
-  const definitionId = result.lastInsertRowid;
+  const definitionId = result.lastInsertId;
   const graphProvided = body.graph && (Array.isArray(body.graph.nodes) || Array.isArray(body.graph.transitions));
   const version = transaction(db, () => {
     const versionId = insertVersion(db, definitionId, { notes: body.notes || "Initial draft", created_by: actor?.id ?? null });
@@ -294,12 +294,12 @@ function insertVersion(db, definitionId, body = {}) {
      VALUES (?, ?, 'draft', ?, '{}', ?, ?, ?)`,
     [Number(definitionId), version, body.notes || "", body.created_by ?? null, ts, ts]
   );
-  run(db, "UPDATE workflow_definitions SET current_version = MAX(current_version, ?), updated_at = ? WHERE id = ?", [
+  run(db, "UPDATE workflow_definitions SET current_version = GREATEST(current_version, ?), updated_at = ? WHERE id = ?", [
     version,
     ts,
     Number(definitionId),
   ]);
-  return result.lastInsertRowid;
+  return result.lastInsertId;
 }
 
 export function listVersions(db, definitionId, tenantId) {

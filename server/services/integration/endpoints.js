@@ -36,7 +36,7 @@ function scopeWhere({ tenantId, integrationId, externalSystemId, direction, stat
     params.push(apiVersion);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(path) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(path) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -121,7 +121,7 @@ export function createEndpoint(db, input = {}, actor = null, tenantId = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM integration_endpoints WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM integration_endpoints WHERE id = ?", [Number(result.lastInsertId)]);
   auditIntegration(db, { actor, action: "integration.endpoint.create", resourceType: "integration_endpoint", resourceId: row.id, details: { code: row.code, method: row.method, path: row.path } });
   return publicEndpoint(row);
 }

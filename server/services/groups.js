@@ -22,7 +22,7 @@ export function listGroups(db, query = {}) {
     params.push(Number(query.tenantId));
   }
   if (query.q) {
-    where.push("(name LIKE ? OR code LIKE ? OR description LIKE ?)");
+    where.push("(name ILIKE ? OR code ILIKE ? OR description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -96,7 +96,7 @@ export function createGroup(db, body, actor, ip) {
     }
     throw err;
   }
-  const group = getGroup(db, result.lastInsertRowid);
+  const group = getGroup(db, result.lastInsertId);
   writeAudit(db, {
     actor,
     action: "group.create",

@@ -57,7 +57,7 @@ function subjectFields(input) {
 }
 
 function lastId(result) {
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 function exists(db, table, id) {
@@ -1114,7 +1114,7 @@ export function bumpEpoch(db, tenantId, scope = "all") {
     db,
     `INSERT INTO security_cache_epoch (tenant_id, scope, epoch, updated_at)
      VALUES (?, ?, 1, ?)
-     ON CONFLICT(tenant_id, scope) DO UPDATE SET epoch = epoch + 1, updated_at = excluded.updated_at`,
+     ON CONFLICT(tenant_id, scope) DO UPDATE SET epoch = security_cache_epoch.epoch + 1, updated_at = excluded.updated_at`,
     [Number(tenantId), String(scope), nowIso()]
   );
   return currentEpoch(db, tenantId, scope);

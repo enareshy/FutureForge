@@ -68,7 +68,7 @@ export function registerReportingSources() {
     code: "reporting_report",
     table: "reporting_reports",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM reporting_reports WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, report_ref, code, name, description, report_type, data_source, entity, status, owner_user_id, created_by FROM reporting_reports WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -98,7 +98,7 @@ export function registerReportingSources() {
     code: "reporting_dashboard",
     table: "reporting_dashboards",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM reporting_dashboards WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, dashboard_ref, code, name, description, dashboard_type, status, owner_user_id, created_by FROM reporting_dashboards WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -128,7 +128,7 @@ export function registerReportingSources() {
     code: "reporting_kpi",
     table: "reporting_kpis",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM reporting_kpis WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, kpi_ref, code, name, description, metric_code, entity, aggregation, unit, status, owner_user_id, created_by FROM reporting_kpis WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {

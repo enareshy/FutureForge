@@ -42,7 +42,7 @@ function definitionRow(db, tenantId, ref) {
     const row = queryOne(db, "SELECT * FROM bom_transformation_definitions WHERE id = ? AND tenant_id = ?", [id, Number(tenantId)]);
     if (row) return row;
   }
-  return queryOne(db, "SELECT * FROM bom_transformation_definitions WHERE tenant_id = ? AND (definition_ref = ? OR code = ? COLLATE NOCASE)", [Number(tenantId), String(ref), String(ref)]);
+  return queryOne(db, "SELECT * FROM bom_transformation_definitions WHERE tenant_id = ? AND (definition_ref = ? OR lower(code) = lower(?))", [Number(tenantId), String(ref), String(ref)]);
 }
 
 export function requireTransformationDefinition(db, tenantId, ref) {
@@ -95,7 +95,7 @@ export function createTransformationDefinition(db, tenantId, body = {}, actor = 
       assertTransformationDefinitionStatus(body.status ?? "DRAFT"), JSON.stringify(parseObject(body.config ?? body.config_json, {})),
       actor?.id ?? null, actor?.id ?? null, ts, ts]
   );
-  const row = queryOne(db, "SELECT * FROM bom_transformation_definitions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM bom_transformation_definitions WHERE id = ?", [Number(result.lastInsertId)]);
   recordChange(db, { tenantId: tenant, entityType: "TRANSFORMATION", entityId: row.id, entityRef: row.definition_ref, action: "CREATED", status: row.status, after: publicTransformationDefinition(row), actor, ip });
   return publicTransformationDefinition(row);
 }
@@ -171,7 +171,7 @@ export function createMapping(db, tenantId, definitionId, body = {}, actor = nul
       normalized.status, ts, ts]
   );
   refreshMappingCount(db, definition.id);
-  const row = queryOne(db, "SELECT * FROM bom_transformation_mappings WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM bom_transformation_mappings WHERE id = ?", [Number(result.lastInsertId)]);
   return publicTransformationMapping(row);
 }
 
@@ -365,7 +365,7 @@ export function transform(db, tenantId, body = {}, actor = null, ip = null) {
     [runRef(), tenant, sourceRevision.organization_id, definition.id, sourceRevision.id, targetBomId, targetRevisionId, mode, status,
       JSON.stringify(summary), mappedCount, unmappedCount, warnings.length, status === "FAILED" ? 1 : 0, actor?.id ?? null, ts, nowIso(), ts]
   );
-  const row = queryOne(db, "SELECT * FROM bom_transformation_runs WHERE id = ?", [Number(insert.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM bom_transformation_runs WHERE id = ?", [Number(insert.lastInsertId)]);
   if (mode === "EXECUTE" && status === "FAILED") {
     publishBomEvent(db, { eventType: bomEventCode("TRANSFORMED"), objectType: "bom_transformation_run", objectId: row.id, tenantId: tenant, payload: { status, error: summary.error } }, actor);
     throw transformationFailed(summary.error || "Transformation failed", { run_ref: row.run_ref, summary });

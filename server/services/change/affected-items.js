@@ -37,7 +37,7 @@ export function addAffectedItem(db, tenantId, orderRef, body = {}, actor = null,
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [tenant, order.id, normalized.object_type, normalized.object_id, normalized.object_label, normalized.disposition, normalized.notes, JSON.stringify(normalized.metadata || {}), actor?.id ?? null, ts, ts]
   );
-  const row = queryOne(db, "SELECT * FROM change_affected_items WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM change_affected_items WHERE id = ?", [Number(result.lastInsertId)]);
   publishChangeEvent(db, { eventType: "ChangeAffectedItemAdded", objectType: "change_order", objectId: order.id, tenantId: tenant, organizationId: order.organization_id, payload: { object_type: row.object_type, object_id: row.object_id } }, actor);
   return publicAffectedItem(row);
 }

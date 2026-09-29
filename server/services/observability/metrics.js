@@ -126,7 +126,7 @@ export function createMetric(db, tenantId, input = {}, actor = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM observability_metric_definitions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM observability_metric_definitions WHERE id = ?", [Number(result.lastInsertId)]);
   recordHistory(db, { tenantId, action: "METRIC_CREATED", entityType: "metric", entityId: row.id, entityRef: row.metric_ref, actor, summary: `Metric ${code} created`, detail: { code } });
   writeAudit(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.metric.create", resource_type: "observability_metric", resource_id: row.metric_ref, details: { code } });
   publishObservabilityEvent(db, { eventType: observabilityEventCode("METRIC_OBSERVED"), payload: { metric_ref: row.metric_ref, code, action: "created" }, objectType: "observability_metric", objectId: row.id, tenantId }, actor);
@@ -225,7 +225,7 @@ export function listMetrics(db, tenantId, query = {}) {
     params.push(String(query.provider_code || query.providerCode).toUpperCase());
   }
   if (query.search) {
-    where.push("(code LIKE ? OR name LIKE ?)");
+    where.push("(code ILIKE ? OR name ILIKE ?)");
     params.push(`%${query.search}%`, `%${query.search}%`);
   }
   return paged(db, "observability_metric_definitions", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicMetric });
@@ -283,7 +283,7 @@ export function recordObservation(db, tenantId, metric, { value, dimensions = {}
       nowIso(),
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listObservations(db, tenantId, query = {}) {
@@ -342,7 +342,7 @@ export function metricHistory(db, tenantId, ref, query = {}) {
   const rows = queryAll(
     db,
     `SELECT * FROM observability_metric_observations
-     WHERE tenant_id = ? AND metric_code = ? AND observed_at >= datetime('now', ?)
+     WHERE tenant_id = ? AND metric_code = ? AND observed_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')
      ORDER BY observed_at ASC LIMIT ?`,
     [Number(tenantId), metric.code, `-${windowSeconds} seconds`, limit]
   );
@@ -365,7 +365,7 @@ export function countMetrics(db, tenantId) {
 
 export function pruneObservations(db, tenantId, retainDays) {
   const days = Math.max(1, Number(retainDays) || 30);
-  const result = run(db, "DELETE FROM observability_metric_observations WHERE tenant_id = ? AND observed_at < datetime('now', ?)", [Number(tenantId), `-${days} days`]);
+  const result = run(db, "DELETE FROM observability_metric_observations WHERE tenant_id = ? AND observed_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]);
   return Number(result.changes || 0);
 }
 

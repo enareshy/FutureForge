@@ -423,7 +423,7 @@ function normalizePermissions(value) {
 }
 
 export function getJobTypeRow(db, code) {
-  const row = queryOne(db, "SELECT * FROM job_types WHERE code = ? COLLATE NOCASE", [String(code || "")]);
+  const row = queryOne(db, "SELECT * FROM job_types WHERE lower(code) = lower(?)", [String(code || "")]);
   return row || null;
 }
 
@@ -447,7 +447,7 @@ export function listJobTypes(db, query = {}) {
   }
   if (query.q) {
     const like = `%${query.q}%`;
-    where.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    where.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     params.push(like, like, like);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -495,7 +495,7 @@ export function createJobType(db, input = {}, actor = null, ip = null) {
     actor,
     action: "jobs.type.create",
     resourceType: "job_type",
-    resourceId: result.lastInsertRowid,
+    resourceId: result.lastInsertId,
     details: { code, source_module: input.source_module || input.sourceModule || "platform" },
     ip,
   });

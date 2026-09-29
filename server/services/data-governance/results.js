@@ -61,7 +61,7 @@ export function listResults(db, { tenantId, objectType, domainId, qualityStatus,
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(object_type) LIKE ? OR LOWER(object_id) LIKE ? OR LOWER(object_name) LIKE ?)");
+    clauses.push("(LOWER(object_type) ILIKE ? OR LOWER(object_id) ILIKE ? OR LOWER(object_name) ILIKE ?)");
     params.push(like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -228,7 +228,7 @@ export function typeScores(db, { tenantId, objectType } = {}) {
 }
 
 export function trend(db, { tenantId, objectType = null, days = 30 } = {}) {
-  const clauses = ["tenant_id = ?", `evaluated_at >= datetime('now', ?)`];
+  const clauses = ["tenant_id = ?", `evaluated_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')`];
   const params = [Number(tenantId), `-${Number(days) || 30} days`];
   if (objectType) {
     clauses.push("object_type = ?");
@@ -237,7 +237,7 @@ export function trend(db, { tenantId, objectType = null, days = 30 } = {}) {
   const where = `WHERE ${clauses.join(" AND ")}`;
   return queryAll(
     db,
-    `SELECT substr(evaluated_at, 1, 10) AS day, COUNT(*) AS evaluations, AVG(overall_score) AS average_score,
+    `SELECT left(evaluated_at, 10) AS day, COUNT(*) AS evaluations, AVG(overall_score) AS average_score,
             SUM(CASE WHEN violation_count > 0 THEN 1 ELSE 0 END) AS failed
        FROM dg_quality_results ${where} GROUP BY day ORDER BY day`,
     params

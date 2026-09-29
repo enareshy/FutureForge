@@ -88,7 +88,7 @@ export function listLovs(db, query = {}, tenantId = null) {
     params.push(query.status);
   }
   if (query.q) {
-    where.push("(l.code LIKE ? OR l.name LIKE ? OR l.description LIKE ?)");
+    where.push("(l.code ILIKE ? OR l.name ILIKE ? OR l.description ILIKE ?)");
     const like = `%${query.q}%`;
     params.push(like, like, like);
   }
@@ -156,7 +156,7 @@ export function createLov(db, body, actor, ip, tenantId) {
     }
     throw err;
   }
-  const row = getLovRow(db, result.lastInsertRowid);
+  const row = getLovRow(db, result.lastInsertId);
   recordVersion(db, "lov", row.id, { ...row, values: [] }, actor, "create");
   writeAudit(db, {
     actor,
@@ -302,7 +302,7 @@ export function addValue(db, lovId, body, actor, ip, tenantId) {
     details: { value: body.code },
     ip,
   });
-  return publicValue(queryOne(db, "SELECT * FROM metadata_lov_values WHERE id = ?", [result.lastInsertRowid]));
+  return publicValue(queryOne(db, "SELECT * FROM metadata_lov_values WHERE id = ?", [result.lastInsertId]));
 }
 
 export function updateValue(db, lovId, valueId, body, actor, ip, tenantId) {
@@ -399,8 +399,8 @@ export function cascadeOptions(db, lovId, parentValueId, tenantId) {
 export function markUsage(db, lovId, valueId, refType = "record", refId = "") {
   run(
     db,
-    `INSERT OR IGNORE INTO metadata_lov_usage (lov_id, value_id, ref_type, ref_id, created_at)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO metadata_lov_usage (lov_id, value_id, ref_type, ref_id, created_at)
+     VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
     [Number(lovId), valueId === null || valueId === undefined ? null : Number(valueId), refType, String(refId), nowIso()]
   );
 }

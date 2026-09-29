@@ -68,7 +68,7 @@ export function mapIdentifier(db, tenantId, input = {}, actor = null, ip = null,
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [tenant, fields.project_id, fields.package_id, sourceSystem, sourceObjectType, sourceObjectId, fields.target_object_type, fields.target_object_id, fields.target_object_ref, fields.status, ts, ts]
   );
-  const mapping = publicIdentifierMapping(queryOne(db, "SELECT * FROM mig_identifier_mappings WHERE id = ?", [Number(result.lastInsertRowid)]));
+  const mapping = publicIdentifierMapping(queryOne(db, "SELECT * FROM mig_identifier_mappings WHERE id = ?", [Number(result.lastInsertId)]));
   writeAudit(db, { actor, action: "migration.identifier.create", resourceType: "mig_identifier_mappings", resourceId: String(mapping.id), details: { source_object_id: sourceObjectId, target_object_id: targetObjectId }, ip });
   return { mapping, created: true };
 }

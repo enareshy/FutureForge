@@ -47,14 +47,25 @@ const databaseProvider = {
     const content = typeof payload === "string" ? payload : JSON.stringify(payload);
     const checksum = sha256(content);
     const storageUri = `lc-archive://${Number(tenantId)}/${key}`;
-    run(db, "INSERT OR REPLACE INTO lc_archive_blobs (tenant_id, storage_uri, checksum, size_bytes, content, created_at) VALUES (?, ?, ?, ?, ?, ?)", [
-      Number(tenantId),
-      storageUri,
-      checksum,
-      Buffer.byteLength(content),
-      content,
-      nowIso(),
-    ]);
+    run(
+      db,
+      `INSERT INTO lc_archive_blobs (tenant_id, storage_uri, checksum, size_bytes, content, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (storage_uri) DO UPDATE SET
+         tenant_id = EXCLUDED.tenant_id,
+         checksum = EXCLUDED.checksum,
+         size_bytes = EXCLUDED.size_bytes,
+         content = EXCLUDED.content,
+         created_at = EXCLUDED.created_at`,
+      [
+        Number(tenantId),
+        storageUri,
+        checksum,
+        Buffer.byteLength(content),
+        content,
+        nowIso(),
+      ]
+    );
     return { storage_uri: storageUri, checksum, size_bytes: Buffer.byteLength(content), provider: "database" };
   },
   async retrieve(db, { storageUri }) {

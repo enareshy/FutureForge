@@ -94,8 +94,8 @@ export function createBinding(db, body, actor = null, ip = null, reqTenantId = n
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Binding code already exists in this scope");
     throw err;
   }
-  writeAudit(db, { actor, action: "workflow.binding.create", resourceType: "workflow_binding", resourceId: result.lastInsertRowid, details: { code: body.code, event: body.event }, ip });
-  return publicBinding(getBindingRow(db, result.lastInsertRowid));
+  writeAudit(db, { actor, action: "workflow.binding.create", resourceType: "workflow_binding", resourceId: result.lastInsertId, details: { code: body.code, event: body.event }, ip });
+  return publicBinding(getBindingRow(db, result.lastInsertId));
 }
 
 export function updateBinding(db, id, body, actor = null, ip = null, tenantId = null) {

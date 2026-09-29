@@ -76,7 +76,7 @@ export function persistNewVersion(db, contentRow, versionInput = {}, stored = {}
       ts,
     ]
   );
-  const versionRow = queryOne(db, "SELECT * FROM content_versions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const versionRow = queryOne(db, "SELECT * FROM content_versions WHERE id = ?", [Number(result.lastInsertId)]);
   updateCurrentSnapshot(db, contentRow, versionRow, ts);
   return versionRow;
 }
@@ -146,7 +146,7 @@ export function registerStorageReference(db, { contentRow, versionId = null, sto
       nowIso(),
     ]
   );
-  return queryOne(db, "SELECT * FROM content_storage_references WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return queryOne(db, "SELECT * FROM content_storage_references WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 export function resolveVersionForDownload(db, contentRow, reference = null) {

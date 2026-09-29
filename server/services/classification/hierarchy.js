@@ -77,7 +77,7 @@ export function createClass(db, tenantId, body = {}, actor = null, ip = null) {
   const maxDepth = Number(getConfig(db, tenantId, "max_hierarchy_depth") || 64);
   if (depth >= maxDepth) throw classDepthExceeded(maxDepth);
 
-  const siblingCount = Number(queryOne(db, "SELECT COUNT(*) AS c FROM cla_classes WHERE tenant_id = ? AND classification_id = ? AND parent_class_id IS ?", [Number(tenantId), classification.id, parent ? parent.id : null])?.c || 0);
+  const siblingCount = Number(queryOne(db, "SELECT COUNT(*) AS c FROM cla_classes WHERE tenant_id = ? AND classification_id = ? AND parent_class_id IS NOT DISTINCT FROM ?", [Number(tenantId), classification.id, parent ? parent.id : null])?.c || 0);
   if (siblingCount >= MAX_CHILDREN) throw invalidClass(`At most ${MAX_CHILDREN} sibling classes are allowed`);
 
   const status = assertClassStatus(body.status || getConfig(db, tenantId, "default_class_status") || "DRAFT");
@@ -110,7 +110,7 @@ export function createClass(db, tenantId, body = {}, actor = null, ip = null) {
       ts,
     ]
   );
-  const id = Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertId);
   invalidate(tenantId);
   const row = queryOne(db, "SELECT * FROM cla_classes WHERE id = ?", [id]);
   recordChange(db, {
@@ -154,7 +154,7 @@ export function listClasses(db, { tenantId, classificationId, classification, pa
     params.push(normalizeUpper(status));
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }
@@ -251,7 +251,7 @@ export function reorderClasses(db, tenantId, { classificationId, parentClassId =
   if (!ids.length) return { updated: 0 };
   let updated = 0;
   ids.forEach((id, index) => {
-    updated += run(db, "UPDATE cla_classes SET sort_order = ?, updated_at = ? WHERE tenant_id = ? AND classification_id = ? AND parent_class_id IS ? AND id = ?", [
+    updated += run(db, "UPDATE cla_classes SET sort_order = ?, updated_at = ? WHERE tenant_id = ? AND classification_id = ? AND parent_class_id IS NOT DISTINCT FROM ? AND id = ?", [
       index,
       nowIso(),
       Number(tenantId),
@@ -382,7 +382,7 @@ export function classDescendants(db, tenantId, ref, { includeSelf = false } = {}
   const row = requireClassRow(db, tenantId, ref);
   const rows = queryAll(
     db,
-    "SELECT * FROM cla_classes WHERE tenant_id = ? AND (path = ? OR path LIKE ?) ORDER BY level, sort_order, code",
+    "SELECT * FROM cla_classes WHERE tenant_id = ? AND (path = ? OR path ILIKE ?) ORDER BY level, sort_order, code",
     [Number(tenantId), row.path, `${row.path}/%`]
   );
   const items = rows.filter((entry) => includeSelf || entry.id !== row.id).map(publicClass);

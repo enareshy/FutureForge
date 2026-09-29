@@ -98,7 +98,7 @@ export function createClassification(db, tenantId, body = {}, actor = null, ip =
       ts,
     ]
   );
-  const id = Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertId);
   invalidate(tenantId);
   recordChange(db, {
     tenantId,
@@ -141,7 +141,7 @@ export function listClassifications(db, { tenantId, status, ownerId, q, approval
     params.push(Number(ownerId));
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(description) ILIKE ?)");
     const like = `%${String(q).toLowerCase()}%`;
     params.push(like, like, like);
   }

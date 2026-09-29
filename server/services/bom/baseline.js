@@ -24,7 +24,7 @@ export function getBaselineRow(db, tenantId, ref) {
     const row = queryOne(db, "SELECT * FROM bom_baselines WHERE id = ? AND tenant_id = ?", [id, Number(tenantId)]);
     if (row) return row;
   }
-  return queryOne(db, "SELECT * FROM bom_baselines WHERE tenant_id = ? AND (baseline_ref = ? OR baseline_number = ? COLLATE NOCASE)", [Number(tenantId), String(ref), String(ref)]);
+  return queryOne(db, "SELECT * FROM bom_baselines WHERE tenant_id = ? AND (baseline_ref = ? OR lower(baseline_number) = lower(?))", [Number(tenantId), String(ref), String(ref)]);
 }
 
 export function requireBaselineRow(db, tenantId, ref) {
@@ -94,7 +94,7 @@ export function createBaseline(db, tenantId, body = {}, actor = null, ip = null)
       JSON.stringify({ revision_id: revision.id, revision_number: revision.revision_number, line_count: snapshot.length }),
       actor?.id ?? null, status === "FROZEN" ? ts : null, status === "FROZEN" ? actor?.id ?? null : null, ts, ts]
   );
-  const baselineId = Number(insert.lastInsertRowid);
+  const baselineId = Number(insert.lastInsertId);
   for (const entry of snapshot) {
     const line = entry.line;
     run(

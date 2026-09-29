@@ -97,7 +97,7 @@ export function enqueue(db, notification, { delaySeconds = 0, providerCode = nul
     ]
   );
   run(db, "UPDATE notifications SET status = 'queued', updated_at = ? WHERE id = ?", [ts, notification.id]);
-  return queryOne(db, "SELECT * FROM notification_deliveries WHERE id = ?", [result.lastInsertRowid]);
+  return queryOne(db, "SELECT * FROM notification_deliveries WHERE id = ?", [result.lastInsertId]);
 }
 
 // Creates a notification for a concrete recipient without going through rule
@@ -168,7 +168,7 @@ export function deliverDirect(db, {
     ingestNotification(
       db,
       {
-        id: result.lastInsertRowid,
+        id: result.lastInsertId,
         tenant_id: resolvedTenant,
         recipient_id: user.id,
         recipient_name: user.display_name || user.username || "",
@@ -185,11 +185,11 @@ export function deliverDirect(db, {
       },
       { delaySeconds }
     );
-    run(db, "UPDATE notifications SET status = 'processing', updated_at = ? WHERE id = ?", [nowTs, result.lastInsertRowid]);
-    return result.lastInsertRowid;
+    run(db, "UPDATE notifications SET status = 'processing', updated_at = ? WHERE id = ?", [nowTs, result.lastInsertId]);
+    return result.lastInsertId;
   }
-  enqueue(db, { id: result.lastInsertRowid, channel, tenant_id: resolvedTenant }, { delaySeconds });
-  return result.lastInsertRowid;
+  enqueue(db, { id: result.lastInsertId, channel, tenant_id: resolvedTenant }, { delaySeconds });
+  return result.lastInsertId;
 }
 
 function nextBackoff(attempt) {

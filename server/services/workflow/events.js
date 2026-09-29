@@ -30,7 +30,7 @@ export function recordEvent(db, { instanceId, taskId = null, nodeKey = "", event
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [Number(instanceId), taskId ?? null, nodeKey || "", eventType, actorId ?? null, message || "", JSON.stringify(details || {}), Number(tenantId), nowIso()]
   );
-  return queryOne(db, "SELECT * FROM workflow_events WHERE id = ?", [result.lastInsertRowid]);
+  return queryOne(db, "SELECT * FROM workflow_events WHERE id = ?", [result.lastInsertId]);
 }
 
 export function listEvents(db, instanceId, query = {}) {

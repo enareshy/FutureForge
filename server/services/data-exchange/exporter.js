@@ -43,8 +43,8 @@ function configFor(db, tenantId) {
 export function getExportJobRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM ie_export_jobs WHERE tenant_id = ? AND (job_ref = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), String(ref), String(ref)]
+    "SELECT * FROM ie_export_jobs WHERE tenant_id = ? AND (job_ref = ? OR id = ?)",
+    [Number(tenantId), String(ref), Number(ref) || -1]
   );
 }
 
@@ -80,7 +80,7 @@ export function createExportJob(db, { tenantId, definition, params = {}, actor =
       ts,
     ]
   );
-  const job = queryOne(db, "SELECT * FROM ie_export_jobs WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const job = queryOne(db, "SELECT * FROM ie_export_jobs WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, { actor, action: "data_exchange.export_job.create", resourceType: "ie_export_jobs", resourceId: job.job_ref, details: { definition: definition?.code || null }, ip });
   recordHistory(db, { direction: "EXPORT", tenantId: tenant, jobId: job.id, definitionId: job.definition_id, definitionVersion: job.definition_version, action: "JOB_CREATED", status: job.status, objectType: job.object_type, format: job.format, actor });
   return { job, existing: false };
@@ -265,7 +265,10 @@ function storeBlob(db, tenantId, { content, contentType, filename }) {
 
 export function readBlob(db, tenantId, storageUri) {
   const row = queryOne(db, "SELECT * FROM ie_blobs WHERE tenant_id = ? AND storage_uri = ?", [Number(tenantId), storageUri]);
-  return row ? row.content : null;
+  if (!row || row.content == null) return null;
+  if (Buffer.isBuffer(row.content)) return row.content.toString("utf8");
+  if (row.content instanceof Uint8Array) return Buffer.from(row.content).toString("utf8");
+  return String(row.content);
 }
 
 // ── Run ──────────────────────────────────────────────────────────────────────
@@ -553,7 +556,7 @@ export function cancelExportJob(db, tenantId, ref, actor = null, ip = null) {
 }
 
 export function getExportResultRow(db, tenantId, ref) {
-  return queryOne(db, "SELECT * FROM ie_export_results WHERE tenant_id = ? AND (result_ref = ? OR CAST(id AS TEXT) = ?)", [Number(tenantId), String(ref), String(ref)]);
+  return queryOne(db, "SELECT * FROM ie_export_results WHERE tenant_id = ? AND (result_ref = ? OR id = ?)", [Number(tenantId), String(ref), Number(ref) || -1]);
 }
 
 export function downloadExportResult(db, tenantId, ref) {

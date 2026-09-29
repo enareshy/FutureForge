@@ -30,7 +30,7 @@ export function publicActionType(row) {
 }
 
 export function getActionTypeRow(db, code) {
-  return queryOne(db, "SELECT * FROM audit_action_types WHERE code = ? COLLATE NOCASE", [String(code || "")]);
+  return queryOne(db, "SELECT * FROM audit_action_types WHERE lower(code) = lower(?)", [String(code || "")]);
 }
 
 export function listActionTypes(db, { category, active, mandatory, q } = {}) {
@@ -50,7 +50,7 @@ export function listActionTypes(db, { category, active, mandatory, q } = {}) {
   }
   if (q) {
     const like = `%${String(q)}%`;
-    where.push("(code LIKE ? OR label LIKE ? OR description LIKE ?)");
+    where.push("(code ILIKE ? OR label ILIKE ? OR description ILIKE ?)");
     params.push(like, like, like);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -96,7 +96,7 @@ export function createActionType(db, body = {}, actor = null, ip = null) {
     event_type: "CONFIGURATION_CHANGED",
     category: "configuration",
     object_type: "audit_action_type",
-    object_id: result.lastInsertRowid,
+    object_id: result.lastInsertId,
     object_name: input.code,
     details: { category: input.category, event_type: input.event_type },
     ip,

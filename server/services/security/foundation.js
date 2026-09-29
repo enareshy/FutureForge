@@ -41,7 +41,7 @@ export function ensureSecurityFoundation(db) {
     }
     run(
       db,
-      `INSERT OR IGNORE INTO security_cache_epoch (tenant_id, scope, epoch) VALUES (?, 'all', 0)`,
+      `INSERT INTO security_cache_epoch (tenant_id, scope, epoch) VALUES (?, 'all', 0) ON CONFLICT DO NOTHING`,
       [Number(tenantId)]
     );
   }

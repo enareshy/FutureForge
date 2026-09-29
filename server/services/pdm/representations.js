@@ -78,7 +78,7 @@ export function listRepresentations(db, { tenantId, itemId, revisionId, datasetI
     params.push(String(status).toUpperCase());
   }
   if (q) {
-    clauses.push("(name LIKE ? OR description LIKE ?)");
+    clauses.push("(name ILIKE ? OR description ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like);
   }
@@ -130,7 +130,7 @@ export function createRepresentation(db, tenantId, body = {}, actor = null, ip =
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_representations WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_representations WHERE id = ?", [Number(result.lastInsertId)]);
   bumpEpoch(tenant);
   invalidate(tenant);
   recordChange(db, { tenantId: tenant, entityType: "REPRESENTATION", entityId: row.id, entityRef: row.representation_ref, action: "CREATED", version: 1, status: row.status, after: publicRepresentation(row), actor, ip, details: { revision_id: row.revision_id, dataset_id: row.dataset_id } });

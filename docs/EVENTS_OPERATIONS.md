@@ -38,7 +38,7 @@ submitting jobs manually.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `IAM_DB` | `data/iam.db` | Database file shared by API and worker |
+| `DATABASE_URL` / `PG*` | `helix@127.0.0.1:5432/helix` | PostgreSQL database shared by API and worker |
 | `EVENT_MAINTENANCE_MS` | `15000` | Worker housekeeping interval |
 
 Restart the worker after changing environment variables.
@@ -69,14 +69,14 @@ Restart the worker after changing environment variables.
 ## Deployment
 
 The framework has no separate broker to install for the default configuration: events,
-outbox rows, deliveries and topology live in the same SQLite database as the rest of the
+outbox rows, deliveries and topology live in the same PostgreSQL database as the rest of the
 platform, and the worker consumes them from the shared job queues.
 
 | Component | Required | Notes |
 | --- | --- | --- |
 | API server (`npm start`) | Yes | Serves `/api/events` and writes the outbox transactionally with business data |
 | Worker (`npm run worker`) | Yes | Publishes the outbox, consumes deliveries, runs replay/retention/maintenance |
-| Database (`IAM_DB`) | Yes | API and every worker must point at the same file |
+| Database (`DATABASE_URL` / `PG*`) | Yes | API and every worker must point at the same database |
 
 Start-up order and idempotency:
 
@@ -89,7 +89,7 @@ Start-up order and idempotency:
 
 Deployment checklist:
 
-- Set `IAM_DB` to an absolute durable path on both API and worker.
+- Point the API and every worker at the same `DATABASE_URL` (or `PG*` settings).
 - Run at least one worker (the API alone never publishes the outbox).
 - Keep API and worker clocks in sync — retry/lease logic is timestamp based.
 - If using the `memory` bus provider, remember it is process-local and non-durable; use

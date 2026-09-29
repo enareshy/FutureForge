@@ -19,7 +19,7 @@ export const REFERENCE_ITEM_SOURCE = {
   code: "reference_item",
   table: "reference_data_items",
   resolve(db, itemId, { tenantId } = {}) {
-    const row = queryOne(db, "SELECT * FROM reference_data_items WHERE id = ?", [Number(itemId)]);
+    const row = queryOne(db, "SELECT id, tenant_id, organization_id, item_ref, code, name, description, attributes_json, scope_key, scope_type, status, owner_user_id, owner_label, domain_id, current_version_number, effective_from, effective_to, is_default, updated_at FROM reference_data_items WHERE id = ?", [Number(itemId)]);
     if (!row) return null;
     if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
     const domain = queryOne(db, "SELECT code, name, category FROM reference_domains WHERE id = ?", [row.domain_id]);
@@ -82,7 +82,7 @@ export const REFERENCE_ITEM_SOURCE = {
     return queryAll(
       db,
       `SELECT id, tenant_id FROM reference_data_items
-       WHERE (? IS NULL OR tenant_id = ?) AND id > ?
+       WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ?
        ORDER BY id LIMIT ?`,
       [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
     );

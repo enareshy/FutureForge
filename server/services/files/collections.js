@@ -31,13 +31,13 @@ export function listCollections(db, query = {}, actor, tenantId) {
   const { page, pageSize, offset } = pagination(query);
   const where = ["c.tenant_id = ?", "c.deleted_at IS NULL"];
   const params = [scope];
-  if (query.q) { where.push("(c.name LIKE ? OR c.code LIKE ? OR c.description LIKE ?)"); params.push(`%${query.q}%`, `%${query.q}%`, `%${query.q}%`); }
+  if (query.q) { where.push("(c.name ILIKE ? OR c.code ILIKE ? OR c.description ILIKE ?)"); params.push(`%${query.q}%`, `%${query.q}%`, `%${query.q}%`); }
   if (query.ownerId || query.owner_id) { where.push("c.owner_id = ?"); params.push(Number(query.ownerId ?? query.owner_id)); }
   const clause = `WHERE ${where.join(" AND ")}`;
   const items = queryAll(
     db,
     `SELECT c.*, (SELECT COUNT(*) FROM file_collection_members m WHERE m.collection_id = c.id) AS member_count
-     FROM file_collections c ${clause} ORDER BY c.name COLLATE NOCASE LIMIT ? OFFSET ?`,
+     FROM file_collections c ${clause} ORDER BY lower(c.name) LIMIT ? OFFSET ?`,
     [...params, pageSize, offset]
   ).map((row) => publicCollection(row, { memberCount: row.member_count }));
   const total = queryOne(db, `SELECT COUNT(*) AS c FROM file_collections c ${clause}`, params).c;
@@ -76,7 +76,7 @@ export function createCollection(db, body = {}, actor, tenantId, ip) {
     [code, name, String(body.description || "").slice(0, 2000), body.owner_id ?? actor?.id ?? null, scope,
       body.organization_id ?? body.organizationId ?? actor?.organization_id ?? null, actor?.id ?? null, actor?.id ?? null, ts, ts]
   );
-  const row = findCollectionRow(db, insert.lastInsertRowid, scope);
+  const row = findCollectionRow(db, insert.lastInsertId, scope);
   auditFile(db, {
     actor, tenantId: scope, organizationId: row.organization_id, action: "files.collection.create",
     objectType: "collection", objectId: row.id, objectName: row.name, details: { code }, ip,
@@ -171,7 +171,7 @@ export function listCollectionsForFile(db, fileId, actor, tenantId) {
     `SELECT c.* FROM file_collections c
      JOIN file_collection_members m ON m.collection_id = c.id
      WHERE m.file_id = ? AND c.tenant_id = ? AND c.deleted_at IS NULL
-     ORDER BY c.name COLLATE NOCASE`,
+     ORDER BY lower(c.name)`,
     [Number(fileId) || -1, scope]
   ).map((row) => publicCollection(row));
   return { items, total: items.length };

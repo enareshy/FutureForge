@@ -23,7 +23,7 @@ from the Configuration & Metadata module, so no business object type is hard-cod
 
 | Concern | Existing component reused |
 |---------|---------------------------|
-| Persistence | `node:sqlite`, `queryAll` / `queryOne` / `run` / `nowIso` in `server/db.js` |
+| Persistence | PostgreSQL via `queryAll` / `queryOne` / `run` / `nowIso` in `server/db.js` |
 | Validation + errors | `HttpError`, `requireFields`, `validateCode`, `pagination` |
 | Authorization | `requirePermission`, `checkPermission`, `resources`/`permissions` catalog |
 | Tenancy | `tenants.js` (`assertTenantScope`, `homeTenantId`, `isPlatformAdmin`) |

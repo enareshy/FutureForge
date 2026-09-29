@@ -41,7 +41,7 @@ export function recordMigrationAudit(db, input = {}) {
       ts,
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function getMigrationAuditRow(db, tenantId, id) {

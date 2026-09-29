@@ -86,7 +86,7 @@ export function listTransformations(db, { tenantId, status, q, page, pageSize, o
     params.push(status);
   }
   if (q) {
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
     params.push(`%${String(q).toLowerCase()}%`, `%${String(q).toLowerCase()}%`);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -149,7 +149,7 @@ export function createTransformation(db, input = {}, actor = null, tenantId = nu
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM transformation_definitions WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM transformation_definitions WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "integration.transformation.create",

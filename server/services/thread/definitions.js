@@ -242,7 +242,7 @@ export function createDefinition(db, tenantId, body = {}, actor = null, ip = nul
       ts,
     ]
   );
-  const id = Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertId);
   replaceChildren(db, tenant, id, body);
   bumpEpoch(tenant);
   const created = getDefinition(db, tenant, id);

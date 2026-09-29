@@ -46,7 +46,7 @@ export function getItemRow(db, tenantId, ref) {
   }
   return queryOne(
     db,
-    "SELECT * FROM pdm_items WHERE tenant_id = ? AND (item_ref = ? OR item_number = ? COLLATE NOCASE)",
+    "SELECT * FROM pdm_items WHERE tenant_id = ? AND (item_ref = ? OR lower(item_number) = lower(?))",
     [Number(tenantId), String(ref), String(ref)]
   );
 }
@@ -93,7 +93,7 @@ export function listItems(db, { tenantId, status, itemType, classificationCode, 
     params.push(Number(ownerUserId));
   }
   if (q) {
-    clauses.push("(item_number LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(item_number ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like);
   }
@@ -149,7 +149,7 @@ export function createItem(db, tenantId, body = {}, actor = null, ip = null) {
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_items WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_items WHERE id = ?", [Number(result.lastInsertId)]);
   const objectId = bridgeCreateObject(
     db,
     {

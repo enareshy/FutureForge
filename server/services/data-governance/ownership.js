@@ -123,7 +123,7 @@ export function createOwnership(db, input = {}, actor = null, tenantId = null, i
       ts,
     ]
   );
-  const row = getOwnershipRow(db, Number(result.lastInsertRowid));
+  const row = getOwnershipRow(db, Number(result.lastInsertId));
   writeAudit(db, {
     actor,
     action: "data_governance.ownership.create",

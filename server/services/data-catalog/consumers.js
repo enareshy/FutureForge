@@ -71,7 +71,7 @@ export function listConsumers(db, { tenantId, consumerType, status, classificati
   }
   if (q) {
     const like = `%${String(q).toLowerCase()}%`;
-    clauses.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(purpose) LIKE ? OR LOWER(description) LIKE ?)");
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ? OR LOWER(purpose) ILIKE ? OR LOWER(description) ILIKE ?)");
     params.push(like, like, like, like);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
@@ -132,7 +132,7 @@ export function createConsumer(db, input = {}, actor = null, tenantId = null, ip
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM dc_consumers WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM dc_consumers WHERE id = ?", [Number(result.lastInsertId)]);
   const entry = registerEntry(
     db,
     {
@@ -296,7 +296,7 @@ export function addConsumerMapping(db, consumerRefValue, input = {}, actor = nul
     actor,
     action: "data_catalog.consumer.map",
     resourceType: "dc_consumer_mapping",
-    resourceId: Number(result.lastInsertRowid),
+    resourceId: Number(result.lastInsertId),
     details: { consumer_id: consumer.id, object_id: objectRow?.id ?? null, attribute_id: attributeRow?.id ?? null },
     ip,
   });
@@ -307,7 +307,7 @@ export function addConsumerMapping(db, consumerRefValue, input = {}, actor = nul
     objectId: consumer.id,
     payload: { consumer_id: consumer.id, object_id: objectRow?.id ?? null, attribute_id: attributeRow?.id ?? null },
   }, actor);
-  return publicConsumerMapping(queryOne(db, "SELECT * FROM dc_consumer_mappings WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicConsumerMapping(queryOne(db, "SELECT * FROM dc_consumer_mappings WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 export function updateConsumerMapping(db, mappingId, patch = {}, actor = null, tenantId = null, ip = null) {

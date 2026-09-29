@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { getEventTypeRow } from "../services/events/registry.js";
 import { createFieldRule } from "../services/security/repository.js";
@@ -484,7 +484,7 @@ describe("data-exchange core — database-backed modules", () => {
   let actor;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);

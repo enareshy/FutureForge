@@ -65,20 +65,19 @@ const objectsAdapter = {
     const result = listObjects(db, { type: objectType, page: Math.floor(offset / Math.max(1, limit)) + 1, pageSize: limit }, Number(tenantId));
     return (result.items || []).map((row) => normalizeLoaded(objectType, row.id, row));
   },
-  // Uniqueness over a governed attribute. Uses JSON1 json_extract over the
-  // object data payload; SQLite ships JSON1 so no extra extension is required.
+  // Uniqueness over a governed attribute. Extracts the attribute from the
+  // object data payload using the built-in JSONB operators.
   findDuplicates(db, { tenantId, objectType, attributeName, value, excludeObjectId, limit = 25 }) {
     if (!attributeName) return [];
-    const path = `$."${String(attributeName).replace(/"/g, '""')}"`;
     return queryAll(
       db,
       `SELECT o.id, o.name, o.code FROM objects o
        JOIN metadata_types t ON t.id = o.object_type_id
        WHERE o.tenant_id = ? AND t.code = ? AND o.deleted_at IS NULL
-         AND CAST(o.id AS TEXT) <> ?
-         AND json_extract(o.data_json, ?) = ?
+         AND o.id <> ?
+         AND (o.data_json::jsonb ->> ?) = (?::text)
        LIMIT ?`,
-      [Number(tenantId), String(objectType), String(excludeObjectId ?? ""), path, value, Number(limit)]
+      [Number(tenantId), String(objectType), Number(excludeObjectId) || -1, String(attributeName), String(value), Number(limit)]
     );
   },
   count(db, { tenantId, objectType }) {

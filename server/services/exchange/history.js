@@ -67,7 +67,7 @@ export function recordHistory(db, input = {}) {
       // Auditing must never fail the business write.
     }
   }
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listHistory(db, { tenantId, transactionRef, definitionCode, formatCode, direction, action, status, from, to, page, pageSize } = {}) {

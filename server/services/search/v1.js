@@ -279,7 +279,7 @@ export function runSaved(db, reference, input = {}, actor, options = {}) {
     savedSearchId: saved.id,
   };
   const result = searchObjects(db, merged, actor, options);
-  run(db, "UPDATE search_saved_searches SET use_count = use_count + 1, last_used_at = datetime('now') WHERE id = ?", [
+  run(db, "UPDATE search_saved_searches SET use_count = use_count + 1, last_used_at = to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [
     saved.id,
   ]);
   return { savedSearch: saved, ...result };

@@ -17,6 +17,6 @@ export function bumpCacheEpoch(db) {
 }
 
 export function ensureCacheEpoch(db) {
-  run(db, "INSERT OR IGNORE INTO reference_cache_epoch (id, epoch) VALUES (1, 0)", []);
+  run(db, "INSERT INTO reference_cache_epoch (id, epoch) VALUES (1, 0) ON CONFLICT DO NOTHING", []);
   return getCacheEpoch(db);
 }

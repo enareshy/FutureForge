@@ -53,7 +53,7 @@ export function recordChange(db, input = {}) {
       // Auditing must never fail the business write.
     }
   }
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listHistory(db, { tenantId, entityType, entityId, entityRef, action, from, to, page, pageSize } = {}) {
@@ -116,7 +116,7 @@ export function recordQuery(db, { tenantId, action, request = {}, summary = {}, 
       nowIso(),
     ]
   );
-  return Number(result.lastInsertRowid);
+  return Number(result.lastInsertId);
 }
 
 export function listQueryHistory(db, { tenantId, action, from, to, page, pageSize } = {}) {

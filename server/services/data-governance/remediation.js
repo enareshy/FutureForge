@@ -62,7 +62,7 @@ function record(db, input) {
       nowIso(),
     ]
   );
-  return publicRemediation(queryOne(db, "SELECT * FROM dg_remediations WHERE id = ?", [Number(result.lastInsertRowid)]));
+  return publicRemediation(queryOne(db, "SELECT * FROM dg_remediations WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
 function applyAttribute(db, { tenantId, objectType, objectId, attributeName, afterValue, actor, ip }) {

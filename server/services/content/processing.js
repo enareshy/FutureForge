@@ -48,7 +48,7 @@ export function recordProcessingJob(db, {
       nowIso(),
     ]
   );
-  return publicProcessingJob(queryOne(db, "SELECT * FROM content_processing_jobs WHERE id = ?", [Number(insert.lastInsertRowid)]));
+  return publicProcessingJob(queryOne(db, "SELECT * FROM content_processing_jobs WHERE id = ?", [Number(insert.lastInsertId)]));
 }
 
 export function completeProcessingJob(db, job, { status, result = {}, errorMessage = "" } = {}) {

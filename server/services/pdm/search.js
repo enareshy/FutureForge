@@ -108,7 +108,7 @@ export function registerPdmSources() {
     code: "pdm_item",
     table: "pdm_items",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM pdm_items WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, item_number, name, description, item_ref, item_type, classification_code, status, owner_user_id FROM pdm_items WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -138,7 +138,7 @@ export function registerPdmSources() {
     code: "pdm_revision",
     table: "pdm_item_revisions",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM pdm_item_revisions WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, item_id, revision_ref, revision_number, configuration_context, status, variant_code, owner_user_id, variant_id FROM pdm_item_revisions WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       const item = queryOne(db, "SELECT item_number, name FROM pdm_items WHERE id = ?", [row.item_id]);
@@ -169,7 +169,7 @@ export function registerPdmSources() {
     code: "pdm_dataset",
     table: "pdm_datasets",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM pdm_datasets WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, dataset_number, name, description, content_reference, dataset_ref, dataset_type, content_type, status, owner_user_id, item_id, revision_id FROM pdm_datasets WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -199,7 +199,7 @@ export function registerPdmSources() {
     code: "pdm_representation",
     table: "pdm_representations",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM pdm_representations WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, representation_ref, name, description, representation_type, status, item_id, revision_id, dataset_id FROM pdm_representations WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -229,7 +229,7 @@ export function registerPdmSources() {
     code: "pdm_cad_association",
     table: "pdm_cad_associations",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM pdm_cad_associations WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, association_ref, source_object_id, application, cad_type, association_type, status, item_id, source_revision_id, dataset_id FROM pdm_cad_associations WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {
@@ -259,7 +259,7 @@ export function registerPdmSources() {
     code: "pdm_baseline",
     table: "pdm_baselines",
     resolve(db, objectId, { tenantId } = {}) {
-      const row = queryOne(db, "SELECT * FROM pdm_baselines WHERE id = ?", [Number(objectId)]);
+      const row = queryOne(db, "SELECT id, tenant_id, organization_id, baseline_number, name, description, baseline_ref, status, created_by, item_id, member_count FROM pdm_baselines WHERE id = ?", [Number(objectId)]);
       if (!row) return null;
       if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
       return {

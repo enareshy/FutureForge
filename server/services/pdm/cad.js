@@ -82,7 +82,7 @@ export function listCadAssociations(db, { tenantId, itemId, sourceRevisionId, da
     params.push(String(status).toUpperCase());
   }
   if (q) {
-    clauses.push("(application LIKE ? OR source_object_id LIKE ? OR association_ref LIKE ?)");
+    clauses.push("(application ILIKE ? OR source_object_id ILIKE ? OR association_ref ILIKE ?)");
     const like = `%${normalizeText(q, { max: 120 })}%`;
     params.push(like, like, like);
   }
@@ -108,7 +108,7 @@ export function createCadAssociation(db, tenantId, body = {}, actor = null, ip =
   if (!allowDuplicate) {
     const duplicate = queryOne(
       db,
-      "SELECT id FROM pdm_cad_associations WHERE tenant_id = ? AND dataset_id = ? AND association_type = ? AND (source_revision_id IS ? OR source_revision_id = ?)",
+      "SELECT id FROM pdm_cad_associations WHERE tenant_id = ? AND dataset_id = ? AND association_type = ? AND (source_revision_id IS NOT DISTINCT FROM ? OR source_revision_id = ?)",
       [tenant, normalized.dataset_id, normalized.association_type, revision?.id ?? null, revision?.id ?? null]
     );
     if (duplicate) throw cadAssociationConflict({ dataset_id: normalized.dataset_id, association_type: normalized.association_type });
@@ -150,7 +150,7 @@ export function createCadAssociation(db, tenantId, body = {}, actor = null, ip =
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_cad_associations WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_cad_associations WHERE id = ?", [Number(result.lastInsertId)]);
   recordReference(db, tenant, {
     source_type: "CAD_ASSOCIATION",
     source_id: String(row.id),

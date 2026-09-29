@@ -43,7 +43,7 @@ export function listBaselines(db, { status, tenantId, q, page = 1, pageSize = 50
     params.push(Number(tenantId));
   }
   if (q) {
-    clauses.push("(code LIKE ? OR name LIKE ? OR description LIKE ?)");
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
     const like = `%${String(q)}%`;
     params.push(like, like, like);
   }
@@ -104,7 +104,7 @@ export function createBaseline(db, input = {}, actor = null, tenantId = null, ip
   return transaction(db, () => {
     const existing = queryOne(
       db,
-      "SELECT id FROM versioning_baselines WHERE code = ? AND (tenant_id IS NULL OR ? IS NULL OR tenant_id = ?)",
+      "SELECT id FROM versioning_baselines WHERE code = ? AND (tenant_id IS NULL OR ?::bigint IS NULL OR tenant_id = ?)",
       [code, tenantId, tenantId]
     );
     if (existing) throw invalidEffectivity(`Baseline ${code} already exists`);
@@ -132,7 +132,7 @@ export function createBaseline(db, input = {}, actor = null, tenantId = null, ip
         ts,
       ]
     );
-    const id = Number(result.lastInsertRowid);
+    const id = Number(result.lastInsertId);
     for (const entry of objects) {
       const snap = snapshotObject(db, entry, context, policyRow, actor, tenantId);
       run(

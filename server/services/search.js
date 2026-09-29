@@ -7,7 +7,7 @@
 // history, permission-aware filtering and export.
 //
 // The framework is deliberately provider-based: the default relational provider
-// compiles queries to SQLite, and an alternative engine can be registered
+// compiles queries to PostgreSQL, and an alternative engine can be registered
 // without changing callers.
 
 export * as SearchRegistryService from "./search/registry.js";

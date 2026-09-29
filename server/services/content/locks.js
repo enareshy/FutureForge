@@ -77,7 +77,7 @@ export function checkOutContent(db, reference, { actor = null, tenantId = null, 
       ts,
       Number(row.id),
     ]);
-    const lock = queryOne(db, "SELECT * FROM content_locks WHERE id = ?", [Number(insert.lastInsertRowid)]);
+    const lock = queryOne(db, "SELECT * FROM content_locks WHERE id = ?", [Number(insert.lastInsertId)]);
     const updated = queryOne(db, "SELECT * FROM content WHERE id = ?", [Number(row.id)]);
     recordContentEvent(db, { eventType: "ContentCheckedOut", content: updated, actor, tenantId: row.tenant_id, payload: { lock_token: lock.lock_token, expires_at: lock.expires_at } });
     auditContent(db, { actor, tenantId: row.tenant_id, action: "content.checked_out", content: updated, details: { lock_token: lock.lock_token }, ip });

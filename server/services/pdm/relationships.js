@@ -112,7 +112,7 @@ export function createRelationship(db, tenantId, body = {}, actor = null, ip = n
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM pdm_relationships WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM pdm_relationships WHERE id = ?", [Number(result.lastInsertId)]);
   const genericId = bridgeCreateRelationship(
     db,
     { type: row.relationship_type, sourceId: row.source_id, targetId: row.target_id, attributes: normalized.attributes },

@@ -186,7 +186,7 @@ function seedEnrichment(db, actor, tenantId) {
 }
 
 export function seedReference(db, { actor = null, tenantId = null } = {}) {
-  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM reference_data_items WHERE is_system = 1 OR item_ref LIKE 'RDM-%'");
+  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM reference_data_items WHERE is_system = 1 OR item_ref ILIKE 'RDM-%'");
   const domains = ensureReferenceDomains(db, { tenantId, actor });
   let items = 0;
   for (const domain of MANDATORY_DOMAINS) {

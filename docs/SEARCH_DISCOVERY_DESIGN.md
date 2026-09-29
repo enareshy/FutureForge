@@ -70,7 +70,7 @@ server/services/search/
   config.js         per-tenant configuration
   registry.js       object-type registration + initialization
   authorization.js  per-type permission checks and result filtering
-  provider.js       search provider abstraction + relational (SQLite) provider
+  provider.js       search provider abstraction + relational (PostgreSQL) provider
   query.js          runSearch, advanced, by-type, by-attributes, by-relationship, facets
   suggestions.js    autocomplete from history, titles and tags
   history.js        search history recording and clearing
@@ -128,13 +128,13 @@ term frequency and recency.
 
 ## 6. Provider abstraction
 
-The default `relationalProvider` compiles queries into SQLite SQL over
+The default `relationalProvider` compiles queries into PostgreSQL SQL over
 `search_index`. `registerSearchProvider` lets a deployment swap in an external
 engine (for example a dedicated full-text service) without changing any caller:
 the query service always resolves a provider by name.
 
-`node:sqlite` ships JSON1 and FTS5, so attribute filters and full-text matching
-work without extra services.
+PostgreSQL provides native JSONB operators (`->>`) and text-search primitives,
+so attribute filters and text matching work without extra services.
 
 ## 7. Permission-aware and tenant-aware search
 

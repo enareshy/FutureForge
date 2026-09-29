@@ -96,9 +96,9 @@ export function createSchedule(db, tenantId, input = {}, actor = null, ip = null
       ts,
     ]
   );
-  writeAudit(db, { actor, action: "reporting.schedule.create", resourceType: "reporting_schedule", resourceId: String(result.lastInsertRowid), details: { target_type: normalized.target_type, frequency: normalized.frequency }, sourceModule: "reporting", ip });
+  writeAudit(db, { actor, action: "reporting.schedule.create", resourceType: "reporting_schedule", resourceId: String(result.lastInsertId), details: { target_type: normalized.target_type, frequency: normalized.frequency }, sourceModule: "reporting", ip });
   publishReportingEvent(db, { eventType: "ReportUpdated", payload: { action: "schedule_created", target_type: normalized.target_type }, objectType: "reporting_schedule", tenantId }, actor);
-  return getScheduleById(db, Number(tenantId), Number(result.lastInsertRowid));
+  return getScheduleById(db, Number(tenantId), Number(result.lastInsertId));
 }
 
 export function getScheduleById(db, tenantId, id) {
@@ -217,7 +217,7 @@ function ensureExportRow(db, tenantId, report, schedule, actor) {
      VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, ?)`,
     [`EXP-${schedule.schedule_ref}`, Number(tenantId), report.id, schedule.format, stringifyJson(schedule.parameters), actor?.id ?? null, ts]
   );
-  return { id: Number(result.lastInsertRowid), export_ref: `EXP-${schedule.schedule_ref}` };
+  return { id: Number(result.lastInsertId), export_ref: `EXP-${schedule.schedule_ref}` };
 }
 
 // ── Cadence ──────────────────────────────────────────────────────────────────

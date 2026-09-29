@@ -43,8 +43,8 @@ function configFor(db, tenantId) {
 export function getImportJobRow(db, tenantId, ref) {
   return queryOne(
     db,
-    "SELECT * FROM ie_import_jobs WHERE tenant_id = ? AND (job_ref = ? OR CAST(id AS TEXT) = ?)",
-    [Number(tenantId), String(ref), String(ref)]
+    "SELECT * FROM ie_import_jobs WHERE tenant_id = ? AND (job_ref = ? OR id = ?)",
+    [Number(tenantId), String(ref), Number(ref) || -1]
   );
 }
 
@@ -84,7 +84,7 @@ export function createImportJob(db, { tenantId, definition, mode, params = {}, a
       ts,
     ]
   );
-  const job = queryOne(db, "SELECT * FROM ie_import_jobs WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const job = queryOne(db, "SELECT * FROM ie_import_jobs WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, { actor, action: "data_exchange.import_job.create", resourceType: "ie_import_jobs", resourceId: jobRef, details: { definition: definition?.code || null, mode: job.mode }, ip });
   recordHistory(db, { direction: "IMPORT", tenantId: tenant, jobId: job.id, definitionId, definitionVersion: job.definition_version, action: "JOB_CREATED", status: job.status, sourceType: job.source_type, targetObjectType: job.target_object_type, actor });
   return { job, existing: false };

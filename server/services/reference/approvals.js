@@ -107,7 +107,7 @@ export function submitForApproval(db, itemRefValue, input = {}, actor = null, te
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_approvals WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_approvals WHERE id = ?", [Number(result.lastInsertId)]);
   if (item.status !== "submitted") {
     try {
       setItemStatus(db, item.item_ref, "submitted", actor, ip, { reason: normalizeText(input.reason, "Submitted for approval") });
@@ -273,7 +273,7 @@ export function createChangeRequest(db, input = {}, actor = null, tenantId = nul
       ts,
     ]
   );
-  const row = queryOne(db, "SELECT * FROM reference_change_requests WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const row = queryOne(db, "SELECT * FROM reference_change_requests WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
     actor,
     action: "reference.change_request.create",
