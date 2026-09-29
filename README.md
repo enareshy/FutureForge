@@ -150,8 +150,15 @@ Then open http://localhost:3001.
 - `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` — discrete PostgreSQL connection settings. Defaults are `127.0.0.1`, `5432`, `helix`, `helix`, `helix`.
 - `HELIX_DB_SCHEMA` — schema (namespace) used for the primary database. Default `public`; set a distinct value for schema-per-tenant single-database installs.
 - `PGSSL` — set to `true` to connect with TLS.
+- `PG_POOL_MAX` — connection pool size per process, default `5`.
+- `PG_STATEMENT_TIMEOUT` — per-statement ceiling (milliseconds) enforced by PostgreSQL for application queries, so a runaway query is cancelled instead of pinning a worker. Default `60000`; `0` disables it. Schema/seed bootstrap and the test suite are exempt.
+- `PG_BRIDGE_TIMEOUT` — milliseconds the synchronous database bridge waits for a result before failing fast, defaulting to the statement timeout plus `15000` (`120000` when the statement timeout is disabled). `0` waits indefinitely.
+- `PG_BOOTSTRAP_TIMEOUT` — millisecond budget for long bootstrap work (schema creation, migration, seeding), default `300000`. These statements run without a statement timeout.
 - `HELIX_AUTH_SECRET` — key for AES-256-GCM secret encryption and HMAC signing. **Required when `NODE_ENV=production`** — the server refuses to start without it. Falls back to an insecure, publicly-known dev key otherwise (fine for local dev/tests only).
 - `HELIX_CORS_ORIGINS` — comma-separated list of allowed cross-origin callers. Defaults to the Vite dev server (`http://localhost:5173`). Not needed in single-port production mode (step 7), since the UI and API are served from the same origin.
+- `HELIX_WEB_CONCURRENCY` — number of API worker processes to fork (default `1`; `NODE_ENV=production` defaults to the CPU count capped at `4`). The synchronous database bridge serializes queries within a process, so replicas are how the API uses more than one core. The primary process applies the schema and seed once, then forks workers that serve traffic; a crashed worker is restarted. Set to `1` to force a single process.
+- `HELIX_SESSION_TOUCH_SECONDS` — how often the session `last_seen_at` timestamp may be refreshed while a user is active (default `60`; `0` writes on every request). The value is informational, so throttling it avoids a database write (and its WAL/autovacuum cost) on every authenticated request.
+- Startup is safe to run concurrently: schema migration, seeding and worker bootstrap serialize on a PostgreSQL advisory lock, so any number of API and job-worker processes may start against the same database at the same time.
 
 ```bash
 # Run on a different port against a different database

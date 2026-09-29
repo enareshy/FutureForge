@@ -54,6 +54,23 @@ export function createSession(db, userId, meta = {}) {
   return { token, public_id: publicId, user_id: userId, expires_at: expires, mfa_verified: meta.mfaVerified ? 1 : 0 };
 }
 
+// Touching `last_seen_at` on every authenticated request turns each read into a
+// write, adding avoidable row/WAL churn and autovacuum pressure at load. The
+// value is informational only (no expiry or idle check depends on it), so it is
+// refreshed at most once per interval. 0 restores the write-on-every-request
+// behaviour.
+const SESSION_TOUCH_SECONDS = Number(process.env.HELIX_SESSION_TOUCH_SECONDS ?? 60);
+const SESSION_TOUCH_MS =
+  Number.isFinite(SESSION_TOUCH_SECONDS) && SESSION_TOUCH_SECONDS >= 0
+    ? SESSION_TOUCH_SECONDS * 1000
+    : 60000;
+
+function lastSeenMillis(value) {
+  if (!value) return 0;
+  const parsed = Date.parse(`${String(value).replace(" ", "T")}Z`);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 export function getSessionByToken(db, token) {
   if (!token) return null;
   const session = queryOne(db, "SELECT * FROM sessions WHERE token = ?", [token]);
@@ -68,7 +85,11 @@ export function getSessionByToken(db, token) {
     run(db, "UPDATE sessions SET public_id = ? WHERE token = ?", [publicId, token]);
     session.public_id = publicId;
   }
-  run(db, "UPDATE sessions SET last_seen_at = ? WHERE token = ?", [nowIso(), token]);
+  if (Date.now() - lastSeenMillis(session.last_seen_at) >= SESSION_TOUCH_MS) {
+    const ts = nowIso();
+    run(db, "UPDATE sessions SET last_seen_at = ? WHERE token = ?", [ts, token]);
+    session.last_seen_at = ts;
+  }
   return session;
 }
 

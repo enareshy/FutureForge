@@ -16,9 +16,22 @@ pg.types.setTypeParser(1700, (v) => (v === null ? null : Number(v)));
 const { port, signal, config, schema, bootstrap, maintenanceConfig } = workerData;
 const sig = new Int32Array(signal);
 
-const poolConfig = { ...config, max: Number(process.env.PG_POOL_MAX || 5) };
+// Interactive per-statement ceiling. 0 means "no server-side timeout": used by
+// test/admin bridges whose bootstrap and bulk statements are legitimately long.
+const statementTimeout =
+  Number(workerData.statementTimeout) > 0 ? Number(workerData.statementTimeout) : 0;
+
+const startupOptions = [];
 if (schema && schema !== "public") {
-  poolConfig.options = `-c search_path=${schema},public`;
+  startupOptions.push(`-c search_path=${schema},public`);
+}
+if (statementTimeout > 0) {
+  startupOptions.push(`-c statement_timeout=${statementTimeout}`);
+}
+
+const poolConfig = { ...config, max: Number(process.env.PG_POOL_MAX || 5) };
+if (startupOptions.length) {
+  poolConfig.options = startupOptions.join(" ");
 }
 
 function makePool() {
@@ -101,6 +114,11 @@ async function refreshFromTemplate(database, template) {
 }
 
 const ADVISORY_LOCK = 771288;
+// Application schema migration (single idempotent DDL pass) and the wider
+// startup bootstrap (migration + seed) are serialized across every process
+// pointed at the same database.
+const SCHEMA_LOCK = 771289;
+const BOOTSTRAP_LOCK = 771290;
 
 async function columnExists(table, column) {
   const r = await pool.query(
@@ -195,6 +213,76 @@ const ready = prepare().then(
   }
 );
 
+// Applies the schema and seed sentinels as a single atomic, lock-guarded step.
+// Concurrent starters serialize on a transaction-scoped advisory lock: the
+// first applies the schema, the rest observe it already applied and only
+// (re-)insert the idempotent seed rows. `SET LOCAL statement_timeout = 0`
+// exempts the long DDL pass without leaking session state back to the pool.
+async function runMigrations({ version, migrationsTable, schemaSql, seedSql }) {
+  if (!validDatabaseName(migrationsTable)) {
+    throw new Error(`Invalid migrations table: ${migrationsTable}`);
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL statement_timeout = 0");
+    await client.query("SELECT pg_advisory_xact_lock($1)", [SCHEMA_LOCK]);
+    const reg = await client.query("SELECT to_regclass($1) AS r", [migrationsTable]);
+    let applied = false;
+    if (reg.rows[0].r) {
+      const v = await client.query(
+        `SELECT 1 FROM ${migrationsTable} WHERE name = $1`,
+        [version]
+      );
+      applied = v.rowCount > 0;
+    }
+    if (!applied) {
+      await client.query(schemaSql);
+    }
+    await client.query(seedSql);
+    await client.query("COMMIT");
+  } catch (err) {
+    let reusable = false;
+    try {
+      await client.query("ROLLBACK");
+      reusable = true;
+    } catch {
+      /* the session is unusable; discard it below */
+    }
+    client.release(reusable ? undefined : err);
+    throw err;
+  }
+  client.release();
+}
+
+// Serializes the whole startup bootstrap (migration plus the seed, which the
+// synchronous facade otherwise runs as many independent pooled statements) so
+// any number of processes can start against the same database without racing.
+// A dedicated client carries the session-scoped lock; it is kept out of the
+// pool so its lifted statement timeout cannot leak into application queries.
+let bootstrapLockClient = null;
+
+async function acquireBootstrapLock() {
+  if (bootstrapLockClient) return;
+  const client = new pg.Client(config);
+  await client.connect();
+  await client.query("SET statement_timeout = 0");
+  await client.query("SELECT pg_advisory_lock($1)", [BOOTSTRAP_LOCK]);
+  bootstrapLockClient = client;
+}
+
+async function releaseBootstrapLock() {
+  if (!bootstrapLockClient) return;
+  const client = bootstrapLockClient;
+  bootstrapLockClient = null;
+  try {
+    await client.query("SELECT pg_advisory_unlock($1)", [BOOTSTRAP_LOCK]);
+  } catch {
+    /* the lock is released when the connection closes regardless */
+  }
+  await client.end();
+}
+
 parentPort.on("message", async (request) => {
   const { op, sql, params } = request;
   try {
@@ -211,7 +299,16 @@ parentPort.on("message", async (request) => {
         tx.release();
         tx = null;
       }
+      await releaseBootstrapLock();
       await pool.end();
+      return reply({ ok: true, rowCount: 0, rows: [] });
+    }
+    if (op === "acquireBootstrapLock") {
+      await acquireBootstrapLock();
+      return reply({ ok: true, rowCount: 0, rows: [] });
+    }
+    if (op === "releaseBootstrapLock") {
+      await releaseBootstrapLock();
       return reply({ ok: true, rowCount: 0, rows: [] });
     }
     // An explicit refresh (the seed shortcut) supersedes any pending schema
@@ -239,6 +336,10 @@ parentPort.on("message", async (request) => {
       pendingRefresh = null;
       await refreshFromTemplate(config.database, template);
     }
+    if (op === "migrate") {
+      await runMigrations(request);
+      return reply({ ok: true, rowCount: 0, rows: [] });
+    }
     if (op === "begin") {
       if (!tx) {
         tx = await pool.connect();
@@ -251,9 +352,8 @@ parentPort.on("message", async (request) => {
       return reply({ ok: true, rows: [{ present: exists }], rowCount: exists ? 1 : 0 });
     }
 
-    const runner = tx || pool;
     const values = params && params.length ? params : undefined;
-    const result = await runner.query(sql, values);
+    const result = await (tx || pool).query(sql, values);
     const fields = result.fields || [];
     return reply({
       ok: true,

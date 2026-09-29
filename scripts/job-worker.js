@@ -18,7 +18,7 @@
 //   JOB_WORKER_DRAIN_MS        graceful shutdown budget (default 30000)
 //   JOB_DEMO_HANDLERS=1        register the bundled demo handlers (local demos only)
 
-import { openDatabase, migrate } from "../server/db.js";
+import { openDatabase, migrate, acquireBootstrapLock, releaseBootstrapLock } from "../server/db.js";
 import { ensureDefaultQueues, createWorker, registerDemoHandlers } from "../server/services/job-execution.js";
 import { registerFileProcessingHandlers, expireUploads, releaseExpiredLocks } from "../server/services/files.js";
 import { registerSearchHandlers, runSearchMaintenance } from "../server/services/search.js";
@@ -76,6 +76,11 @@ function log(level, message, detail = {}) {
 }
 
 const db = openDatabase();
+// Serialize worker startup with every other process: the queue and job-type
+// provisioning below is check-then-insert and would race when several worker
+// or API instances start at once. The lock is held across the whole startup and
+// released before the worker loop begins.
+acquireBootstrapLock(db);
 migrate(db);
 ensureDefaultQueues(db);
 
@@ -155,6 +160,7 @@ registerBomHandlers();
 // where-referenced, baseline creation, validation, reindex and housekeeping).
 ensurePdmJobTypes(db);
 registerPdmHandlers();
+releaseBootstrapLock(db);
 
 // Periodic file housekeeping: expire abandoned upload sessions and auto-release
 // stale check-out locks so operators never fight a lock nobody is using.

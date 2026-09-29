@@ -9,7 +9,14 @@ import { Worker, MessageChannel, receiveMessageOnPort } from "node:worker_thread
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { databaseConfig, databaseSchema, testDatabaseName } from "./db-config.js";
+import {
+  databaseConfig,
+  databaseSchema,
+  testDatabaseName,
+  statementTimeout,
+  bridgeTimeout,
+  bootstrapTimeout,
+} from "./db-config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_SQL =
@@ -53,6 +60,9 @@ function createBridge(workerData) {
   const { port1, port2 } = new MessageChannel();
   const signal = new SharedArrayBuffer(4);
   const sig = new Int32Array(signal);
+  // 0 (or a missing value) means "wait without a deadline"; bootstrap bridges
+  // pass a large explicit budget instead.
+  const waitTimeout = Number(workerData.bridgeTimeout) > 0 ? Number(workerData.bridgeTimeout) : 0;
   const worker = new Worker(new URL("./db-worker.js", import.meta.url), {
     workerData: { ...workerData, port: port2, signal },
     transferList: [port2],
@@ -69,11 +79,12 @@ function createBridge(workerData) {
     Atomics.notify(sig, 0);
   });
 
-  function call(request) {
+  function call(request, options = {}) {
+    const timeout = options.timeout !== undefined ? options.timeout : waitTimeout;
     Atomics.store(sig, 0, 0);
     worker.postMessage(request);
     for (;;) {
-      const waited = Atomics.wait(sig, 0, 0, 120000);
+      const waited = Atomics.wait(sig, 0, 0, timeout > 0 ? timeout : undefined);
       const received = receiveMessageOnPort(port1);
       if (received) {
         const message = received.message;
@@ -91,7 +102,16 @@ function createBridge(workerData) {
         return message;
       }
       if (workerError) throw workerError;
-      if (waited === "timed-out") throw new Error("PostgreSQL bridge timed out");
+      if (waited === "timed-out") {
+        // The worker is still busy, so any reply it eventually posts would be
+        // read as the answer to the next request. Poison the bridge instead of
+        // silently desynchronising the protocol.
+        workerError = new Error(
+          `PostgreSQL bridge timed out after ${timeout}ms ` +
+            "(set PG_BRIDGE_TIMEOUT / PG_STATEMENT_TIMEOUT to adjust)"
+        );
+        throw workerError;
+      }
     }
   }
 
@@ -315,6 +335,8 @@ export function openDatabase() {
     config: databaseConfig(),
     schema,
     bootstrap: null,
+    statementTimeout: statementTimeout(),
+    bridgeTimeout: bridgeTimeout(),
   });
   return new Database(bridge, schema);
 }
@@ -372,6 +394,8 @@ function templateProbe(name) {
       schema: "public",
       maintenanceConfig: maintenanceConfigDefault(),
       bootstrap: { createDatabase: false, ensureSchema: false, truncate: false },
+      statementTimeout: 0,
+      bridgeTimeout: bootstrapTimeout(),
     }),
     "public"
   );
@@ -423,6 +447,8 @@ function ensureTemplates(base) {
           schemaSql: SCHEMA_SQL,
           seedSql: SEED_SQL,
         },
+        statementTimeout: 0,
+        bridgeTimeout: bootstrapTimeout(),
       }),
       "public"
     );
@@ -444,6 +470,8 @@ function ensureTemplates(base) {
         schema: "public",
         maintenanceConfig: maintenanceConfigDefault(),
         bootstrap: { createDatabase: true, cloneFrom: names.schema, ensureSchema: false, truncate: false },
+        statementTimeout: 0,
+        bridgeTimeout: bootstrapTimeout(),
       }),
       "public"
     );
@@ -472,6 +500,11 @@ export function openTestDatabase() {
       ensureSchema: false,
       truncate: false,
     },
+    // Test clones run the same heavy statements (bulk scans, duplicate
+    // detection) that would exceed an interactive ceiling; they stay exempt and
+    // rely on the larger bootstrap budget as a backstop.
+    statementTimeout: 0,
+    bridgeTimeout: bootstrapTimeout(),
   });
   const db = new Database(bridge, "public");
   db.__seedTemplate = names.seed;
@@ -483,18 +516,30 @@ export function migrate(db) {
   // migrated schema, so re-checking and re-applying is pure overhead. The
   // first real query (or the seed shortcut) performs the clone instead.
   if (db.__seedTemplate) return;
-  const registry = db.prepare("SELECT to_regclass(?) AS r").get("schema_migrations");
-  let applied = false;
-  if (registry && registry.r) {
-    const row = db
-      .prepare("SELECT 1 AS ok FROM schema_migrations WHERE name = ?")
-      .get(SCHEMA_VERSION);
-    applied = Boolean(row);
-  }
-  if (!applied) {
-    db.exec(SCHEMA_SQL);
-  }
-  db.exec(SEED_SQL);
+  // The whole check-and-apply runs in one worker transaction guarded by an
+  // advisory lock, so concurrent processes cannot race the DDL. Exempt from the
+  // interactive statement timeout because the full schema applies in one pass.
+  db._bridge.call(
+    {
+      op: "migrate",
+      version: SCHEMA_VERSION,
+      migrationsTable: "schema_migrations",
+      schemaSql: SCHEMA_SQL,
+      seedSql: SEED_SQL,
+    },
+    { timeout: bootstrapTimeout() }
+  );
+}
+
+// Serializes the wider startup bootstrap (migration + seed) across processes.
+// Callers acquire before seeding and release once the schema and demo estate
+// are in place; a concurrent starter blocks until the first one finishes.
+export function acquireBootstrapLock(db) {
+  db._bridge.call({ op: "acquireBootstrapLock" }, { timeout: bootstrapTimeout() });
+}
+
+export function releaseBootstrapLock(db) {
+  db._bridge.call({ op: "releaseBootstrapLock" }, { timeout: bootstrapTimeout() });
 }
 
 export function transaction(db, fn) {

@@ -79,6 +79,7 @@ import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./
 import { writeAudit } from "./services/audit.js";
 import { effectiveAccess } from "./services/access.js";
 import { requirePermission, requireFeature } from "./middleware.js";
+import { runWithRequestContext } from "./request-context.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -183,6 +184,9 @@ function wrap(fn) {
 export function createApp(db) {
   const app = express();
   app.disable("x-powered-by");
+  // Everything downstream runs inside this request's memoization context, so
+  // repeated authorization/access resolution is computed once per request.
+  app.use((_req, _res, next) => runWithRequestContext(() => next()));
   app.set("trust proxy", trustProxySetting());
   app.use(helmet());
   app.use(

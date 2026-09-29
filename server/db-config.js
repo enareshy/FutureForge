@@ -60,3 +60,36 @@ export function testDatabaseName() {
 export function poolMax() {
   return Number(process.env.PG_POOL_MAX || 5);
 }
+
+function envMilliseconds(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+// Per-statement ceiling enforced by PostgreSQL (`statement_timeout`) for
+// application queries. A runaway statement is cancelled by the server instead
+// of pinning a worker connection — and, because the synchronous bridge blocks
+// the main thread, instead of stalling the whole process. Bootstrap work
+// (schema creation, migration, seeding) runs exempt. 0 disables the ceiling.
+export function statementTimeout() {
+  return envMilliseconds("PG_STATEMENT_TIMEOUT", 60000);
+}
+
+// Main-thread bridge wait. Kept just above the statement timeout so the
+// database's own cancellation error is what normally surfaces; this is the
+// last-resort guard when PostgreSQL itself stops responding. 0 waits forever.
+export function bridgeTimeout() {
+  const explicit = envMilliseconds("PG_BRIDGE_TIMEOUT", null);
+  if (explicit !== null) return explicit;
+  const statement = statementTimeout();
+  return statement > 0 ? statement + 15000 : 120000;
+}
+
+// Schema/seed bootstrap is long-running by nature (the full 496-table schema is
+// applied in one statement). These operations are exempt from the statement
+// timeout and get a much larger bridge budget.
+export function bootstrapTimeout() {
+  return envMilliseconds("PG_BOOTSTRAP_TIMEOUT", 300000);
+}

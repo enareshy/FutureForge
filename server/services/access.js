@@ -1,9 +1,16 @@
 import { queryAll, queryOne } from "../db.js";
 import { HttpError } from "../validation.js";
+import { memoize } from "../request-context.js";
 import { ancestorRoles } from "./roles.js";
 import { groupsForUser } from "./groups.js";
 
 export function effectiveAccess(db, userId) {
+  // A request commonly resolves the same principal's access several times (one
+  // per permission guard, plus route code). Resolve it once per request.
+  return memoize(`access:${userId}`, () => computeEffectiveAccess(db, userId));
+}
+
+function computeEffectiveAccess(db, userId) {
   const user = queryOne(
     db,
     `SELECT id, username, email, employee_id, display_name, status, organization_id
