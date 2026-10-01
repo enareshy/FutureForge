@@ -1,4 +1,5 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
 import { resolveRecipients } from "./recipients.js";
 import { buildRuleContext } from "./rules.js";
@@ -43,6 +44,33 @@ function insertReminder(db, { ruleId, eventId, notificationId, tenantId, recipie
   return result.lastInsertId;
 }
 
+// Asynchronous twin of `insertReminder`, mirroring the dedupe + insert flow.
+async function insertReminderAsync(db, { ruleId, eventId, notificationId, tenantId, recipientId, dueAt, level, dedupeKey, details }) {
+  if (dedupeKey) {
+    const existing = await queryOneAsync(db, "SELECT id FROM notification_reminders WHERE dedupe_key = ?", [dedupeKey]);
+    if (existing) return existing.id;
+  }
+  const result = await runAsync(
+    db,
+    `INSERT INTO notification_reminders
+      (rule_id, event_id, notification_id, tenant_id, recipient_id, due_at, level, status, dedupe_key, details_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+    [
+      ruleId ?? null,
+      eventId ?? null,
+      notificationId ?? null,
+      tenantId ?? null,
+      recipientId ?? null,
+      dueAt,
+      level || 0,
+      dedupeKey ?? null,
+      JSON.stringify(details || {}),
+      nowIso(),
+    ]
+  );
+  return result.lastInsertId;
+}
+
 // Schedules the first reminder for a rule that just produced a notification.
 export function scheduleReminderForRule(db, { rule, event, notificationId, recipient, tenantId }) {
   const config = safeParse(rule.reminder_json, {});
@@ -62,6 +90,36 @@ export function scheduleReminderForRule(db, { rule, event, notificationId, recip
     deep_link: config.deep_link || config.deepLink || "",
   };
   return insertReminder(db, {
+    ruleId: rule.id,
+    eventId: event.id,
+    notificationId,
+    tenantId,
+    recipientId: recipient.id,
+    dueAt,
+    level: 0,
+    dedupeKey: `reminder:${rule.id}:${event.id}:${recipient.id}:0`,
+    details,
+  });
+}
+
+export async function scheduleReminderForRuleAsync(db, { rule, event, notificationId, recipient, tenantId }) {
+  const config = safeParse(rule.reminder_json, {});
+  if (!config.enabled) return null;
+  const offset = Number(config.offset_minutes ?? config.offsetMinutes ?? 0) || 0;
+  const dueAt = addMinutes(nowIso(), offset);
+  const details = {
+    event_type: event.event_type,
+    source_module: event.source_module,
+    object_type: event.object_type,
+    object_id: event.object_id,
+    object_name: event.object_name,
+    subject: config.subject || "Reminder",
+    repeat_minutes: Number(config.repeat_minutes ?? config.repeatMinutes ?? 0) || 0,
+    max_repeats: Number(config.max_repeats ?? config.maxRepeats ?? 0) || 0,
+    escalation: config.escalation || safeParse(rule.escalation_json, {}),
+    deep_link: config.deep_link || config.deepLink || "",
+  };
+  return insertReminderAsync(db, {
     ruleId: rule.id,
     eventId: event.id,
     notificationId,
@@ -270,4 +328,43 @@ export function getReminder(db, id, tenantId = null) {
   if (!row) throw new HttpError(404, "Reminder not found");
   if (tenantId && Number(row.tenant_id) !== Number(tenantId)) throw new HttpError(404, "Reminder not found");
   return row;
+}
+
+export async function listRemindersAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  if (tenantId) {
+    where.push("r.tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (query.status) {
+    where.push("r.status = ?");
+    params.push(query.status);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM notification_reminders r ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT r.*, u.username AS recipient_username FROM notification_reminders r
+        LEFT JOIN users u ON u.id = r.recipient_id ${clause} ORDER BY r.due_at LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    )
+  ).map((row) => ({
+    id: row.id,
+    rule_id: row.rule_id ?? null,
+    event_id: row.event_id ?? null,
+    notification_id: row.notification_id ?? null,
+    recipient_id: row.recipient_id,
+    recipient_username: row.recipient_username || "",
+    due_at: row.due_at,
+    fired_at: row.fired_at,
+    level: row.level,
+    status: row.status,
+    attempts: row.attempts,
+    details: safeParse(row.details_json, {}),
+    created_at: row.created_at,
+  }));
+  return { items, total, page, pageSize };
 }

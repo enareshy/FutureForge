@@ -3,6 +3,7 @@
 // (for example a dedicated index server) can be registered under a new name
 // without changing the search service or its callers.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import {
   FILTERABLE_COLUMNS,
@@ -467,6 +468,49 @@ export const relationalProvider = {
     );
     return titles;
   },
+  async searchAsync(db, query, context = {}) {
+    const compiled = compileWhere(query, context);
+    const countRow = await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS total FROM search_index i WHERE ${compiled.where}`,
+      compiled.params
+    );
+    const orderBy = compileSort(query);
+    const limit = Math.max(1, Math.min(Number(context.maxResults) || 500, 5000));
+    const rows = await queryAllAsync(
+      db,
+      `SELECT i.* FROM search_index i WHERE ${compiled.where} ORDER BY ${orderBy} LIMIT ?`,
+      [...compiled.params, limit]
+    );
+    return { total: countRow?.total || 0, rows, compiled };
+  },
+  async facetsAsync(db, query, facetFields, context = {}) {
+    const compiled = compileWhere(query, context);
+    const results = [];
+    for (const field of facetFields) {
+      results.push(await facetForFieldAsync(db, field, compiled));
+    }
+    return results;
+  },
+  async suggestAsync(db, query, context = {}) {
+    const compiled = compileWhere(query, context);
+    const term = normalizeText(query.text);
+    const params = [...compiled.params];
+    let where = compiled.where;
+    if (term) {
+      where += " AND lower(i.title) ILIKE ?";
+      params.push(`%${term}%`);
+    }
+    const limit = Math.max(1, Math.min(Number(context.limit) || 10, 50));
+    const titles = await queryAllAsync(
+      db,
+      `SELECT MIN(i.title) AS value, MIN(i.object_type) AS object_type, COUNT(*) AS count
+       FROM search_index i WHERE ${where}
+       GROUP BY lower(i.title) ORDER BY count DESC, lower(i.title) ASC LIMIT ?`,
+      [...params, limit]
+    );
+    return titles;
+  },
   // Index lifecycle. These methods are what makes the provider replaceable: a
   // future OpenSearch provider implements the same seven methods.
   index(db, document) {
@@ -562,5 +606,46 @@ function facetForField(db, field, compiled) {
   };
 }
 
-export { compileSort, columnExpression };
+async function facetForFieldAsync(db, field, compiled) {
+  if (ATTRIBUTE_FACETS.has(field)) {
+    const rows = await queryAllAsync(
+      db,
+      `SELECT i.tags_json FROM search_index i WHERE ${compiled.where} LIMIT 2000`,
+      compiled.params
+    );
+    const counts = new Map();
+    for (const row of rows) {
+      let tags = [];
+      try {
+        tags = JSON.parse(row.tags_json || "[]");
+      } catch {
+        tags = [];
+      }
+      for (const tag of tags) counts.set(String(tag), (counts.get(String(tag)) || 0) + 1);
+    }
+    return {
+      field,
+      values: [...counts.entries()]
+        .map(([value, count]) => ({ value, count }))
+        .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value))
+        .slice(0, 50),
+    };
+  }
+  const expression = columnExpression(field);
+  const rows = await queryAllAsync(
+    db,
+    `SELECT ${expression} AS value, COUNT(*) AS count
+     FROM search_index i WHERE ${compiled.where}
+     GROUP BY value ORDER BY count DESC LIMIT 50`,
+    compiled.params
+  );
+  return {
+    field,
+    values: rows
+      .filter((row) => row.value !== null && row.value !== undefined && row.value !== "")
+      .map((row) => ({ value: row.value, count: row.count })),
+  };
+}
+
+export { compileSort, columnExpression, facetForFieldAsync };
 

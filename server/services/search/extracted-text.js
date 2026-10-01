@@ -5,6 +5,7 @@
 // object through this module, and indexing merges it into the document's
 // searchable text. Binary payloads are never placed in the index.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync } from "../../db-async.js";
 import { writeAudit } from "../audit.js";
 import { SearchError, SEARCH_ERROR_CODES } from "./errors.js";
 
@@ -134,6 +135,26 @@ export function listExtractedText(db, { tenantId, objectType = null, objectId = 
     `SELECT * FROM search_extracted_text WHERE ${where} ORDER BY id DESC LIMIT ?`,
     params
   ).map(publicExtractedText);
+}
+
+export async function listExtractedTextAsync(db, { tenantId, objectType = null, objectId = null, limit = 100 } = {}) {
+  const params = [Number(tenantId)];
+  let where = "tenant_id = ?";
+  if (objectType) {
+    where += " AND object_type = ?";
+    params.push(String(objectType));
+  }
+  if (objectId) {
+    where += " AND object_id = ?";
+    params.push(String(objectId));
+  }
+  params.push(Number(limit));
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM search_extracted_text WHERE ${where} ORDER BY id DESC LIMIT ?`,
+    params
+  );
+  return rows.map(publicExtractedText);
 }
 
 // Concatenated, de-duplicated indexable text for one object. Used by the

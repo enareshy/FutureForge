@@ -1,9 +1,12 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { pagination } from "../../validation.js";
 import { homeTenantId } from "../tenants.js";
+import { homeTenantIdAsync } from "../tenants.js";
 import { safeParse } from "./validation.js";
-import { providerForChannel, providerConfig, providerSecrets } from "./providers.js";
+import { providerForChannel, providerForChannelAsync, providerConfig, providerSecrets } from "./providers.js";
 import { ingestNotification } from "../delivery/requests.js";
+import { ingestNotificationAsync } from "../delivery/requests.js";
 
 // Channel provider abstraction and delivery queue. External channels are
 // processed asynchronously by `processQueue`, which is pull-based (invoked by
@@ -192,8 +195,118 @@ export function deliverDirect(db, {
   return result.lastInsertId;
 }
 
+// Asynchronous twin of `deliverDirect`. Mirrors the same statement sequence so
+// a directly-created notification row is identical on either layer.
+export async function deliverDirectAsync(db, {
+  user,
+  tenantId = null,
+  channel = "in_app",
+  subject = "",
+  body = "",
+  templateId = null,
+  templateCode = "",
+  priority = "normal",
+  objectType = "",
+  objectId = "",
+  objectName = "",
+  deepLink = "",
+  actions = [],
+  correlationId = "",
+  idempotencyKey = null,
+  delaySeconds = 0,
+  deliverVia = "notification",
+} = {}) {
+  if (!user || !user.id) return null;
+  const resolvedTenant = tenantId ?? user.tenant_id ?? (await homeTenantIdAsync(db, user));
+  if (!resolvedTenant) return null;
+  if (idempotencyKey) {
+    const existing = await queryOneAsync(db, "SELECT id FROM notifications WHERE idempotency_key = ?", [idempotencyKey]);
+    if (existing) return existing.id;
+  }
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO notifications
+      (tenant_id, recipient_id, recipient_address, channel, template_id, template_code, subject, body,
+       status, priority, correlation_id, object_type, object_id, object_name, deep_link, action_links_json,
+       idempotency_key, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      resolvedTenant,
+      user.id,
+      user.email || "",
+      channel,
+      templateId,
+      templateCode,
+      subject,
+      body,
+      priority,
+      correlationId,
+      objectType,
+      objectId,
+      objectName,
+      deepLink,
+      JSON.stringify(Array.isArray(actions) ? actions : []),
+      idempotencyKey,
+      ts,
+      ts,
+    ]
+  );
+  const nowTs = nowIso();
+  if (deliverVia === "delivery") {
+    await ingestNotificationAsync(
+      db,
+      {
+        id: result.lastInsertId,
+        tenant_id: resolvedTenant,
+        recipient_id: user.id,
+        recipient_name: user.display_name || user.username || "",
+        recipient_address: user.email || "",
+        channel,
+        subject,
+        body,
+        priority,
+        correlation_id: correlationId,
+        object_type: objectType,
+        object_id: objectId,
+        object_name: objectName,
+        deep_link: deepLink,
+      },
+      { delaySeconds }
+    );
+    await runAsync(db, "UPDATE notifications SET status = 'processing', updated_at = ? WHERE id = ?", [nowTs, result.lastInsertId]);
+    return result.lastInsertId;
+  }
+  await enqueueAsync(db, { id: result.lastInsertId, channel, tenant_id: resolvedTenant }, { delaySeconds });
+  return result.lastInsertId;
+}
+
 function nextBackoff(attempt) {
   return BACKOFF_BASE_SECONDS * Math.pow(2, Math.max(0, attempt - 1));
+}// Asynchronous twin of `enqueue`. Mirrors the synchronous statement sequence so
+// a queued delivery row is identical on either layer.
+export async function enqueueAsync(db, notification, { delaySeconds = 0, providerCode = null } = {}) {
+  const provider = providerCode
+    ? { code: providerCode, type: providerCode }
+    : await providerForChannelAsync(db, notification.channel);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO notification_deliveries
+      (notification_id, channel, provider_code, status, attempt, max_attempts, scheduled_at, tenant_id, created_at)
+     VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?)`,
+    [
+      notification.id,
+      notification.channel,
+      provider.code || "store",
+      MAX_ATTEMPTS,
+      delaySeconds > 0 ? addSeconds(delaySeconds) : ts,
+      notification.tenant_id ?? null,
+      ts,
+    ]
+  );
+  await runAsync(db, "UPDATE notifications SET status = 'queued', updated_at = ? WHERE id = ?", [ts, notification.id]);
+  return queryOneAsync(db, "SELECT * FROM notification_deliveries WHERE id = ?", [result.lastInsertId]);
 }
 
 // Processes up to `limit` due deliveries. Safe to call repeatedly; returns a
@@ -258,6 +371,78 @@ export function processQueue(db, { limit = 50, now = null } = {}) {
         [attempt, addSeconds(backoff), String(outcome.error || "delivery failed"), delivery.id]
       );
       run(
+        db,
+        `UPDATE notifications SET status = 'retrying', retry_count = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+        [attempt, String(outcome.error || "delivery failed"), ts, delivery.notification_id]
+      );
+      stats.retried += 1;
+    }
+  }
+  return stats;
+}
+
+// Asynchronous twin of `processQueue`. Pull-based and safe to call repeatedly;
+// mirrors the synchronous attempt/backoff/dead-letter transitions exactly.
+export async function processQueueAsync(db, { limit = 50, now = null } = {}) {
+  const stamp = now || nowIso();
+  const due = await queryAllAsync(
+    db,
+    `SELECT d.*, n.recipient_id, n.recipient_address, n.subject, n.channel AS notification_channel
+       FROM notification_deliveries d
+       JOIN notifications n ON n.id = d.notification_id
+      WHERE d.status IN ('queued', 'retrying') AND d.dead_letter = 0 AND d.scheduled_at <= ?
+      ORDER BY d.scheduled_at, d.id LIMIT ?`,
+    [stamp, limit]
+  );
+  const stats = { processed: 0, sent: 0, failed: 0, retried: 0, dead_letter: 0 };
+  for (const delivery of due) {
+    stats.processed += 1;
+    await runAsync(db, "UPDATE notification_deliveries SET status = 'processing' WHERE id = ?", [delivery.id]);
+    const provider = await providerForChannelAsync(db, delivery.channel);
+    const context = { delivery, provider, notification: { ...delivery, id: delivery.notification_id, channel: delivery.notification_channel || delivery.channel } };
+    let outcome;
+    try {
+      outcome = handlerFor(delivery.channel)(db, context);
+    } catch (err) {
+      outcome = { ok: false, error: err.message };
+    }
+    const attempt = Number(delivery.attempt) + 1;
+    if (outcome.ok) {
+      const ts = nowIso();
+      await runAsync(
+        db,
+        `UPDATE notification_deliveries SET status = 'sent', attempt = ?, processed_at = ?, response_json = ?, error = '', provider_code = ? WHERE id = ?`,
+        [attempt, ts, JSON.stringify(outcome.response || {}), outcome.provider || provider.code || "store", delivery.id]
+      );
+      await runAsync(
+        db,
+        `UPDATE notifications SET status = 'sent', sent_at = ?, provider_response = ?, last_error = '', updated_at = ? WHERE id = ?`,
+        [ts, JSON.stringify(outcome.response || {}), ts, delivery.notification_id]
+      );
+      stats.sent += 1;
+    } else if (attempt >= Number(delivery.max_attempts || MAX_ATTEMPTS)) {
+      const ts = nowIso();
+      await runAsync(
+        db,
+        `UPDATE notification_deliveries SET status = 'dead_letter', attempt = ?, processed_at = ?, error = ?, dead_letter = 1 WHERE id = ?`,
+        [attempt, ts, String(outcome.error || "delivery failed"), delivery.id]
+      );
+      await runAsync(
+        db,
+        `UPDATE notifications SET status = 'failed', last_error = ?, retry_count = ?, updated_at = ? WHERE id = ?`,
+        [String(outcome.error || "delivery failed"), attempt, ts, delivery.notification_id]
+      );
+      stats.failed += 1;
+      stats.dead_letter += 1;
+    } else {
+      const ts = nowIso();
+      const backoff = nextBackoff(attempt);
+      await runAsync(
+        db,
+        `UPDATE notification_deliveries SET status = 'retrying', attempt = ?, scheduled_at = ?, error = ? WHERE id = ?`,
+        [attempt, addSeconds(backoff), String(outcome.error || "delivery failed"), delivery.id]
+      );
+      await runAsync(
         db,
         `UPDATE notifications SET status = 'retrying', retry_count = ?, last_error = ?, updated_at = ? WHERE id = ?`,
         [attempt, String(outcome.error || "delivery failed"), ts, delivery.notification_id]
@@ -342,6 +527,103 @@ export function deliveryStats(db, tenantId = null) {
     params
   );
   const byChannel = queryAll(
+    db,
+    `SELECT channel, status, COUNT(*) AS count FROM notification_deliveries ${clause} GROUP BY channel, status`,
+    params
+  );
+  const byStatus = rows.reduce((acc, row) => {
+    acc[row.status] = row.count;
+    return acc;
+  }, {});
+  return {
+    total: rows.reduce((sum, row) => sum + row.count, 0),
+    by_status: byStatus,
+    queued: byStatus.queued || 0,
+    sent: byStatus.sent || 0,
+    failed: byStatus.failed || 0,
+    dead_letter: byStatus.dead_letter || 0,
+    retrying: byStatus.retrying || 0,
+    by_channel: byChannel,
+  };
+}
+
+// ── Async admin twins ───────────────────────────────────────────────────────
+
+export async function retryDeliveryAsync(db, id, tenantId = null) {
+  const row = await queryOneAsync(db, "SELECT * FROM notification_deliveries WHERE id = ?", [Number(id)]);
+  if (!row) return { retried: false };
+  if (row.dead_letter === 0 && !["failed", "dead_letter"].includes(row.status)) {
+    return { retried: false, reason: "not_failed" };
+  }
+  const ts = nowIso();
+  await runAsync(db, "UPDATE notification_deliveries SET status = 'queued', dead_letter = 0, scheduled_at = ?, processed_at = NULL WHERE id = ?", [ts, row.id]);
+  await runAsync(db, "UPDATE notifications SET status = 'queued', updated_at = ? WHERE id = ?", [ts, row.notification_id]);
+  return { retried: true, id: row.id };
+}
+
+export async function listDeliveriesAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  if (tenantId) {
+    where.push("d.tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (query.status) {
+    where.push("d.status = ?");
+    params.push(query.status);
+  }
+  if (query.channel) {
+    where.push("d.channel = ?");
+    params.push(query.channel);
+  }
+  if (query.notificationId) {
+    where.push("d.notification_id = ?");
+    params.push(Number(query.notificationId));
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM notification_deliveries d ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT d.*, n.subject, n.recipient_id, n.object_type, n.object_id, n.object_name
+         FROM notification_deliveries d JOIN notifications n ON n.id = d.notification_id
+         ${clause} ORDER BY d.id DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    )
+  ).map((row) => ({
+    id: row.id,
+    notification_id: row.notification_id,
+    channel: row.channel,
+    provider_code: row.provider_code,
+    status: row.status,
+    attempt: row.attempt,
+    max_attempts: row.max_attempts,
+    scheduled_at: row.scheduled_at,
+    processed_at: row.processed_at,
+    error: row.error,
+    response: safeParse(row.response_json, {}),
+    dead_letter: row.dead_letter === 1,
+    subject: row.subject || "",
+    recipient_id: row.recipient_id,
+    object_type: row.object_type || "",
+    object_id: row.object_id || "",
+    object_name: row.object_name || "",
+    created_at: row.created_at,
+  }));
+  return { items, total, page, pageSize };
+}
+
+export async function deliveryStatsAsync(db, tenantId = null) {
+  const params = [];
+  const clause = tenantId ? "WHERE tenant_id = ?" : "";
+  if (tenantId) params.push(Number(tenantId));
+  const rows = await queryAllAsync(
+    db,
+    `SELECT status, COUNT(*) AS count FROM notification_deliveries ${clause} GROUP BY status`,
+    params
+  );
+  const byChannel = await queryAllAsync(
     db,
     `SELECT channel, status, COUNT(*) AS count FROM notification_deliveries ${clause} GROUP BY channel, status`,
     params

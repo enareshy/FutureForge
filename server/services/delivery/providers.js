@@ -1,18 +1,25 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import {
   SECRET_KEYS,
   publicProvider,
   getProviderRow,
+  getProviderRowAsync,
+  getProviderAsync,
   getProvider,
   listProviders,
   providerConfig,
   providerSecrets,
   createProvider,
+  createProviderAsync,
   updateProvider,
+  updateProviderAsync,
   deleteProvider,
+  deleteProviderAsync,
   testProvider,
+  testProviderAsync,
   providerForChannel,
   ensureDefaultProviders,
 } from "../notifications/providers.js";
@@ -77,6 +84,44 @@ export function getDeliveryProvider(db, idOrCode) {
   return publicProvider(getProvider(db, idOrCode));
 }
 
+export async function listDeliveryProvidersAsync(db, query = {}) {
+  const where = [];
+  const params = [];
+  if (query.channel) {
+    where.push("channel = ?");
+    params.push(query.channel);
+  }
+  if (query.type) {
+    where.push("type = ?");
+    params.push(query.type);
+  }
+  if (query.tenantId !== undefined && query.tenantId !== null && query.tenantId !== "") {
+    where.push("(tenant_id IS NULL OR COALESCE(tenant_id, 0) = ?)");
+    params.push(Number(query.tenantId));
+  }
+  if (query.status) {
+    where.push("COALESCE(status, CASE WHEN enabled = 1 THEN 'active' ELSE 'inactive' END) = ?");
+    params.push(query.status);
+  }
+  if (query.enabled !== undefined && query.enabled !== "") {
+    where.push("enabled = ?");
+    params.push(query.enabled === true || query.enabled === "true" || query.enabled === "1" ? 1 : 0);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  return (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM notification_providers ${clause}
+        ORDER BY channel, COALESCE(tenant_id, 0), is_default DESC, priority, name`,
+      params
+    )
+  ).map(publicProvider);
+}
+
+export async function getDeliveryProviderAsync(db, idOrCode) {
+  return publicProvider(await getProviderAsync(db, idOrCode));
+}
+
 export function createDeliveryProvider(db, body = {}, actor = null, ip = null) {
   return createProvider(db, body, actor, ip);
 }
@@ -111,6 +156,44 @@ export function setDeliveryProviderStatus(db, id, status, actor = null, ip = nul
 
 export function testDeliveryProvider(db, idOrCode, options = {}) {
   return testProvider(db, idOrCode, options);
+}
+
+// --- Async write twins -----------------------------------------------------
+// Provider mutations delegate to the shared notification-provider async
+// writers; activation is mirrored here because it touches the row directly.
+
+export async function createDeliveryProviderAsync(db, body = {}, actor = null, ip = null) {
+  return createProviderAsync(db, body, actor, ip);
+}
+
+export async function updateDeliveryProviderAsync(db, id, body = {}, actor = null, ip = null) {
+  return updateProviderAsync(db, id, body, actor, ip);
+}
+
+export async function deleteDeliveryProviderAsync(db, id, actor = null, ip = null) {
+  return deleteProviderAsync(db, id, actor, ip);
+}
+
+export async function setDeliveryProviderStatusAsync(db, id, status, actor = null, ip = null) {
+  const current = await getProviderAsync(db, id);
+  const next = String(status || "").toLowerCase();
+  if (!["active", "inactive", "disabled"].includes(next)) {
+    throw new HttpError(400, "status must be active or inactive");
+  }
+  const enabled = next === "active" ? 1 : 0;
+  const normalized = next === "disabled" ? "inactive" : next;
+  await runAsync(db, "UPDATE notification_providers SET enabled = ?, status = ?, updated_at = ? WHERE id = ?", [
+    enabled,
+    normalized,
+    nowIso(),
+    current.id,
+  ]);
+  await writeAuditAsync(db, { actor, action: "delivery.provider.status", resourceType: "delivery_provider", resourceId: current.id, details: { code: current.code, status: normalized, enabled }, ip });
+  return publicProvider(await getProviderRowAsync(db, current.id));
+}
+
+export async function testDeliveryProviderAsync(db, idOrCode, options = {}) {
+  return testProviderAsync(db, idOrCode, options);
 }
 
 // Ordered failover chain for a channel. A tenant-specific provider always wins
@@ -206,6 +289,84 @@ export function listProviderFailures(db, query = {}, tenantId = null) {
 
 function providerStatusValue(row) {
   return row.status || (row.enabled === 1 ? "active" : "inactive");
+}
+
+export async function listProviderFailuresAsync(db, query = {}, tenantId = null) {
+  const where = [];
+  const params = [];
+  if (tenantId) {
+    where.push("COALESCE(tenant_id, 0) = ?");
+    params.push(Number(tenantId));
+  }
+  if (query.provider) {
+    where.push("provider_code = ?");
+    params.push(query.provider);
+  }
+  if (query.channel) {
+    where.push("channel = ?");
+    params.push(query.channel);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const limit = Math.min(200, Math.max(1, parseInt(query.pageSize, 10) || 50));
+  return (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM delivery_provider_failures ${clause} ORDER BY created_at DESC, id DESC LIMIT ?`,
+      [...params, limit]
+    )
+  ).map((row) => ({
+    id: row.id,
+    provider_id: row.provider_id ?? null,
+    provider_code: row.provider_code || "",
+    request_id: row.request_id ?? null,
+    tenant_id: row.tenant_id ?? null,
+    channel: row.channel || "",
+    error_code: row.error_code || "",
+    error_message: row.error_message || "",
+    permanent: row.permanent === 1,
+    created_at: row.created_at,
+  }));
+}
+
+export async function providerHealthAsync(db, tenantId = null) {
+  const params = [];
+  const clause = tenantId ? "WHERE (tenant_id IS NULL OR COALESCE(tenant_id, 0) = ?)" : "";
+  if (tenantId) params.push(Number(tenantId));
+  const [rows, failures] = await Promise.all([
+    queryAllAsync(db, `SELECT * FROM notification_providers ${clause}`, params),
+    queryAllAsync(
+      db,
+      `SELECT provider_code, COUNT(*) AS count FROM delivery_provider_failures
+        ${tenantId ? "WHERE (tenant_id IS NULL OR COALESCE(tenant_id, 0) = ?)" : ""}
+        GROUP BY provider_code`,
+      tenantId ? [Number(tenantId)] : []
+    ),
+  ]);
+  const failureMap = failures.reduce((acc, row) => {
+    acc[row.provider_code] = row.count;
+    return acc;
+  }, {});
+  const items = rows.map((row) => ({
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    channel: row.channel,
+    type: row.type,
+    enabled: row.enabled === 1,
+    status: providerStatusValue(row),
+    available: row.enabled === 1 && providerStatusValue(row) === "active",
+    last_test_status: row.last_test_status || "",
+    last_tested_at: row.last_tested_at || null,
+    failures: failureMap[row.code] || 0,
+  }));
+  const available = items.filter((item) => item.available).length;
+  return {
+    total: items.length,
+    available,
+    unavailable: items.length - available,
+    availability: items.length ? Math.round((available / items.length) * 1000) / 10 : 0,
+    items,
+  };
 }
 
 // Availability snapshot for the operational dashboard.

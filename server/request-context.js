@@ -25,3 +25,16 @@ export function memoize(key, compute) {
   store.set(key, value);
   return value;
 }
+
+// Async counterpart. The promise itself is cached, so concurrent and repeated
+// awaits within one request resolve the computation exactly once — important
+// now that the same authorization state may be resolved from several awaited
+// guards. Outside a request the computation still runs, just uncached.
+export function memoizeAsync(key, compute) {
+  const store = storage.getStore();
+  if (!store) return Promise.resolve().then(compute);
+  if (store.has(key)) return store.get(key);
+  const promise = Promise.resolve().then(compute);
+  store.set(key, promise);
+  return promise;
+}

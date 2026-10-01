@@ -1,4 +1,5 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import {
   normalizeAction,
   normalizeSource,
@@ -14,7 +15,7 @@ import {
   maskValue,
   valueTypeOf,
 } from "./validation.js";
-import { resolvePolicy } from "./policies.js";
+import { resolvePolicy, resolvePolicyAsync } from "./policies.js";
 import { publishAuditEvent, AUDIT_EVENT_TYPES } from "./publisher.js";
 
 // Core audit event capture. Invariants:
@@ -204,6 +205,27 @@ export function captureChanges(db, eventId, tenantId, beforeChanged, afterChange
   }
 }
 
+export async function captureChangesAsync(db, eventId, tenantId, beforeChanged, afterChanged, changedFields) {
+  for (const attribute of changedFields) {
+    const sensitive = isSensitiveKey(attribute);
+    await runAsync(
+      db,
+      `INSERT INTO audit_event_changes
+        (event_id, attribute, old_value, new_value, value_type, masked, tenant_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        eventId,
+        attribute,
+        jsonOrNull(beforeChanged[attribute]),
+        jsonOrNull(afterChanged[attribute]),
+        valueTypeOf(afterChanged[attribute] ?? beforeChanged[attribute]),
+        sensitive ? 1 : 0,
+        tenantId,
+      ]
+    );
+  }
+}
+
 // Looks up an action type registered at runtime. Returns null when the action
 // is not in the registry, in which case the framework falls back to its
 // built-in classifier.
@@ -211,6 +233,23 @@ export function resolveActionType(db, action) {
   const code = String(action || "").trim().toLowerCase();
   if (!code) return null;
   const row = queryOne(
+    db,
+    "SELECT code, category, event_type, mandatory FROM audit_action_types WHERE lower(code) = lower(?) AND active = 1",
+    [code]
+  );
+  if (!row) return null;
+  return {
+    code: row.code,
+    category: row.category,
+    event_type: row.event_type || null,
+    mandatory: row.mandatory === 1,
+  };
+}
+
+export async function resolveActionTypeAsync(db, action) {
+  const code = String(action || "").trim().toLowerCase();
+  if (!code) return null;
+  const row = await queryOneAsync(
     db,
     "SELECT code, category, event_type, mandatory FROM audit_action_types WHERE lower(code) = lower(?) AND active = 1",
     [code]
@@ -428,6 +467,184 @@ export function capture(db, input = {}) {
   }
 }
 
+// Asynchronous twin of `capture`. Same policy resolution and masking, but every
+// statement is awaited so it can run inside an async transaction. Like the
+// synchronous version it never throws into the caller: failures are logged and
+// swallowed so auditing can never break a write.
+export async function captureAsync(db, input = {}) {
+  try {
+    const actor = input.actor || null;
+    const tenantId = numberOrNull(input.tenant_id ?? input.tenantId ?? actor?.tenant_id);
+    const objectType = stringOrNull(
+      input.resource_type ?? input.resourceType ?? input.object_type ?? input.objectType
+    ) || "system";
+    const objectId = stringOrNull(
+      input.resource_id ?? input.resourceId ?? input.object_id ?? input.objectId
+    );
+    const action = normalizeAction(input.action);
+    const status = normalizeStatus(input.status);
+    const source = normalizeSource(input.source);
+    const registryAction = await resolveActionTypeAsync(db, action);
+    const eventType = normalizeEventType(
+      input.event_type ?? input.eventType ?? registryAction?.event_type,
+      action
+    );
+    const category = normalizeCategory(
+      input.category ?? registryAction?.category ?? categoryOfAction(action, eventType)
+    );
+    const mandatory =
+      input.mandatory === true ||
+      registryAction?.mandatory === true ||
+      isMandatoryEvent(action, category);
+
+    const { policy, scope } = await resolvePolicyAsync(db, tenantId, objectType);
+    if (!mandatory) {
+      if (!policy.enabled) return null;
+      if (status === "failure" && !policy.record_failure) return null;
+      if (status === "success" && !policy.record_success) return null;
+      if (eventType === "VIEW" && !policy.capture_views && !policy.capture_reads) return null;
+      if (eventType === "DOWNLOAD" && !policy.capture_downloads) return null;
+      if (Array.isArray(policy.actions) && policy.actions.length) {
+        const allowed = policy.actions.some(
+          (entry) => entry === action || String(entry).toUpperCase() === eventType
+        );
+        if (!allowed) return null;
+      }
+      if (Array.isArray(policy.categories) && policy.categories.length && !policy.categories.includes(category)) {
+        return null;
+      }
+    }
+
+    const maskedKeys = new Set(policy.masked_attributes || []);
+    const rawBefore = input.before !== undefined && input.before !== null ? input.before : null;
+    const rawAfter = input.after !== undefined && input.after !== null ? input.after : null;
+    const { changedFields, beforeChanged, afterChanged } = diffValues(rawBefore, rawAfter, {
+      track: policy.track_attributes || [],
+      ignore: policy.ignored_attributes || [],
+    });
+    const storedBefore = maskObject(beforeChanged, maskedKeys);
+    const storedAfter = maskObject(afterChanged, maskedKeys);
+
+    const actorType = normalizeActorType(
+      input.actor_type ?? input.actorType ?? inferActorType(actor, source)
+    );
+    const securityClassification = normalizeClassification(
+      input.security_classification ?? input.securityClassification ?? defaultClassification(category)
+    );
+    const retentionCategory = normalizeRetentionCategory(
+      input.retention_category ?? input.retentionCategory ?? defaultRetentionCategory(category)
+    );
+    const organizationId = numberOrNull(
+      input.organization_id ?? input.organizationId ?? actor?.organization_id
+    );
+
+    const result = await runAsync(
+      db,
+      `INSERT INTO audit_logs
+        (tenant_id, organization_id, plant_id, site_id, department_id, actor_id, actor_username,
+         user_display_name, actor_type, actor_ref, action, event_type, category, source,
+         security_classification, retention_category, resource_type, resource_id, object_name,
+         object_revision, session_id, related_resource_type, related_resource_id,
+         details, changed_fields, before_values, after_values, related_json, status,
+         failure_category, error_message, reason, correlation_id, request_id, parent_event_id,
+         ip, device, duration_ms, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        tenantId,
+        numberOrNull(input.organization_id ?? input.organizationId ?? actor?.organization_id),
+        numberOrNull(input.plant_id ?? input.plantId),
+        numberOrNull(input.site_id ?? input.siteId),
+        numberOrNull(input.department_id ?? input.departmentId),
+        numberOrNull(actor?.id ?? input.actor_id ?? input.actorId),
+        actor?.username || input.actor_username || input.actorUsername || "system",
+        actor?.display_name || actor?.displayName || input.user_display_name || input.userDisplayName || null,
+        actorType,
+        actorReference(actor, input),
+        action,
+        eventType,
+        category,
+        source,
+        securityClassification,
+        retentionCategory,
+        objectType,
+        objectId,
+        stringOrNull(input.object_name ?? input.objectName),
+        stringOrNull(input.object_revision ?? input.objectRevision),
+        stringOrNull(input.session_id ?? input.sessionId),
+        stringOrNull(input.related_resource_type ?? input.relatedResourceType),
+        stringOrNull(input.related_resource_id ?? input.relatedResourceId),
+        jsonOrNull(input.details),
+        changedFields.length ? JSON.stringify(changedFields) : null,
+        changedFields.length ? jsonOrNull(storedBefore) : null,
+        changedFields.length ? jsonOrNull(storedAfter) : null,
+        jsonOrNull(input.related),
+        status,
+        stringOrNull(input.failure_category ?? input.failureCategory),
+        stringOrNull(input.error_message ?? input.errorMessage),
+        stringOrNull(input.reason),
+        stringOrNull(input.correlation_id ?? input.correlationId),
+        stringOrNull(input.request_id ?? input.requestId),
+        numberOrNull(input.parent_event_id ?? input.parentEventId),
+        stringOrNull(input.ip),
+        stringOrNull(input.device ?? input.user_agent ?? input.userAgent),
+        numberOrNull(input.duration_ms ?? input.durationMs),
+        nowIso(),
+      ]
+    );
+    const eventId = Number(result.lastInsertId);
+    if (changedFields.length) {
+      await captureChangesAsync(db, eventId, tenantId, storedBefore, storedAfter, changedFields);
+    }
+    const outcome = {
+      id: eventId,
+      event_type: eventType,
+      category,
+      actor_type: actorType,
+      security_classification: securityClassification,
+      scope,
+    };
+    if (input.publish !== false) {
+      publishAuditEvent(AUDIT_EVENT_TYPES.EVENT_CREATED, {
+        id: eventId,
+        tenant_id: tenantId,
+        organization_id: organizationId,
+        object_type: objectType,
+        object_id: objectId,
+        object_name: stringOrNull(input.object_name ?? input.objectName),
+        action,
+        event_type: eventType,
+        category,
+        actor_type: actorType,
+        security_classification: securityClassification,
+        retention_category: retentionCategory,
+        status,
+        source,
+        reason: stringOrNull(input.reason),
+        actor: actor ? { id: actor.id, username: actor.username } : null,
+        ip: stringOrNull(input.ip),
+        correlation_id: stringOrNull(input.correlation_id ?? input.correlationId),
+      });
+    }
+    return outcome;
+  } catch (err) {
+    structuredLog("audit.capture.failed", { message: err?.message, action: input?.action });
+    return null;
+  }
+}
+
+// Asynchronous twin of the backwards-compatible `writeAudit` wrapper.
+export async function writeAuditAsync(db, { actor, action, resourceType, resourceId, details, ip } = {}) {
+  return captureAsync(db, {
+    actor,
+    action,
+    resource_type: resourceType,
+    resource_id: resourceId == null ? null : String(resourceId),
+    details,
+    ip,
+    source: "api",
+  });
+}
+
 // Records multiple events in one call. Each entry is captured independently so
 // one invalid entry cannot drop the others. Returns the captured event ids.
 export function recordBatch(db, events = []) {
@@ -496,6 +713,47 @@ export function recordObjectChange(db, {
   });
 }
 
+// Async twin of `recordObjectChange` for migrated write routes.
+export async function recordObjectChangeAsync(db, {
+  actor,
+  tenantId,
+  organizationId,
+  action,
+  objectType,
+  objectId,
+  objectName,
+  before,
+  after,
+  reason,
+  source = "api",
+  ip,
+  status,
+  details,
+  correlationId,
+  requestId,
+  related,
+}) {
+  return captureAsync(db, {
+    actor,
+    tenant_id: tenantId,
+    organization_id: organizationId,
+    action,
+    object_type: objectType,
+    object_id: objectId,
+    object_name: objectName,
+    before,
+    after,
+    reason,
+    source,
+    ip,
+    status,
+    details,
+    correlation_id: correlationId,
+    request_id: requestId,
+    related,
+  });
+}
+
 // Convenience wrappers for the specialised event families. They keep call
 // sites declarative and guarantee the correct category/event type is applied.
 export function recordStateChange(db, options = {}) {
@@ -541,6 +799,15 @@ export function listChangesForEvent(db, eventId) {
     "SELECT * FROM audit_event_changes WHERE event_id = ? ORDER BY attribute ASC",
     [eventId]
   ).map(publicChange);
+}
+
+export async function listChangesForEventAsync(db, eventId) {
+  const rows = await queryAllAsync(
+    db,
+    "SELECT * FROM audit_event_changes WHERE event_id = ? ORDER BY attribute ASC",
+    [eventId]
+  );
+  return rows.map(publicChange);
 }
 
 export function getEventRow(db, id) {

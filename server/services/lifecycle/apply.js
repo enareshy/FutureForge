@@ -1,13 +1,14 @@
 import { run, nowIso } from "../../db.js";
+import { runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { publish as publishNotificationEvent } from "../notifications.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { publish as publishNotificationEvent, publishAsync as publishNotificationEventAsync } from "../notifications.js";
 import * as metadata from "../metadata.js";
-import { getObjectRow } from "../objects/repository.js";
-import { recordObjectVersion } from "../objects/versions.js";
-import { getStatusRow, legacyForCategory } from "./statuses.js";
+import { getObjectRow, getObjectRowAsync } from "../objects/repository.js";
+import { recordObjectVersion, recordObjectVersionAsync } from "../objects/versions.js";
+import { getStatusRow, getStatusRowAsync, legacyForCategory } from "./statuses.js";
 import { hasConditions } from "./validation.js";
-import { emitObjectEvent } from "../events/emit.js";
+import { emitObjectEvent, emitObjectEventAsync } from "../events/emit.js";
 
 // Builds the expression context used by lifecycle guards and rules. Guard
 // expressions see the object's attribute payload plus the resolved
@@ -194,4 +195,154 @@ export function assignLifecycle(db, row, version, state, actor = null) {
     actor_id: actor?.id,
   });
   return getObjectRow(db, row.id);
+}
+
+// ── Async twins (used by migrated object write routes) ──────────────────────
+
+export async function recordStatusHistoryAsync(db, entry) {
+  await runAsync(
+    db,
+    `INSERT INTO object_status_history
+      (object_id, lifecycle_version_id, transition_id, from_state_id, to_state_id, from_status_id, to_status_id,
+       from_status, to_status, source, reason, actor_id, tenant_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      entry.object_id,
+      entry.lifecycle_version_id ?? null,
+      entry.transition_id ?? null,
+      entry.from_state_id ?? null,
+      entry.to_state_id ?? null,
+      entry.from_status_id ?? null,
+      entry.to_status_id ?? null,
+      entry.from_status ?? null,
+      entry.to_status ?? null,
+      entry.source || "manual",
+      entry.reason || "",
+      entry.actor_id ?? null,
+      entry.tenant_id,
+      nowIso(),
+    ]
+  );
+}
+
+async function legacyForStateAsync(db, state) {
+  if (state?.status_id) {
+    const status = await getStatusRowAsync(db, state.status_id);
+    if (status) return status.legacy_status;
+  }
+  return legacyForCategory(state?.category || "draft");
+}
+
+export async function assignLifecycleAsync(db, row, version, state, actor = null) {
+  const legacy = await legacyForStateAsync(db, state);
+  await runAsync(
+    db,
+    "UPDATE objects SET lifecycle_version_id = ?, lifecycle_state_id = ?, lifecycle_status_id = ?, status = ?, updated_at = ? WHERE id = ?",
+    [version.id, state.id, state.status_id ?? null, legacy, nowIso(), row.id]
+  );
+  await recordStatusHistoryAsync(db, {
+    object_id: row.id,
+    tenant_id: Number(row.tenant_id),
+    lifecycle_version_id: version.id,
+    from_status: null,
+    to_status: legacy,
+    to_state_id: state.id,
+    to_status_id: state.status_id ?? null,
+    source: "system",
+    reason: `Initial state ${state.code}`,
+    actor_id: actor?.id,
+  });
+  return getObjectRowAsync(db, row.id);
+}
+
+export async function applyTransitionAsync(db, row, transition, toState, actor, tenantId, ip, options = {}) {
+  const { source = "manual", reason = "", comments = "" } = options;
+  const legacy = await legacyForStateAsync(db, toState);
+  const nextRevision = Number(row.revision) + 1;
+  await runAsync(
+    db,
+    `UPDATE objects SET lifecycle_state_id = ?, lifecycle_status_id = ?, status = ?, revision = ?, updated_by = ?, updated_at = ?
+     WHERE id = ?`,
+    [toState.id, toState.status_id ?? null, legacy, nextRevision, actor?.id ?? null, nowIso(), row.id]
+  );
+  const next = await getObjectRowAsync(db, row.id);
+  await recordObjectVersionAsync(
+    db,
+    next,
+    "lifecycle",
+    `Transition ${transition?.code || "manual"} \u2192 ${toState.code}${reason ? ` (${reason})` : ""}`,
+    actor?.id
+  );
+  await recordStatusHistoryAsync(db, {
+    object_id: row.id,
+    tenant_id: Number(tenantId ?? row.tenant_id),
+    lifecycle_version_id: next.lifecycle_version_id,
+    transition_id: transition?.id ?? null,
+    from_state_id: row.lifecycle_state_id,
+    to_state_id: toState.id,
+    from_status_id: row.lifecycle_status_id,
+    to_status_id: toState.status_id ?? null,
+    from_status: row.status,
+    to_status: legacy,
+    source,
+    reason: reason || comments,
+    actor_id: actor?.id,
+  });
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.object.transition",
+    resourceType: "object",
+    resourceId: row.id,
+    details: {
+      code: row.code,
+      transition: transition?.code ?? null,
+      to_state: toState.code,
+      status: legacy,
+      source,
+    },
+    ip,
+  });
+  await publishNotificationEventAsync(
+    db,
+    {
+      event_type: "lifecycle.state.changed",
+      source_module: "lifecycle",
+      tenant_id: Number(tenantId ?? row.tenant_id),
+      object_type: "object",
+      object_id: row.code || String(row.id),
+      object_name: next.name || row.code || "",
+      payload: {
+        status: legacy,
+        from_status: row.status,
+        to_status: legacy,
+        owner_id: next.created_by ?? row.created_by ?? null,
+        transition: transition?.code ?? null,
+        reason: reason || comments || "",
+        link: `/objects/${row.code || row.id}`,
+      },
+    },
+    { actor, ip }
+  );
+  await emitObjectEventAsync(
+    db,
+    next,
+    "LifecycleStateChanged",
+    {
+      source_module: "lifecycle",
+      idempotency_key: `lifecycle:${next.id}:${next.revision}`,
+      payload: {
+        from_state: row.lifecycle_state_id ?? null,
+        to_state: toState.code,
+        from_state_id: row.lifecycle_state_id ?? null,
+        to_state_id: toState.id,
+        from_status: row.status,
+        to_status: legacy,
+        transition: transition?.code ?? null,
+        reason: reason || comments || "",
+        source,
+      },
+    },
+    actor
+  );
+  return next;
 }

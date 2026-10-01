@@ -1,11 +1,16 @@
 import { queryAll, queryOne, run, nowIso } from "../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../db-async.js";
 import { randomToken } from "../crypto.js";
 import { HttpError, pagination } from "../validation.js";
-import { writeAudit } from "./audit.js";
-import { getSetting } from "./hierarchy.js";
+import { writeAudit, writeAuditAsync } from "./audit.js";
+import { getSetting, getSettingAsync } from "./hierarchy.js";
 
 export function sessionHours(db) {
   return Number(getSetting(db, "identity.session_hours", 12)) || 12;
+}
+
+export async function sessionHoursAsync(db) {
+  return Number(await getSettingAsync(db, "identity.session_hours", 12)) || 12;
 }
 
 export function publicSession(row) {
@@ -44,6 +49,48 @@ export function createSession(db, userId, meta = {}) {
     ]
   );
   writeAudit(db, {
+    actor: { id: userId, username: meta.username },
+    action: "auth.session.create",
+    resourceType: "session",
+    resourceId: publicId,
+    details: { provider: meta.providerCode || "password", mfa: !!meta.mfaVerified },
+    ip: meta.ip,
+  });
+  return { token, public_id: publicId, user_id: userId, expires_at: expires, mfa_verified: meta.mfaVerified ? 1 : 0 };
+}
+
+export async function createSessionAsync(db, userId, meta = {}) {
+  const token = randomToken();
+  const publicId = randomToken(16);
+  const ts = nowIso();
+  const expires = new Date(Date.now() + (await sessionHoursAsync(db)) * 3600 * 1000)
+    .toISOString()
+    .replace("T", " ")
+    .slice(0, 19);
+  const tenantId = meta.tenantId
+    || (await queryOneAsync(db, "SELECT tenant_id FROM users WHERE id = ?", [userId]))?.tenant_id
+    || null;
+  await runAsync(
+    db,
+    `INSERT INTO sessions (
+      token, user_id, expires_at, created_at, public_id, ip, user_agent,
+      provider_code, mfa_verified, last_seen_at, tenant_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      token,
+      userId,
+      expires,
+      ts,
+      publicId,
+      meta.ip || null,
+      meta.userAgent || null,
+      meta.providerCode || "password",
+      meta.mfaVerified ? 1 : 0,
+      ts,
+      tenantId,
+    ]
+  );
+  await writeAuditAsync(db, {
     actor: { id: userId, username: meta.username },
     action: "auth.session.create",
     resourceType: "session",
@@ -93,8 +140,42 @@ export function getSessionByToken(db, token) {
   return session;
 }
 
+// Async twin of `getSessionByToken`, used by the asynchronous auth middleware.
+export async function getSessionByTokenAsync(db, token) {
+  if (!token) return null;
+  const session = await queryOneAsync(db, "SELECT * FROM sessions WHERE token = ?", [token]);
+  if (!session) return null;
+  if (session.revoked_at) return null;
+  if (new Date(session.expires_at.replace(" ", "T") + "Z") < new Date()) {
+    await runAsync(db, "UPDATE sessions SET revoked_at = ? WHERE token = ?", [nowIso(), token]);
+    return null;
+  }
+  if (!session.public_id) {
+    const publicId = randomToken(16);
+    await runAsync(db, "UPDATE sessions SET public_id = ? WHERE token = ?", [publicId, token]);
+    session.public_id = publicId;
+  }
+  if (Date.now() - lastSeenMillis(session.last_seen_at) >= SESSION_TOUCH_MS) {
+    const ts = nowIso();
+    await runAsync(db, "UPDATE sessions SET last_seen_at = ? WHERE token = ?", [ts, token]);
+    session.last_seen_at = ts;
+  }
+  return session;
+}
+
 export function listMySessions(db, userId) {
   return queryAll(
+    db,
+    `SELECT public_id, user_id, expires_at, created_at, ip, user_agent, provider_code,
+            mfa_verified, last_seen_at, revoked_at
+     FROM sessions WHERE user_id = ? AND revoked_at IS NULL
+     ORDER BY created_at DESC`,
+    [userId]
+  );
+}
+
+export async function listMySessionsAsync(db, userId) {
+  return queryAllAsync(
     db,
     `SELECT public_id, user_id, expires_at, created_at, ip, user_agent, provider_code,
             mfa_verified, last_seen_at, revoked_at
@@ -116,6 +197,27 @@ export function listSessions(db, query = {}) {
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const total = queryOne(db, `SELECT COUNT(*) AS c FROM sessions ${clause}`, params).c;
   const items = queryAll(
+    db,
+    `SELECT public_id, user_id, expires_at, created_at, ip, user_agent, provider_code,
+            mfa_verified, last_seen_at, revoked_at
+     FROM sessions ${clause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  return { items, total, page, pageSize };
+}
+
+export async function listSessionsAsync(db, query = {}) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  if (query.userId) {
+    where.push("user_id = ?");
+    params.push(Number(query.userId));
+  }
+  if (query.active === "1" || query.active === "true") where.push("revoked_at IS NULL");
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM sessions ${clause}`, params)).c;
+  const items = await queryAllAsync(
     db,
     `SELECT public_id, user_id, expires_at, created_at, ip, user_agent, provider_code,
             mfa_verified, last_seen_at, revoked_at
@@ -171,6 +273,64 @@ export function logoutToken(db, token, actor, ip) {
   if (session && !session.revoked_at) {
     run(db, "UPDATE sessions SET revoked_at = ? WHERE token = ?", [nowIso(), token]);
     writeAudit(db, {
+      actor,
+      action: "auth.logout",
+      resourceType: "session",
+      resourceId: session.public_id,
+      ip,
+    });
+  }
+  return { ok: true };
+}
+
+// --- Async write twins -----------------------------------------------------
+
+async function findOwnedAsync(db, publicId, userId) {
+  const session = await queryOneAsync(db, "SELECT * FROM sessions WHERE public_id = ?", [publicId]);
+  if (!session) throw new HttpError(404, "Session not found");
+  if (userId && session.user_id !== Number(userId)) throw new HttpError(404, "Session not found");
+  return session;
+}
+
+export async function revokeSessionAsync(db, publicId, actor, ip, { ownerId } = {}) {
+  const session = await findOwnedAsync(db, publicId, ownerId);
+  await runAsync(db, "UPDATE sessions SET revoked_at = ? WHERE public_id = ?", [nowIso(), publicId]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "auth.session.revoke",
+    resourceType: "session",
+    resourceId: publicId,
+    details: { user_id: session.user_id },
+    ip,
+  });
+  return { ok: true, public_id: publicId };
+}
+
+export async function revokeAllSessionsAsync(db, userId, actor, ip, { exceptToken } = {}) {
+  if (exceptToken) {
+    await runAsync(
+      db,
+      "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND token != ? AND revoked_at IS NULL",
+      [nowIso(), userId, exceptToken]
+    );
+  } else {
+    await runAsync(db, "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", [nowIso(), userId]);
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "auth.session.revoke_all",
+    resourceType: "user",
+    resourceId: userId,
+    ip,
+  });
+  return { ok: true };
+}
+
+export async function logoutTokenAsync(db, token, actor, ip) {
+  const session = await queryOneAsync(db, "SELECT * FROM sessions WHERE token = ?", [token]);
+  if (session && !session.revoked_at) {
+    await runAsync(db, "UPDATE sessions SET revoked_at = ? WHERE token = ?", [nowIso(), token]);
+    await writeAuditAsync(db, {
       actor,
       action: "auth.logout",
       resourceType: "session",

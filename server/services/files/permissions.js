@@ -1,9 +1,10 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { checkPermission } from "../authorization.js";
-import { isPlatformAdmin } from "../tenants.js";
-import { findFileRow, findFolderRow, publicPermission, assertTenant } from "./repository.js";
-import { auditFile } from "./events.js";
+import { checkPermission, checkPermissionAsync } from "../authorization.js";
+import { isPlatformAdmin, isPlatformAdminAsync } from "../tenants.js";
+import { findFileRow, findFolderRow, findFileRowAsync, findFolderRowAsync, publicPermission, assertTenant } from "./repository.js";
+import { auditFile, auditFileAsync } from "./events.js";
 import { assertFilePermission, assertPrincipalType, assertPermissionEffect, FILE_PERMISSIONS } from "./validation.js";
 
 // File/folder/collection access control. Explicit ACL entries (file_permissions)
@@ -156,6 +157,111 @@ export function effectivePermissions(db, resource, actor, { tenantId = null } = 
   };
 }
 
+// ── Async twins (same ACL/IAM layering as the synchronous checks) ──
+
+export async function principalsForActorAsync(db, actor) {
+  if (!actor?.id) return { userId: null, groupIds: new Set(), roleIds: new Set() };
+  const groupIds = new Set(
+    (await queryAllAsync(db, "SELECT group_id FROM group_members WHERE user_id = ?", [actor.id])).map((r) => r.group_id)
+  );
+  const roleIds = new Set([
+    ...(await queryAllAsync(db, "SELECT role_id FROM user_roles WHERE user_id = ?", [actor.id])).map((r) => r.role_id),
+    ...(groupIds.size
+      ? (
+          await queryAllAsync(
+            db,
+            `SELECT role_id FROM group_roles WHERE group_id IN (${[...groupIds].map(() => "?").join(",")})`,
+            [...groupIds]
+          )
+        ).map((r) => r.role_id)
+      : []),
+  ]);
+  return { userId: Number(actor.id), groupIds, roleIds };
+}
+
+async function aclRowsForAsync(db, resourceType, resourceId, tenantId) {
+  return queryAllAsync(
+    db,
+    `SELECT * FROM file_permissions
+     WHERE resource_type = ? AND resource_id = ? AND tenant_id = ?
+       AND (expires_at IS NULL OR expires_at > ?)`,
+    [resourceType, Number(resourceId), Number(tenantId), nowIso()]
+  );
+}
+
+async function folderAncestryAsync(db, folderId, tenantId) {
+  const chain = [];
+  let current = folderId ? await queryOneAsync(db, "SELECT * FROM folders WHERE id = ?", [Number(folderId)]) : null;
+  const seen = new Set();
+  while (current && !seen.has(current.id) && Number(current.tenant_id) === Number(tenantId)) {
+    seen.add(current.id);
+    chain.push(current);
+    current = current.parent_id ? await queryOneAsync(db, "SELECT * FROM folders WHERE id = ?", [current.parent_id]) : null;
+  }
+  return chain;
+}
+
+export async function canAccessAsync(db, resource, actor, permission, { tenantId = null } = {}) {
+  assertFilePermission(permission);
+  if (!actor?.id) return false;
+  if (!resource) return false;
+  const scope = tenantId ?? resource.tenant_id ?? resource.tenantId;
+  if (scope !== null && scope !== undefined && Number(resource.tenant_id ?? resource.tenantId) !== Number(scope)) return false;
+  if (await isPlatformAdminAsync(db, actor.id)) return true;
+
+  const principals = await principalsForActorAsync(db, actor);
+  const resourceType = resource.file_ref ? "file" : (resource.path !== undefined ? "folder" : "collection");
+  const resourceId = resource.id;
+
+  const scopes = [{ type: resourceType, id: resourceId }];
+  if (resourceType === "file" && resource.folder_id) {
+    for (const folder of await folderAncestryAsync(db, resource.folder_id, resource.tenant_id)) {
+      scopes.push({ type: "folder", id: folder.id });
+    }
+  }
+
+  let explicitAllow = false;
+  for (const scopeEntry of scopes) {
+    for (const row of await aclRowsForAsync(db, scopeEntry.type, scopeEntry.id, resource.tenant_id)) {
+      if (!matchesPrincipal(row, principals, resource)) continue;
+      if (row.effect === "deny") return false;
+      if (row.permission === permission) explicitAllow = true;
+    }
+  }
+  if (explicitAllow) return true;
+
+  const ownerId = Number(resource.owner_id ?? 0);
+  if (ownerId && ownerId === principals.userId) return true;
+
+  if (resource.security_classification === "restricted") {
+    return false;
+  }
+
+  const [iamResource, action] = RESOURCE_PERMISSION_MAP[permission] || [];
+  if (!iamResource) return false;
+  return (await checkPermissionAsync(db, actor, iamResource, action, { organizationId: resource.organization_id })).allowed === true;
+}
+
+export async function assertAccessAsync(db, resource, actor, permission, options) {
+  if (!(await canAccessAsync(db, resource, actor, permission, options))) {
+    throw new HttpError(403, `Not authorized to ${permission.replace(/_/g, " ")}`);
+  }
+  return true;
+}
+
+export async function effectivePermissionsAsync(db, resource, actor, { tenantId = null } = {}) {
+  const permissions = {};
+  for (const permission of FILE_PERMISSIONS) {
+    permissions[permission] = await canAccessAsync(db, resource, actor, permission, { tenantId });
+  }
+  return {
+    permissions,
+    allowed: FILE_PERMISSIONS.filter((p) => permissions[p]),
+    resource_type: resource.file_ref ? "file" : (resource.path !== undefined ? "folder" : "collection"),
+    resource_id: resource.id,
+  };
+}
+
 export function grantPermission(db, body = {}, actor, tenantId, ip) {
   const scope = assertTenant(tenantId);
   const resourceType = body.resource_type || body.resourceType;
@@ -232,6 +338,99 @@ export function listPermissions(db, { resourceType, resourceId } = {}, tenantId)
     db,
     `SELECT * FROM file_permissions WHERE ${where.join(" AND ")} ORDER BY resource_type, resource_id, permission`,
     params
+  ).map(publicPermission);
+  return { items, total: items.length };
+}
+
+async function resourceRowAsync(db, resourceType, resourceId, tenantId) {
+  if (resourceType === "file") return findFileRowAsync(db, resourceId, tenantId);
+  if (resourceType === "folder") return findFolderRowAsync(db, resourceId, tenantId);
+  if (resourceType === "collection") {
+    const row = await queryOneAsync(db, "SELECT * FROM file_collections WHERE id = ?", [Number(resourceId) || -1]);
+    if (!row) throw new HttpError(404, "Collection not found");
+    return row;
+  }
+  throw new HttpError(400, "resource_type must be file, folder or collection");
+}
+
+export async function grantPermissionAsync(db, body = {}, actor, tenantId, ip) {
+  const scope = assertTenant(tenantId);
+  const resourceType = body.resource_type || body.resourceType;
+  const resourceId = Number(body.resource_id ?? body.resourceId ?? body.file_id ?? body.folder_id);
+  if (!["file", "folder", "collection"].includes(resourceType)) {
+    throw new HttpError(400, "resource_type must be file, folder or collection");
+  }
+  const resource = await resourceRowAsync(db, resourceType, resourceId, scope);
+  const principalType = body.principal_type || body.principalType;
+  assertPrincipalType(principalType);
+  const permission = body.permission;
+  assertFilePermission(permission);
+  const effect = body.effect || "allow";
+  assertPermissionEffect(effect);
+  const principalId = body.principal_id ?? body.principalId ?? null;
+  if (["user", "group", "role"].includes(principalType) && !principalId) {
+    throw new HttpError(400, `principal_id is required for ${principalType} principals`);
+  }
+  const existing = await queryOneAsync(
+    db,
+    `SELECT * FROM file_permissions WHERE resource_type = ? AND resource_id = ?
+       AND principal_type = ? AND COALESCE(principal_id, 0) = ? AND permission = ?`,
+    [resourceType, resourceId, principalType, Number(principalId) || 0, permission]
+  );
+  const ts = nowIso();
+  if (existing) {
+    await runAsync(
+      db,
+      "UPDATE file_permissions SET effect = ?, expires_at = ?, granted_by = ?, updated_at = ? WHERE id = ?",
+      [effect, body.expires_at ?? body.expiresAt ?? null, actor?.id ?? null, ts, existing.id]
+    );
+    await auditFileAsync(db, {
+      actor, tenantId: scope, organizationId: resource.organization_id, action: "files.permission.update",
+      objectType: resourceType, objectId: resource.id, objectName: resource.name,
+      details: { principal_type: principalType, principal_id: principalId, permission, effect }, ip,
+    });
+    return publicPermission(await queryOneAsync(db, "SELECT * FROM file_permissions WHERE id = ?", [existing.id]));
+  }
+  const insert = await runAsync(
+    db,
+    `INSERT INTO file_permissions
+      (resource_type, resource_id, principal_type, principal_id, permission, effect, tenant_id, granted_by, expires_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [resourceType, resourceId, principalType, principalId, permission, effect, scope, actor?.id ?? null, body.expires_at ?? body.expiresAt ?? null, ts, ts]
+  );
+  await auditFileAsync(db, {
+    actor, tenantId: scope, organizationId: resource.organization_id, action: "files.permission.grant",
+    objectType: resourceType, objectId: resource.id, objectName: resource.name,
+    details: { principal_type: principalType, principal_id: principalId, permission, effect }, ip,
+  });
+  return publicPermission(await queryOneAsync(db, "SELECT * FROM file_permissions WHERE id = ?", [insert.lastInsertId]));
+}
+
+export async function revokePermissionAsync(db, id, actor, tenantId, ip) {
+  const scope = assertTenant(tenantId);
+  const row = await queryOneAsync(db, "SELECT * FROM file_permissions WHERE id = ? AND tenant_id = ?", [Number(id) || -1, scope]);
+  if (!row) throw new HttpError(404, "Permission not found");
+  await runAsync(db, "DELETE FROM file_permissions WHERE id = ?", [row.id]);
+  await auditFileAsync(db, {
+    actor, tenantId: scope, organizationId: null, action: "files.permission.revoke",
+    objectType: row.resource_type, objectId: row.resource_id,
+    details: { principal_type: row.principal_type, principal_id: row.principal_id, permission: row.permission }, ip,
+  });
+  return { revoked: true, id: row.id };
+}
+
+export async function listPermissionsAsync(db, { resourceType, resourceId } = {}, tenantId) {
+  const scope = assertTenant(tenantId);
+  const where = ["tenant_id = ?"];
+  const params = [scope];
+  if (resourceType) { where.push("resource_type = ?"); params.push(resourceType); }
+  if (resourceId) { where.push("resource_id = ?"); params.push(Number(resourceId)); }
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM file_permissions WHERE ${where.join(" AND ")} ORDER BY resource_type, resource_id, permission`,
+      params
+    )
   ).map(publicPermission);
   return { items, total: items.length };
 }

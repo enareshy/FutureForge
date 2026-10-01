@@ -1,30 +1,47 @@
 import { queryAll, queryOne, run, nowIso, randomUuid, transaction } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync, transactionAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { recordObjectChange } from "../audit.js";
+import { recordObjectChange, recordObjectChangeAsync } from "../audit.js";
 import * as metadata from "../metadata.js";
 import * as tenants from "../tenants.js";
 import { OBJECT_STATUSES, normalizeTags, assertStatus } from "./validation.js";
 import {
   getObjectRow,
+  getObjectRowAsync,
   findObjectRow,
+  findObjectRowAsync,
   listObjectRows,
+  listObjectRowsAsync,
   publicObject,
   activeCheckoutRow,
+  activeCheckoutRowAsync,
   listCheckoutRows,
+  listCheckoutRowsAsync,
 } from "./repository.js";
-import { safeDeleteReport } from "./references.js";
-import { snapshot, recordObjectVersion } from "./versions.js";
-import { applyInitialLifecycle } from "../lifecycle/engine.js";
-import { emitObjectIndexChange } from "../search/hooks.js";
-import { emitObjectEvent } from "../events/emit.js";
+import { safeDeleteReport, safeDeleteReportAsync } from "./references.js";
+import { snapshot, recordObjectVersion, recordObjectVersionAsync } from "./versions.js";
+import { applyInitialLifecycle, applyInitialLifecycleAsync } from "../lifecycle/engine.js";
+import { emitObjectIndexChange, emitObjectIndexChangeAsync } from "../search/hooks.js";
+import { emitObjectEvent, emitObjectEventAsync } from "../events/emit.js";
 
-export { recordObjectVersion };
+export { recordObjectVersion, recordObjectVersionAsync };
 
 // Event-driven search indexing: business writes enqueue a lightweight change so
 // the search framework can (re)index without coupling to this module.
 function emitIndexChange(db, row, operation, reason) {
   if (!row) return;
   emitObjectIndexChange(db, {
+    tenantId: row.tenant_id,
+    objectType: "object",
+    objectId: row.id,
+    operation,
+    reason,
+  });
+}
+
+async function emitIndexChangeAsync(db, row, operation, reason) {
+  if (!row) return;
+  await emitObjectIndexChangeAsync(db, {
     tenantId: row.tenant_id,
     objectType: "object",
     objectId: row.id,
@@ -256,6 +273,18 @@ export function getObject(db, reference, tenantId) {
 export function listObjects(db, query = {}, tenantId) {
   assertTenant(tenantId);
   const { rows, total, page, pageSize } = listObjectRows(db, query, tenantId);
+  return { items: rows.map(publicObject), total, page, pageSize };
+}
+
+// Async twins of the object read surface.
+export async function getObjectAsync(db, reference, tenantId) {
+  assertTenant(tenantId);
+  return publicObject(await findObjectRowAsync(db, reference, tenantId));
+}
+
+export async function listObjectsAsync(db, query = {}, tenantId) {
+  assertTenant(tenantId);
+  const { rows, total, page, pageSize } = await listObjectRowsAsync(db, query, tenantId);
   return { items: rows.map(publicObject), total, page, pageSize };
 }
 
@@ -684,4 +713,607 @@ export function objectSummary(db, tenantId) {
     [Number(tenantId)]
   );
   return { total, deleted, by_status: byStatus, by_type: byType };
+}
+
+// Async twin of `objectSummary`; the four aggregate reads run concurrently.
+export async function objectSummaryAsync(db, tenantId) {
+  assertTenant(tenantId);
+  const tid = Number(tenantId);
+  const [total, deleted, byStatus, byType] = await Promise.all([
+    queryOneAsync(db, "SELECT COUNT(*) AS c FROM objects WHERE tenant_id = ? AND deleted_at IS NULL", [tid]),
+    queryOneAsync(db, "SELECT COUNT(*) AS c FROM objects WHERE tenant_id = ? AND deleted_at IS NOT NULL", [tid]),
+    queryAllAsync(
+      db,
+      "SELECT status, COUNT(*) AS count FROM objects WHERE tenant_id = ? AND deleted_at IS NULL GROUP BY status ORDER BY status",
+      [tid]
+    ),
+    queryAllAsync(
+      db,
+      `SELECT t.code AS type_code, t.name AS type_name, COUNT(o.id) AS count
+       FROM objects o JOIN metadata_types t ON t.id = o.object_type_id
+       WHERE o.tenant_id = ? AND o.deleted_at IS NULL GROUP BY t.id ORDER BY count DESC LIMIT 20`,
+      [tid]
+    ),
+  ]);
+  return { total: total.c, deleted: deleted.c, by_status: byStatus, by_type: byType };
+}
+
+// ── Async write twins (migrated object routes) ──────────────────────────────
+
+async function assertWritableAsync(db, row, actor) {
+  const lock = await activeCheckoutRowAsync(db, row.id);
+  if (!lock) return;
+  if (actor?.id && Number(lock.locked_by) === Number(actor.id)) return;
+  if (await tenants.isPlatformAdminAsync(db, actor?.id)) return;
+  throw new HttpError(409, "Object is checked out by another user", {
+    locked_by: lock.locked_by,
+    object_id: row.id,
+  });
+}
+
+async function resolveTypeAsync(db, body, tenantId) {
+  const typeRef =
+    body.type ?? body.typeId ?? body.type_id ?? body.objectTypeId ?? body.object_type_id;
+  if (typeRef === undefined || typeRef === null || typeRef === "") {
+    throw new HttpError(400, "Object type is required");
+  }
+  const typeRow = await metadata.findTypeAsync(db, typeRef, tenantId);
+  if (!typeRow) throw new HttpError(404, "Type not found");
+  if (typeRow.status !== "active") {
+    throw new HttpError(409, `Type ${typeRow.code} is not active and cannot hold objects`);
+  }
+  return typeRow;
+}
+
+async function resolveOrganizationAsync(db, body, actor, tenantId) {
+  const raw = body.organization_id ?? body.organizationId;
+  if (raw === undefined && body.organization !== undefined) {
+    return body.organization;
+  }
+  if (raw === undefined || raw === null || raw === "" || raw === "global") {
+    const fallback = actor?.organization_id ?? null;
+    if (!fallback) return null;
+    return (await tenants.assertOrgInTenantAsync(db, fallback, tenantId)) ? Number(fallback) : null;
+  }
+  const org = await tenants.assertOrgInTenantAsync(db, Number(raw), tenantId);
+  return org ? Number(org.id) : null;
+}
+
+async function generateObjectCodeAsync(db, typeCode, tenantId) {
+  const prefix = String(typeCode).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 16) || "OBJ";
+  let seq = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM objects o JOIN metadata_types t ON t.id = o.object_type_id
+       WHERE o.tenant_id = ? AND t.code = ?`,
+      [Number(tenantId), typeCode]
+    )
+  ).c + 1;
+  for (let i = 0; i < 100000; i += 1) {
+    const code = `${prefix}-${String(seq).padStart(6, "0")}`;
+    const exists = await queryOneAsync(db, "SELECT 1 AS x FROM objects WHERE tenant_id = ? AND code = ?", [
+      Number(tenantId),
+      code,
+    ]);
+    if (!exists) return code;
+    seq += 1;
+  }
+  throw new HttpError(500, "Unable to allocate an object code");
+}
+
+async function resolveOwnerAsync(db, body, actor, tenantId) {
+  const raw = body.owner_id ?? body.ownerId;
+  if (raw === undefined || raw === null || raw === "") return actor?.id ?? null;
+  const ownerId = Number(raw);
+  const user = await queryOneAsync(db, "SELECT id, tenant_id FROM users WHERE id = ?", [ownerId]);
+  if (!user) throw new HttpError(400, "Owner not found");
+  if (user.tenant_id && Number(user.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Owner not found");
+  }
+  return ownerId;
+}
+
+async function resolveOwnerObjectAsync(db, body, tenantId) {
+  const raw = body.owner_object_id ?? body.ownerObjectId;
+  if (raw === undefined || raw === null || raw === "") return null;
+  const ownerRow = await findObjectRowAsync(db, raw, tenantId);
+  return ownerRow.id;
+}
+
+export async function createObjectAsync(db, body, actor, tenantId, ip) {
+  assertTenant(tenantId);
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  const typeRow = await resolveTypeAsync(db, body, tenantId);
+  await metadata.assertEnabledAsync(db, "type", typeRow.id, {
+    tenantId,
+    organizationId: body.organization_id ?? body.organizationId,
+  });
+
+  const organizationId = await resolveOrganizationAsync(db, body, actor, tenantId);
+  const values = body.data ?? body.values ?? body.attributes ?? {};
+  const validation = await metadata.assertValidRecordAsync(
+    db,
+    { typeId: typeRow.id, values, user: actor, organization: organizationId },
+    tenantId
+  );
+
+  const code = body.code ? String(body.code).trim() : await generateObjectCodeAsync(db, typeRow.code, tenantId);
+  validateObjectCode(code);
+  const status = assertStatus(body.status || "draft", OBJECT_STATUSES, "status must be one of");
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO objects
+        (uuid, code, object_type_id, name, description, status, revision, data_json,
+         owner_id, owner_object_id, organization_id, tenant_id, external_ref, external_system,
+         tags_json, created_by, updated_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUuid(),
+        code,
+        typeRow.id,
+        String(body.name || code).trim(),
+        body.description || "",
+        status,
+        JSON.stringify(validation.values),
+        await resolveOwnerAsync(db, body, actor, tenantId),
+        await resolveOwnerObjectAsync(db, body, tenantId),
+        organizationId,
+        Number(tenantId),
+        body.external_ref || body.externalRef || "",
+        body.external_system || body.externalSystem || "",
+        JSON.stringify(normalizeTags(body.tags)),
+        actor?.id ?? null,
+        actor?.id ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "Object code already exists in this tenant");
+    }
+    throw err;
+  }
+  const fresh = await getObjectRowAsync(db, result.lastInsertId);
+  const row = (await applyInitialLifecycleAsync(db, fresh, actor)) || (await getObjectRowAsync(db, result.lastInsertId));
+  await recordObjectVersionAsync(db, row, "create", body.change_summary || "Object created", actor?.id);
+  await recordObjectChangeAsync(db, {
+    actor,
+    tenantId,
+    organizationId: row.organization_id,
+    action: "object.create",
+    objectType: "object",
+    objectId: row.id,
+    objectName: row.name,
+    before: null,
+    after: auditAttributes(row),
+    details: { code: row.code, type: typeRow.code },
+    ip,
+  });
+  await emitIndexChangeAsync(db, row, "upsert", "object.create");
+  await emitObjectEventAsync(
+    db,
+    row,
+    "ObjectCreated",
+    { correlation_id: body.correlation_id, idempotency_key: `object:create:${row.id}:${row.revision}` },
+    actor
+  );
+  return publicObject(row);
+}
+
+export async function updateObjectAsync(db, reference, body, actor, tenantId, ip) {
+  assertTenant(tenantId);
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  if (row.deleted_at) throw new HttpError(409, "Cannot update a deleted object");
+  await assertWritableAsync(db, row, actor);
+  if (body.revision !== undefined && Number(body.revision) !== Number(row.revision)) {
+    throw new HttpError(409, "Revision conflict", { expected: row.revision, received: Number(body.revision) });
+  }
+
+  const current = snapshot(row);
+  const providedValues = body.data ?? body.values ?? body.attributes;
+  let dataJson = row.data_json;
+  if (providedValues !== undefined) {
+    const merged = { ...current.data, ...providedValues };
+    const validation = await metadata.assertValidRecordAsync(
+      db,
+      {
+        typeId: row.object_type_id,
+        values: merged,
+        user: actor,
+        organization: body.organization_id ?? row.organization_id,
+      },
+      tenantId
+    );
+    dataJson = JSON.stringify(validation.values);
+  }
+
+  const organizationId =
+    body.organization_id === undefined && body.organizationId === undefined
+      ? row.organization_id
+      : await resolveOrganizationAsync(db, body, actor, tenantId);
+  const ownerId =
+    body.owner_id === undefined && body.ownerId === undefined
+      ? row.owner_id
+      : await resolveOwnerAsync(db, body, actor, tenantId);
+  const ownerObjectId =
+    body.owner_object_id === undefined && body.ownerObjectId === undefined
+      ? row.owner_object_id
+      : await resolveOwnerObjectAsync(db, body, tenantId);
+  const status = body.status
+    ? assertStatus(body.status, OBJECT_STATUSES, "status must be one of")
+    : row.status;
+  const code = body.code !== undefined ? String(body.code).trim() : row.code;
+  validateObjectCode(code);
+
+  const nextRevision = Number(row.revision) + 1;
+  try {
+    await runAsync(
+      db,
+      `UPDATE objects SET
+        code = ?, name = ?, description = ?, status = ?, revision = ?, data_json = ?,
+        owner_id = ?, owner_object_id = ?, organization_id = ?, external_ref = ?, external_system = ?,
+        tags_json = ?, updated_by = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        status,
+        nextRevision,
+        dataJson,
+        ownerId,
+        ownerObjectId,
+        organizationId,
+        body.external_ref ?? body.externalRef ?? row.external_ref,
+        body.external_system ?? body.externalSystem ?? row.external_system,
+        body.tags === undefined ? row.tags_json : JSON.stringify(normalizeTags(body.tags)),
+        actor?.id ?? null,
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "Object code already exists in this tenant");
+    }
+    throw err;
+  }
+  const next = await getObjectRowAsync(db, row.id);
+  await recordObjectVersionAsync(db, next, "update", body.change_summary || "Object updated", actor?.id);
+  await recordObjectChangeAsync(db, {
+    actor,
+    tenantId,
+    organizationId: next.organization_id,
+    action: "object.update",
+    objectType: "object",
+    objectId: row.id,
+    objectName: next.name,
+    before: auditAttributes(row),
+    after: auditAttributes(next),
+    reason: body.change_summary || body.reason,
+    details: { code: next.code, revision: next.revision },
+    ip,
+  });
+  await emitIndexChangeAsync(db, next, "upsert", "object.update");
+  await emitObjectEventAsync(
+    db,
+    next,
+    body.status && body.status !== row.status ? "ItemStatusChanged" : "ObjectUpdated",
+    {
+      correlation_id: body.correlation_id,
+      idempotency_key: `object:update:${next.id}:${next.revision}`,
+      payload: { previous_status: row.status, changed: Object.keys(body.data ?? body.values ?? body.attributes ?? {}) },
+    },
+    actor
+  );
+  return publicObject(next);
+}
+
+export async function setObjectStatusAsync(db, reference, status, actor, tenantId, ip) {
+  assertTenant(tenantId);
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  assertStatus(status, OBJECT_STATUSES, "status must be one of");
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  if (row.deleted_at) throw new HttpError(409, "Cannot change the status of a deleted object");
+  await assertWritableAsync(db, row, actor);
+  const nextRevision = Number(row.revision) + 1;
+  await runAsync(db, "UPDATE objects SET status = ?, revision = ?, updated_by = ?, updated_at = ? WHERE id = ?", [
+    status,
+    nextRevision,
+    actor?.id ?? null,
+    nowIso(),
+    row.id,
+  ]);
+  const next = await getObjectRowAsync(db, row.id);
+  await recordObjectVersionAsync(db, next, "status", `Status set to ${status}`, actor?.id);
+  await recordObjectChangeAsync(db, {
+    actor,
+    tenantId,
+    organizationId: next.organization_id,
+    action: `object.status.${status}`,
+    objectType: "object",
+    objectId: row.id,
+    objectName: next.name,
+    before: { status: row.status },
+    after: { status: next.status },
+    details: { code: next.code, status },
+    ip,
+  });
+  await emitIndexChangeAsync(db, next, "upsert", "object.status");
+  await emitObjectEventAsync(
+    db,
+    next,
+    "ItemStatusChanged",
+    {
+      idempotency_key: `object:status:${next.id}:${next.revision}`,
+      payload: { from_status: row.status, to_status: next.status },
+    },
+    actor
+  );
+  return publicObject(next);
+}
+
+export async function listObjectVersionsAsync(db, reference, tenantId, { page, pageSize } = {}) {
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  const limit = Math.min(200, Math.max(1, Number(pageSize) || 50));
+  const offset = Math.max(0, (Math.max(1, Number(page) || 1) - 1) * limit);
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT v.*, u.username AS created_username
+       FROM object_versions v LEFT JOIN users u ON u.id = v.created_by
+       WHERE v.object_id = ? ORDER BY v.revision DESC LIMIT ? OFFSET ?`,
+      [row.id, limit, offset]
+    )
+  ).map((v) => ({ ...v, snapshot: safeParse(v.snapshot, {}) }));
+  const total = (
+    await queryOneAsync(db, "SELECT COUNT(*) AS c FROM object_versions WHERE object_id = ?", [row.id])
+  ).c;
+  return { items, total };
+}
+
+export async function getObjectVersionAsync(db, reference, revision, tenantId) {
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  const version = await queryOneAsync(
+    db,
+    "SELECT * FROM object_versions WHERE object_id = ? AND revision = ?",
+    [row.id, Number(revision)]
+  );
+  if (!version) throw new HttpError(404, "Object revision not found");
+  return { ...version, snapshot: safeParse(version.snapshot, {}) };
+}
+
+export async function checkoutObjectAsync(db, reference, body, actor, tenantId, ip) {
+  assertTenant(tenantId);
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  if (row.deleted_at) throw new HttpError(409, "Cannot check out a deleted object");
+  const existing = await activeCheckoutRowAsync(db, row.id);
+  if (existing) {
+    if (actor?.id && Number(existing.locked_by) === Number(actor.id)) {
+      return { object: publicObject(row), checkout: publicCheckout(existing) };
+    }
+    throw new HttpError(409, "Object is already checked out", { locked_by: existing.locked_by });
+  }
+  const scope = ["exclusive", "shared"].includes(body?.scope) ? body.scope : "exclusive";
+  const ttlMinutes = Number(body?.ttlMinutes ?? body?.ttl_minutes);
+  const expiresAt = Number.isFinite(ttlMinutes) && ttlMinutes > 0
+    ? new Date(Date.now() + ttlMinutes * 60000).toISOString().replace("T", " ").slice(0, 19)
+    : null;
+  const result = await runAsync(
+    db,
+    `INSERT INTO object_checkouts (object_id, locked_by, scope, reason, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [row.id, actor?.id ?? null, scope, body?.reason || "", expiresAt, nowIso()]
+  );
+  await recordObjectChangeAsync(db, {
+    actor,
+    tenantId,
+    organizationId: row.organization_id,
+    action: "object.checkout",
+    objectType: "object",
+    objectId: row.id,
+    objectName: row.name,
+    details: { code: row.code, scope, expires_at: expiresAt },
+    ip,
+  });
+  const checkout = await queryOneAsync(
+    db,
+    `SELECT ck.*, u.username AS locked_by_username FROM object_checkouts ck
+     LEFT JOIN users u ON u.id = ck.locked_by WHERE ck.id = ?`,
+    [result.lastInsertId]
+  );
+  return { object: publicObject(await getObjectRowAsync(db, row.id)), checkout: publicCheckout(checkout) };
+}
+
+export async function checkinObjectAsync(db, reference, body, actor, tenantId, ip) {
+  assertTenant(tenantId);
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  const lock = await activeCheckoutRowAsync(db, row.id);
+  if (!lock) throw new HttpError(409, "Object is not checked out");
+  const force = body?.force === true;
+  if (!force && actor?.id && Number(lock.locked_by) !== Number(actor.id) && !(await tenants.isPlatformAdminAsync(db, actor?.id))) {
+    throw new HttpError(403, "Object is checked out by another user");
+  }
+  await runAsync(db, "UPDATE object_checkouts SET released_at = ?, released_by = ? WHERE id = ?", [
+    nowIso(),
+    actor?.id ?? null,
+    lock.id,
+  ]);
+  await recordObjectChangeAsync(db, {
+    actor,
+    tenantId,
+    organizationId: row.organization_id,
+    action: "object.checkin",
+    objectType: "object",
+    objectId: row.id,
+    objectName: row.name,
+    details: { code: row.code, forced: force },
+    ip,
+  });
+  return { object: publicObject(await getObjectRowAsync(db, row.id)), released: publicCheckout(lock) };
+}
+
+export async function objectLocksAsync(db, reference, tenantId) {
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  return { items: (await listCheckoutRowsAsync(db, row.id)).map(publicCheckout) };
+}
+
+export async function objectTypesAsync(db, tenantId) {
+  assertTenant(tenantId);
+  const items = await queryAllAsync(
+    db,
+    `SELECT t.id, t.code, t.name, t.module, t.status, t.parent_type_id,
+       (SELECT COUNT(*) FROM objects o WHERE o.object_type_id = t.id AND o.deleted_at IS NULL) AS object_count,
+       (SELECT COUNT(*) FROM relationship_types rt
+          WHERE rt.status = 'active' AND (rt.source_type_id = t.id OR rt.target_type_id = t.id)) AS relationship_type_count
+     FROM metadata_types t
+     WHERE (t.tenant_id IS NULL OR t.tenant_id = ?) AND t.status = 'active'
+     ORDER BY t.code`,
+    [Number(tenantId)]
+  );
+  return { items };
+}
+
+export async function bulkCreateObjectsAsync(db, items, actor, tenantId, ip) {
+  assertTenant(tenantId);
+  if (!Array.isArray(items) || !items.length) throw new HttpError(400, "items must be a non-empty array");
+  if (items.length > 500) throw new HttpError(400, "At most 500 items per bulk request");
+  return transactionAsync(db, async () => {
+    const created = [];
+    const failed = [];
+    for (let index = 0; index < items.length; index += 1) {
+      try {
+        created.push(await createObjectAsync(db, items[index], actor, tenantId, ip));
+      } catch (err) {
+        failed.push({ index, error: err.message, status: err.status || 500, details: err.details || null });
+      }
+    }
+    return { created, failed, created_count: created.length, failed_count: failed.length };
+  });
+}
+
+export async function bulkMutateObjectsAsync(db, input, actor, tenantId, ip) {
+  assertTenant(tenantId);
+  const ids = Array.isArray(input?.ids) ? input.ids : [];
+  if (!ids.length) throw new HttpError(400, "ids must be a non-empty array");
+  if (ids.length > 500) throw new HttpError(400, "At most 500 ids per bulk request");
+  const operation = input?.operation || "update";
+  if (!["update", "delete", "restore", "status"].includes(operation)) {
+    throw new HttpError(400, "operation must be update, delete, restore or status");
+  }
+  const patch = input?.patch || {};
+  return transactionAsync(db, async () => {
+    const updated = [];
+    const failed = [];
+    for (const id of ids) {
+      try {
+        if (operation === "delete") {
+          updated.push(await softDeleteObjectAsync(db, id, { force: input.force === true }, actor, tenantId, ip));
+        } else if (operation === "restore") {
+          updated.push(await restoreObjectAsync(db, id, actor, tenantId, ip));
+        } else if (operation === "status") {
+          updated.push(await setObjectStatusAsync(db, id, patch.status, actor, tenantId, ip));
+        } else {
+          updated.push(await updateObjectAsync(db, id, patch, actor, tenantId, ip));
+        }
+      } catch (err) {
+        failed.push({ id, error: err.message, status: err.status || 500, details: err.details || null });
+      }
+    }
+    return { items: updated, failed, updated_count: updated.length, failed_count: failed.length };
+  });
+}
+
+export async function softDeleteObjectAsync(db, reference, { force = false, summary } = {}, actor, tenantId, ip) {
+  assertTenant(tenantId);
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  if (row.deleted_at) throw new HttpError(409, "Object is already deleted");
+  const report = await safeDeleteReportAsync(db, row.id, tenantId);
+  if (report.blockers.length && !force) {
+    throw new HttpError(409, "Object has references or relationships that block deletion", report);
+  }
+  return transactionAsync(db, async () => {
+    for (const child of report.cascade) {
+      const childRow = await queryOneAsync(db, "SELECT * FROM objects WHERE id = ?", [child.id]);
+      if (childRow && !childRow.deleted_at) {
+        await softDeleteObjectAsync(db, childRow.id, { force: true, summary: "Cascade from " + row.code }, actor, tenantId, ip);
+      }
+    }
+    await runAsync(
+      db,
+      "UPDATE object_relationships SET status = 'inactive', deleted_at = ?, updated_at = ? WHERE (source_object_id = ? OR target_object_id = ?) AND deleted_at IS NULL",
+      [nowIso(), nowIso(), row.id, row.id]
+    );
+    await runAsync(db, "UPDATE objects SET deleted_at = ?, deleted_by = ?, revision = revision + 1, updated_by = ?, updated_at = ? WHERE id = ?", [
+      nowIso(),
+      actor?.id ?? null,
+      actor?.id ?? null,
+      nowIso(),
+      row.id,
+    ]);
+    const next = await getObjectRowAsync(db, row.id);
+    await recordObjectVersionAsync(db, next, force ? "force_delete" : "delete", summary || "Object deleted", actor?.id);
+    await recordObjectChangeAsync(db, {
+      actor,
+      tenantId,
+      organizationId: row.organization_id,
+      action: force ? "object.force_delete" : "object.delete",
+      objectType: "object",
+      objectId: row.id,
+      objectName: row.name,
+      before: auditAttributes(row),
+      after: { deleted_at: next.deleted_at },
+      reason: summary,
+      details: { code: row.code, cascade: report.cascade.length, forced: force },
+      ip,
+    });
+    await emitIndexChangeAsync(db, next, "delete", "object.delete");
+    await emitObjectEventAsync(db, next, "ObjectDeleted", {
+      idempotency_key: `object:delete:${next.id}:${next.revision}`,
+      payload: { forced: force, cascade: report.cascade.length },
+    }, actor);
+    return publicObject(next);
+  });
+}
+
+export async function restoreObjectAsync(db, reference, actor, tenantId, ip) {
+  assertTenant(tenantId);
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  if (!row.deleted_at) throw new HttpError(409, "Object is not deleted");
+  const nextRevision = Number(row.revision) + 1;
+  await runAsync(
+    db,
+    "UPDATE objects SET deleted_at = NULL, deleted_by = NULL, revision = ?, updated_by = ?, updated_at = ? WHERE id = ?",
+    [nextRevision, actor?.id ?? null, nowIso(), row.id]
+  );
+  const next = await getObjectRowAsync(db, row.id);
+  await recordObjectVersionAsync(db, next, "restore", "Object restored", actor?.id);
+  await recordObjectChangeAsync(db, {
+    actor,
+    tenantId,
+    organizationId: row.organization_id,
+    action: "object.restore",
+    objectType: "object",
+    objectId: row.id,
+    objectName: row.name,
+    before: { deleted_at: row.deleted_at },
+    after: { deleted_at: null },
+    details: { code: row.code },
+    ip,
+  });
+  await emitIndexChangeAsync(db, next, "upsert", "object.restore");
+  await emitObjectEventAsync(db, next, "ObjectUpdated", {
+    idempotency_key: `object:restore:${next.id}:${next.revision}`,
+    payload: { restored: true },
+  }, actor);
+  return publicObject(next);
 }

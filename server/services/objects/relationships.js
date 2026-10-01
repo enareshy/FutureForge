@@ -1,13 +1,14 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import * as metadata from "../metadata.js";
 import * as tenants from "../tenants.js";
-import { findObjectRow, briefObject } from "./repository.js";
-import { findRelationshipType, publicRelationshipType } from "./relationship-types.js";
+import { findObjectRow, briefObject, findObjectRowAsync, briefObjectAsync } from "./repository.js";
+import { findRelationshipType, publicRelationshipType, findRelationshipTypeAsync } from "./relationship-types.js";
 import { RELATIONSHIP_STATUSES, assertValidEdgeValues } from "./validation.js";
-import { emitObjectIndexChange } from "../search/hooks.js";
-import { emitDomainEvent } from "../events/emit.js";
+import { emitObjectIndexChange, emitObjectIndexChangeAsync } from "../search/hooks.js";
+import { emitDomainEvent, emitDomainEventAsync } from "../events/emit.js";
 
 // Relationship engine. Creates, validates and traverses typed edges while
 // enforcing type compatibility, cardinality, tenant isolation and referential
@@ -583,6 +584,500 @@ export function traverse(db, reference, options = {}, tenantId) {
 
 export function graph(db, reference, tenantId, { depth = 2 } = {}) {
   const result = traverse(db, reference, { direction: "both", depth }, tenantId);
+  return {
+    root_id: result.root?.id ?? null,
+    nodes: result.nodes,
+    edges: result.edges,
+    node_count: result.nodes.length,
+    edge_count: result.edges.length,
+  };
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+// Mirror the synchronous engine statement-for-statement, including validation,
+// cardinality and audit/event emission, but run on the asynchronous pool.
+
+async function emitRelationshipIndexAsync(db, tenantId, ...objectIds) {
+  for (const objectId of new Set(objectIds.filter(Boolean))) {
+    await emitObjectIndexChangeAsync(db, {
+      tenantId,
+      objectType: "object",
+      objectId,
+      operation: "upsert",
+      reason: "relationship",
+    });
+  }
+}
+
+async function emitRelationshipEventAsync(db, row, eventTypeCode, actor, extra = {}) {
+  if (!row) return null;
+  return emitDomainEventAsync(
+    db,
+    {
+      event_type_code: eventTypeCode,
+      source_module: "objects",
+      source_object_type: "relationship",
+      source_object_id: String(row.id),
+      source_object_revision: row.sequence ?? null,
+      tenant_id: row.tenant_id ?? null,
+      payload: {
+        relationship_id: row.id,
+        relationship_type: row.type_code ?? null,
+        source_object_id: row.source_object_id ?? null,
+        target_object_id: row.target_object_id ?? null,
+        source_code: row.source_code ?? null,
+        target_code: row.target_code ?? null,
+        status: row.status ?? null,
+        ...extra,
+      },
+      idempotency_key: `relationship:${eventTypeCode}:${row.id}:${row.sequence ?? ""}`,
+    },
+    actor
+  );
+}
+
+export async function getRelationshipRowAsync(db, id) {
+  return queryOneAsync(db, `${REL_SELECT} WHERE r.id = ?`, [Number(id)]);
+}
+
+async function assertTypeCompatibleAsync(db, objectTypeId, expectedTypeId, label) {
+  if (!expectedTypeId) return;
+  if (Number(objectTypeId) === Number(expectedTypeId)) return;
+  const chain = await metadata.ancestorTypesAsync(db, objectTypeId);
+  if (chain.some((ancestor) => Number(ancestor.id) === Number(expectedTypeId))) return;
+  throw new HttpError(409, `${label} object type is not compatible with this relationship type`);
+}
+
+async function activeEdgeCountAsync(db, typeId, where, params) {
+  return (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM object_relationships
+       WHERE relationship_type_id = ? AND status = 'active' AND deleted_at IS NULL AND ${where}`,
+      [Number(typeId), ...params]
+    )
+  ).c;
+}
+
+async function assertCardinalityAsync(db, type, sourceId, targetId) {
+  const sourceOut = await activeEdgeCountAsync(db, type.id, "source_object_id = ?", [sourceId]);
+  const sourceIn = await activeEdgeCountAsync(db, type.id, "target_object_id = ?", [sourceId]);
+  const targetOut = await activeEdgeCountAsync(db, type.id, "source_object_id = ?", [targetId]);
+  const targetIn = await activeEdgeCountAsync(db, type.id, "target_object_id = ?", [targetId]);
+
+  if (type.max_occurrences !== null && type.max_occurrences !== undefined && sourceOut >= type.max_occurrences) {
+    throw new HttpError(409, `Source already has the maximum of ${type.max_occurrences} relationships of this type`);
+  }
+  switch (type.cardinality) {
+    case "1:1":
+      if (sourceOut || sourceIn) throw new HttpError(409, "Source already participates in a 1:1 relationship of this type");
+      if (targetOut || targetIn) throw new HttpError(409, "Target already participates in a 1:1 relationship of this type");
+      break;
+    case "1:N":
+      if (targetIn) throw new HttpError(409, "Target already has a source for this 1:N relationship type");
+      break;
+    case "N:1":
+      if (sourceOut) throw new HttpError(409, "Source already has a target for this N:1 relationship type");
+      break;
+    default:
+      break;
+  }
+}
+
+export async function planRelationshipAsync(db, body, tenantId, { excludeId = null } = {}) {
+  if (!tenantId) throw new HttpError(400, "Tenant context is required for relationships");
+  const typeRef = body.type ?? body.relationship_type ?? body.relationshipType ?? body.relationship_type_id;
+  if (typeRef === undefined || typeRef === null || typeRef === "") {
+    throw new HttpError(400, "Relationship type is required");
+  }
+  const type = await findRelationshipTypeAsync(db, typeRef, tenantId);
+  if (type.status !== "active") {
+    throw new HttpError(409, `Relationship type ${type.code} is not active`);
+  }
+  const sourceRef = resolveObjectId(
+    db,
+    body,
+    ["source", "source_object_id", "sourceObjectId", "from", "from_object_id"],
+    "Source",
+    tenantId
+  );
+  const targetRef = resolveObjectId(
+    db,
+    body,
+    ["target", "target_object_id", "targetObjectId", "to", "to_object_id"],
+    "Target",
+    tenantId
+  );
+  const sourceRow = await findObjectRowAsync(db, sourceRef, tenantId);
+  const targetRow = await findObjectRowAsync(db, targetRef, tenantId);
+  if (sourceRow.deleted_at) throw new HttpError(409, "Source object is deleted");
+  if (targetRow.deleted_at) throw new HttpError(409, "Target object is deleted");
+  if (sourceRow.id === targetRow.id && type.allow_self !== 1) {
+    throw new HttpError(400, "Self-relationships are not allowed for this relationship type");
+  }
+  await assertTypeCompatibleAsync(db, sourceRow.object_type_id, type.source_type_id, "Source");
+  await assertTypeCompatibleAsync(db, targetRow.object_type_id, type.target_type_id, "Target");
+
+  if (excludeId) {
+    const duplicate = await queryOneAsync(
+      db,
+      `SELECT id FROM object_relationships
+       WHERE relationship_type_id = ? AND source_object_id = ? AND target_object_id = ?
+         AND deleted_at IS NULL AND id != ?`,
+      [type.id, sourceRow.id, targetRow.id, Number(excludeId)]
+    );
+    if (duplicate) throw new HttpError(409, "This relationship already exists");
+  } else {
+    const duplicate = await queryOneAsync(
+      db,
+      `SELECT id FROM object_relationships
+       WHERE relationship_type_id = ? AND source_object_id = ? AND target_object_id = ? AND deleted_at IS NULL`,
+      [type.id, sourceRow.id, targetRow.id]
+    );
+    if (duplicate) throw new HttpError(409, "This relationship already exists");
+    await assertCardinalityAsync(db, type, sourceRow.id, targetRow.id);
+  }
+
+  const definition = safeParse(type.attributes_json, []);
+  const attributes = assertValidEdgeValues(definition, body.attributes || {});
+  const status = body.status && RELATIONSHIP_STATUSES.includes(body.status) ? body.status : "active";
+  const sequence = body.sequence === undefined ? 0 : Number(body.sequence) || 0;
+  return {
+    type,
+    sourceRow,
+    targetRow,
+    attributes,
+    status,
+    sequence,
+    validFrom: body.valid_from ?? body.validFrom ?? null,
+    validTo: body.valid_to ?? body.validTo ?? null,
+    tenantId: Number(sourceRow.tenant_id),
+  };
+}
+
+export async function createRelationshipAsync(db, body, actor, tenantId, ip) {
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  const plan = await planRelationshipAsync(db, body, tenantId);
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO object_relationships
+        (relationship_type_id, source_object_id, target_object_id, status, sequence,
+         attributes_json, valid_from, valid_to, tenant_id, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        plan.type.id,
+        plan.sourceRow.id,
+        plan.targetRow.id,
+        plan.status,
+        plan.sequence,
+        JSON.stringify(plan.attributes),
+        plan.validFrom,
+        plan.validTo,
+        plan.tenantId,
+        actor?.id ?? null,
+        nowIso(),
+        nowIso(),
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "This relationship already exists");
+    }
+    throw err;
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "relationship.create",
+    resourceType: "object_relationship",
+    resourceId: result.lastInsertId,
+    details: {
+      type: plan.type.code,
+      source: plan.sourceRow.code,
+      target: plan.targetRow.code,
+      semantic: plan.type.semantic,
+    },
+    ip,
+  });
+  await emitRelationshipIndexAsync(db, plan.tenantId, plan.sourceRow.id, plan.targetRow.id);
+  const created = await getRelationshipRowAsync(db, result.lastInsertId);
+  await emitRelationshipEventAsync(db, created, "RelationshipCreated", actor);
+  return publicRelationship(created);
+}
+
+export async function validateRelationshipAsync(db, body, tenantId) {
+  try {
+    const plan = await planRelationshipAsync(db, body, tenantId);
+    return {
+      valid: true,
+      relationship_type: publicRelationshipType(plan.type),
+      source: await briefObjectAsync(db, plan.sourceRow.id, tenantId),
+      target: await briefObjectAsync(db, plan.targetRow.id, tenantId),
+      attributes: plan.attributes,
+      cardinality: plan.type.cardinality,
+    };
+  } catch (err) {
+    if (err instanceof HttpError) {
+      return { valid: false, error: err.message, details: err.details || null };
+    }
+    throw err;
+  }
+}
+
+export async function getRelationshipAsync(db, id, tenantId) {
+  const row = await getRelationshipRowAsync(db, id);
+  if (!row || Number(row.tenant_id) !== Number(tenantId)) throw new HttpError(404, "Relationship not found");
+  return publicRelationship(row);
+}
+
+export async function listRelationshipsAsync(db, query = {}, tenantId) {
+  if (!tenantId) throw new HttpError(400, "Tenant context is required");
+  const { page, pageSize, offset } = pagination(query);
+  const where = ["r.tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.source || query.source_object_id) {
+    where.push("r.source_object_id = ?");
+    params.push(Number(query.source || query.source_object_id));
+  }
+  if (query.target || query.target_object_id) {
+    where.push("r.target_object_id = ?");
+    params.push(Number(query.target || query.target_object_id));
+  }
+  if (query.type) {
+    if (/^\d+$/.test(String(query.type))) {
+      where.push("r.relationship_type_id = ?");
+      params.push(Number(query.type));
+    } else {
+      where.push("rt.code = ?");
+      params.push(String(query.type));
+    }
+  }
+  if (query.semantic) {
+    where.push("rt.semantic = ?");
+    params.push(String(query.semantic));
+  }
+  if (query.status) {
+    where.push("r.status = ?");
+    params.push(String(query.status));
+  }
+  const includeDeleted = query.includeDeleted === true || query.include_deleted === true;
+  if (!includeDeleted) where.push("r.deleted_at IS NULL");
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM object_relationships r JOIN relationship_types rt ON rt.id = r.relationship_type_id ${clause}`,
+      params
+    )
+  ).c;
+  const items = (
+    await queryAllAsync(db, `${REL_SELECT} ${clause} ORDER BY r.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+  ).map(publicRelationship);
+  return { items, total, page, pageSize };
+}
+
+export async function updateRelationshipAsync(db, id, body, actor, tenantId, ip) {
+  const row = await getRelationshipRowAsync(db, id);
+  if (!row || Number(row.tenant_id) !== Number(tenantId)) throw new HttpError(404, "Relationship not found");
+  if (row.deleted_at) throw new HttpError(409, "Cannot update a deleted relationship");
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  const definition = safeParse(row.type_attributes_json, []);
+  const attributes = body.attributes === undefined
+    ? row.attributes_json
+    : JSON.stringify(assertValidEdgeValues(definition, body.attributes));
+  const status = body.status ?? row.status;
+  if (!RELATIONSHIP_STATUSES.includes(status)) {
+    throw new HttpError(400, `status must be one of: ${RELATIONSHIP_STATUSES.join(", ")}`);
+  }
+  await runAsync(
+    db,
+    `UPDATE object_relationships SET status = ?, sequence = ?, attributes_json = ?,
+      valid_from = ?, valid_to = ?, updated_at = ? WHERE id = ?`,
+    [
+      status,
+      body.sequence === undefined ? row.sequence : Number(body.sequence) || 0,
+      attributes,
+      body.valid_from === undefined && body.validFrom === undefined ? row.valid_from : body.valid_from ?? body.validFrom ?? null,
+      body.valid_to === undefined && body.validTo === undefined ? row.valid_to : body.valid_to ?? body.validTo ?? null,
+      nowIso(),
+      row.id,
+    ]
+  );
+  await writeAuditAsync(db, {
+    actor,
+    action: "relationship.update",
+    resourceType: "object_relationship",
+    resourceId: row.id,
+    details: { type: row.type_code, status },
+    ip,
+  });
+  await emitRelationshipIndexAsync(db, row.tenant_id, row.source_object_id, row.target_object_id);
+  const updated = await getRelationshipRowAsync(db, row.id);
+  await emitRelationshipEventAsync(db, updated, "RelationshipUpdated", actor, { previous_status: row.status });
+  return publicRelationship(updated);
+}
+
+export async function deleteRelationshipAsync(db, id, { force = false } = {}, actor, tenantId, ip) {
+  const row = await getRelationshipRowAsync(db, id);
+  if (!row || Number(row.tenant_id) !== Number(tenantId)) throw new HttpError(404, "Relationship not found");
+  if (row.deleted_at) throw new HttpError(409, "Relationship is already deleted");
+  await tenants.assertTenantScopeAsync(db, actor, tenantId);
+  const type = await findRelationshipTypeAsync(db, row.relationship_type_id, tenantId);
+  if (!force && row.status === "active") {
+    const remaining = await activeEdgeCountAsync(db, type.id, "source_object_id = ?", [row.source_object_id]);
+    const minimum = type.required === 1 && type.min_occurrences < 1 ? 1 : type.min_occurrences;
+    if (minimum && remaining <= minimum) {
+      throw new HttpError(409, `At least ${minimum} relationship(s) of type ${type.code} are required for this source`);
+    }
+  }
+  await runAsync(
+    db,
+    "UPDATE object_relationships SET status = 'inactive', deleted_at = ?, updated_at = ? WHERE id = ?",
+    [nowIso(), nowIso(), row.id]
+  );
+  await writeAuditAsync(db, {
+    actor,
+    action: "relationship.delete",
+    resourceType: "object_relationship",
+    resourceId: row.id,
+    details: { type: row.type_code, source: row.source_object_id, target: row.target_object_id, forced: force },
+    ip,
+  });
+  await emitRelationshipIndexAsync(db, row.tenant_id, row.source_object_id, row.target_object_id);
+  await emitRelationshipEventAsync(db, row, "RelationshipDeleted", actor, { forced: force });
+  return { deleted: true, id: row.id };
+}
+
+export async function relationshipsForObjectAsync(db, reference, tenantId, query = {}) {
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  const statusClause = query.status ? " AND r.status = ?" : "";
+  const statusParams = query.status ? [query.status] : [];
+  const includeDeleted = query.includeDeleted === true || query.include_deleted === true;
+  const deletedClause = includeDeleted ? "" : " AND r.deleted_at IS NULL";
+  const outgoing = (
+    await queryAllAsync(
+      db,
+      `${REL_SELECT} WHERE r.source_object_id = ?${deletedClause}${statusClause} ORDER BY r.id DESC`,
+      [row.id, ...statusParams]
+    )
+  ).map(publicRelationship);
+  const incoming = (
+    await queryAllAsync(
+      db,
+      `${REL_SELECT} WHERE r.target_object_id = ?${deletedClause}${statusClause} ORDER BY r.id DESC`,
+      [row.id, ...statusParams]
+    )
+  ).map(publicRelationship);
+  return { object: await briefObjectAsync(db, row.id, tenantId), outgoing, incoming };
+}
+
+export async function adjacencyAsync(db, objectIds = [], options = {}) {
+  const { tenantId = null, direction = "both", status = "active", typeCodes = null, limit = 2000 } = options || {};
+  const ids = [...new Set(objectIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))];
+  if (!ids.length) return [];
+  const dir = ["out", "in", "both"].includes(direction) ? direction : "both";
+  const marks = ids.map(() => "?").join(",");
+  const where = [];
+  const params = [];
+  if (tenantId !== null && tenantId !== undefined) {
+    where.push("r.tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (dir === "out") {
+    where.push(`r.source_object_id IN (${marks})`);
+    params.push(...ids);
+  } else if (dir === "in") {
+    where.push(`r.target_object_id IN (${marks})`);
+    params.push(...ids);
+  } else {
+    where.push(`(r.source_object_id IN (${marks}) OR r.target_object_id IN (${marks}))`);
+    params.push(...ids, ...ids);
+  }
+  if (status) {
+    where.push("r.status = ?");
+    params.push(status);
+  }
+  where.push("r.deleted_at IS NULL");
+  if (Array.isArray(typeCodes) && typeCodes.length) {
+    where.push(`rt.code IN (${typeCodes.map(() => "?").join(",")})`);
+    params.push(...typeCodes.map((code) => String(code)));
+  }
+  const cap = Math.min(20000, Math.max(1, Number(limit) || 2000));
+  return (
+    await queryAllAsync(db, `${REL_SELECT} WHERE ${where.join(" AND ")} ORDER BY r.id ASC LIMIT ?`, [...params, cap])
+  ).map(publicRelationship);
+}
+
+export async function traverseAsync(db, reference, options = {}, tenantId) {
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  const direction = ["out", "in", "both"].includes(options.direction) ? options.direction : "out";
+  const depth = Math.min(MAX_TRAVERSAL_DEPTH, Math.max(1, Number(options.depth) || 1));
+  const status = options.status === undefined ? "active" : options.status;
+  const typeCode = options.type && !/^\d+$/.test(String(options.type)) ? String(options.type) : null;
+  const typeId = options.type && /^\d+$/.test(String(options.type)) ? Number(options.type) : null;
+
+  const visited = new Set([row.id]);
+  const nodes = new Map([[row.id, await briefObjectAsync(db, row.id, tenantId)]]);
+  const edges = [];
+  let frontier = [row.id];
+
+  const loadEdges = async (ids, dir) => {
+    if (!ids.length) return [];
+    const marks = ids.map(() => "?").join(",");
+    const where = [];
+    const params = [];
+    if (dir === "out") where.push(`r.source_object_id IN (${marks})`), params.push(...ids);
+    else where.push(`r.target_object_id IN (${marks})`), params.push(...ids);
+    if (status) {
+      where.push("r.status = ?");
+      params.push(status);
+    }
+    where.push("r.deleted_at IS NULL");
+    if (typeCode) {
+      where.push("rt.code = ?");
+      params.push(typeCode);
+    }
+    if (typeId) {
+      where.push("r.relationship_type_id = ?");
+      params.push(typeId);
+    }
+    return queryAllAsync(db, `${REL_SELECT} WHERE ${where.join(" AND ")}`, params);
+  };
+
+  for (let level = 1; level <= depth; level += 1) {
+    const found = new Map();
+    if (direction === "out" || direction === "both") {
+      for (const edge of await loadEdges(frontier, "out")) found.set(edge.id, { edge, from: edge.source_object_id, to: edge.target_object_id });
+    }
+    if (direction === "in" || direction === "both") {
+      for (const edge of await loadEdges(frontier, "in")) {
+        if (!found.has(edge.id)) found.set(edge.id, { edge, from: edge.target_object_id, to: edge.source_object_id });
+      }
+    }
+    const nextFrontier = [];
+    for (const { edge, from, to } of found.values()) {
+      edges.push({
+        ...publicRelationship(edge),
+        depth: level,
+        traversal_from: from,
+        traversal_to: to,
+      });
+      if (!visited.has(to)) {
+        visited.add(to);
+        const brief = await briefObjectAsync(db, to, tenantId);
+        if (brief) nodes.set(to, brief);
+        nextFrontier.push(to);
+      }
+    }
+    if (!nextFrontier.length) break;
+    frontier = nextFrontier;
+  }
+  return { root: await briefObjectAsync(db, row.id, tenantId), nodes: [...nodes.values()], edges, depth };
+}
+
+export async function graphAsync(db, reference, tenantId, { depth = 2 } = {}) {
+  const result = await traverseAsync(db, reference, { direction: "both", depth }, tenantId);
   return {
     root_id: result.root?.id ?? null,
     nodes: result.nodes,

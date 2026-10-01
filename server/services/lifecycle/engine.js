@@ -1,22 +1,46 @@
 import { queryAll, queryOne, run, transaction } from "../../db.js";
+import { queryAllAsync, queryOneAsync, transactionAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
-import { checkPermission } from "../authorization.js";
+import { checkPermission, checkPermissionAsync } from "../authorization.js";
 import * as tenants from "../tenants.js";
-import { findObjectRow, getObjectRow, publicObject, activeCheckoutRow } from "../objects/repository.js";
+import {
+  findObjectRow,
+  findObjectRowAsync,
+  getObjectRow,
+  getObjectRowAsync,
+  publicObject,
+  activeCheckoutRow,
+  activeCheckoutRowAsync,
+} from "../objects/repository.js";
 import {
   getVersionRow,
+  getVersionRowAsync,
   getDefinitionRow,
+  getDefinitionRowAsync,
   getStateRow,
+  getStateRowAsync,
   publicDefinition,
   publicVersion,
   publicState,
   publicTransition,
   transitionsFrom,
+  transitionsFromAsync,
   resolveAssignment,
+  resolveAssignmentAsync,
   initialStateForVersion,
+  initialStateForVersionAsync,
 } from "./definitions.js";
-import { getStatusRow, publicStatus, defaultStatusRow, legacyForCategory } from "./statuses.js";
-import { applyTransition, assignLifecycle, recordStatusHistory, conditionContext, evaluateGuard } from "./apply.js";
+import { getStatusRow, getStatusRowAsync, publicStatus, defaultStatusRow, legacyForCategory } from "./statuses.js";
+import {
+  applyTransition,
+  applyTransitionAsync,
+  assignLifecycle,
+  assignLifecycleAsync,
+  recordStatusHistory,
+  recordStatusHistoryAsync,
+  conditionContext,
+  evaluateGuard,
+} from "./apply.js";
 import * as approvals from "./approvals.js";
 
 // The state-transition engine. It is entirely configuration-driven: states,
@@ -106,6 +130,18 @@ export function applyInitialLifecycle(db, row, actor = null) {
   const state = initialStateForVersion(db, version.id);
   if (!state) return null;
   return assignLifecycle(db, row, version, state, actor);
+}
+
+// Async twin of `applyInitialLifecycle` for migrated object create routes.
+export async function applyInitialLifecycleAsync(db, row, actor = null) {
+  if (!row || row.lifecycle_version_id) return null;
+  const assignment = await resolveAssignmentAsync(db, row.object_type_id, Number(row.tenant_id) || null);
+  if (!assignment) return null;
+  const version = await getVersionRowAsync(db, assignment.lifecycle_version_id);
+  if (!version) return null;
+  const state = await initialStateForVersionAsync(db, version.id);
+  if (!state) return null;
+  return assignLifecycleAsync(db, row, version, state, actor);
 }
 
 function pendingRelease(db, objectId) {
@@ -270,3 +306,225 @@ export function statusForLegacyCategory(category) {
 }
 
 export { recordStatusHistory };
+
+// ── Async twins (used by migrated object lifecycle/release routes) ──────────
+
+export async function actorRoleCodesAsync(db, actor, organizationId = 0) {
+  if (!actor?.id) return [];
+  const org = Number(organizationId) || 0;
+  return (
+    await queryAllAsync(
+      db,
+      `SELECT DISTINCT r.code AS code FROM roles r
+        WHERE r.id IN (
+          SELECT ur.role_id FROM user_roles ur
+           WHERE ur.user_id = ? AND (ur.organization_id = 0 OR ur.organization_id = ?)
+          UNION
+          SELECT gr.role_id FROM group_roles gr
+            JOIN group_members gm ON gm.group_id = gr.group_id
+           WHERE gm.user_id = ? AND (gr.organization_id = 0 OR gr.organization_id = ?)
+        )`,
+      [actor.id, org, actor.id, org]
+    )
+  ).map((row) => row.code);
+}
+
+async function actorSatisfiesAsync(db, actor, entry, organizationId) {
+  if (!entry) return false;
+  if ((await actorRoleCodesAsync(db, actor, organizationId)).includes(entry)) return true;
+  for (const action of ["execute", "update", "read"]) {
+    if ((await checkPermissionAsync(db, actor?.id, entry, action, { organizationId })).allowed) return true;
+  }
+  return false;
+}
+
+async function satisfiesEntryAsync(db, actor, entry, organizationId) {
+  if (!entry) return false;
+  if (String(entry).includes(":")) {
+    const [resource, action] = String(entry).split(":");
+    if ((await checkPermissionAsync(db, actor?.id, resource, action, { organizationId })).allowed) return true;
+  }
+  return actorSatisfiesAsync(db, actor, entry, organizationId);
+}
+
+async function assertTransitionPermissionAsync(db, transition, state, actor, tenantId, organizationId) {
+  const entries = [transition.required_permission, transition.required_role]
+    .concat(parsePermissions(state?.permissions_json))
+    .filter(Boolean);
+  if (!entries.length) return;
+  for (const entry of entries) {
+    if (await satisfiesEntryAsync(db, actor, entry, organizationId)) return;
+  }
+  throw new HttpError(403, "You do not have permission to perform this transition", {
+    required: entries,
+  });
+}
+
+async function assertNotLockedAsync(db, row, actor) {
+  const checkout = await activeCheckoutRowAsync(db, row.id);
+  if (!checkout) return;
+  if (actor?.id && Number(checkout.locked_by) === Number(actor.id)) return;
+  throw new HttpError(409, "Object is checked out by another user", { locked_by: checkout.locked_by });
+}
+
+export async function availableTransitionsAsync(db, row) {
+  if (!row?.lifecycle_version_id || !row.lifecycle_state_id) return [];
+  return transitionsFromAsync(db, row.lifecycle_version_id, row.lifecycle_state_id);
+}
+
+async function pendingReleaseAsync(db, objectId) {
+  return queryOneAsync(
+    db,
+    `SELECT * FROM object_releases WHERE object_id = ? AND status IN ('pending', 'changes_requested') ORDER BY id DESC LIMIT 1`,
+    [objectId]
+  );
+}
+
+export async function objectLifecycleAsync(db, reference, tenantId) {
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  const version = row.lifecycle_version_id ? await getVersionRowAsync(db, row.lifecycle_version_id) : null;
+  const definition = version ? await getDefinitionRowAsync(db, version.definition_id) : null;
+  const state = row.lifecycle_state_id ? await getStateRowAsync(db, row.lifecycle_state_id) : null;
+  const status = row.lifecycle_status_id ? await getStatusRowAsync(db, row.lifecycle_status_id) : null;
+  const pending = await pendingReleaseAsync(db, row.id);
+  return {
+    object: publicObject(row),
+    lifecycle: definition ? publicDefinition(definition) : null,
+    version: version ? publicVersion(version) : null,
+    state: state ? publicState(state) : null,
+    status: publicStatus(status),
+    transitions: await availableTransitionsAsync(db, row),
+    pending_release: pending ? await approvals.publicReleaseAsync(db, pending) : null,
+  };
+}
+
+async function resolveTransitionAsync(db, versionId, body) {
+  const ref = body?.transition ?? body?.transition_id ?? body?.transitionId ?? body?.transition_code ?? body?.transitionCode;
+  if (ref === undefined || ref === null || ref === "") {
+    throw new HttpError(400, "transition is required");
+  }
+  const text = String(ref);
+  const row = /^\d+$/.test(text)
+    ? await queryOneAsync(db, "SELECT * FROM lifecycle_transitions WHERE id = ? AND lifecycle_version_id = ?", [
+        Number(text),
+        Number(versionId),
+      ])
+    : await queryOneAsync(db, "SELECT * FROM lifecycle_transitions WHERE code = ? AND lifecycle_version_id = ?", [
+        text,
+        Number(versionId),
+      ]);
+  if (!row) throw new HttpError(404, "Transition not found for this lifecycle version");
+  return row;
+}
+
+export async function transitionObjectAsync(db, reference, body, actor, tenantId, ip) {
+  return transactionAsync(db, async () => {
+    const row = await findObjectRowAsync(db, reference, tenantId);
+    if (row.deleted_at) throw new HttpError(409, "Cannot transition a deleted object");
+    if (!row.lifecycle_version_id || !row.lifecycle_state_id) {
+      throw new HttpError(409, "Object has no lifecycle assigned");
+    }
+    const version = await getVersionRowAsync(db, row.lifecycle_version_id);
+    const state = await getStateRowAsync(db, row.lifecycle_state_id);
+    if (!version || !state) throw new HttpError(409, "Object lifecycle configuration is unavailable");
+    const transition = await resolveTransitionAsync(db, version.id, body);
+    if (transition.status !== "active") throw new HttpError(409, "Transition is not active");
+    if (Number(transition.from_state_id) !== Number(state.id)) {
+      const fromRow = await queryOneAsync(db, "SELECT code FROM lifecycle_states WHERE id = ?", [transition.from_state_id]);
+      throw new HttpError(409, "Invalid transition for the current state", {
+        current_state: state.code,
+        from_state: (fromRow || {}).code,
+      });
+    }
+    const toState = await getStateRowAsync(db, transition.to_state_id);
+    if (!toState) throw new HttpError(409, "Target state is unavailable");
+    await assertNotLockedAsync(db, row, actor);
+    const organizationId = body?.organization_id ?? body?.organizationId ?? row.organization_id ?? 0;
+    await assertTransitionPermissionAsync(db, transition, state, actor, tenantId, organizationId);
+    const context = conditionContext(row, state, actor);
+    evaluateGuard(state.exit_conditions_json ? safeJson(state.exit_conditions_json) : {}, context, "State exit condition");
+    evaluateGuard(transition.conditions_json ? safeJson(transition.conditions_json) : {}, context, "Transition condition");
+    evaluateGuard(toState.entry_conditions_json ? safeJson(toState.entry_conditions_json) : {}, context, "State entry condition");
+
+    const bypass = transition.auto_approve === 1 && (await tenants.isPlatformAdminAsync(db, actor?.id));
+    if (transition.requires_approval && !bypass) {
+      const release = await approvals.requestReleaseAsync(db, row, transition, state, toState, body || {}, actor, tenantId, ip);
+      return { gated: true, object: publicObject(await getObjectRowAsync(db, row.id)), release };
+    }
+    const next = await applyTransitionAsync(db, row, transition, toState, actor, tenantId, ip, {
+      source: "manual",
+      reason: body?.reason || "",
+      comments: body?.comments || "",
+    });
+    return {
+      gated: false,
+      object: publicObject(next),
+      state: publicState(toState),
+      transition: publicTransition(transition),
+    };
+  });
+}
+
+export async function statusHistoryAsync(db, reference, tenantId, query = {}) {
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  const { page, pageSize, offset } = pagination(query);
+  const total = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM object_status_history WHERE object_id = ?", [row.id])).c;
+  const items = await queryAllAsync(
+    db,
+    `SELECT h.*, u.username AS actor_username, fs.code AS from_state_code, ts.code AS to_state_code,
+            fst.code AS from_status_code, tst.code AS to_status_code, lt.code AS transition_code
+       FROM object_status_history h
+       LEFT JOIN users u ON u.id = h.actor_id
+       LEFT JOIN lifecycle_states fs ON fs.id = h.from_state_id
+       LEFT JOIN lifecycle_states ts ON ts.id = h.to_state_id
+       LEFT JOIN lifecycle_statuses fst ON fst.id = h.from_status_id
+       LEFT JOIN lifecycle_statuses tst ON tst.id = h.to_status_id
+       LEFT JOIN lifecycle_transitions lt ON lt.id = h.transition_id
+      WHERE h.object_id = ?
+      ORDER BY h.id DESC LIMIT ? OFFSET ?`,
+    [row.id, pageSize, offset]
+  );
+  return { items, total, page, pageSize };
+}
+
+export async function requestObjectReleaseAsync(db, reference, body, actor, tenantId, ip) {
+  return transactionAsync(db, async () => {
+    const row = await findObjectRowAsync(db, reference, tenantId);
+    if (row.deleted_at) throw new HttpError(409, "Cannot release a deleted object");
+    if (!row.lifecycle_version_id || !row.lifecycle_state_id) {
+      throw new HttpError(409, "Object has no lifecycle assigned");
+    }
+    const version = await getVersionRowAsync(db, row.lifecycle_version_id);
+    const state = await getStateRowAsync(db, row.lifecycle_state_id);
+    if (!version || !state) throw new HttpError(409, "Object lifecycle configuration is unavailable");
+    const ref = body?.transition ?? body?.transition_id ?? body?.transitionId ?? body?.transition_code ?? body?.transitionCode;
+    let transition;
+    if (ref !== undefined && ref !== null && ref !== "") {
+      transition = await resolveTransitionAsync(db, version.id, body);
+      if (Number(transition.from_state_id) !== Number(state.id)) {
+        throw new HttpError(409, "Transition does not start at the object's current state");
+      }
+    } else {
+      const candidates = (await transitionsFromAsync(db, version.id, state.id)).filter((t) => t.requires_approval);
+      transition =
+        candidates.length === 1
+          ? await queryOneAsync(db, "SELECT * FROM lifecycle_transitions WHERE id = ?", [candidates[0].id])
+          : null;
+    }
+    if (!transition) throw new HttpError(400, "transition is required (no single approval transition available)");
+    if (transition.requires_approval !== 1) {
+      throw new HttpError(409, "Transition does not require approval; use POST /objects/:id/transitions instead");
+    }
+    await assertNotLockedAsync(db, row, actor);
+    const toState = await getStateRowAsync(db, transition.to_state_id);
+    const organizationId = body?.organization_id ?? body?.organizationId ?? row.organization_id ?? 0;
+    await assertTransitionPermissionAsync(db, transition, state, actor, tenantId, organizationId);
+    return approvals.requestReleaseAsync(db, row, transition, state, toState, body || {}, actor, tenantId, ip);
+  });
+}
+
+export function objectReleasesAsync(db, reference, tenantId, query = {}) {
+  return approvals.listReleasesAsync(db, reference, tenantId, query);
+}
+
+export { recordStatusHistoryAsync };

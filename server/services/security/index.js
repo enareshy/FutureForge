@@ -2,12 +2,13 @@
 // modules import from here and never reimplement authorization.
 import { HttpError } from "../../validation.js";
 import { writeAudit } from "../audit.js";
-import { emitDomainEvent } from "../events/emit.js";
+import { emitDomainEvent, emitDomainEventAsync } from "../events/emit.js";
 import { DECISION_REASONS } from "./constants.js";
-import { buildSecurityContext, publicSecurityContext } from "./context.js";
-import { authorize as evaluate, evaluateFields, maskDocument as applyMaskDocument } from "./engine.js";
+import { buildSecurityContext, buildSecurityContextAsync, publicSecurityContext } from "./context.js";
+import { authorize as evaluate, evaluateFields, evaluateFieldsAsync, maskDocument as applyMaskDocument } from "./engine.js";
 import {
   bumpEpoch,
+  bumpEpochAsync,
   recordDecision,
 } from "./repository.js";
 import {
@@ -28,7 +29,9 @@ export {
   authorize as evaluateAuthorization,
   buildEvaluationContext,
   effectiveEnforcement,
+  effectiveEnforcementAsync,
   evaluateFields,
+  evaluateFieldsAsync,
   maskDocument,
 } from "./engine.js";
 export { decisionCacheSize, clearDecisionCache } from "./cache.js";
@@ -161,6 +164,34 @@ export function maskDocumentsByType(db, actor, documents, { action = "read", opt
   });
 }
 
+export async function maskDocumentsByTypeAsync(db, actor, documents, { action = "read", options = {} } = {}) {
+  if (!Array.isArray(documents) || !documents.length) return documents;
+  const context =
+    options.context ||
+    (await buildSecurityContextAsync(db, actor, {
+      tenantId: options.tenantId,
+      organizationId: options.organizationId,
+      correlationId: options.correlationId,
+      ip: options.ip,
+    }));
+  const decisions = new Map();
+  const output = [];
+  for (const document of documents) {
+    const objectType = document.object_type || document.objectType;
+    if (!objectType) {
+      output.push(document);
+      continue;
+    }
+    if (!decisions.has(objectType)) {
+      const evaluated = await evaluateFieldsAsync(db, context, objectType, action, {}, options);
+      decisions.set(objectType, evaluated.fields);
+    }
+    const fieldDecisions = decisions.get(objectType);
+    output.push(fieldDecisions.length ? applyMaskDocument(document, fieldDecisions, options) : document);
+  }
+  return output;
+}
+
 function auditDenied(db, { context, decision, resource, action, options }) {
   try {
     writeAudit(db, {
@@ -206,6 +237,23 @@ export function invalidateSecurity(db, tenantId, scope = "all") {
   clearDecisionCache();
   try {
     emitDomainEvent(db, {
+      event_type_code: "SecurityPolicyChanged",
+      aggregate_type: "security",
+      aggregate_id: `${scope}`,
+      tenant_id: Number(tenantId),
+      payload: { scope, epoch },
+    });
+  } catch {
+    /* events are best effort */
+  }
+  return { tenantId: Number(tenantId), scope, epoch };
+}
+
+export async function invalidateSecurityAsync(db, tenantId, scope = "all") {
+  const epoch = await bumpEpochAsync(db, tenantId, scope);
+  clearDecisionCache();
+  try {
+    await emitDomainEventAsync(db, {
       event_type_code: "SecurityPolicyChanged",
       aggregate_type: "security",
       aggregate_id: `${scope}`,

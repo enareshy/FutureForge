@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso, randomUuid } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { homeTenantId } from "../tenants.js";
 import { safeParse, assertChannel, assertPriority } from "./validation.js";
 
@@ -201,6 +202,103 @@ export function getRequestRow(db, id, tenantId = null) {
   return row;
 }
 
+async function getRequestRowAsync(db, id, tenantId = null) {
+  const row = await queryOneAsync(db, "SELECT * FROM delivery_requests WHERE id = ? OR request_ref = ?", [Number(id) || -1, String(id)]);
+  if (!row) throw new HttpError(404, "Delivery request not found");
+  if (tenantId && Number(row.tenant_id) !== Number(tenantId)) throw new HttpError(404, "Delivery request not found");
+  return row;
+}
+
+export async function getRequestAsync(db, id, tenantId = null) {
+  return publicRequest(await getRequestRowAsync(db, id, tenantId));
+}
+
+export async function listRequestsAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  const scopedTenant = tenantId ?? (query.tenantId !== undefined && query.tenantId !== "" ? Number(query.tenantId) : null);
+  if (scopedTenant) {
+    where.push("COALESCE(tenant_id, 0) = ?");
+    params.push(Number(scopedTenant));
+  }
+  if (query.status) {
+    where.push("status = ?");
+    params.push(query.status);
+  }
+  if (query.channel) {
+    where.push("channel = ?");
+    params.push(query.channel);
+  }
+  if (query.provider || query.provider_code || query.providerCode) {
+    where.push("provider_code = ?");
+    params.push(query.provider || query.provider_code || query.providerCode);
+  }
+  if (query.module || query.source_module || query.sourceModule) {
+    where.push("source_module = ?");
+    params.push(query.module || query.source_module || query.sourceModule);
+  }
+  if (query.notificationId || query.notification_id) {
+    where.push("notification_id = ?");
+    params.push(Number(query.notificationId || query.notification_id));
+  }
+  if (query.eventId || query.event_id) {
+    where.push("event_id = ?");
+    params.push(Number(query.eventId || query.event_id));
+  }
+  if (query.recipientId || query.recipient_id) {
+    where.push("recipient_id = ?");
+    params.push(Number(query.recipientId || query.recipient_id));
+  }
+  if (query.status === "dead_lettered" || query.deadLetter === "true" || query.dead_letter === "true") {
+    where.push("dead_letter = 1");
+  }
+  if (query.from || query.dateFrom) {
+    where.push("created_at >= ?");
+    params.push(String(query.from || query.dateFrom));
+  }
+  if (query.to || query.dateTo) {
+    where.push("created_at <= ?");
+    params.push(String(query.to || query.dateTo));
+  }
+  if (query.q) {
+    const like = `%${query.q}%`;
+    where.push("(subject ILIKE ? OR recipient_address ILIKE ? OR recipient_name ILIKE ? OR error_message ILIKE ? OR request_ref ILIKE ? OR object_name ILIKE ?)");
+    params.push(like, like, like, like, like, like);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const [countRow, rows] = await Promise.all([
+    queryOneAsync(db, `SELECT COUNT(*) AS c FROM delivery_requests ${clause}`, params),
+    queryAllAsync(
+      db,
+      `SELECT * FROM delivery_requests ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    ),
+  ]);
+  return { items: rows.map(publicRequest), total: countRow.c, page, pageSize };
+}
+
+export async function listAttemptsAsync(db, requestId) {
+  return (
+    await queryAllAsync(db, "SELECT * FROM delivery_attempts WHERE request_id = ? ORDER BY attempt, id", [Number(requestId)])
+  ).map((row) => ({
+    id: row.id,
+    request_id: row.request_id,
+    attempt: row.attempt,
+    provider_id: row.provider_id ?? null,
+    provider_code: row.provider_code || "",
+    channel: row.channel || "",
+    status: row.status,
+    error_code: row.error_code || "",
+    error_message: row.error_message || "",
+    response: safeParse(row.response_json, {}),
+    duration_ms: row.duration_ms ?? null,
+    started_at: row.started_at || null,
+    finished_at: row.finished_at || null,
+    created_at: row.created_at,
+  }));
+}
+
 export function listRequests(db, query = {}, tenantId = null) {
   const { page, pageSize, offset } = pagination(query);
   const where = [];
@@ -361,4 +459,147 @@ export function ingestNotification(db, notification, { delaySeconds = 0, provide
     },
     { actor, ip }
   );
+}
+
+// --- Async write twins -----------------------------------------------------
+// Statement-for-statement mirrors of the synchronous request writers. Same
+// idempotency and lifecycle semantics, with awaited queries and async audit
+// capture.
+
+export async function ingestNotificationAsync(db, notification, { delaySeconds = 0, providerCode = null, actor = null, ip = null } = {}) {
+  if (!notification || !notification.id) throw new HttpError(400, "notification is required");
+  return submitRequestAsync(
+    db,
+    {
+      tenant_id: notification.tenant_id ?? notification.tenantId ?? null,
+      organization_id: notification.organization_id ?? notification.organizationId ?? null,
+      notification_id: notification.id,
+      event_id: notification.event_id ?? notification.eventId ?? null,
+      source_module: notification.source_module ?? notification.sourceModule ?? "notifications",
+      recipient_id: notification.recipient_id ?? notification.recipientId ?? null,
+      recipient_name: notification.recipient_name ?? notification.recipientName ?? "",
+      recipient_address: notification.recipient_address ?? notification.recipientAddress ?? "",
+      channel: notification.channel,
+      provider_code: providerCode || "",
+      subject: notification.subject ?? "",
+      body: notification.body ?? "",
+      content_ref: notification.content_ref ?? notification.contentRef ?? "",
+      priority: notification.priority || "normal",
+      delay_seconds: delaySeconds,
+      correlation_id: notification.correlation_id ?? notification.correlationId ?? "",
+      idempotency_key: `notification:${notification.id}`,
+      object_type: notification.object_type ?? "",
+      object_id: notification.object_id ?? "",
+      object_name: notification.object_name ?? "",
+      deep_link: notification.deep_link ?? "",
+      related: { notification_id: notification.id, handoff: true },
+    },
+    { actor, ip }
+  );
+}
+
+async function insertRequestAsync(db, fields) {
+  const columns = Object.keys(fields);
+  const placeholders = columns.map(() => "?").join(", ");
+  const result = await runAsync(
+    db,
+    `INSERT INTO delivery_requests (${columns.join(", ")}) VALUES (${placeholders})`,
+    columns.map((column) => fields[column])
+  );
+  return result.lastInsertId;
+}
+
+export async function submitRequestAsync(db, input = {}, { actor = null, ip = null } = {}) {
+  const normalized = normalizeInput(input, actor);
+  assertRequestInput(normalized);
+  if (normalized.idempotency_key) {
+    const existing = await queryOneAsync(db, "SELECT * FROM delivery_requests WHERE idempotency_key = ?", [
+      normalized.idempotency_key,
+    ]);
+    if (existing) return { ...publicRequest(existing), duplicate: true };
+  }
+  const ts = nowIso();
+  const scheduledAt = normalized.scheduled_at
+    || (normalized.delay_seconds > 0
+      ? new Date(Date.now() + normalized.delay_seconds * 1000).toISOString().replace("T", " ").slice(0, 19)
+      : ts);
+  const maxAttempts = Math.max(1, Math.min(50, Number(normalized.max_attempts) || 5));
+  const id = await insertRequestAsync(db, {
+    request_ref: randomUuid(),
+    tenant_id: normalized.tenant_id,
+    organization_id: normalized.organization_id,
+    plant_id: normalized.plant_id,
+    site_id: normalized.site_id,
+    department_id: normalized.department_id,
+    notification_id: normalized.notification_id,
+    event_id: normalized.event_id,
+    source_module: normalized.source_module,
+    recipient_id: normalized.recipient_id,
+    recipient_name: normalized.recipient_name,
+    recipient_address: normalized.recipient_address,
+    recipient_json: normalized.recipient_json,
+    channel: normalized.channel,
+    provider_code: normalized.provider_code,
+    subject: normalized.subject,
+    body: normalized.body,
+    content_ref: normalized.content_ref,
+    priority: normalized.priority,
+    status: "queued",
+    attempt: 0,
+    max_attempts: maxAttempts,
+    scheduled_at: scheduledAt,
+    queued_at: ts,
+    correlation_id: normalized.correlation_id,
+    idempotency_key: normalized.idempotency_key,
+    object_type: normalized.object_type,
+    object_id: normalized.object_id,
+    object_name: normalized.object_name,
+    deep_link: normalized.deep_link,
+    related_json: normalized.related_json,
+    created_by: normalized.created_by,
+    created_at: ts,
+    updated_at: ts,
+  });
+  await writeAuditAsync(db, {
+    actor,
+    action: "delivery.request.create",
+    resourceType: "delivery_request",
+    resourceId: id,
+    details: { channel: normalized.channel, priority: normalized.priority, source_module: normalized.source_module, notification_id: normalized.notification_id },
+    ip,
+  });
+  return publicRequest(await queryOneAsync(db, "SELECT * FROM delivery_requests WHERE id = ?", [id]));
+}
+
+export async function cancelRequestAsync(db, id, { tenantId = null, actor = null, ip = null } = {}) {
+  const row = await getRequestRowAsync(db, id, tenantId);
+  if (TERMINAL.includes(row.status)) {
+    return { cancelled: false, reason: "already_terminal", request: publicRequest(row) };
+  }
+  const ts = nowIso();
+  await runAsync(
+    db,
+    "UPDATE delivery_requests SET status = 'cancelled', cancelled_at = ?, dead_letter = 0, updated_at = ? WHERE id = ?",
+    [ts, ts, row.id]
+  );
+  await writeAuditAsync(db, { actor, action: "delivery.request.cancel", resourceType: "delivery_request", resourceId: row.id, details: { channel: row.channel }, ip });
+  return { cancelled: true, request: publicRequest(await queryOneAsync(db, "SELECT * FROM delivery_requests WHERE id = ?", [row.id])) };
+}
+
+export async function retryRequestAsync(db, id, { tenantId = null, actor = null, ip = null } = {}) {
+  const row = await getRequestRowAsync(db, id, tenantId);
+  if (!["failed", "dead_lettered"].includes(row.status) && row.dead_letter !== 1) {
+    return { retried: false, reason: "not_failed", request: publicRequest(row) };
+  }
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `UPDATE delivery_requests
+        SET status = 'queued', dead_letter = 0, scheduled_at = ?, queued_at = ?, last_retry_at = ?,
+            processed_at = NULL, error_code = '', error_message = '', updated_at = ?
+      WHERE id = ?`,
+    [ts, ts, ts, ts, row.id]
+  );
+  await writeAuditAsync(db, { actor, action: "delivery.request.retry", resourceType: "delivery_request", resourceId: row.id, details: { channel: row.channel, attempt: row.attempt }, ip });
+  return { retried: true, request: publicRequest(await queryOneAsync(db, "SELECT * FROM delivery_requests WHERE id = ?", [row.id])) };
 }

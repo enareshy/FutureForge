@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { resolveRecipients } from "../notifications/recipients.js";
 import { submitRequest } from "./requests.js";
 import { scheduleEscalation, completeEscalationsForObject } from "./escalations.js";
@@ -162,6 +163,73 @@ export function getReminder(db, id, tenantId = null) {
   return reminder;
 }
 
+export async function listRemindersAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  const scoped = tenantId ?? (query.tenantId ? Number(query.tenantId) : null);
+  if (scoped) {
+    where.push("COALESCE(tenant_id, 0) = ?");
+    params.push(Number(scoped));
+  }
+  if (query.status) {
+    where.push("status = ?");
+    params.push(query.status);
+  }
+  if (query.kind) {
+    where.push("kind = ?");
+    params.push(query.kind);
+  }
+  if (query.objectType || query.object_type) {
+    where.push("object_type = ?");
+    params.push(query.objectType || query.object_type);
+  }
+  if (query.objectId || query.object_id) {
+    where.push("object_id = ?");
+    params.push(query.objectId || query.object_id);
+  }
+  if (query.module || query.source_module) {
+    where.push("source_module = ?");
+    params.push(query.module || query.source_module);
+  }
+  if (query.q) {
+    const like = `%${query.q}%`;
+    where.push("(object_name ILIKE ? OR details_json ILIKE ?)");
+    params.push(like, like);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const [countRow, rows] = await Promise.all([
+    queryOneAsync(db, `SELECT COUNT(*) AS c FROM delivery_reminders ${clause}`, params),
+    queryAllAsync(
+      db,
+      `SELECT * FROM delivery_reminders ${clause} ORDER BY (status = 'pending') DESC, due_at LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    ),
+  ]);
+  return { items: rows.map(publicReminder), total: countRow.c, page, pageSize };
+}
+
+export async function getReminderAsync(db, id, tenantId = null) {
+  const row = await queryOneAsync(db, "SELECT * FROM delivery_reminders WHERE id = ?", [Number(id)]);
+  if (!row) throw new HttpError(404, "Reminder not found");
+  if (tenantId && Number(row.tenant_id) !== Number(tenantId)) throw new HttpError(404, "Reminder not found");
+  const reminder = publicReminder(row);
+  const [runs, escalations] = await Promise.all([
+    queryAllAsync(db, "SELECT * FROM delivery_runs WHERE reminder_id = ? ORDER BY id DESC LIMIT 50", [row.id]),
+    queryAllAsync(db, "SELECT * FROM delivery_escalations WHERE reminder_id = ? ORDER BY level", [row.id]),
+  ]);
+  reminder.runs = runs;
+  reminder.escalations = escalations.map((e) => ({
+    id: e.id,
+    level: e.level,
+    max_level: e.max_level,
+    status: e.status,
+    due_at: e.due_at,
+    fired_at: e.fired_at,
+  }));
+  return reminder;
+}
+
 export function updateReminder(db, id, body = {}, { tenantId = null, actor = null, ip = null } = {}) {
   const row = queryOne(db, "SELECT * FROM delivery_reminders WHERE id = ?", [Number(id)]);
   if (!row || (tenantId && Number(row.tenant_id) !== Number(tenantId))) throw new HttpError(404, "Reminder not found");
@@ -196,6 +264,99 @@ export function cancelReminder(db, id, { tenantId = null, actor = null, ip = nul
   if (["cancelled", "completed"].includes(row.status)) return { cancelled: false, reason: "already_terminal" };
   run(db, "UPDATE delivery_reminders SET status = 'cancelled', next_run_at = NULL, updated_at = ? WHERE id = ?", [nowIso(), row.id]);
   writeAudit(db, { actor, action: "delivery.reminder.cancel", resourceType: "delivery_reminder", resourceId: row.id, details: {}, ip });
+  return { cancelled: true };
+}
+
+// --- Async write twins -----------------------------------------------------
+// Mirrors of the reminder CRUD writers. Due-reminder sweeps stay on the
+// synchronous worker path for now.
+
+async function insertReminderAsync(db, fields) {
+  const columns = Object.keys(fields);
+  const result = await runAsync(
+    db,
+    `INSERT INTO delivery_reminders (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+    columns.map((column) => fields[column])
+  );
+  return result.lastInsertId;
+}
+
+export async function scheduleReminderAsync(db, input = {}, { actor = null, ip = null } = {}) {
+  const kind = input.kind || "due";
+  assertReminderKind(kind);
+  const tenantId = input.tenant_id ?? input.tenantId ?? actor?.tenant_id ?? null;
+  const delay = Number(input.delay_minutes ?? input.delayMinutes ?? input.due_in_minutes ?? input.dueInMinutes ?? 0) || 0;
+  const dueAt = input.due_at ?? input.dueAt ?? addMinutes(nowIso(), delay);
+  const dedupeKey = input.dedupe_key ?? input.dedupeKey ?? null;
+  if (dedupeKey) {
+    const existing = await queryOneAsync(db, "SELECT * FROM delivery_reminders WHERE dedupe_key = ?", [dedupeKey]);
+    if (existing) return publicReminder(existing);
+  }
+  const id = await insertReminderAsync(db, {
+    code: input.code || null,
+    tenant_id: tenantId !== null ? Number(tenantId) : null,
+    organization_id: Number(input.organization_id ?? input.organizationId ?? 0) || null,
+    source_module: input.source_module ?? input.sourceModule ?? "platform",
+    object_type: input.object_type ?? input.objectType ?? "",
+    object_id: input.object_id ?? input.objectId ?? "",
+    object_name: input.object_name ?? input.objectName ?? "",
+    deep_link: input.deep_link ?? input.deepLink ?? "",
+    recipient_id: input.recipient_id ?? input.recipientId ?? null,
+    recipient_json: input.recipient ? JSON.stringify(input.recipient) : (input.recipient_json ?? input.recipientJson ?? "{}"),
+    kind,
+    due_at: dueAt,
+    next_run_at: dueAt,
+    repeat_minutes: Math.max(0, Number(input.repeat_minutes ?? input.repeatMinutes ?? 0) || 0),
+    max_repeats: Math.max(0, Number(input.max_repeats ?? input.maxRepeats ?? 0) || 0),
+    repeat_count: 0,
+    status: "pending",
+    stop_on_complete: input.stop_on_complete === false || input.stopOnComplete === false ? 0 : 1,
+    level: Math.max(0, Number(input.level ?? 0) || 0),
+    escalation_json: input.escalation ? JSON.stringify(input.escalation) : (input.escalation_json ?? input.escalationJson ?? "{}"),
+    details_json: input.details ? JSON.stringify(input.details) : (input.details_json ?? "{}"),
+    dedupe_key: dedupeKey,
+    created_by: actor?.id ?? null,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  });
+  await writeAuditAsync(db, { actor, action: "delivery.reminder.create", resourceType: "delivery_reminder", resourceId: id, details: { kind, due_at: dueAt, object_type: input.object_type ?? "", object_id: input.object_id ?? "" }, ip });
+  return publicReminder(await queryOneAsync(db, "SELECT * FROM delivery_reminders WHERE id = ?", [id]));
+}
+
+export async function updateReminderAsync(db, id, body = {}, { tenantId = null, actor = null, ip = null } = {}) {
+  const row = await queryOneAsync(db, "SELECT * FROM delivery_reminders WHERE id = ?", [Number(id)]);
+  if (!row || (tenantId && Number(row.tenant_id) !== Number(tenantId))) throw new HttpError(404, "Reminder not found");
+  if (body.status !== undefined) assertReminderStatus(body.status);
+  const dueAt = body.due_at ?? body.dueAt ?? row.due_at;
+  await runAsync(
+    db,
+    `UPDATE delivery_reminders
+        SET due_at = ?, next_run_at = ?, repeat_minutes = ?, max_repeats = ?, status = ?,
+            stop_on_complete = ?, deep_link = ?, details_json = ?, updated_at = ?
+      WHERE id = ?`,
+    [
+      dueAt,
+      row.status === "pending" ? dueAt : row.next_run_at,
+      body.repeat_minutes !== undefined ? Math.max(0, Number(body.repeat_minutes) || 0) : row.repeat_minutes,
+      body.max_repeats !== undefined ? Math.max(0, Number(body.max_repeats) || 0) : row.max_repeats,
+      body.status ?? row.status,
+      body.stop_on_complete === undefined ? row.stop_on_complete : body.stop_on_complete === false ? 0 : 1,
+      body.deep_link ?? body.deepLink ?? row.deep_link,
+      body.details ? JSON.stringify(body.details) : row.details_json,
+      nowIso(),
+      row.id,
+    ]
+  );
+  await writeAuditAsync(db, { actor, action: "delivery.reminder.update", resourceType: "delivery_reminder", resourceId: row.id, details: { status: body.status ?? row.status }, ip });
+  return publicReminder(await queryOneAsync(db, "SELECT * FROM delivery_reminders WHERE id = ?", [row.id]));
+}
+
+export async function cancelReminderAsync(db, id, { tenantId = null, actor = null, ip = null } = {}) {
+  const row = await queryOneAsync(db, "SELECT * FROM delivery_reminders WHERE id = ?", [Number(id)]);
+  if (!row || (tenantId && Number(row.tenant_id) !== Number(tenantId))) throw new HttpError(404, "Reminder not found");
+  if (["cancelled", "completed"].includes(row.status)) return { cancelled: false, reason: "already_terminal" };
+  await runAsync(db, "UPDATE delivery_reminders SET status = 'cancelled', next_run_at = NULL, updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  await writeAuditAsync(db, { actor, action: "delivery.reminder.cancel", resourceType: "delivery_reminder", resourceId: row.id, details: {}, ip });
   return { cancelled: true };
 }
 
@@ -359,4 +520,23 @@ export function listRuns(db, { kind = null, reminderId = null, escalationId = nu
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   return queryAll(db, `SELECT * FROM delivery_runs ${clause} ORDER BY id DESC LIMIT ?`, [...params, Math.min(500, Number(limit) || 100)]);
+}
+
+export async function listRunsAsync(db, { kind = null, reminderId = null, escalationId = null, limit = 100 } = {}) {
+  const where = [];
+  const params = [];
+  if (kind) {
+    where.push("kind = ?");
+    params.push(kind);
+  }
+  if (reminderId) {
+    where.push("reminder_id = ?");
+    params.push(Number(reminderId));
+  }
+  if (escalationId) {
+    where.push("escalation_id = ?");
+    params.push(Number(escalationId));
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  return queryAllAsync(db, `SELECT * FROM delivery_runs ${clause} ORDER BY id DESC LIMIT ?`, [...params, Math.min(500, Number(limit) || 100)]);
 }

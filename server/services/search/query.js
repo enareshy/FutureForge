@@ -2,8 +2,8 @@
 // configured provider, applies permission filtering, ranks and highlights
 // results, and records search history / audit.
 import { writeAudit } from "../audit.js";
-import { isPlatformAdmin } from "../tenants.js";
-import { descendantOrganizationIds } from "../orgs.js";
+import { isPlatformAdmin, isPlatformAdminAsync } from "../tenants.js";
+import { descendantOrganizationIds, descendantOrganizationIdsAsync } from "../orgs.js";
 import { HttpError } from "../../validation.js";
 import {
   publicIndexedDocument,
@@ -13,16 +13,22 @@ import {
   getSearchProvider,
   DEFAULT_PROVIDER,
 } from "./provider.js";
-import { filterAuthorizedDocuments, createDecisionCache } from "./authorization.js";
-import { buildSearchSecurityPredicate } from "../security/row-security.js";
-import { maskDocumentsByType } from "../security/index.js";
-import { buildSecurityContext } from "../security/context.js";
-import { listFieldRules } from "../security/repository.js";
+import {
+  filterAuthorizedDocuments,
+  filterAuthorizedDocumentsAsync,
+  createDecisionCache,
+} from "./authorization.js";
+import { buildSearchSecurityPredicate, buildSearchSecurityPredicateAsync } from "../security/row-security.js";
+import { maskDocumentsByType, maskDocumentsByTypeAsync } from "../security/index.js";
+import { buildSecurityContext, buildSecurityContextAsync } from "../security/context.js";
+import { listFieldRules, listFieldRulesAsync } from "../security/repository.js";
 import {
   searchableObjectTypeCodes,
+  searchableObjectTypeCodesAsync,
   searchableObjectTypes,
+  searchableObjectTypesAsync,
 } from "./registry.js";
-import { getConfiguration } from "./config.js";
+import { getConfiguration, getConfigurationAsync } from "./config.js";
 import {
   clampPage,
   clampPageSize,
@@ -40,10 +46,11 @@ import {
 import { computeFacetsFromDocuments } from "./canonical.js";
 import {
   applyEffectivity,
+  applyEffectivityAsync,
   rankRows,
   registerRankingStrategy,
 } from "./extensions.js";
-import { recordSearchHistory } from "./history.js";
+import { recordSearchHistory, recordSearchHistoryAsync } from "./history.js";
 
 function firstDefined(...values) {
   for (const value of values) {
@@ -343,6 +350,209 @@ export function runSearch(db, input, actor, options = {}) {
   };
 }
 
+export async function runSearchAsync(db, input, actor, options = {}) {
+  const started = Date.now();
+  const tenantId = Number(options.tenantId ?? actor?.tenant_id ?? 0);
+  const config = await getConfigurationAsync(db, tenantId);
+  const norm = normalizeSearchQuery(input, { config });
+  if (options.strategy) norm.strategy = assertStrategy(options.strategy, norm.strategy);
+  if (!config.enabled) {
+    return {
+      items: [],
+      total: 0,
+      page: norm.page,
+      page_size: norm.page_size,
+      pages: 0,
+      took_ms: 0,
+      strategy: norm.strategy,
+      scope: norm.scope,
+      query: norm.text,
+      disabled: true,
+    };
+  }
+  if (norm.text && norm.text.length < Number(config.min_query_length || 0)) {
+    throw new HttpError(400, `Search query must be at least ${config.min_query_length} characters`);
+  }
+
+  const platformAdmin = await isPlatformAdminAsync(db, actor?.id);
+  const scopeInfo = await resolveScopeAsync(db, actor, norm.scope, norm.organization_id, platformAdmin);
+  norm.scope = scopeInfo.scope;
+
+  const availableTypes = await searchableObjectTypeCodesAsync(db, tenantId);
+  const allowedTypes = norm.object_types.length
+    ? norm.object_types.filter((code) => availableTypes.includes(code))
+    : availableTypes;
+
+  const provider = getSearchProvider(options.provider || DEFAULT_PROVIDER);
+  const terms = norm.highlight_terms.length ? norm.highlight_terms : tokenize(norm.text);
+  const decisionCache = createDecisionCache();
+
+  // Centralized row level security predicate. When an object type opts into
+  // entitlement/policy enforcement (or has explicit rules) the predicate is
+  // pushed to the data layer so unauthorized rows are never fetched.
+  const securityContext = await buildSecurityContextAsync(db, actor, {
+    tenantId,
+    organizationId: norm.organization_id ?? actor?.organization_id,
+    correlationId: options.correlationId,
+    ip: options.ip,
+  });
+  const securityPredicate = allowedTypes.length
+    ? await buildSearchSecurityPredicateAsync(db, securityContext, allowedTypes, options.action || "read")
+    : { enforced: false, sql: null, params: [] };
+
+  let rows = [];
+  let providerTotal = 0;
+  if (allowedTypes.length) {
+    const searchFn = provider.searchAsync || provider.search;
+    const result = await searchFn(db, norm, {
+      allowedTypes,
+      tenantId,
+      scope: norm.scope,
+      organizationIds: scopeInfo.organizationIds,
+      maxResults: Number(config.max_results) || 500,
+      securityPredicate: securityPredicate.enforced ? securityPredicate : null,
+    });
+    rows = result.rows;
+    providerTotal = result.total;
+  }
+
+  let authorized = rows;
+  if (norm.scope !== "global" || !platformAdmin) {
+    authorized = await filterAuthorizedDocumentsAsync(db, actor, rows, {
+      tenantId,
+      action: options.action,
+      cache: decisionCache,
+      platformAdmin,
+    });
+  }
+
+  // Effectivity-aware applicability is applied after authorisation so counts,
+  // facets and highlights only ever reflect applicable + authorized objects.
+  if (norm.effectivity) {
+    authorized = await applyEffectivityAsync(db, {
+      tenantId,
+      effectivity: norm.effectivity,
+      rows: authorized,
+      objectTypes: allowedTypes,
+      actor,
+    });
+  }
+
+  if (norm.sort === "relevance" && !norm.sorts.length) {
+    authorized = rankRows(authorized, terms, { strategy: config.ranking_strategy || "text" });
+  }
+
+  const maxResults = Number(config.max_results) || 500;
+  const total = rows.length < maxResults ? authorized.length : Math.min(providerTotal, maxResults);
+  const offset = (norm.page - 1) * norm.page_size;
+  const pageRows = authorized.slice(offset, offset + norm.page_size);
+  let items = pageRows.map((row) => {
+    const doc = publicIndexedDocument(row);
+    return norm.highlight ? applyHighlights(doc, terms) : doc;
+  });
+
+  // Field level security & masking run server-side on the DTOs so protected
+  // fields never leave the platform, including through search results.
+  items = await maskDocumentsByTypeAsync(db, actor, items, {
+    action: options.action || "read",
+    options: { tenantId, context: securityContext },
+  });
+
+  let facets = null;
+  if (norm.include_facets) {
+    const blockedFields = await blockedFacetFieldsAsync(db, tenantId, allowedTypes);
+    facets = await getFacetsForQueryAsync(db, norm, authorized, {
+      allowedTypes,
+      tenantId,
+      scope: norm.scope,
+      organizationIds: scopeInfo.organizationIds,
+      requested: norm.facet_fields,
+      blockedFields,
+    });
+  }
+
+  const took = Date.now() - started;
+  if (options.recordHistory !== false && norm.text) {
+    try {
+      await recordSearchHistoryAsync(db, {
+        query: norm.text,
+        strategy: norm.strategy,
+        scope: norm.scope,
+        filters: { filters: norm.filters, condition: norm.condition, object_types: norm.object_types },
+        resultCount: total,
+        durationMs: took,
+        savedSearchId: norm.saved_search_id,
+      }, actor, tenantId);
+    } catch {
+      /* history must never fail the search */
+    }
+  }
+
+  return {
+    items,
+    total,
+    page: norm.page,
+    page_size: norm.page_size,
+    pages: Math.max(1, Math.ceil(total / norm.page_size)),
+    took_ms: took,
+    strategy: norm.strategy,
+    scope: norm.scope,
+    query: norm.text,
+    object_types: allowedTypes,
+    sort: norm.sort,
+    facets,
+  };
+}
+
+async function resolveScopeAsync(db, actor, scope, organizationId, platformAdmin) {
+  if (scope === "global" && !(platformAdmin ?? (await isPlatformAdminAsync(db, actor?.id)))) {
+    return { scope: "tenant", organizationIds: [] };
+  }
+  if (scope === "organization") {
+    const orgId = organizationId ?? actor?.organization_id ?? null;
+    if (!orgId) return { scope: "tenant", organizationIds: [] };
+    return { scope, organizationIds: await descendantOrganizationIdsAsync(db, Number(orgId)) };
+  }
+  return { scope, organizationIds: [] };
+}
+
+async function blockedFacetFieldsAsync(db, tenantId, objectTypes) {
+  const blocked = new Set();
+  for (const objectType of objectTypes) {
+    for (const rule of await listFieldRulesAsync(db, tenantId, { object_type: objectType })) {
+      if (rule.status === "active" && (rule.effect === "deny" || rule.effect === "hide")) {
+        blocked.add(rule.field_name);
+        blocked.add(String(rule.field_name).split(".").pop());
+      }
+    }
+  }
+  return blocked;
+}
+
+async function getFacetsForQueryAsync(db, norm, authorizedRows, context) {
+  const fields = await resolveFacetFieldsAsync(db, context.tenantId, context.requested, context.blockedFields);
+  return computeFacetsFromDocuments(authorizedRows, fields);
+}
+
+async function resolveFacetFieldsAsync(db, tenantId, requested, blockedFields = new Set()) {
+  const registrations = await searchableObjectTypesAsync(db, tenantId);
+  const configured = new Set();
+  for (const reg of registrations) {
+    for (const field of reg.facet_attributes || []) configured.add(field);
+    for (const field of reg.filter_attributes || []) configured.add(field);
+  }
+  const available = [
+    "object_type",
+    "status",
+    "lifecycle_state",
+    "classification",
+    "tags",
+    ...configured,
+  ].filter((field) => !blockedFields.has(field));
+  if (requested?.length) return requested.filter((field) => available.includes(field));
+  return ["object_type", "status", "classification", "tags"].filter((field) => !blockedFields.has(field));
+}
+
 function resolveFacetFields(db, tenantId, requested, blockedFields = new Set()) {
   const registrations = searchableObjectTypes(db, tenantId);
   const configured = new Set();
@@ -433,6 +643,61 @@ export function getFacets(db, input, actor, options = {}) {
   const config = getConfiguration(db, tenantId);
   const norm = normalizeSearchQuery({ ...input, include_facets: true }, { config });
   const result = runSearch(db, { ...norm, include_facets: true }, actor, {
+    ...options,
+    recordHistory: false,
+  });
+  return { facets: result.facets || [] };
+}
+
+export function searchAsync(db, input, actor, options = {}) {
+  return runSearchAsync(db, input, actor, options);
+}
+
+export function advancedSearchAsync(db, input, actor, options = {}) {
+  return runSearchAsync(db, input, actor, { ...options, strategy: "advanced" });
+}
+
+export function fullTextSearchAsync(db, input, actor, options = {}) {
+  return runSearchAsync(db, { ...input, condition: null, filters: [], ...input }, actor, {
+    ...options,
+    strategy: "full_text",
+  });
+}
+
+export function searchByTypeAsync(db, objectType, input, actor, options = {}) {
+  return runSearchAsync(db, { ...input, object_types: [objectType] }, actor, { ...options, strategy: "type" });
+}
+
+export function searchByAttributesAsync(db, attributes, input, actor, options = {}) {
+  const filters = Object.entries(attributes || {}).map(([name, value]) => {
+    const field =
+      name.startsWith(ATTRIBUTE_PREFIX) || FILTERABLE_COLUMNS.includes(name)
+        ? name
+        : `${ATTRIBUTE_PREFIX}${name}`;
+    return {
+      field,
+      operator: value === null ? "not_exists" : "eq",
+      value,
+    };
+  });
+  return runSearchAsync(db, { ...input, filters: [...(input.filters || []), ...filters] }, actor, {
+    ...options,
+    strategy: "attribute",
+  });
+}
+
+export function searchByRelationshipAsync(db, relatedTo, input, actor, options = {}) {
+  return runSearchAsync(db, { ...input, related_to: relatedTo }, actor, {
+    ...options,
+    strategy: "relationship",
+  });
+}
+
+export async function getFacetsAsync(db, input, actor, options = {}) {
+  const tenantId = Number(options.tenantId ?? actor?.tenant_id ?? 0);
+  const config = await getConfigurationAsync(db, tenantId);
+  const norm = normalizeSearchQuery({ ...input, include_facets: true }, { config });
+  const result = await runSearchAsync(db, { ...norm, include_facets: true }, actor, {
     ...options,
     recordHistory: false,
   });

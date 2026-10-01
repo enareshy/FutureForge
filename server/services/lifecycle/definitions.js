@@ -1,7 +1,17 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import {
+  readTenant,
+  writeTenant,
+  tenantClause,
+  assertReadable,
+  assertMutable,
+  readTenantAsync,
+  writeTenantAsync,
+  assertMutableAsync,
+} from "../metadata/scope.js";
 import * as metadata from "../metadata.js";
 import * as statuses from "./statuses.js";
 import {
@@ -896,3 +906,873 @@ export function transitionsFrom(db, versionId, stateId) {
 export function readDefinitionTenant(db, actor, query, reqTenantId) {
   return readTenant(db, actor, query, reqTenantId);
 }
+
+// ── Async twins (used by migrated object write routes) ──────────────────────
+
+export async function getVersionRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM lifecycle_versions WHERE id = ?", [Number(id)]);
+}
+
+export async function resolveAssignmentAsync(db, typeId, tenantId) {
+  if (!typeId) return null;
+  const scope = tenantClause("a", tenantId);
+  return queryOneAsync(
+    db,
+    `${ASSIGNMENT_SELECT} WHERE a.type_id = ? AND a.status = 'active' AND ${scope.sql}
+     ORDER BY a.tenant_id IS NULL LIMIT 1`,
+    [Number(typeId), ...scope.params]
+  );
+}
+
+export async function initialStateForVersionAsync(db, versionId) {
+  return queryOneAsync(
+    db,
+    `${STATE_SELECT} WHERE s.lifecycle_version_id = ? AND s.is_initial = 1 ORDER BY s.display_order LIMIT 1`,
+    [Number(versionId)]
+  );
+}
+
+// ── Async twins (used by migrated lifecycle definition/state/transition routes)
+
+export async function getDefinitionRowAsync(db, id) {
+  return queryOneAsync(db, `${DEFINITION_SELECT} WHERE d.id = ?`, [Number(id)]);
+}
+
+export async function findDefinitionAsync(db, idOrCode, tenantId) {
+  if (idOrCode === undefined || idOrCode === null || idOrCode === "") return null;
+  const text = String(idOrCode);
+  if (/^\d+$/.test(text)) {
+    const byId = await getDefinitionRowAsync(db, Number(text));
+    if (byId) {
+      assertReadable(byId, tenantId, "Lifecycle definition not found");
+      return byId;
+    }
+  }
+  const scope = tenantClause("d", tenantId);
+  const byCode = await queryOneAsync(
+    db,
+    `${DEFINITION_SELECT} WHERE d.code = ? AND ${scope.sql} ORDER BY d.tenant_id IS NULL LIMIT 1`,
+    [text, ...scope.params]
+  );
+  if (!byCode) throw new HttpError(404, "Lifecycle definition not found");
+  return byCode;
+}
+
+export async function getDefinitionAsync(db, idOrCode, tenantId) {
+  return publicDefinition(await findDefinitionAsync(db, idOrCode, tenantId));
+}
+
+export async function listDefinitionsAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("d", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.status) {
+    where.push("d.status = ?");
+    params.push(query.status);
+  }
+  if (query.module) {
+    where.push("d.module = ?");
+    params.push(query.module);
+  }
+  if (query.q) {
+    where.push("(d.code ILIKE ? OR d.name ILIKE ? OR d.description ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM lifecycle_definitions d ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(db, `${DEFINITION_SELECT} ${clause} ORDER BY d.code LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+  ).map(publicDefinition);
+  return { items, total, page, pageSize };
+}
+
+export async function currentVersionRowAsync(db, definitionRow) {
+  return queryOneAsync(db, "SELECT * FROM lifecycle_versions WHERE definition_id = ? AND version = ?", [
+    definitionRow.id,
+    definitionRow.current_version,
+  ]);
+}
+
+export async function publishedVersionRowAsync(db, definitionId) {
+  return queryOneAsync(
+    db,
+    "SELECT * FROM lifecycle_versions WHERE definition_id = ? AND status = 'published' ORDER BY version DESC LIMIT 1",
+    [Number(definitionId)]
+  );
+}
+
+async function createVersionRowAsync(db, definitionId, version, actor, notes = "", status = "draft") {
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO lifecycle_versions (definition_id, version, status, notes, snapshot, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, '{}', ?, ?, ?)`,
+    [definitionId, version, status, notes || "", actor?.id ?? null, ts, ts]
+  );
+  return getVersionRowAsync(db, result.lastInsertId);
+}
+
+export async function createDefinitionAsync(db, body, actor, ip, reqTenantId, query = {}) {
+  requireFields(body, ["code", "name"]);
+  validateCode(body.code, "Lifecycle code");
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO lifecycle_definitions
+        (code, name, description, module, current_version, published_version, status, tenant_id, is_system, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 1, NULL, 'draft', ?, 0, ?, ?)`,
+      [body.code, String(body.name).trim(), body.description || "", body.module || "platform", tenantId ?? null, ts, ts]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "Lifecycle code already exists in this scope");
+    }
+    throw err;
+  }
+  const version = await createVersionRowAsync(db, result.lastInsertId, 1, actor, "Initial draft");
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.definition.create",
+    resourceType: "lifecycle_definition",
+    resourceId: result.lastInsertId,
+    details: { code: body.code, version: version.version, tenant_id: tenantId ?? null },
+    ip,
+  });
+  return { definition: await getDefinitionAsync(db, result.lastInsertId, tenantId), version: publicVersion(version) };
+}
+
+export async function updateDefinitionAsync(db, id, body, actor, ip, tenantId) {
+  const row = await getDefinitionRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Lifecycle definition not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Lifecycle code");
+  const status = body.status === undefined ? row.status : assertOneOf(body.status, DEFINITION_STATUSES, "status");
+  try {
+    await runAsync(
+      db,
+      `UPDATE lifecycle_definitions SET code = ?, name = ?, description = ?, module = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        body.module ?? row.module,
+        status,
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "Lifecycle code already exists in this scope");
+    }
+    throw err;
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.definition.update",
+    resourceType: "lifecycle_definition",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return publicDefinition(await getDefinitionRowAsync(db, row.id));
+}
+
+export async function setDefinitionStatusAsync(db, id, status, actor, ip, tenantId) {
+  assertOneOf(status, DEFINITION_STATUSES, "status");
+  const row = await getDefinitionRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Lifecycle definition not found");
+  await runAsync(db, "UPDATE lifecycle_definitions SET status = ?, updated_at = ? WHERE id = ?", [status, nowIso(), row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: `lifecycle.definition.${status}`,
+    resourceType: "lifecycle_definition",
+    resourceId: row.id,
+    ip,
+  });
+  return publicDefinition(await getDefinitionRowAsync(db, row.id));
+}
+
+export async function deleteDefinitionAsync(db, id, actor, ip, tenantId) {
+  const row = await getDefinitionRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Lifecycle definition not found");
+  const assigned = (
+    await queryOneAsync(db, "SELECT COUNT(*) AS c FROM lifecycle_type_assignments WHERE lifecycle_definition_id = ?", [row.id])
+  ).c;
+  if (assigned) throw new HttpError(409, "Cannot delete a lifecycle assigned to object types");
+  const pinned = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM objects o
+         JOIN lifecycle_versions v ON v.id = o.lifecycle_version_id
+        WHERE v.definition_id = ?`,
+      [row.id]
+    )
+  ).c;
+  if (pinned) throw new HttpError(409, "Cannot delete a lifecycle pinned by existing objects");
+  await runAsync(db, "DELETE FROM lifecycle_definitions WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.definition.delete",
+    resourceType: "lifecycle_definition",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return { deleted: true, id: row.id };
+}
+
+export async function listVersionsAsync(db, definitionId, tenantId) {
+  const def = await findDefinitionAsync(db, definitionId, tenantId);
+  const items = (
+    await queryAllAsync(db, "SELECT * FROM lifecycle_versions WHERE definition_id = ? ORDER BY version DESC", [def.id])
+  ).map(publicVersion);
+  return { items, definition: publicDefinition(def) };
+}
+
+export async function createVersionAsync(db, definitionId, body, actor, ip, tenantId) {
+  const def = await findDefinitionAsync(db, definitionId, tenantId);
+  await assertMutableAsync(db, def, tenantId, actor, "Lifecycle definition not found");
+  const source = body?.from_version
+    ? await queryOneAsync(db, "SELECT * FROM lifecycle_versions WHERE definition_id = ? AND version = ?", [
+        def.id,
+        Number(body.from_version),
+      ])
+    : (await publishedVersionRowAsync(db, def.id)) || (await currentVersionRowAsync(db, def));
+  if (!source) throw new HttpError(409, "No source version to copy");
+  const nextVersion = Number(def.current_version) + 1;
+  const version = await createVersionRowAsync(db, def.id, nextVersion, actor, body?.notes || `Draft from v${source.version}`);
+  await copyVersionGraphAsync(db, source.id, version.id);
+  await runAsync(db, "UPDATE lifecycle_definitions SET current_version = ?, updated_at = ? WHERE id = ?", [
+    nextVersion,
+    nowIso(),
+    def.id,
+  ]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.version.create",
+    resourceType: "lifecycle_definition",
+    resourceId: def.id,
+    details: { version: nextVersion, from: source.version },
+    ip,
+  });
+  return { definition: publicDefinition(await getDefinitionRowAsync(db, def.id)), version: publicVersion(version) };
+}
+
+async function copyVersionGraphAsync(db, sourceVersionId, targetVersionId) {
+  const stateMap = new Map();
+  for (const state of await queryAllAsync(
+    db,
+    "SELECT * FROM lifecycle_states WHERE lifecycle_version_id = ? ORDER BY display_order, id",
+    [sourceVersionId]
+  )) {
+    const result = await runAsync(
+      db,
+      `INSERT INTO lifecycle_states
+        (lifecycle_version_id, code, name, description, status_id, category, is_initial, is_terminal,
+         display_order, editable, visible, permissions_json, entry_conditions_json, exit_conditions_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        targetVersionId,
+        state.code,
+        state.name,
+        state.description,
+        state.status_id,
+        state.category,
+        state.is_initial,
+        state.is_terminal,
+        state.display_order,
+        state.editable,
+        state.visible,
+        state.permissions_json,
+        state.entry_conditions_json,
+        state.exit_conditions_json,
+        nowIso(),
+        nowIso(),
+      ]
+    );
+    stateMap.set(state.id, result.lastInsertId);
+  }
+  for (const t of await queryAllAsync(
+    db,
+    "SELECT * FROM lifecycle_transitions WHERE lifecycle_version_id = ? ORDER BY display_order, id",
+    [sourceVersionId]
+  )) {
+    await runAsync(
+      db,
+      `INSERT INTO lifecycle_transitions
+        (lifecycle_version_id, code, name, description, from_state_id, to_state_id, required_permission,
+         required_role, requires_approval, approval_rule_id, auto_approve, conditions_json, display_order, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        targetVersionId,
+        t.code,
+        t.name,
+        t.description,
+        stateMap.get(t.from_state_id) ?? t.from_state_id,
+        stateMap.get(t.to_state_id) ?? t.to_state_id,
+        t.required_permission,
+        t.required_role,
+        t.requires_approval,
+        null,
+        t.auto_approve,
+        t.conditions_json,
+        t.display_order,
+        t.status,
+        nowIso(),
+        nowIso(),
+      ]
+    );
+  }
+  return stateMap;
+}
+
+export async function validateDefinitionVersionAsync(db, versionId) {
+  const version = await getVersionRowAsync(db, versionId);
+  if (!version) throw new HttpError(404, "Lifecycle version not found");
+  const states = await queryAllAsync(db, "SELECT * FROM lifecycle_states WHERE lifecycle_version_id = ?", [version.id]);
+  const transitions = await queryAllAsync(db, "SELECT * FROM lifecycle_transitions WHERE lifecycle_version_id = ?", [
+    version.id,
+  ]);
+  const errors = validateTransitionGraph(states, transitions);
+  return {
+    valid: errors.length === 0,
+    errors,
+    version: publicVersion(version),
+    state_count: states.length,
+    transition_count: transitions.length,
+  };
+}
+
+export async function validateDefinitionAsync(db, definitionId, tenantId, { version } = {}) {
+  const def = await findDefinitionAsync(db, definitionId, tenantId);
+  const row = version
+    ? await queryOneAsync(db, "SELECT * FROM lifecycle_versions WHERE definition_id = ? AND version = ?", [
+        def.id,
+        Number(version),
+      ])
+    : await currentVersionRowAsync(db, def);
+  if (!row) throw new HttpError(404, "Lifecycle version not found");
+  return validateDefinitionVersionAsync(db, row.id);
+}
+
+export async function publishDefinitionAsync(db, definitionId, body, actor, ip, tenantId) {
+  const def = await findDefinitionAsync(db, definitionId, tenantId);
+  await assertMutableAsync(db, def, tenantId, actor, "Lifecycle definition not found");
+  const version = body?.version
+    ? await queryOneAsync(db, "SELECT * FROM lifecycle_versions WHERE definition_id = ? AND version = ?", [
+        def.id,
+        Number(body.version),
+      ])
+    : await currentVersionRowAsync(db, def);
+  if (!version) throw new HttpError(404, "Lifecycle version not found");
+  const report = await validateDefinitionVersionAsync(db, version.id);
+  if (!report.valid) {
+    throw new HttpError(422, "Lifecycle definition is invalid", report.errors);
+  }
+  const snapshot = await buildSnapshotAsync(db, version.id);
+  await runAsync(
+    db,
+    `UPDATE lifecycle_versions SET status = 'archived', updated_at = ? WHERE definition_id = ? AND status = 'published' AND id != ?`,
+    [nowIso(), def.id, version.id]
+  );
+  await runAsync(
+    db,
+    `UPDATE lifecycle_versions SET status = 'published', snapshot = ?, notes = ?, published_at = ?, published_by = ?, updated_at = ?
+     WHERE id = ?`,
+    [JSON.stringify(snapshot), body?.notes ?? version.notes ?? "", nowIso(), actor?.id ?? null, nowIso(), version.id]
+  );
+  await runAsync(
+    db,
+    "UPDATE lifecycle_definitions SET status = 'published', published_version = ?, current_version = ?, updated_at = ? WHERE id = ?",
+    [version.version, version.version, nowIso(), def.id]
+  );
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.definition.publish",
+    resourceType: "lifecycle_definition",
+    resourceId: def.id,
+    details: { version: version.version, notes: body?.notes || "" },
+    ip,
+  });
+  return {
+    definition: publicDefinition(await getDefinitionRowAsync(db, def.id)),
+    version: publicVersion(await getVersionRowAsync(db, version.id)),
+  };
+}
+
+async function buildSnapshotAsync(db, versionId) {
+  const states = await queryAllAsync(
+    db,
+    "SELECT * FROM lifecycle_states WHERE lifecycle_version_id = ? ORDER BY display_order, id",
+    [versionId]
+  );
+  const transitions = await queryAllAsync(
+    db,
+    "SELECT * FROM lifecycle_transitions WHERE lifecycle_version_id = ? ORDER BY display_order, id",
+    [versionId]
+  );
+  return { states, transitions };
+}
+
+export async function getStateRowAsync(db, id) {
+  return queryOneAsync(db, `${STATE_SELECT} WHERE s.id = ?`, [Number(id)]);
+}
+
+async function versionContextAsync(db, versionId) {
+  const version = await getVersionRowAsync(db, versionId);
+  if (!version) throw new HttpError(404, "Lifecycle version not found");
+  const definition = await queryOneAsync(db, "SELECT * FROM lifecycle_definitions WHERE id = ?", [version.definition_id]);
+  return { version, definition };
+}
+
+async function assertDraftVersionAsync(db, versionId, tenantId, actor) {
+  const context = await versionContextAsync(db, versionId);
+  await assertMutableAsync(db, context.definition, tenantId, actor, "Lifecycle definition not found");
+  if (context.version.status !== "draft") {
+    throw new HttpError(409, "Only draft lifecycle versions can be edited; create a new version first");
+  }
+  return context;
+}
+
+export async function listStatesAsync(db, query = {}, tenantId) {
+  const versionId = Number(query.versionId || query.version_id || query.lifecycle_version_id);
+  if (!versionId) throw new HttpError(400, "versionId is required");
+  const context = await versionContextAsync(db, versionId);
+  assertReadable(context.definition, tenantId, "Lifecycle definition not found");
+  return {
+    items: (
+      await queryAllAsync(db, `${STATE_SELECT} WHERE s.lifecycle_version_id = ? ORDER BY s.display_order, s.code`, [versionId])
+    ).map(publicState),
+  };
+}
+
+async function normalizeStateStatusAsync(db, body, versionDefinition, tenantId, fallback = {}) {
+  if (body.status_id ?? body.statusId ?? body.status_code ?? body.statusCode) {
+    return statuses.findStatusAsync(
+      db,
+      body.status_id ?? body.statusId ?? body.status_code ?? body.statusCode,
+      tenantId
+    );
+  }
+  return fallback.status_id ? statuses.findStatusAsync(db, fallback.status_id, tenantId) : null;
+}
+
+export async function createStateAsync(db, body, actor, ip, tenantId) {
+  requireFields(body, ["code", "name", "lifecycle_version_id"]);
+  validateCode(body.code, "State code");
+  const context = await assertDraftVersionAsync(db, body.lifecycle_version_id, tenantId, actor);
+  const status = await normalizeStateStatusAsync(db, body, context.definition, tenantId);
+  const category = assertCategory(body.category || (status ? status.category : "draft"));
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO lifecycle_states
+        (lifecycle_version_id, code, name, description, status_id, category, is_initial, is_terminal,
+         display_order, editable, visible, permissions_json, entry_conditions_json, exit_conditions_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        context.version.id,
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        status?.id ?? null,
+        category,
+        body.is_initial || body.isInitial ? 1 : 0,
+        body.is_terminal || body.isTerminal ? 1 : 0,
+        Number(body.display_order ?? body.displayOrder ?? 0) || 0,
+        body.editable === undefined ? 1 : body.editable ? 1 : 0,
+        body.visible === undefined ? 1 : body.visible ? 1 : 0,
+        JSON.stringify(normalizePermissionList(body.permissions ?? body.permissions_json)),
+        JSON.stringify(normalizeConditions(body.entry_conditions ?? body.entryConditions, "entry_conditions")),
+        JSON.stringify(normalizeConditions(body.exit_conditions ?? body.exitConditions, "exit_conditions")),
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "State code already exists in this lifecycle version");
+    throw err;
+  }
+  if (body.is_initial || body.isInitial) {
+    await runAsync(db, "UPDATE lifecycle_states SET is_initial = 0 WHERE lifecycle_version_id = ? AND id != ?", [
+      context.version.id,
+      result.lastInsertId,
+    ]);
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.state.create",
+    resourceType: "lifecycle_state",
+    resourceId: result.lastInsertId,
+    details: { code: body.code },
+    ip,
+  });
+  return publicState(await getStateRowAsync(db, result.lastInsertId));
+}
+
+export async function updateStateAsync(db, id, body, actor, ip, tenantId) {
+  const row = await getStateRowAsync(db, id);
+  if (!row) throw new HttpError(404, "State not found");
+  const context = await assertDraftVersionAsync(db, row.lifecycle_version_id, tenantId, actor);
+  if (body.code && body.code !== row.code) validateCode(body.code, "State code");
+  const status =
+    body.status_id !== undefined || body.statusId !== undefined || body.status_code !== undefined || body.statusCode !== undefined
+      ? await normalizeStateStatusAsync(db, body, context.definition, tenantId)
+      : row.status_id
+        ? await statuses.findStatusAsync(db, row.status_id, tenantId)
+        : null;
+  const category = body.category === undefined ? row.category : assertCategory(body.category);
+  try {
+    await runAsync(
+      db,
+      `UPDATE lifecycle_states SET
+        code = ?, name = ?, description = ?, status_id = ?, category = ?, is_initial = ?, is_terminal = ?,
+        display_order = ?, editable = ?, visible = ?, permissions_json = ?, entry_conditions_json = ?,
+        exit_conditions_json = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        status?.id ?? null,
+        category,
+        body.is_initial === undefined && body.isInitial === undefined ? row.is_initial : body.is_initial || body.isInitial ? 1 : 0,
+        body.is_terminal === undefined && body.isTerminal === undefined ? row.is_terminal : body.is_terminal || body.isTerminal ? 1 : 0,
+        body.display_order === undefined && body.displayOrder === undefined ? row.display_order : Number(body.display_order ?? body.displayOrder) || 0,
+        body.editable === undefined ? row.editable : body.editable ? 1 : 0,
+        body.visible === undefined ? row.visible : body.visible ? 1 : 0,
+        body.permissions === undefined && body.permissions_json === undefined
+          ? row.permissions_json
+          : JSON.stringify(normalizePermissionList(body.permissions ?? body.permissions_json)),
+        body.entry_conditions === undefined && body.entryConditions === undefined
+          ? row.entry_conditions_json
+          : JSON.stringify(normalizeConditions(body.entry_conditions ?? body.entryConditions, "entry_conditions")),
+        body.exit_conditions === undefined && body.exitConditions === undefined
+          ? row.exit_conditions_json
+          : JSON.stringify(normalizeConditions(body.exit_conditions ?? body.exitConditions, "exit_conditions")),
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "State code already exists in this lifecycle version");
+    throw err;
+  }
+  if (body.is_initial || body.isInitial) {
+    await runAsync(db, "UPDATE lifecycle_states SET is_initial = 0 WHERE lifecycle_version_id = ? AND id != ?", [
+      row.lifecycle_version_id,
+      row.id,
+    ]);
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.state.update",
+    resourceType: "lifecycle_state",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return publicState(await getStateRowAsync(db, row.id));
+}
+
+export async function deleteStateAsync(db, id, actor, ip, tenantId) {
+  const row = await getStateRowAsync(db, id);
+  if (!row) throw new HttpError(404, "State not found");
+  await assertDraftVersionAsync(db, row.lifecycle_version_id, tenantId, actor);
+  const used = (
+    await queryOneAsync(db, "SELECT COUNT(*) AS c FROM lifecycle_transitions WHERE from_state_id = ? OR to_state_id = ?", [
+      row.id,
+      row.id,
+    ])
+  ).c;
+  if (used) throw new HttpError(409, "Cannot delete a state referenced by transitions");
+  await runAsync(db, "DELETE FROM lifecycle_states WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.state.delete",
+    resourceType: "lifecycle_state",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return { deleted: true, id: row.id };
+}
+
+export async function getTransitionRowAsync(db, id) {
+  return queryOneAsync(db, `${TRANSITION_SELECT} WHERE t.id = ?`, [Number(id)]);
+}
+
+async function resolveStateRefAsync(db, versionId, value, label) {
+  if (value === undefined || value === null || value === "") throw new HttpError(400, `${label} is required`);
+  const text = String(value);
+  const row = /^\d+$/.test(text)
+    ? await queryOneAsync(db, "SELECT * FROM lifecycle_states WHERE id = ? AND lifecycle_version_id = ?", [
+        Number(text),
+        versionId,
+      ])
+    : await queryOneAsync(db, "SELECT * FROM lifecycle_states WHERE code = ? AND lifecycle_version_id = ?", [
+        text,
+        versionId,
+      ]);
+  if (!row) throw new HttpError(400, `${label} not found in this lifecycle version`);
+  return row;
+}
+
+export async function listTransitionsAsync(db, query = {}, tenantId) {
+  const versionId = Number(query.versionId || query.version_id || query.lifecycle_version_id);
+  if (!versionId) throw new HttpError(400, "versionId is required");
+  const context = await versionContextAsync(db, versionId);
+  assertReadable(context.definition, tenantId, "Lifecycle definition not found");
+  const where = ["t.lifecycle_version_id = ?"];
+  const params = [versionId];
+  if (query.fromStateId || query.from_state_id) {
+    where.push("t.from_state_id = ?");
+    params.push(Number(query.fromStateId || query.from_state_id));
+  }
+  if (query.toStateId || query.to_state_id) {
+    where.push("t.to_state_id = ?");
+    params.push(Number(query.toStateId || query.to_state_id));
+  }
+  if (query.status) {
+    where.push("t.status = ?");
+    params.push(query.status);
+  }
+  return {
+    items: (
+      await queryAllAsync(db, `${TRANSITION_SELECT} WHERE ${where.join(" AND ")} ORDER BY t.display_order, t.code`, params)
+    ).map(publicTransition),
+  };
+}
+
+export async function createTransitionAsync(db, body, actor, ip, tenantId) {
+  requireFields(body, ["code", "name", "lifecycle_version_id", "from_state", "to_state"]);
+  validateCode(body.code, "Transition code");
+  const context = await assertDraftVersionAsync(db, body.lifecycle_version_id, tenantId, actor);
+  const from = await resolveStateRefAsync(db, context.version.id, body.from_state ?? body.from ?? body.from_state_id, "from_state");
+  const to = await resolveStateRefAsync(db, context.version.id, body.to_state ?? body.to ?? body.to_state_id, "to_state");
+  const status = assertOneOf(body.status || "active", TRANSITION_STATUSES, "status");
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO lifecycle_transitions
+        (lifecycle_version_id, code, name, description, from_state_id, to_state_id, required_permission,
+         required_role, requires_approval, approval_rule_id, auto_approve, conditions_json, display_order, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        context.version.id,
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        from.id,
+        to.id,
+        body.required_permission || body.requiredPermission || "",
+        body.required_role || body.requiredRole || "",
+        body.requires_approval || body.requiresApproval ? 1 : 0,
+        body.approval_rule_id ?? body.approvalRuleId ?? null,
+        body.auto_approve || body.autoApprove ? 1 : 0,
+        JSON.stringify(normalizeConditions(body.conditions, "conditions")),
+        Number(body.display_order ?? body.displayOrder ?? 0) || 0,
+        status,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Transition code already exists in this lifecycle version");
+    throw err;
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.transition.create",
+    resourceType: "lifecycle_transition",
+    resourceId: result.lastInsertId,
+    details: { code: body.code },
+    ip,
+  });
+  return publicTransition(await getTransitionRowAsync(db, result.lastInsertId));
+}
+
+export async function updateTransitionAsync(db, id, body, actor, ip, tenantId) {
+  const row = await getTransitionRowAsync(db, id);
+  if (!row) throw new HttpError(404, "Transition not found");
+  const context = await assertDraftVersionAsync(db, row.lifecycle_version_id, tenantId, actor);
+  if (body.code && body.code !== row.code) validateCode(body.code, "Transition code");
+  const from =
+    body.from_state === undefined && body.from === undefined && body.from_state_id === undefined
+      ? null
+      : await resolveStateRefAsync(db, context.version.id, body.from_state ?? body.from ?? body.from_state_id, "from_state");
+  const to =
+    body.to_state === undefined && body.to === undefined && body.to_state_id === undefined
+      ? null
+      : await resolveStateRefAsync(db, context.version.id, body.to_state ?? body.to ?? body.to_state_id, "to_state");
+  try {
+    await runAsync(
+      db,
+      `UPDATE lifecycle_transitions SET
+        code = ?, name = ?, description = ?, from_state_id = ?, to_state_id = ?, required_permission = ?,
+        required_role = ?, requires_approval = ?, approval_rule_id = ?, auto_approve = ?, conditions_json = ?,
+        display_order = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        from?.id ?? row.from_state_id,
+        to?.id ?? row.to_state_id,
+        body.required_permission ?? body.requiredPermission ?? row.required_permission,
+        body.required_role ?? body.requiredRole ?? row.required_role,
+        body.requires_approval === undefined && body.requiresApproval === undefined
+          ? row.requires_approval
+          : body.requires_approval || body.requiresApproval
+            ? 1
+            : 0,
+        body.approval_rule_id === undefined && body.approvalRuleId === undefined ? row.approval_rule_id : body.approval_rule_id ?? body.approvalRuleId,
+        body.auto_approve === undefined && body.autoApprove === undefined ? row.auto_approve : body.auto_approve || body.autoApprove ? 1 : 0,
+        body.conditions === undefined ? row.conditions_json : JSON.stringify(normalizeConditions(body.conditions, "conditions")),
+        body.display_order === undefined && body.displayOrder === undefined ? row.display_order : Number(body.display_order ?? body.displayOrder) || 0,
+        body.status === undefined ? row.status : assertOneOf(body.status, TRANSITION_STATUSES, "status"),
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Transition code already exists in this lifecycle version");
+    throw err;
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.transition.update",
+    resourceType: "lifecycle_transition",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return publicTransition(await getTransitionRowAsync(db, row.id));
+}
+
+export async function deleteTransitionAsync(db, id, actor, ip, tenantId) {
+  const row = await getTransitionRowAsync(db, id);
+  if (!row) throw new HttpError(404, "Transition not found");
+  await assertDraftVersionAsync(db, row.lifecycle_version_id, tenantId, actor);
+  await runAsync(db, "DELETE FROM lifecycle_transitions WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.transition.delete",
+    resourceType: "lifecycle_transition",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return { deleted: true, id: row.id };
+}
+
+export async function listAssignmentsAsync(db, query = {}, tenantId) {
+  const scope = tenantClause("a", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.typeId || query.type_id) {
+    where.push("a.type_id = ?");
+    params.push(Number(query.typeId || query.type_id));
+  }
+  if (query.lifecycleId || query.lifecycle_id || query.lifecycleDefinitionId) {
+    where.push("a.lifecycle_definition_id = ?");
+    params.push(Number(query.lifecycleId || query.lifecycle_id || query.lifecycleDefinitionId));
+  }
+  return {
+    items: (await queryAllAsync(db, `${ASSIGNMENT_SELECT} WHERE ${where.join(" AND ")} ORDER BY t.code`, params)).map(
+      publicAssignment
+    ),
+  };
+}
+
+export async function createAssignmentAsync(db, body, actor, ip, reqTenantId) {
+  requireFields(body, ["type", "lifecycle"]);
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const type = await metadata.findTypeAsync(db, body.type ?? body.type_id ?? body.typeCode, tenantId);
+  if (!type) throw new HttpError(404, "Object type not found");
+  const definition = await findDefinitionAsync(db, body.lifecycle ?? body.lifecycle_definition_id ?? body.lifecycleCode, tenantId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Lifecycle definition not found");
+  const published = await publishedVersionRowAsync(db, definition.id);
+  if (!published) throw new HttpError(409, "Lifecycle has no published version to assign");
+  const ts = nowIso();
+  const existing = await queryOneAsync(
+    db,
+    "SELECT * FROM lifecycle_type_assignments WHERE type_id = ? AND COALESCE(tenant_id, 0) = ?",
+    [type.id, tenantId ?? 0]
+  );
+  let id;
+  if (existing) {
+    await runAsync(
+      db,
+      "UPDATE lifecycle_type_assignments SET lifecycle_definition_id = ?, lifecycle_version_id = ?, is_default = ?, status = ?, updated_at = ? WHERE id = ?",
+      [definition.id, published.id, body.is_default === false || body.isDefault === false ? 0 : 1, body.status || "active", ts, existing.id]
+    );
+    id = existing.id;
+  } else {
+    const result = await runAsync(
+      db,
+      `INSERT INTO lifecycle_type_assignments
+        (type_id, lifecycle_definition_id, lifecycle_version_id, is_default, status, tenant_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [type.id, definition.id, published.id, body.is_default === false || body.isDefault === false ? 0 : 1, body.status || "active", tenantId ?? null, ts, ts]
+    );
+    id = result.lastInsertId;
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.assignment.set",
+    resourceType: "lifecycle_assignment",
+    resourceId: id,
+    details: { type: type.code, lifecycle: definition.code, version: published.version },
+    ip,
+  });
+  return publicAssignment(await queryOneAsync(db, `${ASSIGNMENT_SELECT} WHERE a.id = ?`, [id]));
+}
+
+export async function deleteAssignmentAsync(db, id, actor, ip, tenantId) {
+  const row = await queryOneAsync(db, "SELECT * FROM lifecycle_type_assignments WHERE id = ?", [Number(id)]);
+  if (!row) throw new HttpError(404, "Lifecycle assignment not found");
+  await assertMutableAsync(db, row, tenantId, actor, "Lifecycle assignment not found");
+  await runAsync(db, "DELETE FROM lifecycle_type_assignments WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.assignment.delete",
+    resourceType: "lifecycle_assignment",
+    resourceId: row.id,
+    ip,
+  });
+  return { deleted: true, id: row.id };
+}
+
+export async function stateByCodeAsync(db, versionId, code) {
+  return queryOneAsync(db, `${STATE_SELECT} WHERE s.lifecycle_version_id = ? AND s.code = ?`, [
+    Number(versionId),
+    String(code),
+  ]);
+}
+
+export async function transitionsFromAsync(db, versionId, stateId) {
+  return (
+    await queryAllAsync(
+      db,
+      `${TRANSITION_SELECT} WHERE t.lifecycle_version_id = ? AND t.from_state_id = ? AND t.status = 'active'
+       ORDER BY t.display_order, t.code`,
+      [Number(versionId), Number(stateId)]
+    )
+  ).map(publicTransition);
+}
+
+export function readDefinitionTenantAsync(db, actor, query, reqTenantId) {
+  return readTenantAsync(db, actor, query, reqTenantId);
+}
+

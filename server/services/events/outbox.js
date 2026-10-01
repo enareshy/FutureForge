@@ -5,6 +5,7 @@
 // later publishes the event and marks the row published, so a crash between
 // commit and publication can never lose an event.
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { normalizeRetryPolicy, computeBackoffSeconds, shouldRetry, addSecondsIso, toJson, safeParse, clampInt } from "./validation.js";
 import { publicOutbox } from "./repository.js";
@@ -18,6 +19,35 @@ export function enqueueOutbox(db, input = {}) {
   const ts = nowIso();
   const retry = normalizeRetryPolicy({ max_attempts: DEFAULT_MAX_ATTEMPTS, strategy: "exponential", delay_seconds: 5 });
   const result = run(
+    db,
+    `INSERT INTO event_outbox
+      (event_ref, event_type_code, event_version, payload_json, metadata_json, aggregate_type, aggregate_id,
+       correlation_id, status, attempts, max_attempts, next_retry_at, locked_by, locked_at, tenant_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, '', NULL, ?, ?, ?)`,
+    [
+      input.event_ref,
+      input.event_type_code,
+      Number(input.event_version) || 1,
+      toJson(input.payload, {}),
+      toJson(input.metadata, {}),
+      input.aggregate_type || null,
+      input.aggregate_id === undefined || input.aggregate_id === null ? null : String(input.aggregate_id),
+      input.correlation_id || null,
+      retry.max_attempts,
+      input.tenant_id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  return Number(result.lastInsertId);
+}
+
+// Async twin of `enqueueOutbox`; joins the ambient async transaction when one
+// is open, so a business write and its outbox row commit together.
+export async function enqueueOutboxAsync(db, input = {}) {
+  const ts = nowIso();
+  const retry = normalizeRetryPolicy({ max_attempts: DEFAULT_MAX_ATTEMPTS, strategy: "exponential", delay_seconds: 5 });
+  const result = await runAsync(
     db,
     `INSERT INTO event_outbox
       (event_ref, event_type_code, event_version, payload_json, metadata_json, aggregate_type, aggregate_id,

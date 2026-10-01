@@ -1,14 +1,20 @@
 // Searchable object type registry. Business modules declare which object
 // types participate in search and how they map into the index.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { publicObjectType, objectTypeRow, safeParse } from "./repository.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { publicObjectType, objectTypeRow, objectTypeRowAsync, safeParse } from "./repository.js";
 import { registerBuiltinSources } from "./sources.js";
 import { OBJECT_TYPE_STATUSES, isValidIdentifier } from "./validation.js";
-import { ensureConfiguration, getConfiguration } from "./config.js";
+import { ensureConfiguration, getConfiguration, getConfigurationAsync } from "./config.js";
 import { searchState, setRegisteredObjectTypes, setSearchEnabled } from "./state.js";
-import { seedFieldDefinitionsForType, ensureDefaultFieldDefinitions, invalidateFieldCatalog } from "./fields.js";
+import {
+  seedFieldDefinitionsForType,
+  seedFieldDefinitionsForTypeAsync,
+  ensureDefaultFieldDefinitions,
+  invalidateFieldCatalog,
+} from "./fields.js";
 
 function normalizeList(input, fallback = []) {
   if (input === undefined) return fallback;
@@ -34,15 +40,8 @@ export function getObjectType(db, code, tenantId) {
   return publicObjectType(row);
 }
 
-export function registerObjectType(db, input = {}, actor, tenantId, ip) {
-  const code = String(input.code || "").trim();
-  if (!code || !isValidIdentifier(code)) {
-    throw new HttpError(400, "A valid object type code is required");
-  }
-  const name = String(input.name ?? code).trim() || code;
-  const existing = objectTypeRow(db, code, tenantId);
-  const ts = nowIso();
-  const values = {
+function objectTypeValues(input, code, name) {
+  return {
     name,
     description: String(input.description || ""),
     source_module: String(input.source_module ?? input.sourceModule ?? ""),
@@ -80,6 +79,17 @@ export function registerObjectType(db, input = {}, actor, tenantId, ip) {
     display_order: Number(input.display_order ?? input.displayOrder ?? 100) || 100,
     status: OBJECT_TYPE_STATUSES.includes(input.status) ? input.status : "active",
   };
+}
+
+export function registerObjectType(db, input = {}, actor, tenantId, ip) {
+  const code = String(input.code || "").trim();
+  if (!code || !isValidIdentifier(code)) {
+    throw new HttpError(400, "A valid object type code is required");
+  }
+  const name = String(input.name ?? code).trim() || code;
+  const existing = objectTypeRow(db, code, tenantId);
+  const ts = nowIso();
+  const values = objectTypeValues(input, code, name);
   if (existing) {
     run(
       db,
@@ -242,6 +252,188 @@ export function deleteObjectType(db, code, actor, tenantId, ip) {
   return { deleted: true, code };
 }
 
+export async function refreshStateAsync(db) {
+  const rows = await queryAllAsync(
+    db,
+    "SELECT DISTINCT code FROM search_object_types WHERE status = 'active'"
+  );
+  setRegisteredObjectTypes(rows.map((row) => row.code));
+  setSearchEnabled(rows.length > 0);
+  searchState.initialized = true;
+  return rows.map((row) => row.code);
+}
+
+export async function registerObjectTypeAsync(db, input = {}, actor, tenantId, ip) {
+  const code = String(input.code || "").trim();
+  if (!code || !isValidIdentifier(code)) {
+    throw new HttpError(400, "A valid object type code is required");
+  }
+  const name = String(input.name ?? code).trim() || code;
+  const existing = await objectTypeRowAsync(db, code, tenantId);
+  const ts = nowIso();
+  const values = objectTypeValues(input, code, name);
+  if (existing) {
+    await runAsync(
+      db,
+      `UPDATE search_object_types SET
+         name = ?, description = ?, source_module = ?, source_table = ?, key_column = ?,
+         title_attribute = ?, subtitle_attribute = ?, summary_attribute = ?,
+         body_attributes_json = ?, facet_attributes_json = ?, filter_attributes_json = ?,
+         relationship_types_json = ?, index_name = ?, identifier_field = ?,
+         searchable_fields_json = ?, sortable_fields_json = ?, facetable_fields_json = ?,
+         display_fields_json = ?, relationship_fields_json = ?, security_policy = ?,
+         indexing_strategy = ?, permission_resource = ?, permission_action = ?,
+         sensitivity = ?, display_order = ?, status = ?, updated_at = ?
+       WHERE tenant_id = ? AND code = ?`,
+      [
+        values.name,
+        values.description,
+        values.source_module,
+        values.source_table,
+        values.key_column,
+        values.title_attribute,
+        values.subtitle_attribute,
+        values.summary_attribute,
+        JSON.stringify(values.body_attributes),
+        JSON.stringify(values.facet_attributes),
+        JSON.stringify(values.filter_attributes),
+        JSON.stringify(values.relationship_types),
+        values.index_name,
+        values.identifier_field,
+        JSON.stringify(values.searchable_fields),
+        JSON.stringify(values.sortable_fields),
+        JSON.stringify(values.facetable_fields),
+        JSON.stringify(values.display_fields),
+        JSON.stringify(values.relationship_fields),
+        values.security_policy,
+        values.indexing_strategy,
+        values.permission_resource,
+        values.permission_action,
+        values.sensitivity,
+        values.display_order,
+        values.status,
+        ts,
+        Number(tenantId),
+        code,
+      ]
+    );
+  } else {
+    await runAsync(
+      db,
+      `INSERT INTO search_object_types
+         (tenant_id, code, name, description, source_module, source_table, key_column,
+          title_attribute, subtitle_attribute, summary_attribute, body_attributes_json,
+          facet_attributes_json, filter_attributes_json, relationship_types_json,
+          index_name, identifier_field, searchable_fields_json, sortable_fields_json,
+          facetable_fields_json, display_fields_json, relationship_fields_json,
+          security_policy, indexing_strategy,
+          permission_resource, permission_action, sensitivity, display_order, status,
+          registered_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        Number(tenantId),
+        code,
+        values.name,
+        values.description,
+        values.source_module,
+        values.source_table,
+        values.key_column,
+        values.title_attribute,
+        values.subtitle_attribute,
+        values.summary_attribute,
+        JSON.stringify(values.body_attributes),
+        JSON.stringify(values.facet_attributes),
+        JSON.stringify(values.filter_attributes),
+        JSON.stringify(values.relationship_types),
+        values.index_name,
+        values.identifier_field,
+        JSON.stringify(values.searchable_fields),
+        JSON.stringify(values.sortable_fields),
+        JSON.stringify(values.facetable_fields),
+        JSON.stringify(values.display_fields),
+        JSON.stringify(values.relationship_fields),
+        values.security_policy,
+        values.indexing_strategy,
+        values.permission_resource,
+        values.permission_action,
+        values.sensitivity,
+        values.display_order,
+        values.status,
+        actor?.id ?? null,
+        ts,
+        ts,
+      ]
+    );
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: existing ? "search.object_type.update" : "search.object_type.register",
+    resourceType: "search_object_type",
+    resourceId: code,
+    details: { code, tenant_id: Number(tenantId), status: values.status },
+    ip,
+  });
+  await refreshStateAsync(db);
+  const finalized = await getObjectTypeAsync(db, code, tenantId);
+  await seedFieldDefinitionsForTypeAsync(db, tenantId, finalized);
+  return finalized;
+}
+
+export async function updateObjectTypeAsync(db, code, patch = {}, actor, tenantId, ip) {
+  const existing = await objectTypeRowAsync(db, code, tenantId);
+  if (!existing) throw new HttpError(404, "Search object type not found");
+  return registerObjectTypeAsync(db, { ...publicObjectType(existing), ...patch, code }, actor, tenantId, ip);
+}
+
+export async function setObjectTypeStatusAsync(db, code, status, actor, tenantId, ip) {
+  if (!OBJECT_TYPE_STATUSES.includes(status)) {
+    throw new HttpError(400, `status must be one of ${OBJECT_TYPE_STATUSES.join(", ")}`);
+  }
+  const existing = await objectTypeRowAsync(db, code, tenantId);
+  if (!existing) throw new HttpError(404, "Search object type not found");
+  await runAsync(db, "UPDATE search_object_types SET status = ?, updated_at = ? WHERE tenant_id = ? AND code = ?", [
+    status,
+    nowIso(),
+    Number(tenantId),
+    code,
+  ]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "search.object_type.status",
+    resourceType: "search_object_type",
+    resourceId: code,
+    details: { status },
+    ip,
+  });
+  await refreshStateAsync(db);
+  return getObjectTypeAsync(db, code, tenantId);
+}
+
+export async function deleteObjectTypeAsync(db, code, actor, tenantId, ip) {
+  const existing = await objectTypeRowAsync(db, code, tenantId);
+  if (!existing) throw new HttpError(404, "Search object type not found");
+  await runAsync(db, "DELETE FROM search_object_types WHERE tenant_id = ? AND code = ?", [Number(tenantId), code]);
+  await runAsync(db, "DELETE FROM search_index WHERE tenant_id = ? AND object_type = ?", [Number(tenantId), code]);
+  await runAsync(db, "DELETE FROM search_relationships WHERE tenant_id = ? AND (source_type = ? OR target_type = ?)", [
+    Number(tenantId),
+    code,
+    code,
+  ]);
+  await runAsync(db, "DELETE FROM search_index_status WHERE tenant_id = ? AND object_type = ?", [Number(tenantId), code]);
+  await runAsync(db, "DELETE FROM search_field_definitions WHERE tenant_id = ? AND object_type = ?", [Number(tenantId), code]);
+  invalidateFieldCatalog(tenantId);
+  await writeAuditAsync(db, {
+    actor,
+    action: "search.object_type.delete",
+    resourceType: "search_object_type",
+    resourceId: code,
+    details: { tenant_id: Number(tenantId) },
+    ip,
+  });
+  await refreshStateAsync(db);
+  return { deleted: true, code };
+}
+
 export function tenantIds(db) {
   const rows = queryAll(
     db,
@@ -328,3 +520,32 @@ export function searchableObjectTypeCodes(db, tenantId) {
 }
 
 export { DEFAULT_REGISTRATIONS };
+
+// ── Async twins (registry reads) ────────────────────────────────────────────
+
+export async function listObjectTypesAsync(db, { tenantId, includeDisabled = false } = {}) {
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM search_object_types
+     WHERE tenant_id = ? ${includeDisabled ? "" : "AND status = 'active'"}
+     ORDER BY display_order, code`,
+    [Number(tenantId)]
+  );
+  return rows.map(publicObjectType);
+}
+
+export async function getObjectTypeAsync(db, code, tenantId) {
+  const row = await objectTypeRowAsync(db, code, tenantId);
+  if (!row) throw new HttpError(404, "Search object type not found");
+  return publicObjectType(row);
+}
+
+export async function searchableObjectTypesAsync(db, tenantId) {
+  const config = await getConfigurationAsync(db, tenantId);
+  const excluded = new Set((config.excluded_types || []).map((code) => String(code)));
+  return (await listObjectTypesAsync(db, { tenantId })).filter((type) => !excluded.has(type.code));
+}
+
+export async function searchableObjectTypeCodesAsync(db, tenantId) {
+  return (await searchableObjectTypesAsync(db, tenantId)).map((type) => type.code);
+}

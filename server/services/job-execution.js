@@ -41,15 +41,25 @@ export {
 
 export {
   ensureDefaultQueues,
+  ensureDefaultQueuesAsync,
   listQueues,
+  listQueuesAsync,
   getQueue,
+  getQueueAsync,
   getQueueRow,
+  getQueueRowAsync,
   createQueue,
+  createQueueAsync,
   updateQueue,
+  updateQueueAsync,
   setQueueEnabled,
+  setQueueEnabledAsync,
   setQueuePaused,
+  setQueuePausedAsync,
   queueHealth,
+  queueHealthAsync,
   queueLoad,
+  queueLoadAsync,
   orderQueuesForClaim,
   resolveQueuePolicy,
   publicQueue,
@@ -58,14 +68,23 @@ export {
 export {
   publicSchedule,
   listSchedules,
+  listSchedulesAsync,
   getSchedule,
+  getScheduleAsync,
   getScheduleRow,
+  getScheduleRowAsync,
   createSchedule,
+  createScheduleAsync,
   updateSchedule,
+  updateScheduleAsync,
   setScheduleStatus,
+  setScheduleStatusAsync,
   setScheduleEnabled,
+  setScheduleEnabledAsync,
   runScheduleNow,
+  runScheduleNowAsync,
   listScheduleRuns,
+  listScheduleRunsAsync,
   sweepSchedules,
   reconcileScheduleRuns,
 } from "./job-execution/schedules.js";
@@ -129,4 +148,4 @@ export { requestSignal, clearSignal, getSignal, isCancelled } from "./job-execut
 
 export { registerDemoHandlers } from "./job-execution/demo-handlers.js";
 
-export { recordEngineAudit, listEngineAudit } from "./job-execution/audit.js";
+export { recordEngineAudit, recordEngineAuditAsync, listEngineAudit, listEngineAuditAsync } from "./job-execution/audit.js";

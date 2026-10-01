@@ -1,13 +1,14 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { assertReadable } from "../metadata/scope.js";
 import { APPROVAL_DECISIONS, safeParse } from "./validation.js";
-import { recordEvent } from "./events.js";
-import { usersForAssignee } from "./routing.js";
-import { stepsFor } from "../lifecycle/approvals.js";
-import { dispatch } from "./notifications.js";
-import { advance } from "./engine.js";
+import { recordEvent, recordEventAsync } from "./events.js";
+import { usersForAssignee, usersForAssigneeAsync } from "./routing.js";
+import { stepsFor, stepsForAsync } from "../lifecycle/approvals.js";
+import { dispatch, dispatchAsync } from "./notifications.js";
+import { advance, advanceAsync } from "./engine.js";
 
 // Approval nodes. Approver definitions are the same lifecycle `approval_rules`
 // and `approval_rule_steps` used by release approval, so there is a single
@@ -335,4 +336,290 @@ function rejectPathForNode(db, nodeId) {
     "SELECT id FROM workflow_transitions WHERE from_node_id = ? AND transition_key = ?",
     [Number(nodeId), String(config.reject_transition_key)]
   );
+}
+
+// ── Async twins (read-only) ─────────────────────────────────────────────────
+
+export async function getApprovalRowAsync(db, id) {
+  return queryOneAsync(db, `${APPROVAL_SELECT} WHERE a.id = ?`, [Number(id)]);
+}
+
+export async function getRuleRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM approval_rules WHERE id = ?", [Number(id)]);
+}
+
+export async function listApprovalsAsync(db, query = {}, tenantId, actor, { scope = "mine" } = {}) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = ["a.tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (scope === "mine" && actor) {
+    where.push(
+      `(a.approver_id = ? OR a.approver_id IN (
+          SELECT from_user_id FROM workflow_delegations
+           WHERE to_user_id = ? AND status = 'active'
+             AND (starts_at IS NULL OR starts_at <= to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))
+             AND (ends_at IS NULL OR ends_at >= to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))))`
+    );
+    params.push(actor.id, actor.id);
+  }
+  if (query.status) {
+    where.push("a.status = ?");
+    params.push(query.status);
+  } else if (scope === "mine") {
+    where.push("a.status = 'pending'");
+  }
+  if (query.instanceId || query.instance_id) {
+    where.push("a.instance_id = ?");
+    params.push(Number(query.instanceId || query.instance_id));
+  }
+  if (query.nodeKey || query.node_key) {
+    where.push("a.node_key = ?");
+    params.push(String(query.nodeKey || query.node_key));
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM workflow_approvals a ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(db, `${APPROVAL_SELECT} ${clause} ORDER BY a.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+  ).map(publicApproval);
+  return { items, total, page, pageSize, scope };
+}
+
+export async function getApprovalAsync(db, id, tenantId, actor) {
+  const row = await getApprovalRowAsync(db, id);
+  assertReadable(row, tenantId, "Approval not found");
+  const approval = publicApproval(row);
+  const instance = await queryOneAsync(db, "SELECT * FROM workflow_instances WHERE id = ?", [row.instance_id]);
+  if (instance) {
+    approval.instance = {
+      id: instance.id,
+      code: instance.code,
+      title: instance.title,
+      status: instance.status,
+      definition_id: instance.definition_id,
+      version_id: instance.version_id,
+      object_id: instance.object_id ?? null,
+    };
+  }
+  approval.step = row.step_id ? await queryOneAsync(db, "SELECT * FROM approval_rule_steps WHERE id = ?", [row.step_id]) : null;
+  approval.rule = row.approval_rule_id ? await getRuleRowAsync(db, row.approval_rule_id) : null;
+  return approval;
+}
+
+// ── Async twins (runtime writers) ───────────────────────────────────────────
+
+export async function resolveApprovalRuleAsync(db, { ruleId, ruleCode }, tenantId) {
+  if (ruleId) {
+    const row = await getRuleRowAsync(db, ruleId);
+    if (row) return row;
+  }
+  if (ruleCode) {
+    return queryOneAsync(
+      db,
+      `SELECT * FROM approval_rules WHERE code = ? AND status = 'active' AND (tenant_id IS NULL OR tenant_id = ?) ORDER BY tenant_id IS NULL LIMIT 1`,
+      [String(ruleCode), Number(tenantId ?? 0)]
+    );
+  }
+  return null;
+}
+
+export async function createApprovalsForNodeAsync(db, { instance, instanceNode, node, actor = null }) {
+  const config = safeParse(node.config_json, {});
+  const rule = await resolveApprovalRuleAsync(db, { ruleId: config.approval_rule_id, ruleCode: config.approval_rule_code }, instance.tenant_id);
+  if (!rule) {
+    return { rule: null, approvals: [], auto: true };
+  }
+  const steps = await stepsForAsync(db, rule.id);
+  if (!steps.length) {
+    return { rule, approvals: [], auto: true };
+  }
+  const ts = nowIso();
+  const created = [];
+  for (const step of steps) {
+    const approvers = await usersForAssigneeAsync(
+      db,
+      { assignee_type: step.approver_type, assignee_id: step.approver_id },
+      instance.tenant_id,
+      instance.organization_id || 0
+    );
+    if (!approvers.length) {
+      throw new HttpError(409, `No eligible approvers resolved for approval step ${step.code}`);
+    }
+    for (const approver of approvers) {
+      const result = await runAsync(
+        db,
+        `INSERT INTO workflow_approvals
+          (instance_id, task_id, node_id, node_key, approval_rule_id, step_id, step_code, sequence, parallel,
+           approver_type, approver_id, status, tenant_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+        [
+          instance.id,
+          null,
+          node.id,
+          node.node_key,
+          rule.id,
+          step.id,
+          step.code,
+          step.sequence,
+          step.parallel ? 1 : 0,
+          step.approver_type,
+          approver.id,
+          instance.tenant_id,
+          ts,
+          ts,
+        ]
+      );
+      const row = await queryOneAsync(db, `${APPROVAL_SELECT} WHERE a.id = ?`, [result.lastInsertId]);
+      created.push(row);
+      await dispatchAsync(db, {
+        instance,
+        channel: "in_app",
+        recipientType: "user",
+        recipientId: approver.id,
+        recipientRef: approver.username || "",
+        subject: `Approval requested: ${instance.title}`,
+        body: `A workflow approval step "${step.name}" needs your decision.`,
+        payload: { approval_id: row.id, instance_id: instance.id, step: step.code },
+        tenantId: instance.tenant_id,
+      });
+    }
+  }
+  await recordEventAsync(db, {
+    instanceId: instance.id,
+    nodeKey: node.node_key,
+    eventType: "approval.requested",
+    actorId: actor?.id ?? null,
+    message: `Approval requested for ${rule.code}`,
+    details: { rule_id: rule.id, approvals: created.length },
+    tenantId: instance.tenant_id,
+  });
+  return { rule, approvals: created, auto: false };
+}
+
+async function evaluateCompletionAsync(db, rule, instanceNodeId, instanceId, nodeId) {
+  if (!rule) return true;
+  const steps = await stepsForAsync(db, rule.id);
+  for (const step of steps) {
+    const rows = await queryAllAsync(
+      db,
+      "SELECT status FROM workflow_approvals WHERE instance_id = ? AND node_id = ? AND step_code = ?",
+      [instanceId, nodeId, step.code]
+    );
+    if (!rows.length) continue;
+    const approved = rows.filter((r) => r.status === "approved").length;
+    if (step.approval_mode === "any") {
+      if (approved < 1) return false;
+    } else if (step.approval_mode === "min") {
+      if (approved < Math.max(1, step.min_approvals)) return false;
+    } else if (!rows.every((r) => r.status === "approved")) {
+      return false;
+    }
+  }
+  const total = (
+    await queryOneAsync(
+      db,
+      "SELECT COUNT(*) AS c FROM workflow_approvals WHERE instance_id = ? AND node_id = ? AND status = 'approved'",
+      [instanceId, nodeId]
+    )
+  ).c;
+  return total >= Math.max(1, Number(rule.min_approvals) || 1);
+}
+
+async function assertStepOpenAsync(db, rule, instanceId, nodeId, approval) {
+  if (rule?.sequential !== 1) return;
+  const steps = await stepsForAsync(db, rule.id);
+  for (const step of steps) {
+    if (step.sequence === approval.sequence) return;
+    const rows = await queryAllAsync(db, "SELECT status FROM workflow_approvals WHERE instance_id = ? AND node_id = ? AND step_code = ?", [
+      instanceId,
+      nodeId,
+      step.code,
+    ]);
+    if (!rows.length) continue;
+    const approved = rows.filter((r) => r.status === "approved").length;
+    const satisfied =
+      step.approval_mode === "any" ? approved >= 1 : step.approval_mode === "min" ? approved >= Math.max(1, step.min_approvals) : rows.every((r) => r.status === "approved");
+    if (!satisfied) throw new HttpError(409, "A previous approval step is still pending", { blocked_by: step.code });
+  }
+}
+
+async function rejectPathForNodeAsync(db, nodeId) {
+  if (!nodeId) return null;
+  const node = await queryOneAsync(db, "SELECT config_json FROM workflow_nodes WHERE id = ?", [Number(nodeId)]);
+  const config = safeParse(node?.config_json, {});
+  if (!config.reject_transition_key) return null;
+  return queryOneAsync(
+    db,
+    "SELECT id FROM workflow_transitions WHERE from_node_id = ? AND transition_key = ?",
+    [Number(nodeId), String(config.reject_transition_key)]
+  );
+}
+
+export async function decideApprovalAsync(db, id, body = {}, actor = null, tenantId = null, ip = null) {
+  const approval = await getApprovalRowAsync(db, id);
+  assertReadable(approval, tenantId, "Approval not found");
+  const decision = body.decision;
+  if (!APPROVAL_DECISIONS.includes(decision)) {
+    throw new HttpError(400, `decision must be one of: ${APPROVAL_DECISIONS.join(", ")}`);
+  }
+  const rule = approval.approval_rule_id ? await getRuleRowAsync(db, approval.approval_rule_id) : null;
+  const comment = String(body.comment ?? body.comments ?? "").trim();
+  const isAdmin = actor?.is_platform_admin === true;
+  if (approval.approver_id && !isAdmin && Number(approval.approver_id) !== Number(actor?.id)) {
+    throw new HttpError(403, "You are not the assigned approver for this step");
+  }
+  if (approval.status !== "pending") throw new HttpError(409, `Approval is already ${approval.status}`);
+  await assertStepOpenAsync(db, rule, approval.instance_id, approval.node_id, approval);
+
+  const instanceNode = await queryOneAsync(
+    db,
+    "SELECT * FROM workflow_instance_nodes WHERE instance_id = ? AND node_id = ? ORDER BY id DESC LIMIT 1",
+    [approval.instance_id, approval.node_id]
+  );
+  const instance = await queryOneAsync(db, "SELECT * FROM workflow_instances WHERE id = ?", [approval.instance_id]);
+  const ts = nowIso();
+  const statusMap = { approve: "approved", reject: "rejected", request_changes: "changes_requested" };
+  const nextStatus = statusMap[decision];
+  if (decision === "reject" && rule?.mandatory_comment_on_reject === 1 && !comment) {
+    throw new HttpError(400, "A comment is required when rejecting");
+  }
+  await runAsync(db, "UPDATE workflow_approvals SET status = ?, decided_by = ?, decided_at = ?, comment = ?, updated_at = ? WHERE id = ?", [
+    nextStatus,
+    actor?.id ?? null,
+    ts,
+    comment,
+    ts,
+    approval.id,
+  ]);
+  await recordEventAsync(db, {
+    instanceId: approval.instance_id,
+    nodeKey: approval.node_key,
+    eventType: nextStatus === "approved" ? "approval.approved" : nextStatus === "rejected" ? "approval.rejected" : "approval.changes_requested",
+    actorId: actor?.id ?? null,
+    message: `Approval step ${approval.step_code} ${nextStatus}`,
+    details: { approval_id: approval.id, decision, comment },
+    tenantId: approval.tenant_id,
+  });
+  await writeAuditAsync(db, { actor, action: `workflow.approval.${decision}`, resourceType: "workflow_approval", resourceId: approval.id, details: { instance_id: approval.instance_id, decision, comment }, ip });
+
+  if (decision === "approve") {
+    if (await evaluateCompletionAsync(db, rule, instanceNode?.id, approval.instance_id, approval.node_id)) {
+      await advanceAsync(db, approval.instance_id, { actor, ip });
+    }
+  } else if (decision === "reject" && (await rejectPathForNodeAsync(db, approval.node_id))) {
+    await advanceAsync(db, approval.instance_id, { actor, ip });
+  } else {
+    if (instanceNode) {
+      await runAsync(db, "UPDATE workflow_instance_nodes SET status = ?, outcome = ?, completed_at = ?, updated_at = ? WHERE id = ?", [
+        decision === "reject" ? "failed" : "blocked",
+        nextStatus,
+        ts,
+        ts,
+        instanceNode.id,
+      ]);
+    }
+    if (instance) {
+      await runAsync(db, "UPDATE workflow_instances SET status = 'failed', updated_at = ? WHERE id = ?", [ts, instance.id]);
+    }
+  }
+  return getApprovalAsync(db, approval.id, tenantId, actor);
 }

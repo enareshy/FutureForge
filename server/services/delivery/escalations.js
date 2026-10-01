@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { resolveRecipients } from "../notifications/recipients.js";
 import { submitRequest } from "./requests.js";
 import { addMinutes, assertEscalationStatus, safeParse } from "./validation.js";
@@ -118,12 +119,104 @@ export function getEscalation(db, id, tenantId = null) {
   return publicEscalation(row);
 }
 
+export async function listEscalationsAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  const scoped = tenantId ?? (query.tenantId ? Number(query.tenantId) : null);
+  if (scoped) {
+    where.push("COALESCE(tenant_id, 0) = ?");
+    params.push(Number(scoped));
+  }
+  if (query.status) {
+    where.push("status = ?");
+    params.push(query.status);
+  }
+  if (query.reminderId || query.reminder_id) {
+    where.push("reminder_id = ?");
+    params.push(Number(query.reminderId || query.reminder_id));
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const [countRow, rows] = await Promise.all([
+    queryOneAsync(db, `SELECT COUNT(*) AS c FROM delivery_escalations ${clause}`, params),
+    queryAllAsync(db, `SELECT * FROM delivery_escalations ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, pageSize, offset]),
+  ]);
+  return { items: rows.map(publicEscalation), total: countRow.c, page, pageSize };
+}
+
+export async function getEscalationAsync(db, id, tenantId = null) {
+  const row = await queryOneAsync(db, "SELECT * FROM delivery_escalations WHERE id = ?", [Number(id)]);
+  if (!row) throw new HttpError(404, "Escalation not found");
+  if (tenantId && Number(row.tenant_id) !== Number(tenantId)) throw new HttpError(404, "Escalation not found");
+  return publicEscalation(row);
+}
+
 export function cancelEscalation(db, id, { tenantId = null, actor = null, ip = null } = {}) {
   const row = queryOne(db, "SELECT * FROM delivery_escalations WHERE id = ?", [Number(id)]);
   if (!row || (tenantId && Number(row.tenant_id) !== Number(tenantId))) throw new HttpError(404, "Escalation not found");
   if (["fired", "completed", "cancelled"].includes(row.status)) return { cancelled: false, reason: "already_terminal" };
   run(db, "UPDATE delivery_escalations SET status = 'cancelled', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
   writeAudit(db, { actor, action: "delivery.escalation.cancel", resourceType: "delivery_escalation", resourceId: row.id, details: { level: row.level }, ip });
+  return { cancelled: true };
+}
+
+// --- Async write twins -----------------------------------------------------
+// Mirrors of the escalation CRUD writers. Escalation sweeps stay on the
+// synchronous worker path for now.
+
+async function insertEscalationAsync(db, fields) {
+  const columns = Object.keys(fields);
+  const result = await runAsync(
+    db,
+    `INSERT INTO delivery_escalations (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+    columns.map((column) => fields[column])
+  );
+  return result.lastInsertId;
+}
+
+export async function scheduleEscalationAsync(db, input = {}, { actor = null, ip = null } = {}) {
+  const tenantId = input.tenant_id ?? input.tenantId ?? actor?.tenant_id ?? null;
+  const level = Math.max(1, Number(input.level ?? input.escalation_level ?? 1) || 1);
+  const maxLevel = Math.max(level, Number(input.max_level ?? input.maxLevel ?? ESCALATION_MAX_LEVEL) || ESCALATION_MAX_LEVEL);
+  const afterMinutes = Number(input.after_minutes ?? input.afterMinutes ?? 0) || 0;
+  const dueAt = input.due_at ?? input.dueAt ?? addMinutes(nowIso(), afterMinutes);
+  const dedupeKey = input.dedupe_key ?? input.dedupeKey ?? (input.reminder_id ?? input.reminderId ? `escalation:${input.reminder_id ?? input.reminderId}:${level}` : null);
+  if (dedupeKey) {
+    const existing = await queryOneAsync(db, "SELECT * FROM delivery_escalations WHERE dedupe_key = ?", [dedupeKey]);
+    if (existing) return publicEscalation(existing);
+  }
+  const id = await insertEscalationAsync(db, {
+    reminder_id: input.reminder_id ?? input.reminderId ?? null,
+    tenant_id: tenantId !== null ? Number(tenantId) : null,
+    organization_id: Number(input.organization_id ?? input.organizationId ?? 0) || null,
+    source_module: input.source_module ?? input.sourceModule ?? "platform",
+    object_type: input.object_type ?? input.objectType ?? "",
+    object_id: input.object_id ?? input.objectId ?? "",
+    object_name: input.object_name ?? input.objectName ?? "",
+    deep_link: input.deep_link ?? input.deepLink ?? "",
+    recipient_id: input.recipient_id ?? input.recipientId ?? null,
+    recipient_json: input.recipient ? JSON.stringify(input.recipient) : (input.recipient_json ?? input.recipientJson ?? "{}"),
+    level,
+    max_level: maxLevel,
+    after_minutes: afterMinutes,
+    status: "pending",
+    due_at: dueAt,
+    priority: input.priority || "high",
+    dedupe_key: dedupeKey,
+    details_json: input.details ? JSON.stringify(input.details) : (input.details_json ?? "{}"),
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  });
+  await writeAuditAsync(db, { actor, action: "delivery.escalation.create", resourceType: "delivery_escalation", resourceId: id, details: { level, max_level: maxLevel, object_type: input.object_type ?? "", object_id: input.object_id ?? "" }, ip });
+  return publicEscalation(await queryOneAsync(db, "SELECT * FROM delivery_escalations WHERE id = ?", [id]));
+}
+
+export async function cancelEscalationAsync(db, id, { tenantId = null, actor = null, ip = null } = {}) {
+  const row = await queryOneAsync(db, "SELECT * FROM delivery_escalations WHERE id = ?", [Number(id)]);
+  if (!row || (tenantId && Number(row.tenant_id) !== Number(tenantId))) throw new HttpError(404, "Escalation not found");
+  if (["fired", "completed", "cancelled"].includes(row.status)) return { cancelled: false, reason: "already_terminal" };
+  await runAsync(db, "UPDATE delivery_escalations SET status = 'cancelled', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  await writeAuditAsync(db, { actor, action: "delivery.escalation.cancel", resourceType: "delivery_escalation", resourceId: row.id, details: { level: row.level }, ip });
   return { cancelled: true };
 }
 

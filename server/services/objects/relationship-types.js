@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import * as metadata from "../metadata.js";
 import {
   readTenant,
@@ -8,6 +9,9 @@ import {
   tenantClause,
   assertReadable,
   assertMutable,
+  assertMutableAsync,
+  readTenantAsync,
+  writeTenantAsync,
 } from "../metadata/scope.js";
 import { CARDINALITIES, SEMANTICS, normalizeEdgeDefinitions } from "./validation.js";
 
@@ -358,4 +362,281 @@ export function deleteRelationshipType(db, id, actor, ip, tenantId) {
 
 export function readRelationshipTypeTenant(db, actor, query, reqTenantId) {
   return readTenant(db, actor, query, reqTenantId);
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+// Same SQL, validation and audit semantics as the synchronous writers, but on
+// the asynchronous pool. A route uses either the sync or the async layer.
+
+export async function getRelationshipTypeRowAsync(db, id) {
+  return queryOneAsync(db, `${TYPE_SELECT} WHERE rt.id = ?`, [Number(id)]);
+}
+
+export async function findRelationshipTypeAsync(db, idOrCode, tenantId) {
+  if (idOrCode === undefined || idOrCode === null || idOrCode === "") return null;
+  const text = String(idOrCode);
+  if (/^\d+$/.test(text)) {
+    const byId = await getRelationshipTypeRowAsync(db, Number(text));
+    if (byId) {
+      assertReadable(byId, tenantId, "Relationship type not found");
+      return byId;
+    }
+  }
+  const scope = tenantClause("rt", tenantId);
+  const byCode = await queryOneAsync(
+    db,
+    `${TYPE_SELECT} WHERE rt.code = ? AND ${scope.sql} ORDER BY rt.tenant_id IS NULL LIMIT 1`,
+    [text, ...scope.params]
+  );
+  if (!byCode) throw new HttpError(404, "Relationship type not found");
+  return byCode;
+}
+
+export async function getRelationshipTypeAsync(db, idOrCode, tenantId) {
+  return publicRelationshipType(await findRelationshipTypeAsync(db, idOrCode, tenantId));
+}
+
+export async function listRelationshipTypesAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("rt", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.status) {
+    where.push("rt.status = ?");
+    params.push(query.status);
+  }
+  if (query.semantic) {
+    where.push("rt.semantic = ?");
+    params.push(query.semantic);
+  }
+  if (query.module) {
+    where.push("rt.module = ?");
+    params.push(query.module);
+  }
+  if (query.sourceTypeId || query.source_type_id) {
+    where.push("rt.source_type_id = ?");
+    params.push(Number(query.sourceTypeId || query.source_type_id));
+  }
+  if (query.targetTypeId || query.target_type_id) {
+    where.push("rt.target_type_id = ?");
+    params.push(Number(query.targetTypeId || query.target_type_id));
+  }
+  if (query.q) {
+    where.push("(rt.code ILIKE ? OR rt.name ILIKE ? OR rt.description ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM relationship_types rt ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `${TYPE_SELECT} ${clause} ORDER BY rt.code LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    )
+  ).map(publicRelationshipType);
+  return { items, total, page, pageSize };
+}
+
+async function resolveTypeRefAsync(db, value, tenantId, label) {
+  if (value === undefined || value === null || value === "" || value === 0 || value === "0" || value === "any") {
+    return null;
+  }
+  const typeRow = await metadata.findTypeAsync(db, value, tenantId);
+  if (!typeRow) throw new HttpError(400, `${label} not found`);
+  return typeRow.id;
+}
+
+export async function createRelationshipTypeAsync(db, body, actor, ip, reqTenantId, query = {}) {
+  requireFields(body, ["code", "name"]);
+  validateCode(body.code, "Relationship type code");
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const sourceTypeId = await resolveTypeRefAsync(db, body.source_type_id ?? body.sourceTypeId, tenantId, "Source type");
+  const targetTypeId = await resolveTypeRefAsync(db, body.target_type_id ?? body.targetTypeId, tenantId, "Target type");
+  const cardinality = body.cardinality || "N:N";
+  if (!CARDINALITIES.includes(cardinality)) {
+    throw new HttpError(400, `cardinality must be one of: ${CARDINALITIES.join(", ")}`);
+  }
+  const semantic = body.semantic || "association";
+  if (!SEMANTICS.includes(semantic)) {
+    throw new HttpError(400, `semantic must be one of: ${SEMANTICS.join(", ")}`);
+  }
+  const status = body.status || "draft";
+  if (!RELATIONSHIP_TYPE_STATUSES.includes(status)) {
+    throw new HttpError(400, "status must be draft, active or inactive");
+  }
+  const { min, max } = normalizeBounds(body);
+  const attributes = normalizeEdgeDefinitions(body.attributes ?? body.attributes_json);
+  const cascadeDefault = semantic === "composition";
+  const cascade = body.cascade_delete === undefined && body.cascadeDelete === undefined
+    ? cascadeDefault
+    : Boolean(body.cascade_delete ?? body.cascadeDelete);
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO relationship_types
+        (code, name, description, module, source_type_id, target_type_id, cardinality, directed,
+         bidirectional, inverse_code, semantic, required, min_occurrences, max_occurrences,
+         allow_self, cascade_delete, attributes_json, status, tenant_id, is_system, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        body.module || "platform",
+        sourceTypeId,
+        targetTypeId,
+        cardinality,
+        body.directed === false || body.directed === 0 ? 0 : 1,
+        body.bidirectional ? 1 : 0,
+        body.inverse_code || body.inverseCode || "",
+        semantic,
+        body.required ? 1 : 0,
+        min,
+        max,
+        body.allow_self || body.allowSelf ? 1 : 0,
+        cascade ? 1 : 0,
+        JSON.stringify(attributes),
+        status,
+        tenantId ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "Relationship type code already exists in this scope");
+    }
+    throw err;
+  }
+  const row = await getRelationshipTypeRowAsync(db, result.lastInsertId);
+  await writeAuditAsync(db, {
+    actor,
+    action: "relationship_type.create",
+    resourceType: "relationship_type",
+    resourceId: row.id,
+    details: { code: row.code, cardinality, semantic, tenant_id: tenantId ?? null },
+    ip,
+  });
+  return publicRelationshipType(row);
+}
+
+export async function updateRelationshipTypeAsync(db, id, body, actor, ip, tenantId) {
+  const row = await getRelationshipTypeRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Relationship type not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Relationship type code");
+  const cardinality = body.cardinality ?? row.cardinality;
+  if (!CARDINALITIES.includes(cardinality)) {
+    throw new HttpError(400, `cardinality must be one of: ${CARDINALITIES.join(", ")}`);
+  }
+  const semantic = body.semantic ?? row.semantic;
+  if (!SEMANTICS.includes(semantic)) {
+    throw new HttpError(400, `semantic must be one of: ${SEMANTICS.join(", ")}`);
+  }
+  const status = body.status ?? row.status;
+  if (!RELATIONSHIP_TYPE_STATUSES.includes(status)) {
+    throw new HttpError(400, "status must be draft, active or inactive");
+  }
+  const sourceTypeId = body.source_type_id === undefined && body.sourceTypeId === undefined
+    ? row.source_type_id
+    : await resolveTypeRefAsync(db, body.source_type_id ?? body.sourceTypeId, tenantId, "Source type");
+  const targetTypeId = body.target_type_id === undefined && body.targetTypeId === undefined
+    ? row.target_type_id
+    : await resolveTypeRefAsync(db, body.target_type_id ?? body.targetTypeId, tenantId, "Target type");
+  const { min, max } = normalizeBounds(body, row);
+  const attributes = body.attributes === undefined && body.attributes_json === undefined
+    ? row.attributes_json
+    : JSON.stringify(normalizeEdgeDefinitions(body.attributes ?? body.attributes_json));
+  try {
+    await runAsync(
+      db,
+      `UPDATE relationship_types SET
+        code = ?, name = ?, description = ?, module = ?, source_type_id = ?, target_type_id = ?,
+        cardinality = ?, directed = ?, bidirectional = ?, inverse_code = ?, semantic = ?, required = ?,
+        min_occurrences = ?, max_occurrences = ?, allow_self = ?, cascade_delete = ?, attributes_json = ?,
+        status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        body.module ?? row.module,
+        sourceTypeId,
+        targetTypeId,
+        cardinality,
+        body.directed === undefined ? row.directed : body.directed ? 1 : 0,
+        body.bidirectional === undefined ? row.bidirectional : body.bidirectional ? 1 : 0,
+        body.inverse_code ?? body.inverseCode ?? row.inverse_code,
+        semantic,
+        body.required === undefined ? row.required : body.required ? 1 : 0,
+        min,
+        max,
+        body.allow_self === undefined && body.allowSelf === undefined ? row.allow_self : body.allow_self || body.allowSelf ? 1 : 0,
+        body.cascade_delete === undefined && body.cascadeDelete === undefined
+          ? row.cascade_delete
+          : body.cascade_delete ?? body.cascadeDelete ? 1 : 0,
+        attributes,
+        status,
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "Relationship type code already exists in this scope");
+    }
+    throw err;
+  }
+  const next = await getRelationshipTypeRowAsync(db, row.id);
+  await writeAuditAsync(db, {
+    actor,
+    action: "relationship_type.update",
+    resourceType: "relationship_type",
+    resourceId: row.id,
+    details: { code: next.code },
+    ip,
+  });
+  return publicRelationshipType(next);
+}
+
+export async function setRelationshipTypeStatusAsync(db, id, status, actor, ip, tenantId) {
+  if (!RELATIONSHIP_TYPE_STATUSES.includes(status)) {
+    throw new HttpError(400, "status must be draft, active or inactive");
+  }
+  const row = await getRelationshipTypeRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Relationship type not found");
+  await runAsync(db, "UPDATE relationship_types SET status = ?, updated_at = ? WHERE id = ?", [status, nowIso(), row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: `relationship_type.${status}`,
+    resourceType: "relationship_type",
+    resourceId: row.id,
+    ip,
+  });
+  return publicRelationshipType(await getRelationshipTypeRowAsync(db, row.id));
+}
+
+export async function deleteRelationshipTypeAsync(db, id, actor, ip, tenantId) {
+  const row = await getRelationshipTypeRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Relationship type not found");
+  const used = (
+    await queryOneAsync(db, "SELECT COUNT(*) AS c FROM object_relationships WHERE relationship_type_id = ?", [row.id])
+  ).c;
+  if (used) throw new HttpError(409, "Cannot delete a relationship type in use by existing relationships");
+  await runAsync(db, "DELETE FROM relationship_types WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "relationship_type.delete",
+    resourceType: "relationship_type",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return { deleted: true, id: row.id };
+}
+
+export async function readRelationshipTypeTenantAsync(db, actor, query, reqTenantId) {
+  return readTenantAsync(db, actor, query, reqTenantId);
 }

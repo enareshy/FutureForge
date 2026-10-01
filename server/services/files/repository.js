@@ -1,5 +1,6 @@
 import { HttpError } from "../../validation.js";
 import { queryOne } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import {
   FILE_STATUS_LABELS,
   DOWNLOADABLE_STATUSES,
@@ -301,6 +302,32 @@ export function findFolderRow(db, reference, tenantId = null) {
   return row;
 }
 
+export async function findFileRowAsync(db, reference, tenantId = null) {
+  const row = await queryOneAsync(
+    db,
+    "SELECT * FROM files WHERE id = ? OR file_ref = ? OR uuid = ?",
+    [Number(reference) || -1, String(reference || ""), String(reference || "")]
+  );
+  if (!row) throw new HttpError(404, "File not found");
+  if (tenantId !== null && tenantId !== undefined && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "File not found");
+  }
+  return row;
+}
+
+export async function findFolderRowAsync(db, reference, tenantId = null) {
+  const row = await queryOneAsync(
+    db,
+    "SELECT * FROM folders WHERE id = ? OR uuid = ?",
+    [Number(reference) || -1, String(reference || "")]
+  );
+  if (!row) throw new HttpError(404, "Folder not found");
+  if (tenantId !== null && tenantId !== undefined && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Folder not found");
+  }
+  return row;
+}
+
 export function findVersionRow(db, fileId, versionReference) {
   const row = queryOne(
     db,
@@ -318,4 +345,23 @@ export function fileRowById(db, id) {
 
 export function currentVersionRow(db, fileId) {
   return queryOne(db, "SELECT * FROM file_versions WHERE file_id = ? AND is_current = 1", [Number(fileId)]);
+}
+
+export async function findVersionRowAsync(db, fileId, versionReference) {
+  const row = await queryOneAsync(
+    db,
+    `SELECT * FROM file_versions
+     WHERE file_id = ? AND (id = ? OR version_number = ? OR version_label = ?)`,
+    [fileId, Number(versionReference) || -1, Number(versionReference) || -1, String(versionReference || "")]
+  );
+  if (!row) throw new HttpError(404, "File version not found");
+  return row;
+}
+
+export async function fileRowByIdAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM files WHERE id = ?", [Number(id) || -1]);
+}
+
+export async function currentVersionRowAsync(db, fileId) {
+  return queryOneAsync(db, "SELECT * FROM file_versions WHERE file_id = ? AND is_current = 1", [Number(fileId)]);
 }

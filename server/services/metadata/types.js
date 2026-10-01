@@ -1,9 +1,16 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { recordVersion } from "./versions.js";
-import { assertReadable, assertMutable, tenantClause } from "./scope.js";
-import { ancestorAttributes, getAttributeRow, publicAttributeSafe } from "./attributes.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { recordVersion, recordVersionAsync } from "./versions.js";
+import { assertReadable, assertMutable, assertMutableAsync, tenantClause } from "./scope.js";
+import {
+  ancestorAttributes,
+  ancestorAttributesAsync,
+  getAttributeRow,
+  getAttributeRowAsync,
+  publicAttributeSafe,
+} from "./attributes.js";
 
 export const TYPE_STATUSES = ["draft", "active", "inactive"];
 
@@ -528,4 +535,515 @@ export function typeTree(db, tenantId) {
     }
   }
   return roots;
+}
+
+// ── Async read twins ────────────────────────────────────────────────────────
+
+export async function getTypeRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM metadata_types WHERE id = ?", [Number(id)]);
+}
+
+async function findTypeByCodeAsync(db, code, tenantId) {
+  const scope = tenantClause(null, tenantId);
+  return queryOneAsync(
+    db,
+    `SELECT * FROM metadata_types WHERE code = ? AND ${scope.sql} ORDER BY tenant_id IS NULL LIMIT 1`,
+    [code, ...scope.params]
+  );
+}
+
+export async function findTypeAsync(db, idOrCode, tenantId) {
+  if (idOrCode === undefined || idOrCode === null || idOrCode === "") return null;
+  if (typeof idOrCode === "number" || /^\d+$/.test(String(idOrCode))) {
+    const byId = await queryOneAsync(db, "SELECT * FROM metadata_types WHERE id = ?", [Number(idOrCode)]);
+    if (byId) {
+      assertReadable(byId, tenantId, "Type not found");
+      return byId;
+    }
+  }
+  const byCode = await findTypeByCodeAsync(db, String(idOrCode), tenantId);
+  if (!byCode) throw new HttpError(404, "Type not found");
+  return byCode;
+}
+
+export async function getTypeAsync(db, idOrCode, tenantId, { withAttributes = true } = {}) {
+  const row = await findTypeAsync(db, idOrCode, tenantId);
+  const result = publicType(row);
+  if (withAttributes) {
+    result.attributes = await effectiveAttributesAsync(db, row.id, tenantId);
+  }
+  return result;
+}
+
+export async function ancestorTypesAsync(db, typeId) {
+  const result = [];
+  let current = typeId;
+  const seen = new Set();
+  while (current) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const row = await queryOneAsync(db, "SELECT * FROM metadata_types WHERE id = ?", [current]);
+    if (!row) break;
+    result.push(row);
+    current = row.parent_type_id;
+  }
+  return result;
+}
+
+export async function descendantTypeIdsAsync(db, typeId) {
+  const result = [];
+  const queue = [Number(typeId)];
+  const seen = new Set();
+  while (queue.length) {
+    const current = queue.shift();
+    if (seen.has(current)) continue;
+    seen.add(current);
+    const children = await queryAllAsync(db, "SELECT id FROM metadata_types WHERE parent_type_id = ?", [current]);
+    for (const child of children) {
+      result.push(child.id);
+      queue.push(child.id);
+    }
+  }
+  return result;
+}
+
+export async function listTypesAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("t", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.status) {
+    where.push("t.status = ?");
+    params.push(query.status);
+  }
+  if (query.module) {
+    where.push("t.module = ?");
+    params.push(query.module);
+  }
+  if (query.q) {
+    where.push("(t.code ILIKE ? OR t.name ILIKE ? OR t.description ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM metadata_types t ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT t.*,
+        (SELECT COUNT(*) FROM metadata_type_attributes ta WHERE ta.type_id = t.id) AS own_attribute_count,
+        (SELECT COUNT(*) FROM metadata_types c WHERE c.parent_type_id = t.id) AS child_type_count
+       FROM metadata_types t ${clause}
+       ORDER BY t.code LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    )
+  ).map(publicType);
+  return { items, total, page, pageSize };
+}
+
+async function publicAttributeViaChainAsync(db, attribute, tenantId) {
+  const chain = await ancestorAttributesAsync(db, attribute.id);
+  if (!chain.length) return null;
+  const head = chain[0];
+  if (head.tenant_id !== null && head.tenant_id !== undefined && tenantId && Number(head.tenant_id) !== Number(tenantId)) {
+    return null;
+  }
+  const merged = { ...head };
+  for (const ancestor of chain.slice(1)) {
+    if (merged.min_length === null && ancestor.min_length !== null) merged.min_length = ancestor.min_length;
+    if (merged.max_length === null && ancestor.max_length !== null) merged.max_length = ancestor.max_length;
+    if (merged.min_value === null && ancestor.min_value !== null) merged.min_value = ancestor.min_value;
+    if (merged.max_value === null && ancestor.max_value !== null) merged.max_value = ancestor.max_value;
+    if (!merged.lov_id && ancestor.lov_id) merged.lov_id = ancestor.lov_id;
+  }
+  return publicAttributeSafe(merged);
+}
+
+async function resolveAssociationAsync(db, attribute, association, type, tenantId) {
+  const resolved = await publicAttributeViaChainAsync(db, attribute, tenantId);
+  if (!resolved) return null;
+  const required =
+    association.required_override === null || association.required_override === undefined
+      ? resolved.required
+      : association.required_override === 1;
+  const defaultValue =
+    association.default_override === null || association.default_override === undefined
+      ? resolved.default_value
+      : association.default_override;
+  return {
+    id: attribute.id,
+    code: attribute.code,
+    name: attribute.name,
+    description: attribute.description,
+    data_type: resolved.data_type,
+    required,
+    default_value: defaultValue,
+    min_length: resolved.min_length,
+    max_length: resolved.max_length,
+    min_value: resolved.min_value,
+    max_value: resolved.max_value,
+    validation: resolved.validation,
+    multi_value: resolved.multi_value,
+    visible: association.visible === 1 && resolved.visible !== false,
+    editable: association.editable === 1 && resolved.editable !== false,
+    lov_id: resolved.lov_id,
+    status: resolved.status,
+    sequence: association.sequence,
+    inherited_from: resolved.inherited_from,
+    type_id: type.id,
+    type_code: type.code,
+  };
+}
+
+export async function effectiveAttributesAsync(db, typeId, tenantId) {
+  const chain = await ancestorTypesAsync(db, typeId);
+  if (!chain.length) throw new HttpError(404, "Type not found");
+  const map = new Map();
+
+  const orderByType = [...chain].reverse();
+  for (const type of orderByType) {
+    const rows = await queryAllAsync(
+      db,
+      `SELECT ta.*, a.code AS attribute_code, a.name AS attribute_name
+       FROM metadata_type_attributes ta
+       JOIN metadata_attributes a ON a.id = ta.attribute_id
+       WHERE ta.type_id = ? ORDER BY ta.sequence, a.code`,
+      [type.id]
+    );
+    for (const row of rows) {
+      if (row.removed === 1) {
+        map.delete(row.attribute_id);
+        continue;
+      }
+      const attribute = await getAttributeRowAsync(db, row.attribute_id);
+      if (!attribute) continue;
+      const resolved = await resolveAssociationAsync(db, attribute, row, type, tenantId);
+      if (resolved && resolved.status === "active") map.set(row.attribute_id, resolved);
+    }
+  }
+  return [...map.values()].sort((a, b) => a.sequence - b.sequence || a.code.localeCompare(b.code));
+}
+
+export async function resolveTypeAsync(db, idOrCode, tenantId) {
+  const row = await findTypeAsync(db, idOrCode, tenantId);
+  return {
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    description: row.description,
+    module: row.module,
+    status: row.status,
+    version: row.version,
+    tenant_id: row.tenant_id,
+    parent_type_id: row.parent_type_id,
+    is_system: row.is_system === 1,
+    attributes: await effectiveAttributesAsync(db, row.id, tenantId),
+  };
+}
+
+export async function typeTreeAsync(db, tenantId) {
+  const scope = tenantClause(null, tenantId);
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM metadata_types WHERE ${scope.sql} ORDER BY code`,
+    scope.params
+  );
+  const byId = new Map(rows.map((r) => [r.id, { ...publicType(r), children: [] }]));
+  const roots = [];
+  for (const node of byId.values()) {
+    if (node.parent_type_id && byId.has(node.parent_type_id)) {
+      byId.get(node.parent_type_id).children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+  return roots;
+}
+
+// ── Async write twins ───────────────────────────────────────────────────────
+
+async function assertNoTypeCycleAsync(db, id, parentId) {
+  if (!parentId) return;
+  if (Number(id) === Number(parentId)) throw new HttpError(400, "A type cannot inherit from itself");
+  let current = Number(parentId);
+  const seen = new Set();
+  while (current) {
+    if (seen.has(current) || current === Number(id)) {
+      throw new HttpError(400, "Type inheritance cycle detected");
+    }
+    seen.add(current);
+    const row = await queryOneAsync(db, "SELECT parent_type_id FROM metadata_types WHERE id = ?", [current]);
+    if (!row) throw new HttpError(400, "Parent type not found");
+    current = row.parent_type_id;
+  }
+}
+
+async function associationRowAsync(db, typeId, attributeId) {
+  return queryOneAsync(
+    db,
+    "SELECT * FROM metadata_type_attributes WHERE type_id = ? AND attribute_id = ?",
+    [Number(typeId), Number(attributeId)]
+  );
+}
+
+export async function createTypeAsync(db, body, actor, ip, tenantId) {
+  requireFields(body, ["code", "name"]);
+  validateCode(body.code, "Type code");
+  const status = body.status || "draft";
+  if (!TYPE_STATUSES.includes(status)) throw new HttpError(400, "status must be draft, active or inactive");
+  let parentId = body.parent_type_id ?? body.parentTypeId ?? null;
+  if (parentId) {
+    const parent = await queryOneAsync(db, "SELECT * FROM metadata_types WHERE id = ?", [Number(parentId)]);
+    assertReadable(parent, tenantId, "Parent type not found");
+    parentId = Number(parentId);
+  }
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO metadata_types
+        (code, name, description, module, parent_type_id, status, version, tenant_id, is_system, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?)`,
+      [
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        body.module || "platform",
+        parentId,
+        status,
+        tenantId ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE") || String(err.message).includes("unique")) {
+      throw new HttpError(409, "Type code already exists in this scope");
+    }
+    throw err;
+  }
+  const row = await getTypeRowAsync(db, result.lastInsertId);
+  await recordVersionAsync(db, "type", row.id, row, actor, "create");
+  await writeAuditAsync(db, {
+    actor,
+    action: "metadata.type.create",
+    resourceType: "metadata_type",
+    resourceId: row.id,
+    details: { code: row.code, parent: parentId },
+    ip,
+  });
+  return getTypeAsync(db, row.id, tenantId);
+}
+
+export async function updateTypeAsync(db, id, body, actor, ip, tenantId) {
+  const row = await getTypeRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Type not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Type code");
+  if (body.status && !TYPE_STATUSES.includes(body.status)) {
+    throw new HttpError(400, "status must be draft, active or inactive");
+  }
+  let parentId =
+    body.parent_type_id === undefined && body.parentTypeId === undefined
+      ? row.parent_type_id
+      : body.parent_type_id ?? body.parentTypeId ?? null;
+  if (parentId !== null && parentId !== undefined) {
+    parentId = Number(parentId);
+    const parent = await queryOneAsync(db, "SELECT * FROM metadata_types WHERE id = ?", [parentId]);
+    assertReadable(parent, tenantId, "Parent type not found");
+    await assertNoTypeCycleAsync(db, id, parentId);
+  } else {
+    parentId = null;
+  }
+  const ts = nowIso();
+  try {
+    await runAsync(
+      db,
+      `UPDATE metadata_types SET code = ?, name = ?, description = ?, module = ?, parent_type_id = ?,
+        status = ?, updated_at = ? WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        (body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        body.module ?? row.module,
+        parentId,
+        body.status ?? row.status,
+        ts,
+        id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE") || String(err.message).includes("unique")) {
+      throw new HttpError(409, "Type code already exists in this scope");
+    }
+    throw err;
+  }
+  const next = await getTypeRowAsync(db, id);
+  await recordVersionAsync(db, "type", id, next, actor, "update");
+  await writeAuditAsync(db, {
+    actor,
+    action: "metadata.type.update",
+    resourceType: "metadata_type",
+    resourceId: id,
+    details: { code: next.code },
+    ip,
+  });
+  return getTypeAsync(db, id, tenantId);
+}
+
+export async function setTypeStatusAsync(db, id, status, actor, ip, tenantId) {
+  if (!["draft", "active", "inactive"].includes(status)) {
+    throw new HttpError(400, "status must be draft, active or inactive");
+  }
+  const row = await getTypeRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Type not found");
+  if (status === "inactive" && (await descendantTypeIdsAsync(db, id)).length) {
+    throw new HttpError(409, "Deactivate or detach child types before deactivating this type");
+  }
+  await runAsync(db, "UPDATE metadata_types SET status = ?, updated_at = ? WHERE id = ?", [status, nowIso(), id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: `metadata.type.${status}`,
+    resourceType: "metadata_type",
+    resourceId: id,
+    ip,
+  });
+  return getTypeAsync(db, id, tenantId);
+}
+
+export async function deleteTypeAsync(db, id, actor, ip, tenantId) {
+  const row = await getTypeRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Type not found");
+  if ((await descendantTypeIdsAsync(db, id)).length) {
+    throw new HttpError(409, "Cannot delete a type that has child types");
+  }
+  const forms = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM metadata_forms WHERE type_id = ?", [id])).c;
+  const rules = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM metadata_rules WHERE type_id = ?", [id])).c;
+  if (forms || rules) {
+    throw new HttpError(409, "Cannot delete a type referenced by forms or rules");
+  }
+  await runAsync(db, "DELETE FROM metadata_type_attributes WHERE type_id = ?", [id]);
+  await runAsync(db, "DELETE FROM metadata_types WHERE id = ?", [id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "metadata.type.delete",
+    resourceType: "metadata_type",
+    resourceId: id,
+    details: { code: row.code },
+    ip,
+  });
+  return { deleted: true, id: Number(id) };
+}
+
+export async function addTypeAttributeAsync(db, typeId, body, actor, ip, tenantId) {
+  const type = await getTypeRowAsync(db, typeId);
+  await assertMutableAsync(db, type, tenantId, actor, "Type not found");
+  const attributeId = body.attribute_id ?? body.attributeId;
+  if (!attributeId) throw new HttpError(400, "attribute_id is required");
+  const attribute = await getAttributeRowAsync(db, Number(attributeId));
+  assertReadable(attribute, tenantId, "Attribute not found");
+  await assertNoTypeCycleAsync(db, type.id, type.parent_type_id);
+  const existing = await associationRowAsync(db, type.id, attribute.id);
+  const ts = nowIso();
+  if (existing) {
+    await runAsync(
+      db,
+      `UPDATE metadata_type_attributes SET sequence = ?, required_override = ?, default_override = ?,
+        visible = ?, editable = ?, removed = 0, updated_at = ? WHERE id = ?`,
+      [
+        body.sequence ?? existing.sequence,
+        body.required_override === undefined ? existing.required_override : body.required_override ? 1 : 0,
+        body.default_override === undefined ? existing.default_override : body.default_override,
+        body.visible === undefined ? existing.visible : body.visible ? 1 : 0,
+        body.editable === undefined ? existing.editable : body.editable ? 1 : 0,
+        ts,
+        existing.id,
+      ]
+    );
+  } else {
+    await runAsync(
+      db,
+      `INSERT INTO metadata_type_attributes
+        (type_id, attribute_id, sequence, required_override, default_override, visible, editable, removed, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        type.id,
+        attribute.id,
+        body.sequence ?? 0,
+        body.required_override === undefined ? null : body.required_override ? 1 : 0,
+        body.default_override ?? null,
+        body.visible === false ? 0 : 1,
+        body.editable === false ? 0 : 1,
+        ts,
+        ts,
+      ]
+    );
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "metadata.type.attribute.attach",
+    resourceType: "metadata_type",
+    resourceId: type.id,
+    details: { attribute: attribute.code },
+    ip,
+  });
+  await recordVersionAsync(db, "type", type.id, await getTypeAsync(db, type.id, tenantId), actor, "attach attribute");
+  return getTypeAsync(db, type.id, tenantId);
+}
+
+export async function updateTypeAttributeAsync(db, typeId, attributeId, body, actor, ip, tenantId) {
+  const type = await getTypeRowAsync(db, typeId);
+  await assertMutableAsync(db, type, tenantId, actor, "Type not found");
+  const existing = await associationRowAsync(db, type.id, Number(attributeId));
+  if (!existing) throw new HttpError(404, "Attribute is not attached to this type");
+  await runAsync(
+    db,
+    `UPDATE metadata_type_attributes SET sequence = ?, required_override = ?, default_override = ?,
+      visible = ?, editable = ?, removed = 0, updated_at = ? WHERE id = ?`,
+    [
+      body.sequence === undefined ? existing.sequence : body.sequence,
+      body.required_override === undefined ? existing.required_override : body.required_override ? 1 : 0,
+      body.default_override === undefined ? existing.default_override : body.default_override,
+      body.visible === undefined ? existing.visible : body.visible ? 1 : 0,
+      body.editable === undefined ? existing.editable : body.editable ? 1 : 0,
+      nowIso(),
+      existing.id,
+    ]
+  );
+  await recordVersionAsync(db, "type", type.id, await getTypeAsync(db, type.id, tenantId), actor, "update attribute");
+  return getTypeAsync(db, type.id, tenantId);
+}
+
+export async function removeTypeAttributeAsync(db, typeId, attributeId, actor, ip, tenantId) {
+  const type = await getTypeRowAsync(db, typeId);
+  await assertMutableAsync(db, type, tenantId, actor, "Type not found");
+  const existing = await associationRowAsync(db, type.id, Number(attributeId));
+  if (!existing) throw new HttpError(404, "Attribute is not attached to this type");
+  const chain = await ancestorTypesAsync(db, type.id);
+  let inherited = false;
+  for (const ancestor of chain.slice(1)) {
+    if (await associationRowAsync(db, ancestor.id, Number(attributeId))) {
+      inherited = true;
+      break;
+    }
+  }
+  if (inherited) {
+    await runAsync(
+      db,
+      "UPDATE metadata_type_attributes SET removed = 1, updated_at = ? WHERE id = ?",
+      [nowIso(), existing.id]
+    );
+  } else {
+    await runAsync(db, "DELETE FROM metadata_type_attributes WHERE id = ?", [existing.id]);
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "metadata.type.attribute.detach",
+    resourceType: "metadata_type",
+    resourceId: type.id,
+    details: { attribute_id: Number(attributeId) },
+    ip,
+  });
+  await recordVersionAsync(db, "type", type.id, await getTypeAsync(db, type.id, tenantId), actor, "detach attribute");
+  return getTypeAsync(db, type.id, tenantId);
 }

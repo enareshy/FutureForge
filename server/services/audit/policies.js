@@ -1,4 +1,5 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { validatePolicyInput, normalizeVisibility } from "./validation.js";
 
@@ -118,6 +119,23 @@ export function resolvePolicy(db, tenantId, objectType) {
   candidates.push({ sql: "tenant_id IS NULL AND object_type = '*'", params: [] });
   for (const candidate of candidates) {
     const row = queryOne(db, `SELECT * FROM audit_policies WHERE ${candidate.sql} LIMIT 1`, candidate.params);
+    if (row) return { policy: effectiveFromRow(row), scope: row.tenant_id ? "tenant" : "system", row };
+  }
+  return { policy: defaultEffectivePolicy(), scope: "default", row: null };
+}
+
+export async function resolvePolicyAsync(db, tenantId, objectType) {
+  const tenant = tenantId ? Number(tenantId) : null;
+  const type = objectType ? String(objectType) : "*";
+  const candidates = [];
+  if (tenant) {
+    candidates.push({ sql: "tenant_id = ? AND object_type = ?", params: [tenant, type] });
+    candidates.push({ sql: "tenant_id = ? AND object_type = '*'", params: [tenant] });
+  }
+  candidates.push({ sql: "tenant_id IS NULL AND object_type = ?", params: [type] });
+  candidates.push({ sql: "tenant_id IS NULL AND object_type = '*'", params: [] });
+  for (const candidate of candidates) {
+    const row = await queryOneAsync(db, `SELECT * FROM audit_policies WHERE ${candidate.sql} LIMIT 1`, candidate.params);
     if (row) return { policy: effectiveFromRow(row), scope: row.tenant_id ? "tenant" : "system", row };
   }
   return { policy: defaultEffectivePolicy(), scope: "default", row: null };

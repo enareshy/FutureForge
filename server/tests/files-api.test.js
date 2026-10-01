@@ -240,6 +240,17 @@ describe("Document & File Management REST APIs", () => {
     assert.equal(listing.body.total, 1);
     const crumbs = await request(port, "GET", `/api/folders/${folder.body.id}/breadcrumb`, { token: adminToken });
     assert.equal(crumbs.body.items.length, 1);
+
+    const folders = await request(port, "GET", "/api/folders", { token: adminToken });
+    assert.equal(folders.status, 200);
+    assert.ok(folders.body.items.some((f) => f.id === folder.body.id));
+    const tree = await request(port, "GET", "/api/folders/tree", { token: adminToken });
+    assert.equal(tree.status, 200);
+    assert.ok(tree.body.items.some((f) => f.id === folder.body.id));
+    const folderDetail = await request(port, "GET", `/api/folders/${folder.body.id}`, { token: adminToken });
+    assert.equal(folderDetail.status, 200);
+    assert.equal(folderDetail.body.id, folder.body.id);
+    assert.equal(folderDetail.body.file_count, 1);
   });
 
   test("permissions administration is admin-only", async () => {
@@ -280,6 +291,12 @@ describe("Document & File Management REST APIs", () => {
     assert.ok(facets.body.total >= 1);
     const events = await request(port, "GET", "/api/files/events", { token: adminToken });
     assert.ok(events.body.total >= 1);
+    const storage = await request(port, "GET", "/api/files/metrics/storage", { token: adminToken });
+    assert.equal(storage.status, 200);
+    assert.ok(Array.isArray(storage.body.by_provider));
+    const processingMetrics = await request(port, "GET", "/api/files/metrics/processing", { token: adminToken });
+    assert.equal(processingMetrics.status, 200);
+    assert.ok("pending" in processingMetrics.body);
   });
 
   test("chunked upload through the API", async () => {

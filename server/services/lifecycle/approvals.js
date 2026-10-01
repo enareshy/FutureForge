@@ -1,13 +1,30 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { publish as publishNotificationEvent } from "../notifications.js";
-import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { publish as publishNotificationEvent, publishAsync as publishNotificationEventAsync } from "../notifications.js";
+import {
+  readTenant,
+  writeTenant,
+  tenantClause,
+  assertReadable,
+  assertMutable,
+  readTenantAsync,
+  writeTenantAsync,
+  assertMutableAsync,
+} from "../metadata/scope.js";
 import * as metadata from "../metadata.js";
 import * as tenants from "../tenants.js";
-import { findObjectRow, getObjectRow, publicObject } from "../objects/repository.js";
-import { getVersionRow, getTransitionRow, getStateRow } from "./definitions.js";
-import { applyTransition, conditionContext, evaluateGuard } from "./apply.js";
+import { findObjectRow, findObjectRowAsync, getObjectRow, getObjectRowAsync, publicObject } from "../objects/repository.js";
+import {
+  getVersionRow,
+  getVersionRowAsync,
+  getTransitionRow,
+  getTransitionRowAsync,
+  getStateRow,
+  getStateRowAsync,
+} from "./definitions.js";
+import { applyTransition, applyTransitionAsync, conditionContext, evaluateGuard } from "./apply.js";
 import {
   APPROVAL_RULE_KINDS,
   APPROVER_TYPES,
@@ -151,6 +168,10 @@ export function listRules(db, query = {}, tenantId) {
 
 export function stepsFor(db, ruleId) {
   return queryAll(db, "SELECT * FROM approval_rule_steps WHERE rule_id = ? ORDER BY sequence, id", [Number(ruleId)]).map(publicStep);
+}
+
+export async function stepsForAsync(db, ruleId) {
+  return (await queryAllAsync(db, "SELECT * FROM approval_rule_steps WHERE rule_id = ? ORDER BY sequence, id", [Number(ruleId)])).map(publicStep);
 }
 
 function resolveBinding(db, body, tenantId, actor) {
@@ -773,5 +794,716 @@ export function decideByRelease(db, reference, releaseId, body, actor, tenantId,
   const release = queryOne(db, "SELECT * FROM object_releases WHERE id = ? AND object_id = ?", [Number(releaseId), objectRow.id]);
   if (!release) throw new HttpError(404, "Release not found");
   if (body?.decision === "resubmit") return resubmit(db, objectRow, release, actor, tenantId, ip);
+  throw new HttpError(400, "Approve/reject against a specific approval id");
+}
+
+// ── Async twins (used by migrated lifecycle rule and release routes) ─────────
+
+export async function publicReleaseAsync(db, row) {
+  if (!row) return null;
+  const approvals = (
+    await queryAllAsync(
+      db,
+      `SELECT a.*, u.username AS approver_username, du.username AS decided_username
+         FROM object_approvals a
+         LEFT JOIN users u ON u.id = a.approver_id
+         LEFT JOIN users du ON du.id = a.decided_by
+        WHERE a.release_id = ? ORDER BY a.sequence, a.id`,
+      [row.id]
+    )
+  ).map(publicApproval);
+  return {
+    id: row.id,
+    object_id: row.object_id,
+    lifecycle_version_id: row.lifecycle_version_id ?? null,
+    transition_id: row.transition_id ?? null,
+    rule_id: row.rule_id ?? null,
+    rule_code: row.rule_code ?? null,
+    from_state_id: row.from_state_id ?? null,
+    to_state_id: row.to_state_id ?? null,
+    status: row.status,
+    requested_by: row.requested_by ?? null,
+    requested_username: row.requested_username ?? null,
+    resolved_at: row.resolved_at || null,
+    comments: row.comments || "",
+    approvals,
+    approved_count: approvals.filter((a) => a.status === "approved").length,
+    pending_count: approvals.filter((a) => a.status === "pending").length,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export async function getRuleRowAsync(db, id) {
+  return queryOneAsync(db, `${RULE_SELECT} WHERE r.id = ?`, [Number(id)]);
+}
+
+export async function findRuleAsync(db, idOrCode, tenantId) {
+  if (idOrCode === undefined || idOrCode === null || idOrCode === "") return null;
+  const text = String(idOrCode);
+  if (/^\d+$/.test(text)) {
+    const byId = await getRuleRowAsync(db, Number(text));
+    if (byId) {
+      assertReadable(byId, tenantId, "Approval rule not found");
+      return byId;
+    }
+  }
+  const scope = tenantClause("r", tenantId);
+  const byCode = await queryOneAsync(
+    db,
+    `${RULE_SELECT} WHERE r.code = ? AND ${scope.sql} ORDER BY r.tenant_id IS NULL LIMIT 1`,
+    [text, ...scope.params]
+  );
+  if (!byCode) throw new HttpError(404, "Approval rule not found");
+  return byCode;
+}
+
+export async function getRuleAsync(db, idOrCode, tenantId) {
+  const row = await findRuleAsync(db, idOrCode, tenantId);
+  return publicRule(row, await stepsForAsync(db, row.id));
+}
+
+export async function listRulesAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("r", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  const kind = query.kind;
+  if (kind) {
+    where.push("r.kind = ?");
+    params.push(kind);
+  }
+  if (query.status) {
+    where.push("r.status = ?");
+    params.push(query.status);
+  }
+  if (query.lifecycleVersionId || query.lifecycle_version_id || query.versionId) {
+    where.push("r.lifecycle_version_id = ?");
+    params.push(Number(query.lifecycleVersionId || query.lifecycle_version_id || query.versionId));
+  }
+  if (query.transitionId || query.transition_id) {
+    where.push("r.transition_id = ?");
+    params.push(Number(query.transitionId || query.transition_id));
+  }
+  if (query.q) {
+    where.push("(r.code ILIKE ? OR r.name ILIKE ? OR r.description ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM approval_rules r ${clause}`, params)).c;
+  const items = await Promise.all(
+    (
+      await queryAllAsync(db, `${RULE_SELECT} ${clause} ORDER BY r.code LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+    ).map(async (row) => publicRule(row, await stepsForAsync(db, row.id)))
+  );
+  return { items, total, page, pageSize };
+}
+
+async function resolveBindingAsync(db, body, tenantId, actor) {
+  const transitionRef = body.transition_id ?? body.transitionId ?? body.transition;
+  const versionRef = body.lifecycle_version_id ?? body.lifecycleVersionId ?? body.version_id ?? body.versionId;
+  let transition = null;
+  let version = null;
+  if (transitionRef !== undefined && transitionRef !== null && transitionRef !== "") {
+    const text = String(transitionRef);
+    transition = /^\d+$/.test(text)
+      ? await getTransitionRowAsync(db, Number(text))
+      : await queryOneAsync(db, "SELECT * FROM lifecycle_transitions WHERE code = ?", [text]);
+    if (!transition) throw new HttpError(400, "Transition not found");
+    version = await getVersionRowAsync(db, transition.lifecycle_version_id);
+  } else if (versionRef !== undefined && versionRef !== null && versionRef !== "") {
+    version = await getVersionRowAsync(db, Number(versionRef));
+    if (!version) throw new HttpError(400, "Lifecycle version not found");
+  }
+  return { transition, version };
+}
+
+async function normalizeStepsAsync(db, rawSteps, tenantId, actor, object, ruleId = null) {
+  if (rawSteps === undefined) return null;
+  if (!Array.isArray(rawSteps) || !rawSteps.length) throw new HttpError(400, "steps must be a non-empty array");
+  const normalized = [];
+  for (let index = 0; index < rawSteps.length; index += 1) {
+    const step = rawSteps[index];
+    if (!step.code || !step.name) throw new HttpError(400, `steps[${index}] requires code and name`);
+    validateCode(step.code, `Step ${index} code`);
+    const approverType = step.approver_type || step.approverType || "role";
+    if (!APPROVER_TYPES.includes(approverType)) {
+      throw new HttpError(400, `steps[${index}].approver_type must be one of: ${APPROVER_TYPES.join(", ")}`);
+    }
+    const mode = step.approval_mode || step.approvalMode || "all";
+    if (!APPROVAL_MODES.includes(mode)) {
+      throw new HttpError(400, `steps[${index}].approval_mode must be one of: ${APPROVAL_MODES.join(", ")}`);
+    }
+    let approverId = step.approver_id ?? step.approverId ?? null;
+    if (approverType === "role") {
+      const role = await queryOneAsync(db, "SELECT id FROM roles WHERE code = ?", [String(approverId)]);
+      if (role) approverId = role.id;
+      else if (!approverId) throw new HttpError(400, `steps[${index}] requires a role approver`);
+    } else if (approverType === "user") {
+      const user = await queryOneAsync(db, "SELECT id FROM users WHERE id = ?", [Number(approverId)]);
+      if (!user) throw new HttpError(400, `steps[${index}] approver user not found`);
+    } else if (approverType === "organization") {
+      const org = await queryOneAsync(db, "SELECT id FROM organizations WHERE id = ?", [Number(approverId)]);
+      if (!org) throw new HttpError(400, `steps[${index}] approver organization not found`);
+    }
+    const minApprovals = Number(step.min_approvals ?? step.minApprovals ?? (mode === "min" ? 1 : 1)) || 1;
+    normalized.push({
+      code: step.code,
+      name: String(step.name).trim(),
+      description: step.description || "",
+      sequence: Number(step.sequence ?? index) || 0,
+      parallel: step.parallel ? 1 : 0,
+      approver_type: approverType,
+      approver_id: approverId,
+      approval_mode: mode,
+      min_approvals: Math.max(1, minApprovals),
+      conditions_json: JSON.stringify(step.conditions && typeof step.conditions === "object" ? step.conditions : {}),
+    });
+  }
+  return normalized;
+}
+
+async function insertStepsAsync(db, ruleId, steps) {
+  for (const step of steps) {
+    await runAsync(
+      db,
+      `INSERT INTO approval_rule_steps
+        (rule_id, code, name, description, sequence, parallel, approver_type, approver_id, approval_mode, min_approvals, conditions_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [ruleId, step.code, step.name, step.description, step.sequence, step.parallel, step.approver_type, step.approver_id, step.approval_mode, step.min_approvals, step.conditions_json, nowIso(), nowIso()]
+    );
+  }
+}
+
+export async function createRuleAsync(db, body, actor, ip, reqTenantId) {
+  requireFields(body, ["code", "name"]);
+  validateCode(body.code, "Approval rule code");
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const kind = body.kind || "approval";
+  if (!APPROVAL_RULE_KINDS.includes(kind)) {
+    throw new HttpError(400, `kind must be one of: ${APPROVAL_RULE_KINDS.join(", ")}`);
+  }
+  const { transition, version } = await resolveBindingAsync(db, body, tenantId, actor);
+  const steps = (await normalizeStepsAsync(db, body.steps, tenantId, actor, null)) || [];
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO approval_rules
+        (code, name, description, kind, module, lifecycle_version_id, transition_id, require_all, min_approvals,
+         sequential, allow_self_approval, mandatory_comment_on_reject, conditions_json, auto_transition,
+         rollback_state_id, status, tenant_id, is_system, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        kind,
+        body.module || "platform",
+        version?.id ?? null,
+        transition?.id ?? null,
+        body.require_all || body.requireAll ? 1 : 0,
+        Number(body.min_approvals ?? body.minApprovals ?? 1) || 1,
+        body.sequential ? 1 : 0,
+        body.allow_self_approval || body.allowSelfApproval ? 1 : 0,
+        body.mandatory_comment_on_reject === undefined && body.mandatoryCommentOnReject === undefined
+          ? 1
+          : body.mandatory_comment_on_reject || body.mandatoryCommentOnReject
+            ? 1
+            : 0,
+        JSON.stringify(body.conditions && typeof body.conditions === "object" ? body.conditions : {}),
+        body.auto_transition === undefined && body.autoTransition === undefined
+          ? 1
+          : body.auto_transition || body.autoTransition
+            ? 1
+            : 0,
+        body.rollback_state_id ?? body.rollbackStateId ?? null,
+        body.status || "active",
+        tenantId ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Approval rule code already exists in this scope");
+    throw err;
+  }
+  await insertStepsAsync(db, result.lastInsertId, steps);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.approval_rule.create",
+    resourceType: "approval_rule",
+    resourceId: result.lastInsertId,
+    details: { code: body.code, kind, steps: steps.length },
+    ip,
+  });
+  return getRuleAsync(db, result.lastInsertId, tenantId);
+}
+
+export async function updateRuleAsync(db, id, body, actor, ip, tenantId) {
+  const row = await getRuleRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Approval rule not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Approval rule code");
+  const kind = body.kind === undefined ? row.kind : body.kind;
+  if (!APPROVAL_RULE_KINDS.includes(kind)) {
+    throw new HttpError(400, `kind must be one of: ${APPROVAL_RULE_KINDS.join(", ")}`);
+  }
+  const bindingProvided = body.transition_id !== undefined || body.transitionId !== undefined || body.transition !== undefined ||
+    body.lifecycle_version_id !== undefined || body.lifecycleVersionId !== undefined || body.version_id !== undefined || body.versionId !== undefined;
+  const binding = bindingProvided ? await resolveBindingAsync(db, body, tenantId, actor) : { transition: null, version: null };
+  const steps = await normalizeStepsAsync(db, body.steps, tenantId, actor, null);
+  try {
+    await runAsync(
+      db,
+      `UPDATE approval_rules SET
+        code = ?, name = ?, description = ?, kind = ?, module = ?, lifecycle_version_id = ?, transition_id = ?,
+        require_all = ?, min_approvals = ?, sequential = ?, allow_self_approval = ?, mandatory_comment_on_reject = ?,
+        conditions_json = ?, auto_transition = ?, rollback_state_id = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        kind,
+        body.module ?? row.module,
+        bindingProvided ? binding.version?.id ?? null : row.lifecycle_version_id,
+        bindingProvided ? binding.transition?.id ?? null : row.transition_id,
+        body.require_all === undefined && body.requireAll === undefined ? row.require_all : body.require_all || body.requireAll ? 1 : 0,
+        body.min_approvals === undefined && body.minApprovals === undefined ? row.min_approvals : Number(body.min_approvals ?? body.minApprovals) || 1,
+        body.sequential === undefined ? row.sequential : body.sequential ? 1 : 0,
+        body.allow_self_approval === undefined && body.allowSelfApproval === undefined ? row.allow_self_approval : body.allow_self_approval || body.allowSelfApproval ? 1 : 0,
+        body.mandatory_comment_on_reject === undefined && body.mandatoryCommentOnReject === undefined
+          ? row.mandatory_comment_on_reject
+          : body.mandatory_comment_on_reject || body.mandatoryCommentOnReject
+            ? 1
+            : 0,
+        body.conditions === undefined ? row.conditions_json : JSON.stringify(body.conditions && typeof body.conditions === "object" ? body.conditions : {}),
+        body.auto_transition === undefined && body.autoTransition === undefined ? row.auto_transition : body.auto_transition || body.autoTransition ? 1 : 0,
+        body.rollback_state_id === undefined && body.rollbackStateId === undefined ? row.rollback_state_id : body.rollback_state_id ?? body.rollbackStateId,
+        body.status === undefined ? row.status : body.status,
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Approval rule code already exists in this scope");
+    throw err;
+  }
+  if (steps) {
+    await runAsync(db, "DELETE FROM approval_rule_steps WHERE rule_id = ?", [row.id]);
+    await insertStepsAsync(db, row.id, steps);
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.approval_rule.update",
+    resourceType: "approval_rule",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return getRuleAsync(db, row.id, tenantId);
+}
+
+export async function deleteRuleAsync(db, id, actor, ip, tenantId) {
+  const row = await getRuleRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Approval rule not found");
+  const used = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM object_releases WHERE rule_id = ?", [row.id])).c;
+  if (used) throw new HttpError(409, "Cannot delete an approval rule used by existing releases");
+  await runAsync(db, "DELETE FROM approval_rules WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.approval_rule.delete",
+    resourceType: "approval_rule",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return { deleted: true, id: row.id };
+}
+
+export function listReleaseRulesAsync(db, query = {}, tenantId) {
+  return listRulesAsync(db, { ...query, kind: "release" }, tenantId);
+}
+
+export function listApprovalRulesAsync(db, query = {}, tenantId) {
+  return listRulesAsync(db, { ...query, kind: "approval" }, tenantId);
+}
+
+export function readRuleTenantAsync(db, actor, query, reqTenantId) {
+  return readTenantAsync(db, actor, query, reqTenantId);
+}
+
+async function resolveRuleAsync(db, row, transition) {
+  if (transition?.approval_rule_id) {
+    const rule = await queryOneAsync(db, "SELECT * FROM approval_rules WHERE id = ?", [transition.approval_rule_id]);
+    if (rule) return rule;
+  }
+  if (transition) {
+    const byTransition = await queryOneAsync(
+      db,
+      `SELECT * FROM approval_rules
+        WHERE status = 'active' AND kind IN ('release','approval') AND transition_id = ?
+          AND (tenant_id IS NULL OR tenant_id = ?)
+        ORDER BY tenant_id IS NULL LIMIT 1`,
+      [transition.id, row.tenant_id]
+    );
+    if (byTransition) return byTransition;
+  }
+  return queryOneAsync(
+    db,
+    `SELECT * FROM approval_rules
+      WHERE status = 'active' AND kind = 'release' AND transition_id IS NULL AND lifecycle_version_id = ?
+        AND (tenant_id IS NULL OR tenant_id = ?)
+      ORDER BY tenant_id IS NULL LIMIT 1`,
+    [row.lifecycle_version_id, row.tenant_id]
+  );
+}
+
+async function assertEligibleAsync(db, row, fromState, rule, actor, tenantId) {
+  const context = conditionContext(row, fromState, actor);
+  evaluateGuard(safeJson(rule.conditions_json), context, "Release condition");
+  const validation = await metadata.validateRecordAsync(
+    db,
+    { typeId: row.object_type_id, values: safeJson(row.data_json), user: actor, organization: row.organization_id },
+    tenantId
+  );
+  if (!validation.valid) {
+    throw new HttpError(422, "Release eligibility validation failed", validation.errors);
+  }
+  return [];
+}
+
+export async function requestReleaseAsync(db, row, transition, fromState, toState, body, actor, tenantId, ip) {
+  const pending = await queryOneAsync(
+    db,
+    "SELECT * FROM object_releases WHERE object_id = ? AND status IN ('pending','changes_requested')",
+    [row.id]
+  );
+  if (pending) throw new HttpError(409, "A release request is already pending for this object");
+  const rule = await resolveRuleAsync(db, row, transition);
+  if (!rule) throw new HttpError(409, "No active release/approval rule is configured for this transition");
+  if (rule.status !== "active") throw new HttpError(409, "The applicable approval rule is not active");
+  await assertEligibleAsync(db, row, fromState, rule, actor, tenantId);
+  const steps = await queryAllAsync(db, "SELECT * FROM approval_rule_steps WHERE rule_id = ? ORDER BY sequence, id", [rule.id]);
+  if (!steps.length) throw new HttpError(409, "The approval rule has no steps configured");
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO object_releases
+      (object_id, lifecycle_version_id, transition_id, rule_id, from_state_id, to_state_id, status, requested_by, comments, tenant_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+    [
+      row.id,
+      row.lifecycle_version_id,
+      transition?.id ?? null,
+      rule.id,
+      fromState?.id ?? row.lifecycle_state_id,
+      toState?.id ?? null,
+      actor?.id ?? null,
+      body?.comments || body?.reason || "",
+      Number(tenantId),
+      ts,
+      ts,
+    ]
+  );
+  const releaseId = result.lastInsertId;
+  let created = 0;
+  const approverIds = new Set();
+  for (const step of steps) {
+    const approvers = await workflow.resolveApproversAsync(db, {
+      step,
+      object: { ...row, organization_id: body?.organization_id ?? row.organization_id },
+      tenantId,
+    });
+    if (!approvers.length) {
+      throw new HttpError(409, `No eligible approvers resolved for step ${step.code}`);
+    }
+    for (const approver of approvers) {
+      await runAsync(
+        db,
+        `INSERT INTO object_approvals
+          (release_id, object_id, step_id, step_code, sequence, parallel, approver_type, approver_id, status, tenant_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+        [releaseId, row.id, step.id, step.code, step.sequence, step.parallel, step.approver_type, approver.id, Number(tenantId), ts, ts]
+      );
+      created += 1;
+      approverIds.add(Number(approver.id));
+    }
+  }
+  workflow.startApproval(db, { releaseId, object: row, rule });
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.release.request",
+    resourceType: "object",
+    resourceId: row.id,
+    details: { code: row.code, rule: rule.code, release_id: releaseId, approvals: created },
+    ip,
+  });
+  for (const approverId of approverIds) {
+    await publishNotificationEventAsync(
+      db,
+      {
+        event_type: "approval.requested",
+        source_module: "lifecycle",
+        tenant_id: Number(tenantId),
+        object_type: "object",
+        object_id: row.code || String(row.id),
+        object_name: row.name || row.code || "",
+        payload: {
+          approver_id: approverId,
+          rule: rule.code,
+          release_id: releaseId,
+          link: `/lifecycle/releases/${releaseId}`,
+        },
+        idempotency_key: `approval-requested:${releaseId}:${approverId}`,
+      },
+      { actor, ip }
+    );
+  }
+  return publicReleaseAsync(db, await queryOneAsync(db, `${RELEASE_SELECT} WHERE r.id = ?`, [releaseId]));
+}
+
+async function stepSatisfiedAsync(db, rule, releaseId, step) {
+  const rows = await queryAllAsync(db, "SELECT status FROM object_approvals WHERE release_id = ? AND step_id = ?", [
+    releaseId,
+    step.id,
+  ]);
+  if (!rows.length) return true;
+  const approved = rows.filter((r) => r.status === "approved").length;
+  if (step.approval_mode === "any") return approved >= 1;
+  if (step.approval_mode === "min") return approved >= Math.max(1, step.min_approvals);
+  return rows.every((r) => r.status === "approved");
+}
+
+async function assertStepOpenAsync(db, rule, release, approval) {
+  if (rule?.sequential !== 1) return;
+  const steps = await queryAllAsync(db, "SELECT * FROM approval_rule_steps WHERE rule_id = ? ORDER BY sequence, id", [rule.id]);
+  for (const step of steps) {
+    if (step.sequence === approval.sequence) return;
+    if (!(await stepSatisfiedAsync(db, rule, release.id, step))) {
+      throw new HttpError(409, "A previous approval step is still pending", { blocked_by: step.code });
+    }
+  }
+}
+
+async function evaluateCompletionAsync(db, rule, release) {
+  const steps = await queryAllAsync(db, "SELECT * FROM approval_rule_steps WHERE rule_id = ? ORDER BY sequence, id", [rule.id]);
+  for (const step of steps) {
+    if (!(await stepSatisfiedAsync(db, rule, release.id, step))) return false;
+  }
+  const approved = (
+    await queryOneAsync(db, "SELECT COUNT(*) AS c FROM object_approvals WHERE release_id = ? AND status = 'approved'", [release.id])
+  ).c;
+  return approved >= Math.max(1, Number(rule.min_approvals) || 1);
+}
+
+async function rollbackAsync(db, row, rule, actor, tenantId, ip) {
+  if (!rule.rollback_state_id || !row.lifecycle_version_id) return null;
+  const target = await getStateRowAsync(db, rule.rollback_state_id);
+  if (!target || Number(target.lifecycle_version_id) !== Number(row.lifecycle_version_id)) return null;
+  const transition = await queryOneAsync(
+    db,
+    "SELECT * FROM lifecycle_transitions WHERE from_state_id = ? AND to_state_id = ? AND status = 'active'",
+    [row.lifecycle_state_id, target.id]
+  );
+  return applyTransitionAsync(db, row, transition, target, actor, tenantId, ip, {
+    source: "approval",
+    reason: "Release rollback",
+  });
+}
+
+export async function decideApprovalAsync(db, reference, approvalId, body, actor, tenantId, ip) {
+  const objectRow = await findObjectRowAsync(db, reference, tenantId);
+  const approval = await queryOneAsync(
+    db,
+    `SELECT a.*, u.username AS approver_username FROM object_approvals a
+     LEFT JOIN users u ON u.id = a.approver_id WHERE a.id = ? AND a.object_id = ?`,
+    [Number(approvalId), objectRow.id]
+  );
+  if (!approval) throw new HttpError(404, "Approval not found");
+  const release = await queryOneAsync(db, `${RELEASE_SELECT} WHERE r.id = ?`, [approval.release_id]);
+  if (!release) throw new HttpError(404, "Release not found");
+  const rule = release.rule_id ? await queryOneAsync(db, "SELECT * FROM approval_rules WHERE id = ?", [release.rule_id]) : null;
+  const decision = body?.decision;
+  if (!APPROVAL_DECISIONS.includes(decision)) {
+    throw new HttpError(400, `decision must be one of: ${APPROVAL_DECISIONS.join(", ")}`);
+  }
+  const comment = String(body?.comment ?? body?.comments ?? "").trim();
+
+  if (decision === "resubmit") {
+    if (!["changes_requested", "rejected"].includes(release.status)) {
+      throw new HttpError(409, "Only a changed or rejected release can be resubmitted");
+    }
+    return resubmitAsync(db, objectRow, release, actor, tenantId, ip);
+  }
+  if (["approved", "rejected", "cancelled"].includes(release.status)) {
+    throw new HttpError(409, `Release is already ${release.status}`);
+  }
+  const isAdmin = await tenants.isPlatformAdminAsync(db, actor?.id);
+  if (approval.approver_id && !isAdmin && Number(approval.approver_id) !== Number(actor?.id)) {
+    throw new HttpError(403, "You are not the assigned approver for this step");
+  }
+  if (decision === "approve" && !rule?.allow_self_approval && Number(release.requested_by) === Number(actor?.id) && !isAdmin) {
+    throw new HttpError(403, "Self-approval is not permitted for this rule");
+  }
+  await assertStepOpenAsync(db, rule, release, approval);
+
+  const ts = nowIso();
+  if (decision === "reject") {
+    if (rule?.mandatory_comment_on_reject === 1 && !comment) {
+      throw new HttpError(400, "A comment is required when rejecting");
+    }
+    await runAsync(db, "UPDATE object_approvals SET status = 'rejected', decided_by = ?, decided_at = ?, comment = ?, updated_at = ? WHERE id = ?", [
+      actor?.id ?? null,
+      ts,
+      comment,
+      ts,
+      approval.id,
+    ]);
+    await runAsync(db, "UPDATE object_releases SET status = 'rejected', resolved_at = ?, comments = ?, updated_at = ? WHERE id = ?", [
+      ts,
+      comment || release.comments,
+      ts,
+      release.id,
+    ]);
+    await rollbackAsync(db, objectRow, rule || {}, actor, tenantId, ip);
+    workflow.onApprovalComplete(db, { release: { ...release, status: "rejected" }, object: objectRow, rule });
+    await writeAuditAsync(db, {
+      actor,
+      action: "lifecycle.release.reject",
+      resourceType: "object",
+      resourceId: objectRow.id,
+      details: { code: objectRow.code, rule: rule?.code ?? null, comment },
+      ip,
+    });
+    if (release.requested_by) {
+      await publishNotificationEventAsync(
+        db,
+        {
+          event_type: "change.request.rejected",
+          source_module: "lifecycle",
+          tenant_id: Number(tenantId),
+          object_type: "object",
+          object_id: objectRow.code || String(objectRow.id),
+          object_name: objectRow.name || objectRow.code || "",
+          payload: {
+            requester_id: Number(release.requested_by),
+            reason: comment || "Rejected",
+            rule: rule?.code ?? null,
+            link: `/lifecycle/releases/${release.id}`,
+          },
+          idempotency_key: `change-rejected:${release.id}:${approval.id}`,
+        },
+        { actor, ip }
+      );
+    }
+    return publicReleaseAsync(db, await queryOneAsync(db, `${RELEASE_SELECT} WHERE r.id = ?`, [release.id]));
+  }
+  if (decision === "request_changes") {
+    await runAsync(db, "UPDATE object_approvals SET status = 'changes_requested', decided_by = ?, decided_at = ?, comment = ?, updated_at = ? WHERE id = ?", [
+      actor?.id ?? null,
+      ts,
+      comment,
+      ts,
+      approval.id,
+    ]);
+    await runAsync(db, "UPDATE object_releases SET status = 'changes_requested', comments = ?, updated_at = ? WHERE id = ?", [
+      comment || release.comments,
+      ts,
+      release.id,
+    ]);
+    workflow.onApprovalComplete(db, { release: { ...release, status: "changes_requested" }, object: objectRow, rule });
+    await writeAuditAsync(db, {
+      actor,
+      action: "lifecycle.release.request_changes",
+      resourceType: "object",
+      resourceId: objectRow.id,
+      details: { code: objectRow.code, comment },
+      ip,
+    });
+    return publicReleaseAsync(db, await queryOneAsync(db, `${RELEASE_SELECT} WHERE r.id = ?`, [release.id]));
+  }
+
+  await runAsync(db, "UPDATE object_approvals SET status = 'approved', decided_by = ?, decided_at = ?, comment = ?, updated_at = ? WHERE id = ?", [
+    actor?.id ?? null,
+    ts,
+    comment,
+    ts,
+    approval.id,
+  ]);
+  const refreshed = await queryOneAsync(db, "SELECT * FROM object_releases WHERE id = ?", [release.id]);
+  if (await evaluateCompletionAsync(db, rule, refreshed)) {
+    await runAsync(db, "UPDATE object_releases SET status = 'approved', resolved_at = ?, updated_at = ? WHERE id = ?", [ts, ts, release.id]);
+    let moved = null;
+    if (rule?.auto_transition === 1 && release.to_state_id) {
+      const target = await getStateRowAsync(db, release.to_state_id);
+      if (target) {
+        const transition = release.transition_id ? await getTransitionRowAsync(db, release.transition_id) : null;
+        const latest = await getObjectRowAsync(db, objectRow.id);
+        moved = await applyTransitionAsync(db, latest, transition, target, actor, tenantId, ip, {
+          source: "approval",
+          reason: "Release approved",
+        });
+      }
+    }
+    workflow.onApprovalComplete(db, { release: { ...refreshed, status: "approved" }, object: objectRow, rule, moved });
+    await writeAuditAsync(db, {
+      actor,
+      action: "lifecycle.release.approve",
+      resourceType: "object",
+      resourceId: objectRow.id,
+      details: { code: objectRow.code, rule: rule?.code ?? null, auto_transitioned: Boolean(moved) },
+      ip,
+    });
+  }
+  return publicReleaseAsync(db, await queryOneAsync(db, `${RELEASE_SELECT} WHERE r.id = ?`, [release.id]));
+}
+
+export async function resubmitAsync(db, objectRow, release, actor, tenantId, ip) {
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `UPDATE object_approvals SET status = 'pending', decided_by = NULL, decided_at = NULL, comment = '', updated_at = ?
+     WHERE release_id = ? AND status IN ('changes_requested','rejected','cancelled')`,
+    [ts, release.id]
+  );
+  await runAsync(db, "UPDATE object_releases SET status = 'pending', resolved_at = NULL, updated_at = ? WHERE id = ?", [ts, release.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.release.resubmit",
+    resourceType: "object",
+    resourceId: objectRow.id,
+    details: { code: objectRow.code, release_id: release.id },
+    ip,
+  });
+  return publicReleaseAsync(db, await queryOneAsync(db, `${RELEASE_SELECT} WHERE r.id = ?`, [release.id]));
+}
+
+export async function listReleasesAsync(db, reference, tenantId, query = {}) {
+  const row = await findObjectRowAsync(db, reference, tenantId);
+  const { page, pageSize, offset } = pagination(query);
+  const total = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM object_releases WHERE object_id = ?", [row.id])).c;
+  const releases = await Promise.all(
+    (
+      await queryAllAsync(db, `${RELEASE_SELECT} WHERE r.object_id = ? ORDER BY r.id DESC LIMIT ? OFFSET ?`, [
+        row.id,
+        pageSize,
+        offset,
+      ])
+    ).map((release) => publicReleaseAsync(db, release))
+  );
+  return { object: publicObject(row), items: releases, total, page, pageSize };
+}
+
+export async function decideByReleaseAsync(db, reference, releaseId, body, actor, tenantId, ip) {
+  const objectRow = await findObjectRowAsync(db, reference, tenantId);
+  const release = await queryOneAsync(db, "SELECT * FROM object_releases WHERE id = ? AND object_id = ?", [
+    Number(releaseId),
+    objectRow.id,
+  ]);
+  if (!release) throw new HttpError(404, "Release not found");
+  if (body?.decision === "resubmit") return resubmitAsync(db, objectRow, release, actor, tenantId, ip);
   throw new HttpError(400, "Approve/reject against a specific approval id");
 }

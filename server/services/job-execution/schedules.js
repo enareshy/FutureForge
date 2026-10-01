@@ -7,15 +7,16 @@
 // the engine-level scheduler lock.
 
 import { queryAll, queryOne, run, nowIso, randomUuid } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
 import { truncate, TERMINAL_STATUSES, safeParse } from "../jobs/validation.js";
-import { submitJob, cancelJob } from "../jobs/jobs.js";
-import { recordHistory } from "../jobs/history.js";
-import { getJobTypeRow } from "../jobs/types.js";
+import { submitJob, submitJobAsync, cancelJob } from "../jobs/jobs.js";
+import { recordHistory, recordHistoryAsync } from "../jobs/history.js";
+import { getJobTypeRow, getJobTypeRowAsync } from "../jobs/types.js";
 import { nextRunAt, describeSchedule } from "./recurrence.js";
 import { canonicalQueue, normalizeScheduleInput, assertScheduleStatus } from "./validation.js";
 import { acquireLock, releaseLock } from "./locks.js";
-import { recordEngineAudit } from "./audit.js";
+import { recordEngineAudit, recordEngineAuditAsync } from "./audit.js";
 import { requestSignal } from "./signals.js";
 import { parseSqlTime, parseInstant } from "./timezone.js";
 
@@ -675,6 +676,416 @@ export function listScheduleRuns(db, ref, query = {}) {
        FROM job_schedule_runs r LEFT JOIN jobs j ON j.id = r.job_id
        ${clause} ORDER BY r.scheduled_for DESC, r.id DESC LIMIT ? OFFSET ?`,
     [...params, pageSize, offset]
+  ).map((item) => ({
+    id: item.id,
+    schedule_id: item.schedule_id,
+    job_id: item.job_id ?? null,
+    job_ref: item.job_ref || "",
+    job_status: item.job_status || "",
+    job_progress: item.job_progress ?? null,
+    scheduled_for: item.scheduled_for,
+    status: item.status,
+    attempt: item.attempt,
+    detail: safeParse(item.detail_json, {}),
+    created_at: item.created_at,
+    updated_at: item.updated_at,
+  }));
+  return { schedule: publicSchedule(row), items, total, page, pageSize };
+}
+
+// ---------------------------------------------------------------------------
+// Async twins of the request-path schedule surface.
+//
+// Sweeps (`sweepSchedules`) and reconciliation stay on the synchronous worker
+// path; only administration + manual dispatch run on the async layer so a
+// request never mixes layers.
+// ---------------------------------------------------------------------------
+
+export async function getScheduleRowAsync(db, ref) {
+  const row = await queryOneAsync(
+    db,
+    "SELECT * FROM job_schedules WHERE id = ? OR schedule_ref = ? OR code = ? OR code = ?",
+    [Number(ref) || -1, String(ref || ""), String(ref || ""), String(ref || "").toUpperCase()]
+  );
+  if (!row) throw new HttpError(404, "Schedule not found");
+  return row;
+}
+
+export async function getScheduleAsync(db, ref, tenantId = null) {
+  const row = await getScheduleRowAsync(db, ref);
+  if (tenantId !== null && tenantId !== undefined && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Schedule not found");
+  }
+  return publicSchedule(row);
+}
+
+export async function listSchedulesAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  const scoped = tenantId ?? (query.tenantId !== undefined && query.tenantId !== "" ? Number(query.tenantId) : null);
+  if (scoped !== null && scoped !== undefined) {
+    where.push("COALESCE(tenant_id, 0) = ?");
+    params.push(Number(scoped));
+  }
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status));
+  }
+  if (query.enabled === "true" || query.enabled === true) where.push("enabled = 1");
+  if (query.enabled === "false" || query.enabled === false) where.push("enabled = 0");
+  if (query.schedule_type || query.type) {
+    where.push("schedule_type = ?");
+    params.push(String(query.schedule_type || query.type));
+  }
+  if (query.job_type_code) {
+    where.push("job_type_code = ?");
+    params.push(String(query.job_type_code).toUpperCase());
+  }
+  if (query.queue) {
+    where.push("queue = ?");
+    params.push(String(query.queue));
+  }
+  if (query.q) {
+    const like = `%${query.q}%`;
+    where.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
+    params.push(like, like, like);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM job_schedules ${clause}`, params)).c;
+  const sort = SORTABLE.has(String(query.sort || "")) ? String(query.sort) : "next_run_at";
+  const dir = String(query.order || "").toLowerCase() === "desc" ? "DESC" : "ASC";
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM job_schedules ${clause} ORDER BY ${sort} ${dir}, id ASC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    )
+  ).map(publicSchedule);
+
+  const summary = await queryOneAsync(
+    db,
+    `SELECT
+        SUM(CASE WHEN enabled = 1 AND status = 'active' THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END) AS paused,
+        SUM(CASE WHEN status = 'disabled' THEN 1 ELSE 0 END) AS disabled,
+        SUM(CASE WHEN status IN ('completed', 'expired') THEN 1 ELSE 0 END) AS finished
+       FROM job_schedules ${scoped !== null && scoped !== undefined ? "WHERE COALESCE(tenant_id, 0) = ?" : ""}`,
+    scoped !== null && scoped !== undefined ? [Number(scoped)] : []
+  );
+  return {
+    items,
+    total,
+    page,
+    pageSize,
+    summary: {
+      active: summary?.active || 0,
+      paused: summary?.paused || 0,
+      disabled: summary?.disabled || 0,
+      finished: summary?.finished || 0,
+    },
+  };
+}
+
+async function assertJobTypeAsync(db, code) {
+  const type = await getJobTypeRowAsync(db, code);
+  if (!type) throw new HttpError(400, `Unknown job type: ${code}`);
+  return type;
+}
+
+export async function createScheduleAsync(db, input = {}, actor = null, ip = null) {
+  const fields = normalizeScheduleInput(db, input, { partial: false });
+  const type = await assertJobTypeAsync(db, fields.job_type_code);
+  if (fields.queue === undefined || !fields.queue) fields.queue = safeParse(type.queues_json, ["DEFAULT"])[0];
+
+  const resolved = withDefaults(fields);
+  const nextAt = applyCatchup(withDefaults(resolved), nextRunAt(resolved, new Date()));
+  const status = fields.status || "active";
+  const enabled = fields.enabled === undefined ? (status === "active" ? 1 : 0) : fields.enabled;
+  const ts = nowIso();
+  const tenantId = fields.tenant_id !== undefined && fields.tenant_id !== null ? Number(fields.tenant_id) : actor?.tenant_id ?? null;
+  const organizationId = input.organization_id !== undefined ? Number(input.organization_id) || null : actor?.organization_id ?? null;
+
+  const result = await runAsync(
+    db,
+    `INSERT INTO job_schedules
+      (schedule_ref, code, name, description, tenant_id, organization_id, job_type_code, queue, priority,
+       schedule_type, cron_expression, interval_seconds, daily_time, weekdays_json, day_of_month, timezone,
+       start_at, end_at, max_executions, max_retries, timeout_seconds, retry_strategy, retry_delay_seconds,
+       failure_policy, concurrency_policy, catchup_policy, payload_json, status, enabled, submitted_as,
+       execution_count, failure_count, consecutive_failures, next_run_at, config_json, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'schedule',
+             0, 0, 0, ?, ?, ?, ?, ?, ?)`,
+    [
+      scheduleRef(),
+      fields.code,
+      fields.name || fields.code,
+      fields.description || "",
+      tenantId,
+      organizationId,
+      fields.job_type_code,
+      fields.queue,
+      fields.priority || "normal",
+      resolved.schedule_type,
+      resolved.cron_expression,
+      resolved.interval_seconds,
+      resolved.daily_time,
+      resolved.weekdays_json,
+      resolved.day_of_month,
+      resolved.timezone,
+      resolved.start_at,
+      resolved.end_at,
+      resolved.max_executions,
+      fields.max_retries || 0,
+      fields.timeout_seconds || 0,
+      fields.retry_strategy || "exponential",
+      fields.retry_delay_seconds === undefined ? 30 : fields.retry_delay_seconds,
+      fields.failure_policy || "continue",
+      fields.concurrency_policy || "allow",
+      fields.catchup_policy || "skip",
+      JSON.stringify(safeParse(fields.payload_json, {})),
+      status,
+      enabled,
+      nextAt,
+      JSON.stringify(safeParse(fields.config_json, {})),
+      actor?.id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM job_schedules WHERE id = ?", [Number(result.lastInsertId)]);
+  await recordEngineAuditAsync(db, {
+    tenantId: row.tenant_id,
+    entityType: "schedule",
+    entityId: row.id,
+    entityCode: row.code,
+    action: "create",
+    actor,
+    detail: { job_type_code: row.job_type_code, schedule_type: row.schedule_type, next_run_at: row.next_run_at },
+    ip,
+  });
+  return publicSchedule(row);
+}
+
+export async function updateScheduleAsync(db, ref, input = {}, actor = null, ip = null) {
+  const row = await getScheduleRowAsync(db, ref);
+  if (input.job_type_code || input.jobTypeCode) await assertJobTypeAsync(db, String(input.job_type_code || input.jobTypeCode).toUpperCase());
+  const fields = normalizeScheduleInput(db, input, { partial: true });
+  const merged = withDefaults({ ...row, ...fields });
+  const timingChanged =
+    input.schedule_type ||
+    input.scheduleType ||
+    input.cron_expression !== undefined ||
+    input.cronExpression !== undefined ||
+    input.interval_seconds !== undefined ||
+    input.intervalSeconds !== undefined ||
+    input.daily_time !== undefined ||
+    input.dailyTime !== undefined ||
+    input.weekdays !== undefined ||
+    input.weekdays_json !== undefined ||
+    input.day_of_month !== undefined ||
+    input.dayOfMonth !== undefined ||
+    input.timezone !== undefined ||
+    input.start_at !== undefined ||
+    input.startAt !== undefined ||
+    input.end_at !== undefined ||
+    input.endAt !== undefined;
+  const status = input.status !== undefined ? String(input.status) : row.status;
+  assertScheduleStatus(status);
+  const enabled = input.enabled !== undefined ? (input.enabled ? 1 : 0) : row.enabled;
+
+  let nextRun = row.next_run_at;
+  if (status !== "active" || enabled !== 1) nextRun = row.next_run_at;
+  else if (timingChanged || !row.next_run_at) nextRun = applyCatchup(withDefaults({ ...row, ...fields }), nextRunAt(merged, new Date()));
+
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `UPDATE job_schedules SET
+       name = ?, description = ?, job_type_code = ?, queue = ?, priority = ?, schedule_type = ?,
+       cron_expression = ?, interval_seconds = ?, daily_time = ?, weekdays_json = ?, day_of_month = ?,
+       timezone = ?, start_at = ?, end_at = ?, max_executions = ?, max_retries = ?, timeout_seconds = ?,
+       retry_strategy = ?, retry_delay_seconds = ?, failure_policy = ?, concurrency_policy = ?, catchup_policy = ?,
+       payload_json = ?, status = ?, enabled = ?, next_run_at = ?, config_json = ?, updated_by = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      fields.name ?? row.name,
+      fields.description ?? row.description,
+      fields.job_type_code ?? row.job_type_code,
+      fields.queue ?? row.queue,
+      fields.priority ?? row.priority,
+      merged.schedule_type,
+      merged.cron_expression,
+      merged.interval_seconds,
+      merged.daily_time,
+      merged.weekdays_json,
+      merged.day_of_month,
+      merged.timezone,
+      merged.start_at,
+      merged.end_at,
+      merged.max_executions,
+      fields.max_retries ?? row.max_retries,
+      fields.timeout_seconds ?? row.timeout_seconds,
+      fields.retry_strategy ?? row.retry_strategy,
+      fields.retry_delay_seconds ?? row.retry_delay_seconds,
+      fields.failure_policy ?? row.failure_policy,
+      fields.concurrency_policy ?? row.concurrency_policy,
+      fields.catchup_policy ?? row.catchup_policy,
+      fields.payload_json ?? row.payload_json,
+      status,
+      enabled,
+      nextRun,
+      fields.config_json ?? row.config_json,
+      actor?.id ?? null,
+      ts,
+      row.id,
+    ]
+  );
+  const updated = await queryOneAsync(db, "SELECT * FROM job_schedules WHERE id = ?", [row.id]);
+  await recordEngineAuditAsync(db, {
+    tenantId: updated.tenant_id,
+    entityType: "schedule",
+    entityId: updated.id,
+    entityCode: updated.code,
+    action: "update",
+    actor,
+    detail: {
+      before: { status: row.status, next_run_at: row.next_run_at, schedule_type: row.schedule_type },
+      after: { status: updated.status, next_run_at: updated.next_run_at, schedule_type: updated.schedule_type },
+    },
+    ip,
+  });
+  return publicSchedule(updated);
+}
+
+export async function setScheduleStatusAsync(db, ref, status, actor = null, ip = null) {
+  assertScheduleStatus(status);
+  const row = await getScheduleRowAsync(db, ref);
+  const merged = withDefaults({ ...row });
+  let nextRun = row.next_run_at;
+  if (status === "active") {
+    nextRun = nextRunAt(merged, new Date());
+    if (row.status === "completed" || row.status === "expired") nextRun = nextRunAt(merged, new Date());
+  }
+  const enabled = status === "active" ? 1 : status === "paused" ? row.enabled : 0;
+  await runAsync(
+    db,
+    "UPDATE job_schedules SET status = ?, enabled = ?, next_run_at = ?, updated_by = ?, updated_at = ? WHERE id = ?",
+    [status, enabled, nextRun, actor?.id ?? null, nowIso(), row.id]
+  );
+  await recordEngineAuditAsync(db, {
+    tenantId: row.tenant_id,
+    entityType: "schedule",
+    entityId: row.id,
+    entityCode: row.code,
+    action: status,
+    actor,
+    detail: { previous_status: row.status },
+    ip,
+  });
+  return publicSchedule(await queryOneAsync(db, "SELECT * FROM job_schedules WHERE id = ?", [row.id]));
+}
+
+export async function setScheduleEnabledAsync(db, ref, enabled, actor = null, ip = null) {
+  const row = await getScheduleRowAsync(db, ref);
+  return setScheduleStatusAsync(db, row.id, enabled ? "active" : "disabled", actor, ip);
+}
+
+async function submitScheduleJobAsync(db, schedule, scheduledFor) {
+  const idempotencyKey = `schedule:${schedule.id}:${scheduledFor}`;
+  const job = await submitJobAsync(
+    db,
+    {
+      job_type_code: schedule.job_type_code,
+      name: schedule.name,
+      description: schedule.description,
+      queue: schedule.queue,
+      priority: schedule.priority,
+      submitted_as: "schedule",
+      tenant_id: schedule.tenant_id,
+      organization_id: schedule.organization_id,
+      input: safeParse(schedule.payload_json, {}),
+      timeout_seconds: schedule.timeout_seconds,
+      max_retries: schedule.max_retries,
+      idempotency_key: idempotencyKey,
+      correlation_id: `schedule-${schedule.code}`,
+      source_module: "scheduler",
+    },
+    { actor: schedule.created_by ? { id: schedule.created_by, tenant_id: schedule.tenant_id, organization_id: schedule.organization_id } : null }
+  );
+  if (!job.duplicate) {
+    await runAsync(db, "UPDATE jobs SET schedule_id = ?, execution_group = ?, updated_at = ? WHERE id = ?", [
+      schedule.id,
+      schedule.schedule_ref || schedule.code,
+      nowIso(),
+      job.id,
+    ]);
+  }
+  return job;
+}
+
+export async function runScheduleNowAsync(db, ref, { actor = null, ip = null } = {}) {
+  const row = await getScheduleRowAsync(db, ref);
+  if (row.status === "disabled") throw new HttpError(409, "Schedule is disabled");
+  const now = nowIso();
+  const insert = await runAsync(
+    db,
+    `INSERT INTO job_schedule_runs (schedule_id, job_id, scheduled_for, status, detail_json, created_at, updated_at)
+     VALUES (?, NULL, ?, 'pending', ?, ?, ?) ON CONFLICT DO NOTHING`,
+    [row.id, now, JSON.stringify({ manual: true, actor_id: actor?.id ?? null }), now, now]
+  );
+  const runId = insert.changes === 1
+    ? Number(insert.lastInsertId)
+    : (await queryOneAsync(db, "SELECT id FROM job_schedule_runs WHERE schedule_id = ? AND scheduled_for = ?", [row.id, now]))?.id;
+  const job = await submitScheduleJobAsync(db, row, `manual:${now}`);
+  await runAsync(db, "UPDATE job_schedule_runs SET job_id = ?, status = 'enqueued', updated_at = ? WHERE id = ?", [job.id, nowIso(), runId]);
+  await runAsync(
+    db,
+    "UPDATE job_schedules SET execution_count = execution_count + 1, last_run_at = ?, last_job_id = ?, last_status = 'enqueued', updated_at = ? WHERE id = ?",
+    [now, job.id, nowIso(), row.id]
+  );
+  await recordHistoryAsync(db, job.id, {
+    event_type: "status",
+    to_status: job.status,
+    message: "Dispatched by schedule run-now",
+    detail: { schedule_id: row.id, schedule_code: row.code, manual: true },
+    actor_id: actor?.id ?? null,
+    actor_type: actor ? "user" : "engine",
+    source: "scheduler",
+  });
+  await recordEngineAuditAsync(db, {
+    tenantId: row.tenant_id,
+    entityType: "schedule",
+    entityId: row.id,
+    entityCode: row.code,
+    action: "run_now",
+    actor,
+    detail: { job_id: job.id, job_ref: job.job_ref },
+    ip,
+  });
+  return { schedule: publicSchedule(await queryOneAsync(db, "SELECT * FROM job_schedules WHERE id = ?", [row.id])), job };
+}
+
+export async function listScheduleRunsAsync(db, ref, query = {}) {
+  const { page, pageSize, offset } = pagination(query);
+  const row = await getScheduleRowAsync(db, ref);
+  const where = ["r.schedule_id = ?"];
+  const params = [row.id];
+  if (query.status) {
+    where.push("r.status = ?");
+    params.push(String(query.status));
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM job_schedule_runs r ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT r.*, j.job_ref, j.status AS job_status, j.progress AS job_progress
+         FROM job_schedule_runs r LEFT JOIN jobs j ON j.id = r.job_id
+         ${clause} ORDER BY r.scheduled_for DESC, r.id DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    )
   ).map((item) => ({
     id: item.id,
     schedule_id: item.schedule_id,

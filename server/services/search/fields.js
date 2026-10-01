@@ -3,7 +3,8 @@
 // sorted and faceted. Definitions are provider-independent metadata and are
 // cached per tenant (invalidated on any configuration change).
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { SearchError, SEARCH_ERROR_CODES } from "./errors.js";
 import {
   SEARCH_DATA_TYPES,
@@ -204,6 +205,30 @@ export function getFieldDefinition(db, tenantId, objectType, name) {
   return row ? publicFieldDefinition(row) : null;
 }
 
+export async function listFieldDefinitionsAsync(db, { tenantId, objectType = null } = {}) {
+  const params = [Number(tenantId)];
+  let where = "tenant_id = ?";
+  if (objectType) {
+    where += " AND object_type = ?";
+    params.push(String(objectType));
+  }
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM search_field_definitions WHERE ${where} ORDER BY object_type, display_order, field`,
+    params
+  );
+  return rows.map(publicFieldDefinition);
+}
+
+export async function getFieldDefinitionAsync(db, tenantId, objectType, name) {
+  const row = await queryOneAsync(
+    db,
+    "SELECT * FROM search_field_definitions WHERE tenant_id = ? AND object_type = ? AND field = ?",
+    [Number(tenantId), String(objectType), String(name)]
+  );
+  return row ? publicFieldDefinition(row) : null;
+}
+
 export function upsertFieldDefinition(db, input = {}, actor, tenantId, ip) {
   const objectType = String(input.objectType ?? input.object_type ?? "").trim();
   const name = String(input.field ?? input.name ?? "").trim();
@@ -335,6 +360,137 @@ export function deleteFieldDefinition(db, tenantId, objectType, name, actor, ip)
   return { deleted: true, object_type: objectType, field: name };
 }
 
+export async function upsertFieldDefinitionAsync(db, input = {}, actor, tenantId, ip) {
+  const objectType = String(input.objectType ?? input.object_type ?? "").trim();
+  const name = String(input.field ?? input.name ?? "").trim();
+  if (!objectType || !isValidIdentifier(objectType)) {
+    throw new SearchError(SEARCH_ERROR_CODES.OBJECT_TYPE_NOT_FOUND, "A valid object type is required");
+  }
+  if (!name || !/^[A-Za-z0-9_.-]+$/.test(name)) {
+    throw new SearchError(SEARCH_ERROR_CODES.INVALID_FIELD, "A valid field name is required");
+  }
+  const registration = await queryOneAsync(
+    db,
+    "SELECT * FROM search_object_types WHERE tenant_id = ? AND code = ?",
+    [Number(tenantId), objectType]
+  );
+  if (!registration) {
+    throw new SearchError(SEARCH_ERROR_CODES.OBJECT_TYPE_NOT_FOUND, `Object type "${objectType}" is not registered`);
+  }
+  const ts = nowIso();
+  const values = {
+    display_name: String(input.displayName ?? input.display_name ?? name),
+    data_type: normalizeDataType(input.dataType ?? input.data_type),
+    searchable: bool(input.searchable, false) ? 1 : 0,
+    filterable: bool(input.filterable, false) ? 1 : 0,
+    sortable: bool(input.sortable, false) ? 1 : 0,
+    facetable: bool(input.facetable, false) ? 1 : 0,
+    full_text: bool(input.fullText ?? input.full_text, false) ? 1 : 0,
+    exact_match: bool(input.exactMatch ?? input.exact_match, false) ? 1 : 0,
+    wildcard: bool(input.wildcard, false) ? 1 : 0,
+    boost: clampBoost(input.boost),
+    analyzer: String(input.analyzer || "standard"),
+    security_sensitive: bool(input.securitySensitive ?? input.security_sensitive, false) ? 1 : 0,
+    indexed: bool(input.indexed, true) ? 1 : 0,
+    display_order: Number(input.displayOrder ?? input.display_order ?? 100) || 100,
+  };
+  const existing = await queryOneAsync(
+    db,
+    "SELECT * FROM search_field_definitions WHERE tenant_id = ? AND object_type = ? AND field = ?",
+    [Number(tenantId), objectType, name]
+  );
+  if (existing) {
+    await runAsync(
+      db,
+      `UPDATE search_field_definitions SET
+         display_name = ?, data_type = ?, searchable = ?, filterable = ?, sortable = ?,
+         facetable = ?, full_text = ?, exact_match = ?, wildcard = ?, boost = ?,
+         analyzer = ?, security_sensitive = ?, indexed = ?, display_order = ?, updated_at = ?
+       WHERE tenant_id = ? AND object_type = ? AND field = ?`,
+      [
+        values.display_name,
+        values.data_type,
+        values.searchable,
+        values.filterable,
+        values.sortable,
+        values.facetable,
+        values.full_text,
+        values.exact_match,
+        values.wildcard,
+        values.boost,
+        values.analyzer,
+        values.security_sensitive,
+        values.indexed,
+        values.display_order,
+        ts,
+        Number(tenantId),
+        objectType,
+        name,
+      ]
+    );
+  } else {
+    await runAsync(
+      db,
+      `INSERT INTO search_field_definitions
+         (tenant_id, object_type, field, display_name, data_type, searchable, filterable, sortable,
+          facetable, full_text, exact_match, wildcard, boost, analyzer, security_sensitive, indexed,
+          display_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        Number(tenantId),
+        objectType,
+        name,
+        values.display_name,
+        values.data_type,
+        values.searchable,
+        values.filterable,
+        values.sortable,
+        values.facetable,
+        values.full_text,
+        values.exact_match,
+        values.wildcard,
+        values.boost,
+        values.analyzer,
+        values.security_sensitive,
+        values.indexed,
+        values.display_order,
+        ts,
+        ts,
+      ]
+    );
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: existing ? "search.field.update" : "search.field.create",
+    resourceType: "search_field_definition",
+    resourceId: `${objectType}:${name}`,
+    details: { object_type: objectType, field: name, data_type: values.data_type },
+    ip,
+  });
+  invalidateFieldCatalog(tenantId);
+  return getFieldDefinitionAsync(db, tenantId, objectType, name);
+}
+
+export async function deleteFieldDefinitionAsync(db, tenantId, objectType, name, actor, ip) {
+  const existing = await queryOneAsync(
+    db,
+    "SELECT * FROM search_field_definitions WHERE tenant_id = ? AND object_type = ? AND field = ?",
+    [Number(tenantId), String(objectType), String(name)]
+  );
+  if (!existing) throw new SearchError(SEARCH_ERROR_CODES.INVALID_FIELD, "Field definition not found");
+  await runAsync(db, "DELETE FROM search_field_definitions WHERE id = ?", [existing.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "search.field.delete",
+    resourceType: "search_field_definition",
+    resourceId: `${objectType}:${name}`,
+    details: { object_type: objectType, field: name },
+    ip,
+  });
+  invalidateFieldCatalog(tenantId);
+  return { deleted: true, object_type: objectType, field: name };
+}
+
 function bool(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "boolean") return value;
@@ -359,12 +515,41 @@ export function canonicalFieldCatalog(db, tenantId, { objectTypes = null } = {})
     `SELECT * FROM search_object_types WHERE tenant_id = ? AND status = 'active'`,
     [tenant]
   );
+  const configured = queryAll(
+    db,
+    `SELECT * FROM search_field_definitions WHERE tenant_id = ?`,
+    [tenant]
+  );
+  const catalog = buildCanonicalCatalog(registrations, configured, objectTypes);
+  if (!objectTypes) catalogCache.set(tenant, catalog);
+  return catalog;
+}
+
+export async function canonicalFieldCatalogAsync(db, tenantId, { objectTypes = null } = {}) {
+  const tenant = Number(tenantId);
+  const cached = catalogCache.get(tenant);
+  if (cached && !objectTypes) return cached;
+
+  const registrations = await queryAllAsync(
+    db,
+    `SELECT * FROM search_object_types WHERE tenant_id = ? AND status = 'active'`,
+    [tenant]
+  );
+  const configured = await queryAllAsync(
+    db,
+    `SELECT * FROM search_field_definitions WHERE tenant_id = ?`,
+    [tenant]
+  );
+  const catalog = buildCanonicalCatalog(registrations, configured, objectTypes);
+  if (!objectTypes) catalogCache.set(tenant, catalog);
+  return catalog;
+}
+
+function buildCanonicalCatalog(registrations, configured, objectTypes) {
   const wanted = objectTypes ? new Set(objectTypes.map(String)) : null;
   const catalog = new Map();
-  const registrationByType = new Map();
   for (const registration of registrations) {
     if (wanted && !wanted.has(registration.code)) continue;
-    registrationByType.set(registration.code, registration);
     const fields = new Map();
     for (const base of BASE_FIELDS) fields.set(base.field, { ...base });
     for (const name of listOf(registration.searchable_fields_json)) {
@@ -379,18 +564,12 @@ export function canonicalFieldCatalog(db, tenantId, { objectTypes = null } = {})
     catalog.set(registration.code, fields);
   }
 
-  const configured = queryAll(
-    db,
-    `SELECT * FROM search_field_definitions WHERE tenant_id = ?`,
-    [tenant]
-  );
   for (const row of configured) {
     const fields = catalog.get(row.object_type);
     if (!fields) continue;
     fields.set(row.field, definitionRow(row));
   }
 
-  if (!objectTypes) catalogCache.set(tenant, catalog);
   return catalog;
 }
 
@@ -469,6 +648,60 @@ export function seedFieldDefinitionsForType(db, tenantId, registration) {
   return { created };
 }
 
+export async function seedFieldDefinitionsForTypeAsync(db, tenantId, registration) {
+  if (!registration?.code) return { created: 0 };
+  const derived = derivedFieldsForRegistration(registration);
+  const fields = new Map();
+  for (const base of BASE_FIELDS) fields.set(base.field, { ...base });
+  for (const name of derived.searchable) merge(fields, name, { searchable: true });
+  for (const name of derived.filterable) merge(fields, name, { filterable: true });
+  for (const name of derived.facetable) merge(fields, name, { facetable: true });
+  for (const name of derived.sortable) merge(fields, name, { sortable: true });
+  let created = 0;
+  const ts = nowIso();
+  for (const def of fields.values()) {
+    if (SPECIAL_FIELDS.has(def.field)) continue;
+    const existing = await queryOneAsync(
+      db,
+      "SELECT id FROM search_field_definitions WHERE tenant_id = ? AND object_type = ? AND field = ?",
+      [Number(tenantId), registration.code, def.field]
+    );
+    if (existing) continue;
+    await runAsync(
+      db,
+      `INSERT INTO search_field_definitions
+         (tenant_id, object_type, field, display_name, data_type, searchable, filterable, sortable,
+          facetable, full_text, exact_match, wildcard, boost, analyzer, security_sensitive, indexed,
+          display_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        Number(tenantId),
+        registration.code,
+        def.field,
+        def.displayName || def.field,
+        def.dataType || "string",
+        def.searchable ? 1 : 0,
+        def.filterable ? 1 : 0,
+        def.sortable ? 1 : 0,
+        def.facetable ? 1 : 0,
+        def.fullText ? 1 : 0,
+        def.exactMatch ? 1 : 0,
+        def.wildcard ? 1 : 0,
+        def.boost ?? 1,
+        def.analyzer || "standard",
+        def.securitySensitive ? 1 : 0,
+        def.indexed === false ? 0 : 1,
+        def.displayOrder ?? 100,
+        ts,
+        ts,
+      ]
+    );
+    created += 1;
+  }
+  invalidateFieldCatalog(tenantId);
+  return { created };
+}
+
 export function ensureDefaultFieldDefinitions(db) {
   const tenants = queryAll(db, "SELECT DISTINCT tenant_id FROM search_object_types");
   let created = 0;
@@ -506,6 +739,52 @@ export function validateCanonicalQuery(db, canonical, { tenantId, availableTypes
     }
   }
   const catalog = canonicalFieldCatalog(db, tenant, requested.length ? { objectTypes: requested } : {});
+
+  const conditionCount =
+    canonical.filters.length + countConditionLeaves(canonical.condition);
+  if (conditionCount > CONDITION_COUNT_MAX) {
+    throw new SearchError(
+      SEARCH_ERROR_CODES.QUERY_TOO_COMPLEX,
+      `Too many search conditions (max ${CONDITION_COUNT_MAX})`
+    );
+  }
+
+  for (const filter of canonical.filters) validateFilter(catalog, requested, filter);
+  validateCondition(catalog, requested, canonical.condition);
+
+  for (const entry of canonical.sort) {
+    const allowed = requested.some((type) => catalog.get(type)?.get(entry.field)?.sortable);
+    if (!allowed) {
+      throw new SearchError(SEARCH_ERROR_CODES.FIELD_NOT_SORTABLE, `Field "${entry.field}" is not sortable`);
+    }
+  }
+  for (const facet of canonical.facets) {
+    const allowed = requested.some((type) => catalog.get(type)?.get(facet)?.facetable);
+    if (!allowed) {
+      throw new SearchError(SEARCH_ERROR_CODES.FIELD_NOT_FACETABLE, `Field "${facet}" is not facetable`);
+    }
+  }
+
+  return { catalog, objectTypes: requested };
+}
+
+export async function validateCanonicalQueryAsync(db, canonical, { tenantId, availableTypes } = {}) {
+  const tenant = Number(tenantId);
+  const types = availableTypes || [...(await canonicalFieldCatalogAsync(db, tenant)).keys()];
+  const requested = canonical.objectTypes.length ? canonical.objectTypes : types;
+  for (const type of requested) {
+    if (!types.includes(type)) {
+      throw new SearchError(
+        SEARCH_ERROR_CODES.OBJECT_TYPE_NOT_FOUND,
+        `Search object type "${type}" is not registered`
+      );
+    }
+  }
+  const catalog = await canonicalFieldCatalogAsync(
+    db,
+    tenant,
+    requested.length ? { objectTypes: requested } : {}
+  );
 
   const conditionCount =
     canonical.filters.length + countConditionLeaves(canonical.condition);

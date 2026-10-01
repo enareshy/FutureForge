@@ -1,6 +1,6 @@
 // Change hooks called by business modules. They are intentionally tiny and
 // best-effort: a search indexing hiccup must never fail the business write.
-import { enqueueIndexChange } from "./queue.js";
+import { enqueueIndexChange, enqueueIndexChangeAsync } from "./queue.js";
 import { isRegisteredObjectType, isSearchEnabled } from "./state.js";
 
 export function emitObjectIndexChange(db, input = {}) {
@@ -9,6 +9,25 @@ export function emitObjectIndexChange(db, input = {}) {
     const objectType = String(input.objectType ?? input.object_type ?? "");
     if (!objectType || !isRegisteredObjectType(objectType)) return null;
     return enqueueIndexChange(db, {
+      tenantId: input.tenantId ?? input.tenant_id,
+      objectType,
+      objectId: input.objectId ?? input.object_id,
+      operation: input.operation,
+      reason: input.reason,
+      correlationId: input.correlationId ?? input.correlation_id,
+    });
+  } catch {
+    return null;
+  }
+}
+
+// Async twin of `emitObjectIndexChange` for migrated write routes.
+export async function emitObjectIndexChangeAsync(db, input = {}) {
+  try {
+    if (!isSearchEnabled()) return null;
+    const objectType = String(input.objectType ?? input.object_type ?? "");
+    if (!objectType || !isRegisteredObjectType(objectType)) return null;
+    return await enqueueIndexChangeAsync(db, {
       tenantId: input.tenantId ?? input.tenant_id,
       objectType,
       objectId: input.objectId ?? input.object_id,

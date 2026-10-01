@@ -9,7 +9,7 @@
 // framework hiccup (for example a disabled event type) must never fail the
 // business write. Modules that require strict atomicity can call
 // `Events.publish` directly.
-import { publishEvent } from "./publisher.js";
+import { publishEvent, publishEventAsync } from "./publisher.js";
 import { log } from "./hooks.js";
 
 // Demo/bootstrap seeding performs many writes that are not real business
@@ -52,11 +52,60 @@ export function emitDomainEvent(db, input = {}, actor = null, options = {}) {
   }
 }
 
+// Async twin of `emitDomainEvent` for migrated write routes. Best-effort: a
+// framework hiccup never fails the caller's business write.
+export async function emitDomainEventAsync(db, input = {}, actor = null, options = {}) {
+  if (suppressionDepth > 0) return null;
+  const eventTypeCode = typeCodeOf(input);
+  if (!eventTypeCode) {
+    log("warn", "event.domain.emit_skipped", { reason: "missing_event_type" });
+    return null;
+  }
+  try {
+    return await publishEventAsync(db, { ...input, event_type_code: eventTypeCode }, actor, {
+      useOutbox: true,
+      ...options,
+    });
+  } catch (error) {
+    log("warn", "event.domain.emit_failed", { event_type: eventTypeCode, error: error.message });
+    return null;
+  }
+}
+
 // Convenience wrapper for object-centric events. Callers pass the persisted
 // object row plus the event code and optional extra payload fields.
 export function emitObjectEvent(db, row, eventTypeCode, extra = {}, actor = null) {
   if (!row) return null;
   return emitDomainEvent(
+    db,
+    {
+      event_type_code: eventTypeCode,
+      source_module: extra.source_module || "objects",
+      source_object_type: extra.source_object_type || "object",
+      source_object_id: row.id,
+      source_object_revision: row.revision,
+      organization_id: row.organization_id ?? null,
+      tenant_id: row.tenant_id ?? null,
+      payload: {
+        id: row.id,
+        code: row.code,
+        name: row.name,
+        status: row.status,
+        revision: row.revision,
+        ...extra.payload,
+      },
+      metadata: extra.metadata,
+      correlation_id: extra.correlation_id,
+      idempotency_key: extra.idempotency_key,
+    },
+    actor
+  );
+}
+
+// Async twin of `emitObjectEvent` for migrated write routes.
+export async function emitObjectEventAsync(db, row, eventTypeCode, extra = {}, actor = null) {
+  if (!row) return null;
+  return emitDomainEventAsync(
     db,
     {
       event_type_code: eventTypeCode,

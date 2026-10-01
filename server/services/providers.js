@@ -1,7 +1,8 @@
 import { queryAll, queryOne, run, nowIso } from "../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../db-async.js";
 import { encryptJson, decryptJson, randomToken, sha256 } from "../crypto.js";
 import { HttpError, requireFields, validateCode } from "../validation.js";
-import { writeAudit } from "./audit.js";
+import { writeAudit, writeAuditAsync } from "./audit.js";
 import * as users from "./users.js";
 
 export const PROVIDER_TYPES = ["password", "oidc", "saml", "ldap"];
@@ -338,4 +339,141 @@ export function listIdentities(db, userId) {
      WHERE i.user_id = ? ORDER BY p.name`,
     [userId]
   );
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+
+export async function listProvidersAsync(db, { enabledOnly = false } = {}) {
+  const clause = enabledOnly ? "WHERE enabled = 1" : "";
+  return (await queryAllAsync(db, `SELECT * FROM auth_providers ${clause} ORDER BY type, name`)).map((row) =>
+    publicProvider(row)
+  );
+}
+
+export async function getProviderAsync(db, idOrCode) {
+  const row =
+    (await queryOneAsync(db, "SELECT * FROM auth_providers WHERE code = ?", [idOrCode])) ||
+    (await queryOneAsync(db, "SELECT * FROM auth_providers WHERE id = ?", [idOrCode]));
+  if (!row) throw new HttpError(404, "Authentication provider not found");
+  return row;
+}
+
+export async function getEnabledProviderAsync(db, code) {
+  const row = await getProviderAsync(db, code);
+  if (!row.enabled) throw new HttpError(400, "Authentication provider is disabled");
+  return row;
+}
+
+export async function ensureDefaultProvidersAsync(db) {
+  const existing = await queryOneAsync(db, "SELECT id FROM auth_providers WHERE code = 'password'");
+  if (existing) return;
+  await runAsync(
+    db,
+    `INSERT INTO auth_providers (code, name, type, enabled, config_json, secrets_enc, created_at, updated_at)
+     VALUES ('password', 'Username and password', 'password', 1, '{}', '', ?, ?)`,
+    [nowIso(), nowIso()]
+  );
+}
+
+export async function findIdentityAsync(db, providerId, subject) {
+  return queryOneAsync(
+    db,
+    "SELECT * FROM auth_identities WHERE provider_id = ? AND subject = ?",
+    [providerId, subject]
+  );
+}
+
+export async function linkIdentityAsync(db, userId, providerId, subject, email) {
+  const existing = await findIdentityAsync(db, providerId, subject);
+  if (existing) {
+    if (existing.user_id !== Number(userId)) throw new HttpError(409, "Identity already linked to another user");
+    return existing;
+  }
+  await runAsync(
+    db,
+    "INSERT INTO auth_identities (user_id, provider_id, subject, email, created_at) VALUES (?, ?, ?, ?, ?)",
+    [userId, providerId, subject, email || null, nowIso()]
+  );
+  return findIdentityAsync(db, providerId, subject);
+}
+
+export async function authenticatePasswordProviderAsync(db, username, password, ip) {
+  return users.authenticateAsync(db, username, password, ip);
+}
+
+export async function createProviderAsync(db, body, actor, ip) {
+  requireFields(body, ["code", "name", "type"]);
+  validateCode(body.code, "Provider code");
+  assertType(body.type);
+  const { config, secrets } = splitBody(body);
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO auth_providers (code, name, type, enabled, config_json, secrets_enc, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        body.code,
+        body.name.trim(),
+        body.type,
+        body.enabled === 0 || body.enabled === false ? 0 : 1,
+        JSON.stringify(config),
+        encryptJson(secrets),
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Provider code already exists");
+    throw err;
+  }
+  const row = await queryOneAsync(db, "SELECT * FROM auth_providers WHERE id = ?", [result.lastInsertId]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "auth.provider.create",
+    resourceType: "auth_provider",
+    resourceId: row.id,
+    details: { code: row.code, type: row.type },
+    ip,
+  });
+  return publicProvider(row);
+}
+
+export async function updateProviderAsync(db, id, body, actor, ip) {
+  const current = await getProviderAsync(db, id);
+  const nextType = body.type ?? current.type;
+  assertType(nextType);
+  const { config, secrets } = splitBody(body);
+  const mergedConfig = { ...parseConfig(current), ...config };
+  const mergedSecrets = { ...decryptJson(current.secrets_enc), ...secrets };
+  for (const key of SECRET_KEYS) {
+    if (secrets[key] === "") delete mergedSecrets[key];
+  }
+  const enabled =
+    body.enabled === undefined ? current.enabled : body.enabled === 0 || body.enabled === false ? 0 : 1;
+  await runAsync(
+    db,
+    `UPDATE auth_providers SET name = ?, type = ?, enabled = ?, config_json = ?, secrets_enc = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      (body.name ?? current.name).trim(),
+      nextType,
+      enabled,
+      JSON.stringify(mergedConfig),
+      encryptJson(mergedSecrets),
+      nowIso(),
+      current.id,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM auth_providers WHERE id = ?", [current.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "auth.provider.update",
+    resourceType: "auth_provider",
+    resourceId: row.id,
+    details: { code: row.code, enabled: row.enabled },
+    ip,
+  });
+  return publicProvider(row);
 }

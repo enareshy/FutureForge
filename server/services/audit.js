@@ -43,9 +43,12 @@ export {
 
 export {
   capture,
+  captureAsync,
   recordBatch,
   writeAudit,
+  writeAuditAsync,
   recordObjectChange,
+  recordObjectChangeAsync,
   recordStateChange,
   recordRelationshipChange,
   recordWorkflowAction,
@@ -64,6 +67,7 @@ export {
 export {
   publicPolicy,
   resolvePolicy,
+  resolvePolicyAsync,
   defaultEffectivePolicy,
   listPolicies,
   getPolicy,
@@ -92,7 +96,11 @@ export {
   integrationAudit,
   backgroundJobAudit,
   eventFacets,
+  eventFacetsAsync,
   auditSummary,
+  auditSummaryAsync,
+  listEventsAsync,
+  getEventAsync,
   auditMetrics,
 } from "./audit/query.js";
 
@@ -160,12 +168,20 @@ export {
 
 export { registerAuditHandlers, runAuditMaintenance } from "./audit/jobs.js";
 
-import { listEvents } from "./audit/query.js";
+import { listEvents, listEventsAsync } from "./audit/query.js";
 
 // Legacy listing used by GET /api/audit-logs. Preserves the original response
 // shape while delegating to the rich query layer.
 export function listAuditLogs(db, { page, pageSize, offset, action, resourceType, q, scope } = {}) {
   return listEvents(
+    db,
+    { page, pageSize, offset, action, objectType: resourceType, q },
+    scope || { scopeAll: true }
+  );
+}
+
+export async function listAuditLogsAsync(db, { page, pageSize, offset, action, resourceType, q, scope } = {}) {
+  return listEventsAsync(
     db,
     { page, pageSize, offset, action, objectType: resourceType, q },
     scope || { scopeAll: true }

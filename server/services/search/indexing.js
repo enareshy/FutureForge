@@ -2,6 +2,7 @@
 // source resolvers, maintains the index and relationship projections, and
 // drains the durable change queue with retry / dead-letter handling.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { writeAudit } from "../audit.js";
 import { HttpError } from "../../validation.js";
 import {
@@ -523,3 +524,53 @@ export function pruneIndex(db, { tenantId } = {}, actor, ip) {
 }
 
 export { registerBuiltinSources, listSourceResolvers, registerSourceResolver, getSourceResolver };
+
+// ── Async twins (index status reads) ────────────────────────────────────────
+
+export async function indexingStatusAsync(db, { tenantId } = {}) {
+  const tenantClause = tenantId ? "WHERE tenant_id = ?" : "";
+  const params = tenantId ? [Number(tenantId)] : [];
+  const queue = await queryAllAsync(
+    db,
+    `SELECT status, COUNT(*) AS count FROM search_index_status ${tenantClause} GROUP BY status`,
+    params
+  );
+  const documents = await queryAllAsync(
+    db,
+    `SELECT object_type, COUNT(*) AS count FROM search_index ${tenantClause} GROUP BY object_type`,
+    params
+  );
+  const lastIndexed = await queryOneAsync(
+    db,
+    `SELECT MAX(indexed_at) AS last_indexed_at FROM search_index ${tenantClause}`,
+    params
+  );
+  const queueMap = Object.fromEntries(queue.map((row) => [row.status, row.count]));
+  return {
+    documents_total: documents.reduce((sum, row) => sum + row.count, 0),
+    documents_by_type: documents,
+    queue: {
+      pending: queueMap.pending || 0,
+      processing: queueMap.processing || 0,
+      succeeded: queueMap.succeeded || 0,
+      failed: queueMap.failed || 0,
+      dead_letter: queueMap.dead_letter || 0,
+    },
+    last_indexed_at: lastIndexed?.last_indexed_at || null,
+  };
+}
+
+export async function listIndexFailuresAsync(db, { tenantId = null, limit = 50 } = {}) {
+  const params = [];
+  let where = "status IN ('failed', 'dead_letter')";
+  if (tenantId) {
+    where += " AND tenant_id = ?";
+    params.push(Number(tenantId));
+  }
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM search_index_status WHERE ${where} ORDER BY updated_at DESC LIMIT ?`,
+    [...params, Number(limit)]
+  );
+  return rows.map(publicIndexStatus);
+}

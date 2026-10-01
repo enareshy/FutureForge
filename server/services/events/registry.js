@@ -5,6 +5,7 @@
 // stored per type so consumers can rely on a stable contract and breaking
 // changes force a new version.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import {
   assertEventTypeCode,
@@ -26,7 +27,7 @@ import {
   validatePayloadAgainstSchema,
 } from "./validation.js";
 import { publicEventType, publicSchemaVersion } from "./repository.js";
-import { auditEvent } from "./hooks.js";
+import { auditEvent, auditEventAsync } from "./hooks.js";
 
 // The platform's default domain catalogue. Business modules publish these
 // without any manual catalogue maintenance; anything missing can be registered
@@ -325,6 +326,86 @@ export function resolveSchema(db, eventTypeCode, version, { strict = false } = {
   if (!row) throw new HttpError(404, `Unknown event type ${eventTypeCode}`);
   const requested = version === undefined || version === null ? Number(row.version) : Number(version);
   const schemaRow = getVersionRow(db, row.id, requested);
+  if (!schemaRow) {
+    if (strict && requested !== Number(row.version)) throw new HttpError(400, `Unsupported version ${requested} for ${row.code}`);
+    return { type: row, schema: safeParse(row.schema_json, {}), version: Number(row.version), resolved: false };
+  }
+  if (schemaRow.status === "retired" && strict) throw new HttpError(400, `Event version ${row.code}.v${requested} is retired`);
+  return { type: row, schema: safeParse(schemaRow.schema_json, {}), version: requested, resolved: true, versionStatus: schemaRow.status };
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+// Used by the asynchronous event emission path (`emitDomainEventAsync`).
+
+export async function getEventTypeRowAsync(db, refValue) {
+  const id = Number(refValue);
+  return queryOneAsync(db, "SELECT * FROM event_registry WHERE id = ? OR code = ?", [
+    Number.isFinite(id) ? id : -1,
+    String(refValue),
+  ]);
+}
+
+export async function createEventTypeAsync(db, input = {}, actor = null, tenantId = null) {
+  assertEventTypeCode(input.code);
+  const existing = await getEventTypeRowAsync(db, input.code);
+  if (existing) return publicEventType(existing);
+  const version = clampInt(input.version, 1, 100000, 1);
+  const schema = input.schema && typeof input.schema === "object" ? input.schema : {};
+  const example = input.example && typeof input.example === "object" ? input.example : {};
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO event_registry
+      (code, name, description, category, source_module, version, security_classification, retention_days, replay_policy,
+       ordering_required, ordering_scope, default_priority, status, enabled, system, schema_json, example_json, tenant_id, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.code,
+      input.name || input.code,
+      input.description || "",
+      normalizeCategory(input.category),
+      input.source_module || "",
+      version,
+      normalizeClassification(input.security_classification),
+      clampInt(input.retention_days, 1, 3650, 90),
+      normalizeReplayPolicy(input.replay_policy),
+      input.ordering_required ? 1 : 0,
+      normalizeOrderingScope(input.ordering_scope),
+      normalizePriority(input.default_priority),
+      normalizeEventStatus(input.status),
+      input.enabled === false ? 0 : 1,
+      input.system ? 1 : 0,
+      toJson(schema, {}),
+      toJson(example, {}),
+      tenantId ?? input.tenant_id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const typeId = Number(result.lastInsertId);
+  await runAsync(
+    db,
+    `INSERT INTO event_schemas (event_type_id, version, status, compatibility, schema_json, example_json, notes, created_by, created_at, updated_at)
+     VALUES (?, ?, 'active', 'backward', ?, ?, '', ?, ?, ?)`,
+    [typeId, version, toJson(schema, {}), toJson(example, {}), actor?.id ?? null, ts, ts]
+  );
+  await auditEventAsync(db, { actor, action: "event.type.create", resourceType: "event_registry", resourceId: typeId, details: { code: input.code, version } });
+  return publicEventType(await queryOneAsync(db, "SELECT * FROM event_registry WHERE id = ?", [typeId]));
+}
+
+export async function getVersionRowAsync(db, eventTypeId, version) {
+  return queryOneAsync(db, "SELECT * FROM event_schemas WHERE event_type_id = ? AND version = ?", [
+    Number(eventTypeId),
+    Number(version),
+  ]);
+}
+
+export async function resolveSchemaAsync(db, eventTypeCode, version, { strict = false } = {}) {
+  const row = await getEventTypeRowAsync(db, eventTypeCode);
+  if (!row) throw new HttpError(404, `Unknown event type ${eventTypeCode}`);
+  const requested = version === undefined || version === null ? Number(row.version) : Number(version);
+  const schemaRow = await getVersionRowAsync(db, row.id, requested);
   if (!schemaRow) {
     if (strict && requested !== Number(row.version)) throw new HttpError(400, `Unsupported version ${requested} for ${row.code}`);
     return { type: row, schema: safeParse(row.schema_json, {}), version: Number(row.version), resolved: false };

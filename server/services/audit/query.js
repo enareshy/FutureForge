@@ -1,6 +1,7 @@
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { publicEvent, listChangesForEvent } from "./events.js";
+import { publicEvent, listChangesForEvent, listChangesForEventAsync } from "./events.js";
 
 // Audit query layer. All reads are tenant scoped unless the caller is a
 // platform operator explicitly requesting a global view.
@@ -270,6 +271,76 @@ export function auditSummary(db, filters = {}, scope = {}) {
      GROUP BY day ORDER BY day DESC LIMIT 30`,
     params
   );
+  return {
+    total: totals.total || 0,
+    success: totals.success || 0,
+    failure: totals.failure || 0,
+    denied: totals.denied || 0,
+    by_type: byType,
+    by_source: bySource,
+    top_actors: topActors,
+    top_objects: topObjects,
+    by_day: byDay.reverse(),
+  };
+}
+
+// Async twins of the audit read queries (same filters, scope and shapes).
+export async function listEventsAsync(db, filters = {}, scope = {}) {
+  const { where, params } = buildEventFilters(filters, scope);
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const page = Math.max(1, Number(filters.page) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number(filters.pageSize) || 25));
+  const offset = filters.offset !== undefined ? Math.max(0, Number(filters.offset) || 0) : (page - 1) * pageSize;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM audit_logs ${clause}`, params)).c;
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM audit_logs ${clause} ${orderClause(filters.sort, filters.order)} LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  return { items: rows.map(publicEvent), total, page, pageSize };
+}
+
+export async function getEventAsync(db, id, scope = {}) {
+  const { where, params } = buildEventFilters({}, scope);
+  const clause = where.length ? `WHERE ${where.join(" AND ")} AND id = ?` : "WHERE id = ?";
+  const row = await queryOneAsync(db, `SELECT * FROM audit_logs ${clause}`, [...params, Number(id)]);
+  if (!row) throw new HttpError(404, "Audit event not found");
+  return { ...publicEvent(row), changes: await listChangesForEventAsync(db, row.id) };
+}
+
+export async function eventFacetsAsync(db, filters = {}, scope = {}) {
+  const { where, params } = buildEventFilters(filters, scope);
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const [actions, sources, eventTypes, categories, actorTypes, statuses] = await Promise.all([
+    queryAllAsync(db, `SELECT action, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY action ORDER BY count DESC LIMIT 50`, params),
+    queryAllAsync(db, `SELECT source, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY source ORDER BY count DESC`, params),
+    queryAllAsync(db, `SELECT event_type, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY event_type ORDER BY count DESC`, params),
+    queryAllAsync(db, `SELECT category, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY category ORDER BY count DESC`, params),
+    queryAllAsync(db, `SELECT actor_type, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY actor_type ORDER BY count DESC`, params),
+    queryAllAsync(db, `SELECT status, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY status ORDER BY count DESC`, params),
+  ]);
+  return { actions, sources, event_types: eventTypes, categories, actor_types: actorTypes, statuses };
+}
+
+export async function auditSummaryAsync(db, filters = {}, scope = {}) {
+  const { where, params } = buildEventFilters(filters, scope);
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const [totals, byType, bySource, topActors, topObjects, byDay] = await Promise.all([
+    queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
+              SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) AS failure,
+              SUM(CASE WHEN status = 'denied' THEN 1 ELSE 0 END) AS denied
+       FROM audit_logs ${clause}`,
+      params
+    ),
+    queryAllAsync(db, `SELECT event_type, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY event_type ORDER BY count DESC`, params),
+    queryAllAsync(db, `SELECT source, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY source ORDER BY count DESC`, params),
+    queryAllAsync(db, `SELECT actor_id, actor_username, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY actor_id, actor_username ORDER BY count DESC LIMIT 10`, params),
+    queryAllAsync(db, `SELECT resource_type, resource_id, object_name, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY resource_type, resource_id, object_name ORDER BY count DESC LIMIT 10`, params),
+    queryAllAsync(db, `SELECT left(created_at, 10) AS day, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY day ORDER BY day DESC LIMIT 30`, params),
+  ]);
   return {
     total: totals.total || 0,
     success: totals.success || 0,

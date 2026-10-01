@@ -1,8 +1,9 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { publish as publishNotificationEvent } from "../notifications.js";
-import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
+import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable, writeTenantAsync, assertMutableAsync } from "../metadata/scope.js";
 import { ESCALATION_ACTIONS, TASK_PRIORITIES, safeParse } from "./validation.js";
 import { recordEvent } from "./events.js";
 import { usersForAssignee } from "./routing.js";
@@ -283,4 +284,128 @@ export function sweepEscalations(db, { tenantId = null, now = nowIso(), limit = 
 
 export function readEscalationTenant(db, actor, query, reqTenantId) {
   return readTenant(db, actor, query, reqTenantId);
+}
+
+// ── Async twins (config writes) ───────────────────────────────────────────────
+
+export async function getEscalationRuleRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM workflow_escalation_rules WHERE id = ?", [Number(id)]);
+}
+
+export async function listEscalationRulesAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("r", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.status) {
+    where.push("r.status = ?");
+    params.push(query.status);
+  }
+  if (query.definitionId || query.definition_id) {
+    where.push("(r.definition_id IS NULL OR r.definition_id = ?)");
+    params.push(Number(query.definitionId || query.definition_id));
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM workflow_escalation_rules r ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(db, `SELECT r.* FROM workflow_escalation_rules r ${clause} ORDER BY r.code LIMIT ? OFFSET ?`, [
+      ...params,
+      pageSize,
+      offset,
+    ])
+  ).map(publicEscalationRule);
+  return { items, total, page, pageSize };
+}
+
+export async function createEscalationRuleAsync(db, body, actor = null, ip = null, reqTenantId = null) {
+  requireFields(body, ["code", "name"]);
+  validateCode(body.code, "Escalation rule code");
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const action = body.action || "notify";
+  if (!ESCALATION_ACTIONS.includes(action)) {
+    throw new HttpError(400, `action must be one of: ${ESCALATION_ACTIONS.join(", ")}`);
+  }
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO workflow_escalation_rules
+        (code, name, description, definition_id, node_key, after_minutes, action,
+         target_assignee_type, target_assignee_id, target_assignee_ref, notify_user_id, priority, status, tenant_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        body.definition_id ?? body.definitionId ?? null,
+        body.node_key ?? body.nodeKey ?? "",
+        Number(body.after_minutes ?? body.afterMinutes ?? 60) || 60,
+        action,
+        body.target_assignee_type ?? body.targetAssigneeType ?? "",
+        body.target_assignee_id ?? body.targetAssigneeId ?? null,
+        body.target_assignee_ref ?? body.targetAssigneeRef ?? "",
+        body.notify_user_id ?? body.notifyUserId ?? null,
+        body.priority || "high",
+        body.status || "active",
+        tenantId ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Escalation rule code already exists in this scope");
+    throw err;
+  }
+  await writeAuditAsync(db, { actor, action: "workflow.escalation_rule.create", resourceType: "workflow_escalation_rule", resourceId: result.lastInsertId, details: { code: body.code }, ip });
+  return publicEscalationRule(await getEscalationRuleRowAsync(db, result.lastInsertId));
+}
+
+export async function updateEscalationRuleAsync(db, id, body, actor = null, ip = null, tenantId = null) {
+  const row = await getEscalationRuleRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Escalation rule not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Escalation rule code");
+  const action = body.action ?? row.action;
+  if (!ESCALATION_ACTIONS.includes(action)) {
+    throw new HttpError(400, `action must be one of: ${ESCALATION_ACTIONS.join(", ")}`);
+  }
+  try {
+    await runAsync(
+      db,
+      `UPDATE workflow_escalation_rules SET
+         code = ?, name = ?, description = ?, definition_id = ?, node_key = ?, after_minutes = ?, action = ?,
+         target_assignee_type = ?, target_assignee_id = ?, target_assignee_ref = ?, notify_user_id = ?, priority = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        body.definition_id === undefined && body.definitionId === undefined ? row.definition_id : body.definition_id ?? body.definitionId,
+        body.node_key === undefined && body.nodeKey === undefined ? row.node_key : body.node_key ?? body.nodeKey,
+        body.after_minutes === undefined && body.afterMinutes === undefined ? row.after_minutes : Number(body.after_minutes ?? body.afterMinutes) || 60,
+        action,
+        body.target_assignee_type === undefined && body.targetAssigneeType === undefined ? row.target_assignee_type : body.target_assignee_type ?? body.targetAssigneeType,
+        body.target_assignee_id === undefined && body.targetAssigneeId === undefined ? row.target_assignee_id : body.target_assignee_id ?? body.targetAssigneeId,
+        body.target_assignee_ref === undefined && body.targetAssigneeRef === undefined ? row.target_assignee_ref : body.target_assignee_ref ?? body.targetAssigneeRef,
+        body.notify_user_id === undefined && body.notifyUserId === undefined ? row.notify_user_id : body.notify_user_id ?? body.notifyUserId,
+        body.priority ?? row.priority,
+        body.status ?? row.status,
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Escalation rule code already exists in this scope");
+    throw err;
+  }
+  await writeAuditAsync(db, { actor, action: "workflow.escalation_rule.update", resourceType: "workflow_escalation_rule", resourceId: row.id, details: { code: row.code }, ip });
+  return publicEscalationRule(await getEscalationRuleRowAsync(db, row.id));
+}
+
+export async function deleteEscalationRuleAsync(db, id, actor = null, ip = null, tenantId = null) {
+  const row = await getEscalationRuleRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Escalation rule not found");
+  await runAsync(db, "DELETE FROM workflow_escalation_rules WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, { actor, action: "workflow.escalation_rule.delete", resourceType: "workflow_escalation_rule", resourceId: row.id, details: { code: row.code }, ip });
+  return { deleted: true, id: row.id };
 }

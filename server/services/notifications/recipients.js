@@ -1,5 +1,6 @@
 import { queryAll, queryOne } from "../../db.js";
-import { descendantOrganizationIds } from "../orgs.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { descendantOrganizationIds, descendantOrganizationIdsAsync } from "../orgs.js";
 import {
   normalizeRecipientDefinition,
   normalizeRecipientItem,
@@ -279,4 +280,243 @@ function finalize(users, normalized, context) {
       language: user.language || "en",
       isInitiator: context.initiator?.id ? Number(user.id) === Number(context.initiator.id) : false,
     }));
+}
+
+// ---------------------------------------------------------------------------
+// Asynchronous twins. They mirror the synchronous implementation statement for
+// statement so rule evaluation resolves the same recipients on either layer.
+// ---------------------------------------------------------------------------
+
+async function activeUsersInOrganizationsAsync(db, organizationIds, tenantId) {
+  const ids = [...new Set(organizationIds.map(Number).filter(Boolean))];
+  if (!ids.length) return [];
+  const scope = tenantPredicate(tenantId);
+  const placeholders = ids.map(() => "?").join(", ");
+  return queryAllAsync(
+    db,
+    `SELECT ${USER_COLUMNS} FROM users u
+      WHERE u.status = 'active' AND u.organization_id IN (${placeholders}) AND ${scope.sql}
+      ORDER BY u.username`,
+    [...ids, ...scope.params]
+  );
+}
+
+async function resolveOrganizationSubtreeAsync(db, organizationId, tenantId) {
+  const id = Number(organizationId);
+  if (!id) return [];
+  const descendants = await descendantOrganizationIdsAsync(db, id);
+  const ids = [id, ...(descendants || [])];
+  return activeUsersInOrganizationsAsync(db, ids, tenantId);
+}
+
+async function usersForRoleAsync(db, roleRef, tenantId, organizationId = 0) {
+  if (!roleRef && roleRef !== 0) return [];
+  const scope = tenantPredicate(tenantId);
+  return queryAllAsync(
+    db,
+    `SELECT DISTINCT ${USER_COLUMNS}
+       FROM users u
+      WHERE u.status = 'active' AND ${scope.sql}
+        AND u.id IN (
+          SELECT ur.user_id FROM user_roles ur
+           WHERE ur.role_id IN (SELECT id FROM roles WHERE id = ? OR code = ?)
+             AND (ur.organization_id = 0 OR ur.organization_id = ?)
+          UNION
+          SELECT gm.user_id FROM group_members gm
+            JOIN group_roles gr ON gr.group_id = gm.group_id
+           WHERE gr.role_id IN (SELECT id FROM roles WHERE id = ? OR code = ?)
+             AND (gr.organization_id = 0 OR gr.organization_id = ?)
+        )
+      ORDER BY u.username`,
+    [
+      ...scope.params,
+      Number(roleRef) || 0,
+      String(roleRef ?? ""),
+      Number(organizationId) || 0,
+      Number(roleRef) || 0,
+      String(roleRef ?? ""),
+      Number(organizationId) || 0,
+    ]
+  );
+}
+
+async function usersForGroupAsync(db, groupRef, tenantId) {
+  if (!groupRef && groupRef !== 0) return [];
+  const scope = tenantPredicate(tenantId);
+  return queryAllAsync(
+    db,
+    `SELECT DISTINCT ${USER_COLUMNS}
+       FROM group_members gm
+       JOIN users u ON u.id = gm.user_id
+       JOIN groups g ON g.id = gm.group_id
+      WHERE u.status = 'active' AND ${scope.sql}
+        AND (g.id = ? OR g.code = ?)
+      ORDER BY u.username`,
+    [...scope.params, Number(groupRef) || 0, String(groupRef ?? "")]
+  );
+}
+
+async function usersForIdsOrRefsAsync(db, values, tenantId) {
+  const list = Array.isArray(values) ? values : [values];
+  const ids = [];
+  const refs = [];
+  for (const value of list) {
+    if (value === null || value === undefined || value === "") continue;
+    if (typeof value === "number" || /^\d+$/.test(String(value))) ids.push(Number(value));
+    else refs.push(String(value));
+  }
+  const out = [];
+  const scope = tenantPredicate(tenantId);
+  if (ids.length) {
+    const placeholders = ids.map(() => "?").join(", ");
+    out.push(
+      ...(await queryAllAsync(
+        db,
+        `SELECT ${USER_COLUMNS} FROM users u WHERE u.status = 'active' AND ${scope.sql} AND u.id IN (${placeholders})`,
+        [...scope.params, ...ids]
+      ))
+    );
+  }
+  if (refs.length) {
+    const ph = refs.map(() => "?").join(", ");
+    out.push(
+      ...(await queryAllAsync(
+        db,
+        `SELECT ${USER_COLUMNS} FROM users u
+          WHERE u.status = 'active' AND ${scope.sql} AND (u.username IN (${ph}) OR u.email IN (${ph}))`,
+        [...scope.params, ...refs, ...refs]
+      ))
+    );
+  }
+  return out;
+}
+
+async function getByIdentityAsync(db, { id, ref }, tenantId) {
+  const scope = tenantPredicate(tenantId);
+  if (id) {
+    const row = await queryOneAsync(db, `SELECT ${USER_COLUMNS} FROM users u WHERE u.id = ? AND ${scope.sql}`, [Number(id), ...scope.params]);
+    if (row && row.status !== "inactive") return [row];
+  }
+  if (ref) {
+    const row = await queryOneAsync(
+      db,
+      `SELECT ${USER_COLUMNS} FROM users u WHERE (u.username = ? OR u.email = ?) AND ${scope.sql}`,
+      [String(ref), String(ref), ...scope.params]
+    );
+    if (row && row.status !== "inactive") return [row];
+  }
+  return [];
+}
+
+async function resolveManagerAsync(db, context, tenantId) {
+  const explicit = context.managerUserId || context.supervisorUserId || context.payload?.manager_id;
+  if (explicit) return usersForIdsOrRefsAsync(db, explicit, tenantId);
+  const subjectUser =
+    context.recipient ||
+    context.object?.owner_id ||
+    context.object?.created_by ||
+    context.task?.assignee_id ||
+    context.initiator?.id ||
+    context.task?.assignee_id;
+  let organizationId = context.organization?.id || context.object?.organization_id || context.initiator?.organization_id;
+  if (subjectUser && !organizationId) {
+    const row = await queryOneAsync(db, "SELECT organization_id FROM users WHERE id = ?", [Number(subjectUser)]);
+    organizationId = row?.organization_id;
+  }
+  if (!organizationId) return [];
+  const org = await queryOneAsync(db, "SELECT id, parent_id FROM organizations WHERE id = ?", [Number(organizationId)]);
+  if (!org) return [];
+  const targetId = org.parent_id || org.id;
+  const scope = tenantPredicate(tenantId);
+  const primary = await queryAllAsync(
+    db,
+    `SELECT DISTINCT ${USER_COLUMNS}
+       FROM organization_members om
+       JOIN users u ON u.id = om.user_id
+      WHERE om.organization_id = ? AND om.is_primary = 1 AND u.status = 'active' AND ${scope.sql}
+      ORDER BY u.username`,
+    [Number(targetId), ...scope.params]
+  );
+  if (primary.length) return primary;
+  return activeUsersInOrganizationsAsync(db, (await descendantOrganizationIdsAsync(db, targetId)) || [targetId], tenantId);
+}
+
+async function resolveItemAsync(db, item, context, tenantId) {
+  const type = item.type || "user";
+  switch (type) {
+    case "user":
+      return getByIdentityAsync(db, item, tenantId);
+    case "role":
+      return usersForRoleAsync(db, item.id ?? item.ref, tenantId, context.organization?.id || context.object?.organization_id || 0);
+    case "group":
+      return usersForGroupAsync(db, item.id ?? item.ref, tenantId);
+    case "organization":
+    case "business_unit":
+    case "plant":
+    case "site":
+    case "department":
+      return resolveOrganizationSubtreeAsync(db, item.id ?? item.ref ?? context.organization?.id, tenantId);
+    case "responsible_organization":
+      return resolveOrganizationSubtreeAsync(
+        db,
+        context.responsible_organization_id || item.id || item.ref || context.organization?.id,
+        tenantId
+      );
+    case "object_owner":
+      return usersForIdsOrRefsAsync(db, context.object?.owner_id ?? context.payload?.owner_id, tenantId);
+    case "object_creator":
+      return usersForIdsOrRefsAsync(db, context.object?.created_by ?? context.payload?.created_by, tenantId);
+    case "workflow_assignee":
+      return resolveAssigneeUsersAsync(db, context.workflow || {}, tenantId, context);
+    case "task_assignee":
+      return resolveAssigneeUsersAsync(db, context.task || {}, tenantId, context);
+    case "manager":
+      return resolveManagerAsync(db, context, tenantId);
+    case "supervisor":
+      return resolveManagerAsync(db, { ...context, supervisorUserId: context.supervisorUserId || context.payload?.supervisor_id }, tenantId);
+    case "initiator":
+      return getByIdentityAsync(db, { id: context.initiator?.id, ref: context.initiator?.username }, tenantId);
+    case "event_payload": {
+      const path = item.ref || item.id;
+      const value = path ? resolvePathSafe(context.payload || context, String(path)) : context.payload?.recipients;
+      return usersForIdsOrRefsAsync(db, value, tenantId);
+    }
+    default:
+      return [];
+  }
+}
+
+async function resolveAssigneeUsersAsync(db, holder, tenantId, context) {
+  const type = holder.assignee_type || "user";
+  const id = holder.assignee_id;
+  const ref = holder.assignee_ref;
+  if (!type || type === "unassigned") return [];
+  if (type === "user") return getByIdentityAsync(db, { id, ref }, tenantId);
+  if (type === "role" || type === "queue") return usersForRoleAsync(db, id ?? ref, tenantId, context.organization?.id || 0);
+  if (type === "group") return usersForGroupAsync(db, id ?? ref, tenantId);
+  if (type === "organization") return resolveOrganizationSubtreeAsync(db, id ?? ref, tenantId);
+  return [];
+}
+
+export async function resolveRecipientsAsync(db, definition, context = {}, tenantId = null) {
+  const normalized = normalizeRecipientDefinition(definition);
+  const items = normalized.items.length ? normalized.items : [normalizeRecipientItem({ type: "initiator" })];
+  const collected = await collectAsync(db, items, context, tenantId);
+  if (!collected.length && normalized.fallback.length) {
+    return finalize(await collectAsync(db, normalized.fallback, context, tenantId), normalized, context);
+  }
+  return finalize(collected, normalized, context);
+}
+
+async function collectAsync(db, items, context, tenantId) {
+  const map = new Map();
+  for (const item of items) {
+    for (const user of await resolveItemAsync(db, item, context, tenantId)) {
+      if (!user) continue;
+      if (user.status && user.status !== "active") continue;
+      if (item.exclude_initiator && Number(user.id) === Number(context.initiator?.id)) continue;
+      map.set(Number(user.id), user);
+    }
+  }
+  return [...map.values()];
 }

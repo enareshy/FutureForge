@@ -7,6 +7,7 @@
 // `out_of_order` until either the gap is filled or the configured timeout
 // elapses, after which they are processed regardless and the gap is recorded.
 import { queryOne, queryAll, nowIso } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { addSecondsIso } from "./validation.js";
 
 // Allocates the next sequence number within a partition. Called when a
@@ -14,6 +15,13 @@ import { addSecondsIso } from "./validation.js";
 export function nextSequence(db, partitionKey) {
   if (!partitionKey) return null;
   const row = queryOne(db, "SELECT MAX(sequence_number) AS m FROM event_records WHERE partition_key = ?", [partitionKey]);
+  return Number(row?.m || 0) + 1;
+}
+
+// Async twin of `nextSequence`.
+export async function nextSequenceAsync(db, partitionKey) {
+  if (!partitionKey) return null;
+  const row = await queryOneAsync(db, "SELECT MAX(sequence_number) AS m FROM event_records WHERE partition_key = ?", [partitionKey]);
   return Number(row?.m || 0) + 1;
 }
 

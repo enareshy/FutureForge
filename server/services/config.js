@@ -1,7 +1,8 @@
 import { queryAll, queryOne, run, nowIso } from "../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../db-async.js";
 import { HttpError } from "../validation.js";
-import { writeAudit } from "./audit.js";
-import { getSetting, getSettings } from "./hierarchy.js";
+import { writeAudit, writeAuditAsync } from "./audit.js";
+import { getSetting, getSettingAsync, getSettings, getSettingsAsync } from "./hierarchy.js";
 
 export const SCOPES = ["system", "tenant", "organization"];
 export const VALUE_TYPES = ["boolean", "number", "string", "json"];
@@ -341,6 +342,203 @@ export function catalogAndEffective(db, context = {}) {
   return {
     definitions: listDefinitions(db),
     effective: resolveAll(db, context),
+    system: settings.values,
+  };
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+// The layered configuration resolver for migrated config routes. Reads walk the
+// same default → system → tenant → organization layers; writes upsert the same
+// config_values rows and audit as the synchronous path.
+
+const definitionsInitialisedAsync = new WeakSet();
+
+export async function ensureDefinitionsAsync(db) {
+  if (definitionsInitialised.has(db) || definitionsInitialisedAsync.has(db)) return;
+  const ts = nowIso();
+  for (const def of DEFAULT_DEFINITIONS) {
+    await runAsync(
+      db,
+      `INSERT INTO config_definitions
+        (key, value_type, default_value, min_value, max_value, scopes, system_only, feature, description, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+      [
+        def.key,
+        def.value_type,
+        def.default_value,
+        def.min_value || "",
+        def.max_value || "",
+        JSON.stringify(def.scopes),
+        def.system_only ? 1 : 0,
+        def.feature,
+        def.description,
+        ts,
+        ts,
+      ]
+    );
+  }
+  definitionsInitialisedAsync.add(db);
+}
+
+export async function listDefinitionsAsync(db) {
+  await ensureDefinitionsAsync(db);
+  return (await queryAllAsync(db, "SELECT * FROM config_definitions ORDER BY feature, key")).map(publicDefinition);
+}
+
+export async function getDefinitionAsync(db, key) {
+  await ensureDefinitionsAsync(db);
+  const row = await queryOneAsync(db, "SELECT * FROM config_definitions WHERE key = ?", [key]);
+  if (!row) throw new HttpError(400, `Unknown setting: ${key}`);
+  return publicDefinition(row);
+}
+
+async function readOverrideAsync(db, key, scope, scopeId) {
+  return queryOneAsync(
+    db,
+    "SELECT * FROM config_values WHERE key = ? AND scope = ? AND scope_id = ?",
+    [key, scope, scopeId || 0]
+  );
+}
+
+export async function resolveConfigAsync(db, key, context = {}, preloadedDefinition = null) {
+  const def = preloadedDefinition || (await getDefinitionAsync(db, key));
+  const layers = [];
+  let value = parseValue(def.value_type, def.default_value);
+  let source = "default";
+
+  const systemSetting = await getSettingAsync(db, key, undefined);
+  if (systemSetting !== undefined) {
+    const parsed = typeof systemSetting === "string" ? parseValue(def.value_type, systemSetting) : systemSetting;
+    if (parsed !== null && parsed !== undefined) {
+      value = parsed;
+      source = "system";
+    }
+  }
+  layers.push({ scope: "system", scope_id: 0, value, source });
+
+  const tenantId = Number(context.tenantId || context.tenant_id || 0) || 0;
+  const orgId = Number(context.organizationId || context.organization_id || 0) || 0;
+
+  if (tenantId && def.scopes.includes("tenant") && !def.system_only) {
+    const row = await readOverrideAsync(db, key, "tenant", tenantId);
+    if (row) {
+      const parsed = parseValue(def.value_type, row.value);
+      if (parsed !== null && parsed !== undefined) {
+        value = parsed;
+        source = "tenant";
+        layers.push({ scope: "tenant", scope_id: tenantId, value: parsed });
+      }
+    }
+  }
+
+  if (orgId && def.scopes.includes("organization") && !def.system_only) {
+    const row = await readOverrideAsync(db, key, "organization", orgId);
+    if (row) {
+      const parsed = parseValue(def.value_type, row.value);
+      if (parsed !== null && parsed !== undefined) {
+        value = parsed;
+        source = "organization";
+        layers.push({ scope: "organization", scope_id: orgId, value: parsed });
+      }
+    }
+  }
+
+  return {
+    key,
+    value,
+    source,
+    type: def.value_type,
+    definition: def,
+    layers,
+  };
+}
+
+export async function resolveAllAsync(db, context = {}) {
+  const definitions = await listDefinitionsAsync(db);
+  const out = [];
+  for (const def of definitions) {
+    const resolved = await resolveConfigAsync(db, def.key, context, def);
+    out.push({
+      key: def.key,
+      value: resolved.value,
+      source: resolved.source,
+      type: def.value_type,
+      feature: def.feature,
+      description: def.description,
+      scopes: def.scopes,
+      system_only: def.system_only,
+    });
+  }
+  return out;
+}
+
+export async function listScopeValuesAsync(db, scope, scopeId) {
+  if (!SCOPES.includes(scope)) throw new HttpError(400, "scope must be system, tenant or organization");
+  const rows = await queryAllAsync(
+    db,
+    "SELECT * FROM config_values WHERE scope = ? AND scope_id = ? ORDER BY key",
+    [scope, scopeId || 0]
+  );
+  const out = [];
+  for (const row of rows) {
+    const def = await queryOneAsync(db, "SELECT * FROM config_definitions WHERE key = ?", [row.key]);
+    out.push({
+      ...row,
+      parsed: def ? parseValue(def.value_type, row.value) : row.value,
+    });
+  }
+  return out;
+}
+
+export async function putValuesAsync(db, { scope, scopeId, values }, actor, ip) {
+  await ensureDefinitionsAsync(db);
+  if (!SCOPES.includes(scope)) throw new HttpError(400, "scope must be system, tenant or organization");
+  const patch = values || {};
+  const keys = Object.keys(patch);
+  if (!keys.length) throw new HttpError(400, "No settings provided");
+  if (scope === "system") {
+    throw new HttpError(400, "System settings use /api/platform/settings");
+  }
+  const ts = nowIso();
+  for (const key of keys) {
+    const def = await getDefinitionAsync(db, key);
+    if (def.system_only) throw new HttpError(400, `${key} is system-only`);
+    if (!def.scopes.includes(scope)) {
+      throw new HttpError(400, `${key} cannot be set at ${scope} scope`);
+    }
+    const raw = validateRaw(def, patch[key]);
+    await runAsync(
+      db,
+      `INSERT INTO config_values (key, scope, scope_id, value, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(key, scope, scope_id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [key, scope, Number(scopeId) || 0, raw, ts]
+    );
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "config.update",
+    resourceType: "config",
+    resourceId: `${scope}:${scopeId || 0}`,
+    details: { scope, scopeId: Number(scopeId) || 0, keys },
+    ip,
+  });
+  return {
+    scope,
+    scope_id: Number(scopeId) || 0,
+    items: await listScopeValuesAsync(db, scope, scopeId),
+    effective: await resolveAllAsync(db, {
+      tenantId: scope === "tenant" ? scopeId : undefined,
+      organizationId: scope === "organization" ? scopeId : undefined,
+    }),
+  };
+}
+
+export async function catalogAndEffectiveAsync(db, context = {}) {
+  const settings = await getSettingsAsync(db);
+  return {
+    definitions: await listDefinitionsAsync(db),
+    effective: await resolveAllAsync(db, context),
     system: settings.values,
   };
 }

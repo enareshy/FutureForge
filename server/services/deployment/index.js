@@ -41,3 +41,4 @@ export const deploymentHealth = Foundation.deploymentHealth;
 // `requireFeature` middleware resolves entitlements directly).
 export const isFeatureEnabled = Features.isFeatureEnabled;
 export const resolveCapabilities = Features.resolveCapabilities;
+export const resolveCapabilitiesAsync = Features.resolveCapabilitiesAsync;

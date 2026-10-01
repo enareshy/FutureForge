@@ -1,7 +1,17 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import {
+  readTenant,
+  writeTenant,
+  tenantClause,
+  assertReadable,
+  assertMutable,
+  readTenantAsync,
+  writeTenantAsync,
+  assertMutableAsync,
+} from "../metadata/scope.js";
 import * as metadata from "../metadata.js";
 import {
   STATUS_CATEGORIES,
@@ -54,6 +64,10 @@ const STATUS_SELECT = `
 
 export function getStatusRow(db, id) {
   return queryOne(db, `${STATUS_SELECT} WHERE s.id = ?`, [Number(id)]);
+}
+
+export async function getStatusRowAsync(db, id) {
+  return queryOneAsync(db, `${STATUS_SELECT} WHERE s.id = ?`, [Number(id)]);
 }
 
 export function findStatus(db, idOrCode, tenantId) {
@@ -334,4 +348,280 @@ export function legacyForCategory(category) {
 
 export function readStatusTenant(db, actor, query, reqTenantId) {
   return readTenant(db, actor, query, reqTenantId);
+}
+
+// ── Async twins (used by migrated lifecycle status routes) ──────────────────
+
+export function readStatusTenantAsync(db, actor, query, reqTenantId) {
+  return readTenantAsync(db, actor, query, reqTenantId);
+}
+
+export async function findStatusAsync(db, idOrCode, tenantId) {
+  if (idOrCode === undefined || idOrCode === null || idOrCode === "") return null;
+  const text = String(idOrCode);
+  if (/^\d+$/.test(text)) {
+    const byId = await getStatusRowAsync(db, Number(text));
+    if (byId) {
+      assertReadable(byId, tenantId, "Status not found");
+      return byId;
+    }
+  }
+  const scope = tenantClause("s", tenantId);
+  const byCode = await queryOneAsync(
+    db,
+    `${STATUS_SELECT} WHERE s.code = ? AND ${scope.sql} ORDER BY s.tenant_id IS NULL LIMIT 1`,
+    [text, ...scope.params]
+  );
+  if (!byCode) throw new HttpError(404, "Status not found");
+  return byCode;
+}
+
+export async function getStatusAsync(db, idOrCode, tenantId) {
+  return publicStatus(await findStatusAsync(db, idOrCode, tenantId));
+}
+
+export async function listStatusesAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("s", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.category) {
+    assertCategory(query.category);
+    where.push("s.category = ?");
+    params.push(query.category);
+  }
+  if (query.module) {
+    where.push("s.module = ?");
+    params.push(query.module);
+  }
+  if (query.status) {
+    where.push("s.status = ?");
+    params.push(query.status);
+  }
+  if (query.legacy_status) {
+    where.push("s.legacy_status = ?");
+    params.push(query.legacy_status);
+  }
+  if (query.typeId || query.type_id) {
+    const typeId = Number(query.typeId || query.type_id);
+    where.push(
+      `(NOT EXISTS (SELECT 1 FROM status_type_availability a WHERE a.status_id = s.id)
+        OR EXISTS (SELECT 1 FROM status_type_availability a WHERE a.status_id = s.id AND a.type_id = ?))`
+    );
+    params.push(typeId);
+  }
+  if (query.q) {
+    where.push("(s.code ILIKE ? OR s.name ILIKE ? OR s.label ILIKE ? OR s.description ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM lifecycle_statuses s ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(db, `${STATUS_SELECT} ${clause} ORDER BY s.display_order, s.code LIMIT ? OFFSET ?`, [
+      ...params,
+      pageSize,
+      offset,
+    ])
+  ).map(publicStatus);
+  return { items, total, page, pageSize };
+}
+
+async function normalizeAvailabilityAsync(db, body, tenantId, actor) {
+  const raw = body.available_types ?? body.availableTypes ?? body.type_ids ?? body.typeIds;
+  if (raw === undefined) return null;
+  if (raw === null || raw === "any" || raw === "all") return [];
+  if (!Array.isArray(raw)) throw new HttpError(400, "available_types must be an array of type ids or codes");
+  const ids = [];
+  for (const ref of raw) {
+    const type = await metadata.findTypeAsync(db, ref, tenantId);
+    if (!type) throw new HttpError(400, `Object type ${ref} not found`);
+    ids.push(type.id);
+  }
+  return [...new Set(ids)];
+}
+
+async function replaceAvailabilityAsync(db, statusId, typeIds) {
+  await runAsync(db, "DELETE FROM status_type_availability WHERE status_id = ?", [statusId]);
+  for (const typeId of typeIds) {
+    await runAsync(
+      db,
+      "INSERT INTO status_type_availability (status_id, type_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+      [statusId, typeId, nowIso()]
+    );
+  }
+}
+
+export async function createStatusAsync(db, body, actor, ip, reqTenantId, query = {}) {
+  requireFields(body, ["code", "name"]);
+  validateCode(body.code, "Status code");
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const category = assertCategory(body.category || "draft");
+  const legacy = assertOneOf(body.legacy_status || legacyForCategory(category), LEGACY_OBJECT_STATUSES, "legacy_status");
+  const status = assertOneOf(body.status || "active", ["active", "inactive"], "status");
+  const availability = await normalizeAvailabilityAsync(db, body, tenantId, actor);
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO lifecycle_statuses
+        (code, name, label, description, category, module, owner, legacy_status, display_order,
+         color, is_default, status, tenant_id, is_system, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        body.code,
+        String(body.name).trim(),
+        body.label || String(body.name).trim(),
+        body.description || "",
+        category,
+        body.module || "platform",
+        body.owner || "",
+        legacy,
+        Number(body.display_order ?? body.displayOrder ?? 0) || 0,
+        body.color || "",
+        body.is_default || body.isDefault ? 1 : 0,
+        status,
+        tenantId ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "Status code already exists in this scope");
+    }
+    throw err;
+  }
+  if (availability) await replaceAvailabilityAsync(db, result.lastInsertId, availability);
+  if ((body.is_default || body.isDefault) && tenantId) {
+    await runAsync(db, "UPDATE lifecycle_statuses SET is_default = 0 WHERE tenant_id = ? AND id != ?", [
+      tenantId,
+      result.lastInsertId,
+    ]);
+  }
+  const row = await getStatusRowAsync(db, result.lastInsertId);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.status.create",
+    resourceType: "lifecycle_status",
+    resourceId: row.id,
+    details: { code: row.code, category, tenant_id: tenantId ?? null },
+    ip,
+  });
+  return publicStatus(row);
+}
+
+export async function updateStatusAsync(db, id, body, actor, ip, tenantId) {
+  const row = await getStatusRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Status not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Status code");
+  const category = body.category === undefined ? row.category : assertCategory(body.category);
+  const legacy =
+    body.legacy_status === undefined
+      ? row.legacy_status
+      : assertOneOf(body.legacy_status, LEGACY_OBJECT_STATUSES, "legacy_status");
+  const status = body.status === undefined ? row.status : assertOneOf(body.status, ["active", "inactive"], "status");
+  const availability = await normalizeAvailabilityAsync(db, body, row.tenant_id ?? tenantId, actor);
+  try {
+    await runAsync(
+      db,
+      `UPDATE lifecycle_statuses SET
+        code = ?, name = ?, label = ?, description = ?, category = ?, module = ?, owner = ?,
+        legacy_status = ?, display_order = ?, color = ?, is_default = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.label ?? row.label,
+        body.description ?? row.description,
+        category,
+        body.module ?? row.module,
+        body.owner ?? row.owner,
+        legacy,
+        body.display_order === undefined && body.displayOrder === undefined
+          ? row.display_order
+          : Number(body.display_order ?? body.displayOrder) || 0,
+        body.color ?? row.color,
+        body.is_default === undefined && body.isDefault === undefined
+          ? row.is_default
+          : body.is_default || body.isDefault
+            ? 1
+            : 0,
+        status,
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "Status code already exists in this scope");
+    }
+    throw err;
+  }
+  if (availability) await replaceAvailabilityAsync(db, row.id, availability);
+  const next = await getStatusRowAsync(db, row.id);
+  if (next.is_default && next.tenant_id) {
+    await runAsync(db, "UPDATE lifecycle_statuses SET is_default = 0 WHERE tenant_id = ? AND id != ?", [
+      next.tenant_id,
+      row.id,
+    ]);
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.status.update",
+    resourceType: "lifecycle_status",
+    resourceId: row.id,
+    details: { code: next.code },
+    ip,
+  });
+  return publicStatus(next);
+}
+
+export async function setStatusStatusAsync(db, id, status, actor, ip, tenantId) {
+  assertOneOf(status, ["active", "inactive"], "status");
+  const row = await getStatusRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Status not found");
+  await runAsync(db, "UPDATE lifecycle_statuses SET status = ?, updated_at = ? WHERE id = ?", [status, nowIso(), row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: `lifecycle.status.${status}`,
+    resourceType: "lifecycle_status",
+    resourceId: row.id,
+    ip,
+  });
+  return publicStatus(await getStatusRowAsync(db, row.id));
+}
+
+export async function deleteStatusAsync(db, id, actor, ip, tenantId) {
+  const row = await getStatusRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Status not found");
+  const usedByObjects = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM objects WHERE lifecycle_status_id = ?", [row.id])).c;
+  if (usedByObjects) {
+    throw new HttpError(409, "Cannot delete a status assigned to existing objects");
+  }
+  const usedByStates = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM lifecycle_states WHERE status_id = ?", [row.id])).c;
+  if (usedByStates) {
+    throw new HttpError(409, "Cannot delete a status referenced by lifecycle states");
+  }
+  await runAsync(db, "DELETE FROM lifecycle_statuses WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "lifecycle.status.delete",
+    resourceType: "lifecycle_status",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return { deleted: true, id: row.id };
+}
+
+export async function defaultStatusRowAsync(db, tenantId) {
+  const scope = tenantClause("s", tenantId);
+  return queryOneAsync(
+    db,
+    `${STATUS_SELECT} WHERE ${scope.sql} AND s.status = 'active' AND s.is_default = 1
+     ORDER BY s.tenant_id IS NULL LIMIT 1`,
+    scope.params
+  );
 }

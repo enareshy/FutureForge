@@ -1,4 +1,5 @@
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync, transactionAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import {
   getStorageProvider,
@@ -7,9 +8,9 @@ import {
   checksumObject,
 } from "../file-storage.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { findFileRow, publicProcessing, assertTenant } from "./repository.js";
-import { assertAccess } from "./permissions.js";
-import { recordFileEvent, auditFile } from "./events.js";
+import { findFileRow, findFileRowAsync, publicProcessing, assertTenant } from "./repository.js";
+import { assertAccess, assertAccessAsync } from "./permissions.js";
+import { recordFileEvent, recordFileEventAsync, auditFile, auditFileAsync } from "./events.js";
 
 // File processing status service. The heavy lifting (checksum, malware scanning,
 // preview/rendition generation) belongs to the File Storage & Processing
@@ -292,4 +293,150 @@ export function registerFileProcessingHandlers() {
   }, { description: "Preview/rendition generation for a stored file version" });
 
   return ["files.virusScan", "files.previewGeneration"];
+}
+
+// ── Asynchronous twins ──
+
+export async function upsertProcessingAsync(db, {
+  fileId, versionId = null, type, status, provider = "", result = {}, errorMessage = "", tenantId = null, attempt = null,
+}) {
+  const ts = nowIso();
+  const existing = await queryOneAsync(
+    db,
+    "SELECT * FROM file_processing WHERE version_id IS NOT DISTINCT FROM ? AND processing_type = ?",
+    [versionId ?? null, type]
+  );
+  const attempts = attempt ?? ((existing?.attempts || 0) + 1);
+  const completedAt = ["in_progress", "pending"].includes(status) ? null : ts;
+  if (existing) {
+    await runAsync(
+      db,
+      `UPDATE file_processing SET status = ?, provider = ?, attempts = ?, result_json = ?, error_message = ?,
+         started_at = COALESCE(started_at, ?), completed_at = ?, updated_at = ? WHERE id = ?`,
+      [status, provider, attempts, JSON.stringify(result || {}), errorMessage || "", ts, completedAt, ts, existing.id]
+    );
+    return publicProcessing(await queryOneAsync(db, "SELECT * FROM file_processing WHERE id = ?", [existing.id]));
+  }
+  const insert = await runAsync(
+    db,
+    `INSERT INTO file_processing
+      (file_id, version_id, processing_type, status, provider, attempts, result_json, error_message,
+       started_at, completed_at, tenant_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      fileId, versionId ?? null, type, status, provider, attempts, JSON.stringify(result || {}),
+      errorMessage || "", ts, completedAt, tenantId ?? null, ts, ts,
+    ]
+  );
+  return publicProcessing(await queryOneAsync(db, "SELECT * FROM file_processing WHERE id = ?", [insert.lastInsertId]));
+}
+
+export async function persistProcessingResultAsync(db, fileRow, versionId, outcome, { actor = null, tenantId = null } = {}) {
+  const scope = tenantId ?? fileRow.tenant_id;
+  const ts = nowIso();
+
+  if (outcome.checksum && outcome.checksum !== fileRow.checksum) {
+    await runAsync(db, "UPDATE file_versions SET checksum = ? WHERE id = ?", [outcome.checksum, versionId]);
+    await runAsync(db, "UPDATE files SET checksum = ?, updated_at = ? WHERE id = ?", [outcome.checksum, ts, fileRow.id]);
+  }
+
+  await upsertProcessingAsync(db, {
+    fileId: fileRow.id, versionId, type: "virus_scan", status: processingRowStatus("virus_scan", outcome),
+    provider: outcome.scan?.engine || "scan", result: outcome.scan || {}, errorMessage: outcome.scan_status === "clean" ? "" : (outcome.scan?.detail || ""),
+    tenantId: scope,
+  });
+  if (outcome.scan_status === "clean") {
+    await upsertProcessingAsync(db, {
+      fileId: fileRow.id, versionId, type: "preview", status: processingRowStatus("preview", outcome),
+      provider: outcome.preview?.provider || "preview", result: outcome.preview || {}, tenantId: scope,
+    });
+    await upsertProcessingAsync(db, {
+      fileId: fileRow.id, versionId, type: "rendition", status: processingRowStatus("rendition", outcome),
+      provider: outcome.rendition?.provider || "preview", result: outcome.rendition || {}, tenantId: scope,
+    });
+  }
+
+  let status;
+  if (outcome.scan_status === "infected") status = "quarantined";
+  else if (outcome.scan_status === "failed") status = "scan_failed";
+  else if (outcome.scan_status === "clean") status = "available";
+  else status = "pending_scan";
+
+  const versionStatus = status === "available" ? "available" : (status === "quarantined" ? "quarantined" : "processing");
+  await runAsync(db, "UPDATE file_versions SET status = ?, virus_scan_status = ?, updated_at = ? WHERE id = ?", [versionStatus, outcome.scan_status, ts, versionId]);
+  await runAsync(
+    db,
+    `UPDATE files SET status = ?, virus_scan_status = ?, preview_status = ?, rendition_status = ?, updated_at = ? WHERE id = ?`,
+    [status, outcome.scan_status, outcome.preview_status, outcome.rendition_status, ts, fileRow.id]
+  );
+
+  await recordFileEventAsync(db, {
+    eventType: "FileScanCompleted",
+    file: { ...fileRow, status },
+    versionId,
+    actor,
+    tenantId: scope,
+    payload: {
+      result: outcome.scan_status,
+      detail: outcome.scan?.detail || "",
+      preview: outcome.preview_status,
+      rendition: outcome.rendition_status,
+    },
+  });
+  return { ...outcome, status };
+}
+
+export async function processVersionAsync(db, fileRow, versionRow, { provider, actor = null, tenantId = null } = {}) {
+  const store = provider || getStorageProvider();
+  const scope = tenantId ?? fileRow.tenant_id;
+  const outcome = await runProcessingPipeline(store, {
+    key: versionRow.storage_key,
+    size: versionRow.size_bytes,
+    mimeType: versionRow.mime_type,
+    extension: versionRow.extension,
+    name: versionRow.name,
+    checksum: versionRow.checksum,
+  });
+  return transactionAsync(db, () => persistProcessingResultAsync(db, fileRow, versionRow.id, outcome, { actor, tenantId: scope }));
+}
+
+export async function getProcessingStatusAsync(db, fileReference, actor, tenantId) {
+  const scope = assertTenant(tenantId);
+  const file = await findFileRowAsync(db, fileReference, scope);
+  await assertAccessAsync(db, file, actor, "view_metadata", { tenantId: scope });
+  const items = (await queryAllAsync(db, "SELECT * FROM file_processing WHERE file_id = ? ORDER BY processing_type", [file.id]))
+    .map(publicProcessing);
+  const current = file.current_version_id
+    ? items.filter((item) => !item.version_id || Number(item.version_id) === Number(file.current_version_id))
+    : items;
+  const overall = file.status === "quarantined"
+    ? "quarantined"
+    : (["scan_failed", "upload_failed"].includes(file.status) ? "failed" : (file.status === "available" ? "available" : "processing"));
+  return {
+    file_id: file.id,
+    file_ref: file.file_ref,
+    status: file.status,
+    virus_scan_status: file.virus_scan_status,
+    preview_status: file.preview_status,
+    rendition_status: file.rendition_status,
+    overall_status: overall,
+    is_downloadable: file.status === "available",
+    items: current,
+  };
+}
+
+export async function requeueProcessingAsync(db, fileReference, type, actor, tenantId, ip) {
+  const scope = assertTenant(tenantId);
+  const file = await findFileRowAsync(db, fileReference, scope);
+  await assertAccessAsync(db, file, actor, "edit_metadata", { tenantId: scope });
+  const version = file.current_version_id
+    ? await queryOneAsync(db, "SELECT * FROM file_versions WHERE id = ?", [file.current_version_id])
+    : null;
+  if (!version) throw new HttpError(409, "File has no current version to process");
+  const result = await processVersionAsync(db, file, version, { actor, tenantId: scope });
+  await auditFileAsync(db, {
+    actor, tenantId: scope, organizationId: file.organization_id, action: "files.processing.requeue",
+    file, details: { type, result: { scan_status: result.scan_status } }, ip,
+  });
+  return { scan_status: result.scan_status, preview_status: result.preview_status, file: await findFileRowAsync(db, file.id, scope) };
 }

@@ -1,13 +1,14 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { writeAudit } from "../audit.js";
-import { homeTenantId } from "../tenants.js";
-import { matchRules, buildRuleContext } from "./rules.js";
-import { findTemplateForEvent, renderTemplateRow } from "./templates.js";
-import { resolveRecipients } from "./recipients.js";
-import { evaluatePreference } from "./preferences.js";
-import { enqueue, processQueue } from "./delivery.js";
-import { scheduleReminderForRule } from "./reminders.js";
+import { homeTenantId, homeTenantIdAsync } from "../tenants.js";
+import { matchRules, matchRulesAsync, buildRuleContext } from "./rules.js";
+import { findTemplateForEvent, findTemplateForEventAsync, renderTemplateRow } from "./templates.js";
+import { resolveRecipients, resolveRecipientsAsync } from "./recipients.js";
+import { evaluatePreference, evaluatePreferenceAsync } from "./preferences.js";
+import { enqueue, enqueueAsync, processQueue, processQueueAsync } from "./delivery.js";
+import { scheduleReminderForRule, scheduleReminderForRuleAsync } from "./reminders.js";
 import { safeParse, normalizeChannels, CHANNELS } from "./validation.js";
 
 // Notification event service. Business modules call `publish(event)` instead of
@@ -247,6 +248,202 @@ function insertNotification(db, { event, rule, template, recipient, channel, ren
   return result.lastInsertId;
 }
 
+async function normalizeEventInputAsync(db, event = {}, actor = null) {
+  const initiator = event.initiator || {};
+  const tenantId =
+    event.tenant_id ?? event.tenantId ?? actor?.tenant_id ?? (await homeTenantIdAsync(db, actor)) ?? null;
+  return {
+    event_type: event.event_type || event.eventType,
+    source_module: event.source_module || event.sourceModule || "platform",
+    tenant_id: tenantId ? Number(tenantId) : null,
+    organization_id: event.organization_id ?? event.organizationId ?? actor?.organization_id ?? null,
+    plant_id: event.plant_id ?? event.plantId ?? null,
+    site_id: event.site_id ?? event.siteId ?? null,
+    department_id: event.department_id ?? event.departmentId ?? null,
+    object_type: event.object_type ?? event.objectType ?? "",
+    object_id: event.object_id ?? event.objectId ?? "",
+    object_name: event.object_name ?? event.objectName ?? "",
+    initiator_id: actor?.id ?? initiator.id ?? null,
+    initiator_username: actor?.username ?? initiator.username ?? "",
+    payload: event.payload ?? event.data ?? {},
+    related: event.related ?? {},
+    correlation_id: event.correlation_id ?? event.correlationId ?? "",
+    idempotency_key: event.idempotency_key ?? event.idempotencyKey ?? null,
+    occurred_at: event.occurred_at ?? event.occurredAt ?? null,
+  };
+}
+
+// Asynchronous twin of `publish`. It mirrors the synchronous pipeline
+// (event row -> matching rules -> recipients -> preferences -> template ->
+// notification rows -> delivery queue) and, like the synchronous version, never
+// throws into the calling business transaction.
+export async function publishAsync(db, event = {}, { actor = null, ip = null } = {}) {
+  const summary = { published: false, event_id: null, notifications: [], skipped: [] };
+  try {
+    const input = await normalizeEventInputAsync(db, event, actor);
+    if (!input.event_type) throw new HttpError(400, "event_type is required");
+    if (!input.tenant_id) {
+      logError("publish.missing_tenant", { event_type: input.event_type });
+      summary.reason = "missing_tenant";
+      return summary;
+    }
+
+    if (input.idempotency_key) {
+      const existing = await queryOneAsync(db, "SELECT * FROM notification_events WHERE idempotency_key = ?", [input.idempotency_key]);
+      if (existing) {
+        summary.published = false;
+        summary.event_id = existing.id;
+        summary.reason = "duplicate";
+        return summary;
+      }
+    }
+
+    const ts = nowIso();
+    const insert = await runAsync(
+      db,
+      `INSERT INTO notification_events
+        (event_type, source_module, tenant_id, organization_id, plant_id, site_id, department_id,
+         object_type, object_id, object_name, initiator_id, initiator_username, payload_json, related_json,
+         correlation_id, idempotency_key, status, occurred_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?)`,
+      [
+        input.event_type,
+        input.source_module,
+        input.tenant_id,
+        input.organization_id ?? null,
+        input.plant_id ?? null,
+        input.site_id ?? null,
+        input.department_id ?? null,
+        input.object_type,
+        input.object_id,
+        input.object_name,
+        input.initiator_id ?? null,
+        input.initiator_username,
+        JSON.stringify(input.payload || {}),
+        JSON.stringify(input.related || {}),
+        input.correlation_id,
+        input.idempotency_key,
+        input.occurred_at || ts,
+        ts,
+      ]
+    );
+    const eventId = insert.lastInsertId;
+    summary.published = true;
+    summary.event_id = eventId;
+    const eventRow = await queryOneAsync(db, "SELECT * FROM notification_events WHERE id = ?", [eventId]);
+
+    const rules = await matchRulesAsync(db, eventRow, input.tenant_id);
+    let queued = 0;
+    for (const rule of rules) {
+      queued += await applyRuleAsync(db, rule, eventRow, input.tenant_id, { ip, summary });
+    }
+
+    await runAsync(
+      db,
+      "UPDATE notification_events SET status = ?, rule_count = ?, notification_count = ? WHERE id = ?",
+      [rules.length ? "processed" : "skipped", rules.length, queued, eventId]
+    );
+    summary.event = publicEvent(await queryOneAsync(db, "SELECT * FROM notification_events WHERE id = ?", [eventId]));
+
+    if (queued) await processQueueAsync(db, { limit: 100 });
+    return summary;
+  } catch (err) {
+    logError("publish.failed", { event_type: event?.event_type || event?.eventType, message: err.message });
+    summary.reason = err.message;
+    return summary;
+  }
+}
+
+async function applyRuleAsync(db, rule, eventRow, tenantId, { ip, summary }) {
+  const context = buildRuleContext(eventRow);
+  const template = await findTemplateForEventAsync(db, rule, eventRow, tenantId);
+  const channels = normalizeChannels(safeParse(rule.channels_json, ["in_app"]));
+  const channelsToUse = template && CHANNELS.includes(template.channel) && !channels.includes(template.channel)
+    ? [...channels, template.channel]
+    : channels;
+  const recipients = await resolveRecipientsAsync(
+    db,
+    safeParse(rule.recipient_json, {}),
+    { ...context, ip },
+    tenantId
+  );
+  let created = 0;
+  for (const recipient of recipients) {
+    for (const channel of channelsToUse) {
+      const decision = await evaluatePreferenceAsync(db, recipient, channel, eventRow.event_type, tenantId, {
+        mandatory: rule.mandatory === 1,
+        now: new Date(),
+      });
+      if (!decision.allowed) {
+        summary.skipped.push({ recipient_id: recipient.id, channel, reason: decision.reason });
+        continue;
+      }
+      const rendered = template
+        ? renderTemplateRow(template, { ...context, recipient, applicationUrl: context.applicationUrl || "" })
+        : { subject: eventRow.event_type, html: "", text: "" };
+      const notificationId = await insertNotificationAsync(db, {
+        event: eventRow,
+        rule,
+        template,
+        recipient,
+        channel,
+        rendered,
+        context,
+      });
+      if (!notificationId) continue;
+      created += 1;
+      summary.notifications.push(notificationId);
+      await enqueueAsync(db, { id: notificationId, channel, tenant_id: tenantId }, { delaySeconds: Number(rule.delay_minutes || 0) * 60 });
+      if (rule.reminder_json && safeParse(rule.reminder_json, {}).enabled) {
+        await scheduleReminderForRuleAsync(db, { rule, event: eventRow, notificationId, recipient, tenantId });
+      }
+    }
+  }
+  return created;
+}
+
+async function insertNotificationAsync(db, { event, rule, template, recipient, channel, rendered, context }) {
+  const idempotencyKey = `${event.id}:${rule.id}:${recipient.id}:${channel}`;
+  const existing = await queryOneAsync(db, "SELECT id FROM notifications WHERE idempotency_key = ?", [idempotencyKey]);
+  if (existing) return null;
+  const ts = nowIso();
+  const payload = safeParse(event.payload_json, {});
+  const deepLink = payload.deepLink || payload.deep_link || payload.link || context.link || "";
+  const actions = Array.isArray(payload.actions) ? payload.actions : [];
+  const result = await runAsync(
+    db,
+    `INSERT INTO notifications
+      (event_id, rule_id, tenant_id, organization_id, recipient_id, recipient_address, channel,
+       template_id, template_code, subject, body, content_ref, status, priority, correlation_id,
+       object_type, object_id, object_name, deep_link, action_links_json, idempotency_key, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 'created', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      event.id,
+      rule.id,
+      event.tenant_id,
+      event.organization_id ?? null,
+      recipient.id,
+      recipient.email || "",
+      channel,
+      template?.id ?? null,
+      template?.code || "",
+      rendered.subject || "",
+      rendered.html || rendered.text || "",
+      rule.priority || "normal",
+      event.correlation_id || "",
+      event.object_type || "",
+      event.object_id || "",
+      event.object_name || "",
+      deepLink,
+      JSON.stringify(actions),
+      idempotencyKey,
+      ts,
+      ts,
+    ]
+  );
+  return result.lastInsertId;
+}
+
 // ---------------------------------------------------------------------------
 // Direct helpers used by integrations that do not go through a configured rule.
 // ---------------------------------------------------------------------------
@@ -391,5 +588,97 @@ export function simulateRule(db, ruleId, event, { actor = null, ip = null } = {}
   const created = applyRule(db, rule, eventRow, eventRow.tenant_id, { ip, summary });
   run(db, "UPDATE notification_events SET status = 'processed', rule_count = 1, notification_count = ? WHERE id = ?", [created, eventRow.id]);
   processQueue(db, { limit: 100 });
+  return { event: publicEvent(eventRow), created, notifications: summary.notifications, skipped: summary.skipped };
+}
+
+// ── Async admin twins ───────────────────────────────────────────────────────
+
+export async function listEventsAsync(db, query = {}, tenantId = null) {
+  const where = [];
+  const params = [];
+  if (tenantId) {
+    where.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (query.eventType || query.event_type) {
+    where.push("event_type = ?");
+    params.push(query.eventType || query.event_type);
+  }
+  if (query.sourceModule || query.source_module) {
+    where.push("source_module = ?");
+    params.push(query.sourceModule || query.source_module);
+  }
+  if (query.status) {
+    where.push("status = ?");
+    params.push(query.status);
+  }
+  if (query.q) {
+    where.push("(object_name ILIKE ? OR event_type ILIKE ? OR initiator_username ILIKE ? OR payload_json ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like, like);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(query.pageSize, 10) || 25));
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM notification_events ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM notification_events ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, (page - 1) * pageSize]
+    )
+  ).map(publicEvent);
+  return { items, total, page, pageSize };
+}
+
+export async function getEventAsync(db, id, tenantId = null) {
+  const row = await queryOneAsync(db, "SELECT * FROM notification_events WHERE id = ?", [Number(id)]);
+  if (!row) throw new HttpError(404, "Notification event not found");
+  if (tenantId && Number(row.tenant_id) !== Number(tenantId)) throw new HttpError(404, "Notification event not found");
+  const event = publicEvent(row);
+  event.notifications = await queryAllAsync(
+    db,
+    `SELECT n.id, n.recipient_id, u.username AS recipient_username, n.channel, n.status, n.subject, n.created_at
+       FROM notifications n LEFT JOIN users u ON u.id = n.recipient_id WHERE n.event_id = ? ORDER BY n.id`,
+    [row.id]
+  );
+  return event;
+}
+
+export async function simulateRuleAsync(db, ruleId, event, { actor = null, ip = null } = {}) {
+  const rule = await queryOneAsync(db, "SELECT * FROM notification_rules WHERE id = ?", [Number(ruleId)]);
+  if (!rule) throw new HttpError(404, "Notification rule not found");
+  const input = await normalizeEventInputAsync(db, event, actor);
+  if (!input.event_type) input.event_type = rule.event_type === "*" ? "notification.test" : rule.event_type;
+  if (!input.tenant_id) input.tenant_id = actor?.tenant_id ?? (await homeTenantIdAsync(db, actor)) ?? null;
+  const ts = nowIso();
+  const insert = await runAsync(
+    db,
+    `INSERT INTO notification_events
+      (event_type, source_module, tenant_id, organization_id, object_type, object_id, object_name,
+       initiator_id, initiator_username, payload_json, related_json, correlation_id, status, occurred_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?)`,
+    [
+      input.event_type,
+      input.source_module,
+      input.tenant_id,
+      input.organization_id ?? null,
+      input.object_type,
+      input.object_id,
+      input.object_name,
+      input.initiator_id ?? null,
+      input.initiator_username,
+      JSON.stringify(input.payload || {}),
+      JSON.stringify(input.related || {}),
+      input.correlation_id,
+      ts,
+      ts,
+    ]
+  );
+  const eventRow = await queryOneAsync(db, "SELECT * FROM notification_events WHERE id = ?", [insert.lastInsertId]);
+  const summary = { notifications: [], skipped: [] };
+  const created = await applyRuleAsync(db, rule, eventRow, eventRow.tenant_id, { ip, summary });
+  await runAsync(db, "UPDATE notification_events SET status = 'processed', rule_count = 1, notification_count = ? WHERE id = ?", [created, eventRow.id]);
+  await processQueueAsync(db, { limit: 100 });
   return { event: publicEvent(eventRow), created, notifications: summary.notifications, skipped: summary.skipped };
 }

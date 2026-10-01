@@ -173,6 +173,90 @@ describe("metadata REST APIs", () => {
     assert.ok(rendered.body.fields.some((f) => f.code === "part.number"));
   });
 
+  test("manages LOVs and their values through the async surface", async () => {
+    const created = await request(port, "POST", "/api/metadata/lovs", {
+      token,
+      body: { code: "smoke.priority", name: "Smoke Priority", selection_type: "single" },
+    });
+    assert.equal(created.status, 201);
+    const lovId = created.body.id;
+
+    const value = await request(port, "POST", `/api/metadata/lovs/${lovId}/values`, {
+      token,
+      body: { code: "high", label: "High", sequence: 1 },
+    });
+    assert.equal(value.status, 201);
+    assert.equal(value.body.code, "high");
+
+    const values = await request(port, "GET", `/api/metadata/lovs/${lovId}/values`, { token });
+    assert.equal(values.status, 200);
+    assert.ok(values.body.items.some((v) => v.code === "high" && v.active === true));
+
+    const cascade = await request(port, "GET", `/api/metadata/lovs/${lovId}/cascade`, { token });
+    assert.equal(cascade.status, 200);
+    assert.ok(cascade.body.items.some((v) => v.code === "high"));
+
+    const updated = await request(port, "PUT", `/api/metadata/lovs/${lovId}/values/${value.body.id}`, {
+      token,
+      body: { label: "High Priority" },
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.label, "High Priority");
+
+    const status = await request(port, "POST", `/api/metadata/lovs/${lovId}/status`, {
+      token,
+      body: { status: "inactive" },
+    });
+    assert.equal(status.status, 200);
+    assert.equal(status.body.status, "inactive");
+
+    const removed = await request(port, "DELETE", `/api/metadata/lovs/${lovId}/values/${value.body.id}`, { token });
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.deleted, true);
+
+    const deleted = await request(port, "DELETE", `/api/metadata/lovs/${lovId}`, { token });
+    assert.equal(deleted.status, 200);
+    assert.equal(deleted.body.deleted, true);
+  });
+
+  test("creates a form, replaces its layout and activates it through the async surface", async () => {
+    const created = await request(port, "POST", "/api/metadata/forms", {
+      token,
+      body: { code: "part.smoke", name: "Part Smoke", type_id: typeId, mode: "create", status: "draft" },
+    });
+    assert.equal(created.status, 201);
+    const formId = created.body.id;
+
+    const layout = await request(port, "PUT", `/api/metadata/forms/${formId}/layout`, {
+      token,
+      body: {
+        nodes: [{ code: "main", label: "Main", kind: "section" }],
+        fields: [{ code: "part.number", attribute_code: "part.number", node_code: "main" }],
+      },
+    });
+    assert.equal(layout.status, 200);
+    assert.ok(layout.body.fields.some((f) => f.code === "part.number"));
+
+    const activated = await request(port, "POST", `/api/metadata/forms/${formId}/status`, {
+      token,
+      body: { status: "active" },
+    });
+    assert.equal(activated.status, 200);
+    assert.equal(activated.body.status, "active");
+
+    const versions = await request(port, "GET", `/api/metadata/forms/${formId}/versions`, { token });
+    assert.equal(versions.status, 200);
+    assert.ok(versions.body.items.length >= 1);
+
+    const rendered = await request(port, "GET", `/api/metadata/forms/${formId}/render`, { token });
+    assert.equal(rendered.status, 200);
+    assert.ok(rendered.body.fields.some((f) => f.code === "part.number"));
+
+    const deleted = await request(port, "DELETE", `/api/metadata/forms/${formId}`, { token });
+    assert.equal(deleted.status, 200);
+    assert.equal(deleted.body.deleted, true);
+  });
+
   test("validate without a type is a client error, not a crash", async () => {
     const res = await request(port, "POST", "/api/metadata/validate", { token, body: { values: {} } });
     assert.equal(res.status, 400);
@@ -198,6 +282,62 @@ describe("metadata REST APIs", () => {
     assert.equal(unmatched.body.matched, false);
   });
 
+  test("manages rules and validates through the async surface", async () => {
+    const created = await request(port, "POST", "/api/metadata/rules", {
+      token,
+      body: {
+        code: "smoke.rule",
+        name: "Smoke Rule",
+        category: "validation",
+        type_id: typeId,
+        target_field: "part.number",
+        condition: {},
+        actions: [{ type: "error", field: "part.number", message: "smoke rule failed" }],
+      },
+    });
+    assert.equal(created.status, 201);
+    const ruleId = created.body.id;
+    assert.equal(created.body.category, "validation");
+
+    const list = await request(port, "GET", "/api/metadata/rules?category=validation", { token });
+    assert.equal(list.status, 200);
+    assert.ok(list.body.items.some((r) => r.id === ruleId));
+
+    const fetched = await request(port, "GET", `/api/metadata/rules/${ruleId}`, { token });
+    assert.equal(fetched.status, 200);
+    assert.equal(fetched.body.code, "smoke.rule");
+
+    const updated = await request(port, "PUT", `/api/metadata/rules/${ruleId}`, {
+      token,
+      body: { name: "Smoke Rule Renamed", priority: 5 },
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.name, "Smoke Rule Renamed");
+    assert.equal(updated.body.priority, 5);
+
+    const status = await request(port, "POST", `/api/metadata/rules/${ruleId}/status`, {
+      token,
+      body: { status: "inactive" },
+    });
+    assert.equal(status.status, 200);
+    assert.equal(status.body.status, "inactive");
+
+    const tested = await request(port, "POST", `/api/metadata/rules/${ruleId}/test`, {
+      token,
+      body: { context: { values: {} } },
+    });
+    assert.equal(tested.status, 200);
+    assert.equal(tested.body.matched, true);
+
+    const contract = await request(port, "GET", `/api/metadata/types/${typeId}/contract`, { token });
+    assert.equal(contract.status, 200);
+    assert.ok(contract.body.items.some((a) => a.code === "part.number"));
+
+    const deleted = await request(port, "DELETE", `/api/metadata/rules/${ruleId}`, { token });
+    assert.equal(deleted.status, 200);
+    assert.equal(deleted.body.deleted, true);
+  });
+
   test("scoped configuration can disable a type for a tenant", async () => {
     const tenantsRes = await request(port, "GET", "/api/tenants", { token });
     assert.equal(tenantsRes.status, 200);
@@ -218,5 +358,29 @@ describe("metadata REST APIs", () => {
     const entry = effective.body.items.find((i) => i.artifact_id === typeId && i.artifact_type === "type");
     assert.equal(entry.config.enabled, false);
     assert.equal(entry.config.source, "tenant");
+
+    const scoped = await request(
+      port,
+      "GET",
+      `/api/metadata/configurations?scope=tenant&scopeId=${helix.id}&artifactType=type`,
+      { token }
+    );
+    assert.equal(scoped.status, 200);
+    assert.ok(scoped.body.items.some((c) => c.artifact_id === typeId && c.enabled === false));
+
+    const removed = await request(
+      port,
+      "DELETE",
+      `/api/metadata/configurations?scope=tenant&scopeId=${helix.id}&artifactType=type&artifactId=${typeId}`,
+      { token }
+    );
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.deleted, true);
+
+    const after = await request(port, "GET", `/api/metadata/configurations/effective?artifactType=type`, { token });
+    assert.equal(after.status, 200);
+    const reverted = after.body.items.find((i) => i.artifact_id === typeId && i.artifact_type === "type");
+    assert.equal(reverted.config.enabled, true);
+    assert.equal(reverted.config.source, "default");
   });
 });

@@ -1,14 +1,26 @@
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync, transactionAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable, writeTenantAsync, assertMutableAsync } from "../metadata/scope.js";
 import {
   WORKFLOW_STATUSES,
   VERSION_STATUSES,
   safeParse,
   assertValidGraph,
 } from "./validation.js";
-import { readGraph, readNodes, readTransitions, replaceGraph, snapshotGraph, restoreSnapshot } from "./graph.js";
+import {
+  readGraph,
+  readGraphAsync,
+  readNodes,
+  readTransitions,
+  replaceGraph,
+  replaceGraphAsync,
+  snapshotGraph,
+  snapshotGraphAsync,
+  restoreSnapshot,
+  restoreSnapshotAsync,
+} from "./graph.js";
 
 // Workflow template (definition) and version lifecycle. A definition is the
 // logical workflow; each version is an immutable snapshot once published and
@@ -468,4 +480,386 @@ export function cloneDefinition(db, definitionId, body = {}, actor = null, ip = 
 
 export function readDefinitionTenant(db, actor, query, reqTenantId) {
   return readTenant(db, actor, query, reqTenantId);
+}
+
+// ── Async twins (read-only) ─────────────────────────────────────────────────
+
+export async function getDefinitionRowAsync(db, id) {
+  return queryOneAsync(db, `${DEFINITION_SELECT} WHERE d.id = ?`, [Number(id)]);
+}
+
+export async function findDefinitionAsync(db, idOrCode, tenantId) {
+  if (idOrCode === undefined || idOrCode === null || idOrCode === "") return null;
+  const text = String(idOrCode);
+  if (/^\d+$/.test(text)) {
+    const byId = await getDefinitionRowAsync(db, Number(text));
+    if (byId) {
+      assertReadable(byId, tenantId, "Workflow template not found");
+      return byId;
+    }
+  }
+  const scope = tenantClause("d", tenantId);
+  const byCode = await queryOneAsync(db, `${DEFINITION_SELECT} WHERE d.code = ? AND ${scope.sql} ORDER BY d.tenant_id IS NULL LIMIT 1`, [
+    text,
+    ...scope.params,
+  ]);
+  if (!byCode) throw new HttpError(404, "Workflow template not found");
+  return byCode;
+}
+
+export async function getDefinitionAsync(db, idOrCode, tenantId) {
+  const row = await findDefinitionAsync(db, idOrCode, tenantId);
+  const definition = publicDefinition(row);
+  const versions = (
+    await queryAllAsync(db, `${VERSION_SELECT} WHERE v.definition_id = ? ORDER BY v.version DESC`, [row.id])
+  ).map((v) => publicVersion(v));
+  definition.versions = versions;
+  if (row.published_version) {
+    definition.published = versions.find((v) => v.version === row.published_version) || null;
+  }
+  return definition;
+}
+
+export async function listDefinitionsAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("d", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.status) {
+    where.push("d.status = ?");
+    params.push(query.status);
+  }
+  if (query.module) {
+    where.push("d.module = ?");
+    params.push(query.module);
+  }
+  if (query.category) {
+    where.push("d.category = ?");
+    params.push(query.category);
+  }
+  if (query.q) {
+    where.push("(d.code ILIKE ? OR d.name ILIKE ? OR d.description ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM workflow_definitions d ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(db, `${DEFINITION_SELECT} ${clause} ORDER BY d.name LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+  ).map(publicDefinition);
+  return { items, total, page, pageSize };
+}
+
+export async function getVersionRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM workflow_versions WHERE id = ?", [Number(id)]);
+}
+
+export async function getVersionByNumberAsync(db, definitionId, version) {
+  return queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? AND version = ?", [Number(definitionId), Number(version)]);
+}
+
+export async function listVersionsAsync(db, definitionId, tenantId) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  assertReadable(definition, tenantId, "Workflow template not found");
+  return (await queryAllAsync(db, `${VERSION_SELECT} WHERE v.definition_id = ? ORDER BY v.version DESC`, [definition.id])).map((v) =>
+    publicVersion(v)
+  );
+}
+
+export async function getVersionAsync(db, definitionId, version, tenantId, { withSnapshot = true } = {}) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  assertReadable(definition, tenantId, "Workflow template not found");
+  const row = /^\d+$/.test(String(version))
+    ? await getVersionByNumberAsync(db, definition.id, Number(version))
+    : await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? AND status = ? ORDER BY version DESC LIMIT 1", [
+        definition.id,
+        String(version || "published"),
+      ]);
+  if (!row) throw new HttpError(404, "Workflow version not found");
+  const result = publicVersion(row, { withSnapshot });
+  result.graph = await readGraphAsync(db, row.id);
+  result.definition = publicDefinition(definition);
+  return result;
+}
+
+export async function validateDefinitionAsync(db, definitionId, tenantId, options = {}) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  assertReadable(definition, tenantId, "Workflow template not found");
+  const versionRow = options.version
+    ? (await getVersionByNumberAsync(db, definition.id, Number(options.version))) || (await getVersionRowAsync(db, Number(options.version)))
+    : await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? ORDER BY version DESC LIMIT 1", [definition.id]);
+  if (!versionRow) throw new HttpError(404, "Workflow version not found");
+  const graph = await readGraphAsync(db, versionRow.id);
+  const result = assertValidGraph(graph);
+  return { definition: publicDefinition(definition), version: publicVersion(versionRow), graph, ...result };
+}
+
+// ── Async twins (writers) ─────────────────────────────────────────────────────
+
+export async function publishedVersionRowAsync(db, definitionId) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  if (definition?.published_version) {
+    const row = await getVersionByNumberAsync(db, definitionId, definition.published_version);
+    if (row) return row;
+  }
+  return queryOneAsync(
+    db,
+    "SELECT * FROM workflow_versions WHERE definition_id = ? AND status = 'published' ORDER BY version DESC LIMIT 1",
+    [Number(definitionId)]
+  );
+}
+
+async function insertVersionAsync(db, definitionId, body = {}) {
+  const current = await queryOneAsync(db, "SELECT COALESCE(MAX(version), 0) AS m FROM workflow_versions WHERE definition_id = ?", [Number(definitionId)]);
+  const version = Number(body.version ?? (current?.m ?? 0) + 1);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO workflow_versions
+      (definition_id, version, status, notes, snapshot, created_by, created_at, updated_at)
+     VALUES (?, ?, 'draft', ?, '{}', ?, ?, ?)`,
+    [Number(definitionId), version, body.notes || "", body.created_by ?? null, ts, ts]
+  );
+  await runAsync(db, "UPDATE workflow_definitions SET current_version = GREATEST(current_version, ?), updated_at = ? WHERE id = ?", [
+    version,
+    ts,
+    Number(definitionId),
+  ]);
+  return result.lastInsertId;
+}
+
+export async function createDefinitionAsync(db, body, actor = null, ip = null, reqTenantId = null) {
+  requireFields(body, ["code", "name"]);
+  validateCode(body.code, "Workflow code");
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO workflow_definitions
+        (code, name, description, category, module, current_version, published_version, status, tenant_id, is_system, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, 0, ?, ?)`,
+      [
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        body.category || "general",
+        body.module || "platform",
+        body.status || "draft",
+        tenantId ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Workflow code already exists in this scope");
+    throw err;
+  }
+  const definitionId = result.lastInsertId;
+  const graphProvided = body.graph && (Array.isArray(body.graph.nodes) || Array.isArray(body.graph.transitions));
+  const version = await transactionAsync(db, async () => {
+    const versionId = await insertVersionAsync(db, definitionId, { notes: body.notes || "Initial draft", created_by: actor?.id ?? null });
+    if (graphProvided) {
+      await replaceGraphAsync(db, versionId, body.graph);
+    } else {
+      await replaceGraphAsync(db, versionId, defaultGraph());
+    }
+    return versionId;
+  });
+  await writeAuditAsync(db, {
+    actor,
+    action: "workflow.definition.create",
+    resourceType: "workflow_definition",
+    resourceId: definitionId,
+    details: { code: body.code, version_id: version },
+    ip,
+  });
+  return getDefinitionAsync(db, definitionId, tenantId);
+}
+
+export async function updateDefinitionAsync(db, id, body, actor = null, ip = null, tenantId = null) {
+  const row = await getDefinitionRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Workflow template not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Workflow code");
+  try {
+    await runAsync(
+      db,
+      `UPDATE workflow_definitions SET
+         code = ?, name = ?, description = ?, category = ?, module = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        body.category ?? row.category,
+        body.module ?? row.module,
+        body.status ?? row.status,
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Workflow code already exists in this scope");
+    throw err;
+  }
+  await writeAuditAsync(db, { actor, action: "workflow.definition.update", resourceType: "workflow_definition", resourceId: row.id, details: { code: row.code }, ip });
+  return getDefinitionAsync(db, row.id, tenantId);
+}
+
+export async function setDefinitionStatusAsync(db, id, status, actor = null, ip = null, tenantId = null) {
+  const row = await getDefinitionRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Workflow template not found");
+  if (!WORKFLOW_STATUSES.includes(status)) {
+    throw new HttpError(400, `status must be one of: ${WORKFLOW_STATUSES.join(", ")}`);
+  }
+  await runAsync(db, "UPDATE workflow_definitions SET status = ?, updated_at = ? WHERE id = ?", [status, nowIso(), row.id]);
+  await writeAuditAsync(db, { actor, action: "workflow.definition.status", resourceType: "workflow_definition", resourceId: row.id, details: { status }, ip });
+  return getDefinitionAsync(db, row.id, tenantId);
+}
+
+export async function deleteDefinitionAsync(db, id, actor = null, ip = null, tenantId = null) {
+  const row = await getDefinitionRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Workflow template not found");
+  const running = (
+    await queryOneAsync(
+      db,
+      "SELECT COUNT(*) AS c FROM workflow_instances WHERE definition_id = ? AND status IN ('pending','running','paused')",
+      [row.id]
+    )
+  ).c;
+  if (running) throw new HttpError(409, "Cannot delete a workflow with running instances");
+  await runAsync(db, "DELETE FROM workflow_definitions WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, { actor, action: "workflow.definition.delete", resourceType: "workflow_definition", resourceId: row.id, details: { code: row.code }, ip });
+  return { deleted: true, id: row.id };
+}
+
+export async function createVersionAsync(db, definitionId, body = {}, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  const sourceRef = body.from_version ?? body.fromVersion ?? body.source_version;
+  let sourceRow = null;
+  if (body.from_definition_id || body.fromDefinitionId) {
+    sourceRow = await publishedVersionRowAsync(db, Number(body.from_definition_id ?? body.fromDefinitionId));
+  } else if (sourceRef !== undefined && sourceRef !== null && sourceRef !== "") {
+    sourceRow = /^\d+$/.test(String(sourceRef))
+      ? (await getVersionByNumberAsync(db, definition.id, Number(sourceRef))) || (await getVersionRowAsync(db, Number(sourceRef)))
+      : await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? AND status = ? ORDER BY version DESC LIMIT 1", [
+          definition.id,
+          String(sourceRef),
+        ]);
+  } else if (body.copy_published !== false && body.copyPublished !== false) {
+    sourceRow =
+      (await publishedVersionRowAsync(db, definition.id)) ||
+      (await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? ORDER BY version DESC LIMIT 1", [definition.id]));
+  }
+  const versionId = await transactionAsync(db, async () => {
+    const vid = await insertVersionAsync(db, definition.id, { notes: body.notes || "", created_by: actor?.id ?? null, version: body.version });
+    if (Array.isArray(body.graph?.nodes) || Array.isArray(body.graph?.transitions) || Array.isArray(body.nodes)) {
+      await replaceGraphAsync(db, vid, body.graph || body);
+    } else if (sourceRow) {
+      await restoreSnapshotAsync(db, vid, sourceRow.snapshot);
+      if (!safeParse(sourceRow.snapshot, {}).nodes?.length) {
+        const graph = await readGraphAsync(db, sourceRow.id);
+        await replaceGraphAsync(db, vid, graph);
+      }
+    } else {
+      await replaceGraphAsync(db, vid, defaultGraph());
+    }
+    return vid;
+  });
+  await writeAuditAsync(db, {
+    actor,
+    action: "workflow.version.create",
+    resourceType: "workflow_definition",
+    resourceId: definition.id,
+    details: { version_id: versionId, source_version_id: sourceRow?.id ?? null },
+    ip,
+  });
+  return getVersionAsync(db, definition.id, (await getVersionRowAsync(db, versionId)).version, tenantId);
+}
+
+export async function publishDefinitionAsync(db, definitionId, body = {}, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  const versionRow = body.version
+    ? (await getVersionByNumberAsync(db, definition.id, Number(body.version))) || (await getVersionRowAsync(db, Number(body.version)))
+    : await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? ORDER BY version DESC LIMIT 1", [definition.id]);
+  if (!versionRow || Number(versionRow.definition_id) !== Number(definition.id)) {
+    throw new HttpError(404, "Workflow version not found");
+  }
+  const graph = await readGraphAsync(db, versionRow.id);
+  const validation = assertValidGraph(graph);
+  const ts = nowIso();
+  await transactionAsync(db, async () => {
+    await runAsync(db, "UPDATE workflow_versions SET status = 'archived', updated_at = ? WHERE definition_id = ? AND status = 'published'", [
+      ts,
+      definition.id,
+    ]);
+    const snapshot = await snapshotGraphAsync(db, versionRow.id);
+    await runAsync(
+      db,
+      `UPDATE workflow_versions SET status = 'published', published_at = ?, published_by = ?, snapshot = ?, notes = ?, updated_at = ?
+       WHERE id = ?`,
+      [ts, actor?.id ?? null, JSON.stringify(snapshot), body.notes ?? versionRow.notes ?? "", ts, versionRow.id]
+    );
+    await runAsync(db, "UPDATE workflow_definitions SET published_version = ?, status = 'published', updated_at = ? WHERE id = ?", [
+      versionRow.version,
+      ts,
+      definition.id,
+    ]);
+  });
+  await writeAuditAsync(db, {
+    actor,
+    action: "workflow.definition.publish",
+    resourceType: "workflow_definition",
+    resourceId: definition.id,
+    details: { version: versionRow.version, nodes: graph.nodes.length, transitions: graph.transitions.length },
+    ip,
+  });
+  return {
+    definition: publicDefinition(await getDefinitionRowAsync(db, definition.id)),
+    version: publicVersion(await getVersionRowAsync(db, versionRow.id)),
+    validation,
+  };
+}
+
+export async function cloneDefinitionAsync(db, definitionId, body = {}, actor = null, ip = null, tenantId = null) {
+  const source = await getDefinitionRowAsync(db, definitionId);
+  assertReadable(source, tenantId, "Workflow template not found");
+  const code = body.code || `${source.code}-copy`;
+  validateCode(code, "Workflow code");
+  const created = await createDefinitionAsync(
+    db,
+    {
+      code,
+      name: body.name || `${source.name} (copy)`,
+      description: body.description ?? source.description,
+      category: source.category,
+      module: source.module,
+      tenantId: body.tenantId ?? body.tenant_id,
+    },
+    actor,
+    ip,
+    tenantId
+  );
+  const published = await publishedVersionRowAsync(db, source.id);
+  if (published) {
+    const targetVersionId = (await queryOneAsync(db, "SELECT id FROM workflow_versions WHERE definition_id = ? ORDER BY version LIMIT 1", [created.id])).id;
+    await transactionAsync(db, async () => {
+      await runAsync(db, "DELETE FROM workflow_transitions WHERE version_id = ?", [targetVersionId]);
+      await runAsync(db, "DELETE FROM workflow_nodes WHERE version_id = ?", [targetVersionId]);
+      const snapshot = safeParse(published.snapshot, {});
+      await replaceGraphAsync(db, targetVersionId, snapshot.nodes?.length ? snapshot : await readGraphAsync(db, published.id));
+    });
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "workflow.definition.clone",
+    resourceType: "workflow_definition",
+    resourceId: created.id,
+    details: { source_id: source.id, code },
+    ip,
+  });
+  return getDefinitionAsync(db, created.id, tenantId);
 }

@@ -7,6 +7,7 @@
 // low-level `publishEventNow` path routes synchronously for infrastructure
 // events that do not need the outbox.
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
+import { queryOneAsync, runAsync, transactionAsync, inAsyncTransaction } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import {
   buildEnvelope,
@@ -19,11 +20,11 @@ import {
   normalizeDeliveryStatus,
 } from "./validation.js";
 import { publicEvent, publicDelivery, eventUuid, ref } from "./repository.js";
-import { getEventTypeRow, createEventType, resolveSchema } from "./registry.js";
-import { enqueueOutbox } from "./outbox.js";
+import { getEventTypeRow, createEventType, resolveSchema, getEventTypeRowAsync, createEventTypeAsync, resolveSchemaAsync } from "./registry.js";
+import { enqueueOutbox, enqueueOutboxAsync } from "./outbox.js";
 import { routeEvent } from "./router.js";
-import { nextSequence } from "./ordering.js";
-import { auditEvent, log } from "./hooks.js";
+import { nextSequence, nextSequenceAsync } from "./ordering.js";
+import { auditEvent, auditEventAsync, log } from "./hooks.js";
 
 export function serializeEvent(event) {
   return JSON.stringify(event);
@@ -197,6 +198,140 @@ export function publishAsync(db, input = {}, actor = null, options = {}) {
 export function publishWithCorrelation(db, input = {}, actor = null, options = {}) {
   const correlationId = input.correlation_id || input.correlationId || ref("COR");
   return publishEvent(db, { ...input, correlation_id: correlationId }, actor, options);
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+// The asynchronous emission path used by migrated write routes. It mirrors the
+// outbox branch of `publishEvent` statement-for-statement so an event stored on
+// the async layer is byte-identical to one stored on the synchronous layer.
+
+export async function validateEventAsync(db, input = {}, { actor = null, tenantId = null, strictType = false, validatePayload = true } = {}) {
+  const rawType = input.event_type_code || input.eventTypeCode || input.event_type || input.eventType;
+  if (!rawType) throw new HttpError(400, "event_type_code is required");
+  let type = await getEventTypeRowAsync(db, rawType);
+  if (!type) {
+    if (strictType) throw new HttpError(400, `Unknown event type ${rawType}`);
+    const created = await createEventTypeAsync(db, {
+      code: rawType,
+      name: String(rawType).replace(/([A-Z])/g, " $1").trim() || rawType,
+      source_module: input.source_module || input.sourceModule || "unknown",
+      category: input.category || "domain",
+    });
+    type = await getEventTypeRowAsync(db, created.code);
+  }
+  if (!type.enabled || type.status === "retired") throw new HttpError(400, `Event type ${type.code} is not enabled`);
+  const envelope = buildEnvelope(input, { actor, tenantId, eventType: type });
+  validateEnvelope(envelope, type);
+  const resolved = await resolveSchemaAsync(db, type.code, envelope.event_version, { strict: false });
+  const schema = resolved.schema;
+  if (validatePayload) {
+    const errors = validatePayloadAgainstSchema(envelope.payload, schema);
+    if (errors.length) {
+      const error = new HttpError(400, `Event payload does not match schema: ${errors.join("; ")}`);
+      error.category = "schema";
+      error.code = "schema_mismatch";
+      throw error;
+    }
+  }
+  return { envelope, type, schema, resolvedVersion: resolved.version };
+}
+
+export async function publishEventAsync(db, input = {}, actor = null, options = {}) {
+  const tenantId = options.tenantId ?? input.tenant_id ?? actor?.tenant_id ?? null;
+  const useOutbox = options.useOutbox === undefined ? !options.immediate : Boolean(options.useOutbox);
+  if (!useOutbox) {
+    throw new HttpError(400, "publishEventAsync only supports the transactional outbox path");
+  }
+  const idempotencyKey = input.idempotency_key ?? input.idempotencyKey ?? null;
+  if (idempotencyKey) {
+    const existing = await queryOneAsync(db, "SELECT * FROM event_records WHERE idempotency_key = ?", [idempotencyKey]);
+    if (existing) {
+      return { ...publicEvent(existing, { includePayload: true }), duplicate: true, deliveries: [] };
+    }
+  }
+  const { envelope, type } = await validateEventAsync(db, input, { actor, tenantId, ...options });
+  const ts = nowIso();
+  const eventRef = envelope.event_ref || ref("EVT");
+  const eventIdUuid = input.event_id || eventUuid();
+  const traceId = envelope.trace_id || input.trace_id || null;
+
+  const persist = async () => {
+    const partitionKey = orderingPartitionKey(envelope, type);
+    const sequence = type.ordering_required || envelope.ordering_scope !== "none" ? await nextSequenceAsync(db, partitionKey) : null;
+    const record = { ...envelope, partition_key: partitionKey || envelope.partition_key, sequence_number: sequence };
+    const result = await runAsync(
+      db,
+      `INSERT INTO event_records
+        (event_id, event_ref, event_type_code, event_version, source_module, source_system, source_object_type, source_object_id,
+         source_object_revision, actor_id, actor_type, correlation_id, causation_id, trace_id, parent_event_id, sequence_number,
+         partition_key, priority, payload_json, payload_schema_version, metadata_json, security_classification, status,
+         subscriber_count, delivered_count, failed_count, tenant_id, organization_id, plant_id, site_id, idempotency_key,
+         occurred_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        eventIdUuid,
+        eventRef,
+        envelope.event_type_code,
+        envelope.event_version,
+        envelope.source_module,
+        envelope.source_system,
+        envelope.source_object_type,
+        envelope.source_object_id === undefined || envelope.source_object_id === null ? null : String(envelope.source_object_id),
+        envelope.source_object_revision === undefined || envelope.source_object_revision === null ? null : String(envelope.source_object_revision),
+        envelope.actor_id,
+        envelope.actor_type,
+        envelope.correlation_id || null,
+        envelope.causation_id || null,
+        traceId,
+        envelope.parent_event_id ?? null,
+        record.sequence_number,
+        record.partition_key ?? null,
+        envelope.priority,
+        toJson(envelope.payload, {}),
+        envelope.payload_schema_version,
+        toJson(envelope.metadata, {}),
+        envelope.security_classification,
+        "queued",
+        tenantId,
+        input.organization_id ?? envelope.metadata?.organization_id ?? null,
+        input.plant_id ?? envelope.metadata?.plant_id ?? null,
+        input.site_id ?? envelope.metadata?.site_id ?? null,
+        idempotencyKey,
+        envelope.occurred_at,
+        ts,
+        ts,
+      ]
+    );
+    const id = Number(result.lastInsertId);
+    await enqueueOutboxAsync(db, {
+      event_ref: eventRef,
+      event_type_code: envelope.event_type_code,
+      event_version: envelope.event_version,
+      payload: envelope.payload,
+      metadata: envelope.metadata,
+      aggregate_type: envelope.source_object_type,
+      aggregate_id: envelope.source_object_id,
+      correlation_id: envelope.correlation_id,
+      tenant_id: tenantId,
+    });
+    return queryOneAsync(db, "SELECT * FROM event_records WHERE id = ?", [id]);
+  };
+
+  // Join the caller's async transaction when one is open so the business write
+  // and the outbox row commit together; otherwise open one for the pair.
+  const eventRow = inAsyncTransaction() ? await persist() : await transactionAsync(db, persist);
+
+  await auditEventAsync(db, {
+    actor,
+    action: "event.publish",
+    resourceType: "event_record",
+    resourceId: eventRow.id,
+    details: { event_type: envelope.event_type_code, event_ref: eventRef, queued: true, subscribers: 0 },
+    correlation: envelope.correlation_id,
+    category: "data",
+  });
+  log("info", "event.published", { event_ref: eventRef, event_type: envelope.event_type_code, queued: true });
+  return { ...publicEvent(eventRow, { includePayload: true }), deliveries: [], queued: true };
 }
 
 // Routes an already-stored event (used by the outbox, replay and manual

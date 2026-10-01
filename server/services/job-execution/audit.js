@@ -5,7 +5,8 @@
 // history even when the platform audit log is queried separately.
 
 import { run, queryAll, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 
 export function recordEngineAudit(db, { tenantId = null, entityType, entityId = "", entityCode = "", action, actor = null, detail = {}, ip = null }) {
   run(
@@ -54,6 +55,66 @@ export function listEngineAudit(db, { tenantId = null, entityType = null, entity
     `SELECT * FROM job_engine_audit ${clause} ORDER BY id DESC LIMIT ?`,
     [...params, Math.max(1, Math.min(500, Number(limit) || 100))]
   ).map((row) => ({
+    id: row.id,
+    tenant_id: row.tenant_id ?? null,
+    entity_type: row.entity_type,
+    entity_id: row.entity_id,
+    entity_code: row.entity_code,
+    action: row.action,
+    actor_id: row.actor_id ?? null,
+    detail: row.detail_json ? JSON.parse(row.detail_json) : {},
+    created_at: row.created_at,
+  }));
+}
+
+export async function recordEngineAuditAsync(db, { tenantId = null, entityType, entityId = "", entityCode = "", action, actor = null, detail = {}, ip = null }) {
+  await runAsync(
+    db,
+    `INSERT INTO job_engine_audit (tenant_id, entity_type, entity_id, entity_code, action, actor_id, detail_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      tenantId === null || tenantId === undefined ? null : Number(tenantId),
+      String(entityType),
+      String(entityId || ""),
+      String(entityCode || ""),
+      String(action),
+      actor?.id ?? null,
+      JSON.stringify(detail || {}),
+      nowIso(),
+    ]
+  );
+  await writeAuditAsync(db, {
+    actor,
+    action: `job_engine.${entityType}.${action}`,
+    resourceType: entityType,
+    resourceId: entityId || entityCode,
+    details: { entity_code: entityCode, ...detail },
+    ip,
+  });
+}
+
+export async function listEngineAuditAsync(db, { tenantId = null, entityType = null, entityId = null, limit = 100 } = {}) {
+  const where = [];
+  const params = [];
+  if (tenantId !== null && tenantId !== undefined) {
+    where.push("COALESCE(tenant_id, 0) = ?");
+    params.push(Number(tenantId));
+  }
+  if (entityType) {
+    where.push("entity_type = ?");
+    params.push(String(entityType));
+  }
+  if (entityId) {
+    where.push("entity_id = ?");
+    params.push(String(entityId));
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM job_engine_audit ${clause} ORDER BY id DESC LIMIT ?`,
+    [...params, Math.max(1, Math.min(500, Number(limit) || 100))]
+  );
+  return rows.map((row) => ({
     id: row.id,
     tenant_id: row.tenant_id ?? null,
     entity_type: row.entity_type,

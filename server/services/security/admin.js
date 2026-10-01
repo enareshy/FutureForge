@@ -2,7 +2,8 @@
 // Routes stay thin; all validation, persistence, invalidation and auditing live
 // here so the model is enforced centrally.
 import { queryAll, queryOne } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { securityError, assertionError } from "./errors.js";
 import {
   DECISION_REASONS,
@@ -16,51 +17,84 @@ import {
 } from "./constants.js";
 import {
   createClassificationRule,
+  createClassificationRuleAsync,
   createEntitlement,
+  createEntitlementAsync,
   createFieldRule,
+  createFieldRuleAsync,
   createMaskingRule,
+  createMaskingRuleAsync,
   createOrganizationRule,
+  createOrganizationRuleAsync,
   createPlantRule,
+  createPlantRuleAsync,
   createPolicy,
+  createPolicyAsync,
   getClassificationRule,
   getEntitlement,
+  getEntitlementAsync,
   getFieldRule,
+  getFieldRuleAsync,
   getMaskingRule,
   getObjectType,
+  getObjectTypeAsync,
   getOrganizationRule,
   getPlantRule,
   getPolicy,
+  getPolicyAsync,
   listClassificationRules,
+  listClassificationRulesAsync,
   listDecisions,
+  listDecisionsAsync,
   listEntitlements,
+  listEntitlementsAsync,
   listFieldRules,
+  listFieldRulesAsync,
   listMaskingRules,
+  listMaskingRulesAsync,
   listObjectTypes,
+  listObjectTypesAsync,
   listOrganizationRules,
+  listOrganizationRulesAsync,
   listPlantRules,
+  listPlantRulesAsync,
   listPolicies,
+  listPoliciesAsync,
   registerObjectType,
+  registerObjectTypeAsync,
   setClassificationRuleStatus,
+  setClassificationRuleStatusAsync,
   setEntitlementStatus,
+  setEntitlementStatusAsync,
   setFieldRuleStatus,
+  setFieldRuleStatusAsync,
   setMaskingRuleStatus,
+  setMaskingRuleStatusAsync,
   setObjectTypeStatus,
+  setObjectTypeStatusAsync,
   setOrganizationRuleStatus,
+  setOrganizationRuleStatusAsync,
   setPlantRuleStatus,
+  setPlantRuleStatusAsync,
   setPolicyStatus,
+  setPolicyStatusAsync,
   updateEntitlement,
+  updateEntitlementAsync,
   updateFieldRule,
+  updateFieldRuleAsync,
   updatePolicy,
+  updatePolicyAsync,
 } from "./repository.js";
 import {
   authorizeRequest,
   invalidateSecurity,
+  invalidateSecurityAsync,
   listMaskingStrategies,
   publicSecurityContext,
 } from "./index.js";
-import { buildSecurityContext } from "./context.js";
+import { buildSecurityContext, buildSecurityContextAsync } from "./context.js";
 import { evaluateFields } from "./engine.js";
-import { ensureSecurityFoundation } from "./foundation.js";
+import { ensureSecurityFoundation, ensureSecurityFoundationAsync } from "./foundation.js";
 
 function audit(db, actor, action, resourceType, resourceId, details, ip) {
   writeAudit(db, {
@@ -401,3 +435,271 @@ export function effectivePermissionsFor(db, tenantId, userId) {
   const context = buildSecurityContext(db, { id: Number(userId) }, { tenantId });
   return publicSecurityContext(context);
 }
+
+// ---------------------------------------------------------------------------
+// Asynchronous counterparts (Phase 2). The console CRUD and read routes run on
+// the asynchronous pool; the decision debugger stays on the synchronous layer
+// because it shares the full authorization engine.
+// ---------------------------------------------------------------------------
+
+async function auditAsync(db, actor, action, resourceType, resourceId, details, ip) {
+  await writeAuditAsync(db, {
+    actor,
+    action,
+    resourceType,
+    resourceId: String(resourceId ?? ""),
+    details,
+    ip,
+  });
+}
+
+function invalidateAsync(db, tenantId) {
+  return invalidateSecurityAsync(db, tenantId, "all");
+}
+
+export async function securityOverviewAsync(db, tenantId) {
+  await ensureSecurityFoundationAsync(db);
+  const count = async (table, where = "", params = []) =>
+    Number(
+      (
+        await queryOneAsync(db, `SELECT COUNT(*) AS n FROM ${table} WHERE tenant_id = ?${where}`, [
+          Number(tenantId),
+          ...params,
+        ])
+      )?.n || 0
+    );
+  const recent = await queryAllAsync(
+    db,
+    `SELECT decision, reason, COUNT(*) AS n
+     FROM security_decisions WHERE tenant_id = ?
+     GROUP BY decision, reason ORDER BY n DESC`,
+    [Number(tenantId)]
+  );
+  const byEnforcement = await queryAllAsync(
+    db,
+    `SELECT enforcement, COUNT(*) AS n FROM security_object_types
+     WHERE tenant_id = ? GROUP BY enforcement ORDER BY enforcement`,
+    [Number(tenantId)]
+  );
+  return {
+    tenantId: Number(tenantId),
+    objectTypes: await count("security_object_types"),
+    policies: await count("security_policies"),
+    activePolicies: await count("security_policies", " AND status = 'active'"),
+    entitlements: await count("security_entitlements"),
+    fieldRules: await count("security_field_rules"),
+    classificationRules: await count("security_classification_rules"),
+    organizationRules: await count("security_organization_rules"),
+    plantRules: await count("security_plant_rules"),
+    maskingRules: await count("security_masking_rules"),
+    decisions: await count("security_decisions"),
+    enforcement: byEnforcement.map((row) => ({ enforcement: row.enforcement, count: Number(row.n) })),
+    decisionSummary: recent.map((row) => ({ decision: row.decision, reason: row.reason, count: Number(row.n) })),
+  };
+}
+
+export async function listSecurityObjectTypesAsync(db, tenantId, query) {
+  await ensureSecurityFoundationAsync(db);
+  return listObjectTypesAsync(db, tenantId, query);
+}
+
+export async function registerSecurityObjectTypeAsync(db, input, actor, tenantId, ip) {
+  const result = await registerObjectTypeAsync(db, input, actor, tenantId);
+  await auditAsync(db, actor, "security.objecttype.register", "security", result.object_type, { enforcement: result.enforcement }, ip);
+  await invalidateAsync(db, tenantId);
+  return result;
+}
+
+export async function updateSecurityObjectTypeAsync(db, tenantId, objectType, input, actor, ip) {
+  const existing = await getObjectTypeAsync(db, tenantId, objectType);
+  if (!existing) throw securityError(404, `Object type "${objectType}" is not registered`, "NOT_FOUND");
+  const result = await registerObjectTypeAsync(db, { ...input, object_type: objectType }, actor, tenantId);
+  await auditAsync(db, actor, "security.objecttype.update", "security", objectType, { enforcement: result.enforcement }, ip);
+  await invalidateAsync(db, tenantId);
+  return result;
+}
+
+export async function setSecurityObjectTypeStatusAsync(db, tenantId, objectType, status, actor, ip) {
+  const result = await setObjectTypeStatusAsync(db, tenantId, objectType, status);
+  await auditAsync(db, actor, "security.objecttype.status", "security", objectType, { status }, ip);
+  await invalidateAsync(db, tenantId);
+  return result;
+}
+
+export async function getSecurityPolicyAsync(db, tenantId, id) {
+  const policy = await getPolicyAsync(db, id, tenantId);
+  if (!policy) throw securityError(404, "Policy not found", "NOT_FOUND");
+  return policy;
+}
+
+export async function listSecurityPoliciesAsync(db, tenantId, query) {
+  return listPoliciesAsync(db, tenantId, query);
+}
+
+export async function createSecurityPolicyAsync(db, input, actor, tenantId, ip) {
+  const policy = await createPolicyAsync(db, input, actor, tenantId);
+  await auditAsync(db, actor, "security.policy.create", "security", policy.code, { effect: policy.effect }, ip);
+  await invalidateAsync(db, tenantId);
+  return policy;
+}
+
+export async function updateSecurityPolicyAsync(db, tenantId, id, input, actor, ip) {
+  const policy = await updatePolicyAsync(db, id, input, actor, tenantId);
+  if (!policy) throw securityError(404, "Policy not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.policy.update", "security", policy.code, { version: policy.version }, ip);
+  await invalidateAsync(db, tenantId);
+  return policy;
+}
+
+export async function setSecurityPolicyStatusAsync(db, tenantId, id, status, actor, ip) {
+  const policy = await setPolicyStatusAsync(db, id, status, actor, tenantId);
+  if (!policy) throw securityError(404, "Policy not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.policy.status", "security", policy.code, { status }, ip);
+  await invalidateAsync(db, tenantId);
+  return policy;
+}
+
+export async function listSecurityEntitlementsAsync(db, tenantId, query) {
+  return listEntitlementsAsync(db, tenantId, query);
+}
+
+export async function createSecurityEntitlementAsync(db, input, actor, tenantId, ip) {
+  const entitlement = await createEntitlementAsync(db, input, actor, tenantId);
+  await auditAsync(db, actor, "security.entitlement.create", "security", entitlement.id, { effect: entitlement.effect }, ip);
+  await invalidateAsync(db, tenantId);
+  return entitlement;
+}
+
+export async function updateSecurityEntitlementAsync(db, tenantId, id, input, actor, ip) {
+  const entitlement = await updateEntitlementAsync(db, id, input, actor, tenantId);
+  if (!entitlement) throw securityError(404, "Entitlement not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.entitlement.update", "security", id, {}, ip);
+  await invalidateAsync(db, tenantId);
+  return entitlement;
+}
+
+export async function setSecurityEntitlementStatusAsync(db, tenantId, id, status, actor, ip) {
+  const entitlement = await setEntitlementStatusAsync(db, id, status, actor, tenantId);
+  if (!entitlement) throw securityError(404, "Entitlement not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.entitlement.status", "security", id, { status }, ip);
+  await invalidateAsync(db, tenantId);
+  return entitlement;
+}
+
+export async function listSecurityFieldRulesAsync(db, tenantId, query) {
+  return listFieldRulesAsync(db, tenantId, query);
+}
+
+export async function createSecurityFieldRuleAsync(db, input, actor, tenantId, ip) {
+  const rule = await createFieldRuleAsync(db, input, actor, tenantId);
+  await auditAsync(db, actor, "security.field.create", "security", `${rule.object_type}.${rule.field_name}`, { effect: rule.effect }, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function updateSecurityFieldRuleAsync(db, tenantId, id, input, actor, ip) {
+  const rule = await updateFieldRuleAsync(db, id, input, actor, tenantId);
+  if (!rule) throw securityError(404, "Field rule not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.field.update", "security", id, {}, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function setSecurityFieldRuleStatusAsync(db, tenantId, id, status, actor, ip) {
+  const rule = await setFieldRuleStatusAsync(db, id, status, actor, tenantId);
+  if (!rule) throw securityError(404, "Field rule not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.field.status", "security", id, { status }, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function listSecurityClassificationRulesAsync(db, tenantId, query) {
+  return listClassificationRulesAsync(db, tenantId, query);
+}
+
+export async function createSecurityClassificationRuleAsync(db, input, actor, tenantId, ip) {
+  const rule = await createClassificationRuleAsync(db, input, actor, tenantId);
+  await auditAsync(db, actor, "security.classification.create", "security", rule.id, { classification: rule.classification }, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function setSecurityClassificationRuleStatusAsync(db, tenantId, id, status, actor, ip) {
+  const rule = await setClassificationRuleStatusAsync(db, id, status, actor, tenantId);
+  if (!rule) throw securityError(404, "Classification rule not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.classification.status", "security", id, { status }, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function listSecurityOrganizationRulesAsync(db, tenantId, query) {
+  return listOrganizationRulesAsync(db, tenantId, query);
+}
+
+export async function createSecurityOrganizationRuleAsync(db, input, actor, tenantId, ip) {
+  const rule = await createOrganizationRuleAsync(db, input, actor, tenantId);
+  await auditAsync(db, actor, "security.organization.create", "security", rule.id, {}, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function setSecurityOrganizationRuleStatusAsync(db, tenantId, id, status, actor, ip) {
+  const rule = await setOrganizationRuleStatusAsync(db, id, status, actor, tenantId);
+  if (!rule) throw securityError(404, "Organization rule not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.organization.status", "security", id, { status }, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function listSecurityPlantRulesAsync(db, tenantId, query) {
+  return listPlantRulesAsync(db, tenantId, query);
+}
+
+export async function createSecurityPlantRuleAsync(db, input, actor, tenantId, ip) {
+  const rule = await createPlantRuleAsync(db, input, actor, tenantId);
+  await auditAsync(db, actor, "security.plant.create", "security", rule.id, {}, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function setSecurityPlantRuleStatusAsync(db, tenantId, id, status, actor, ip) {
+  const rule = await setPlantRuleStatusAsync(db, id, status, actor, tenantId);
+  if (!rule) throw securityError(404, "Plant rule not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.plant.status", "security", id, { status }, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function listSecurityMaskingRulesAsync(db, tenantId, query) {
+  return listMaskingRulesAsync(db, tenantId, query);
+}
+
+export async function createSecurityMaskingRuleAsync(db, input, actor, tenantId, ip) {
+  const rule = await createMaskingRuleAsync(db, input, actor, tenantId);
+  await auditAsync(db, actor, "security.masking.create", "security", rule.id, { strategy: rule.strategy }, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function setSecurityMaskingRuleStatusAsync(db, tenantId, id, status, actor, ip) {
+  const rule = await setMaskingRuleStatusAsync(db, id, status, actor, tenantId);
+  if (!rule) throw securityError(404, "Masking rule not found", "NOT_FOUND");
+  await auditAsync(db, actor, "security.masking.status", "security", id, { status }, ip);
+  await invalidateAsync(db, tenantId);
+  return rule;
+}
+
+export async function listSecurityDecisionsAsync(db, tenantId, query) {
+  return listDecisionsAsync(db, tenantId, query);
+}
+
+export async function effectiveSecurityContextAsync(db, tenantId, userId, options = {}) {
+  const context = await buildSecurityContextAsync(db, { id: Number(userId) }, {
+    tenantId,
+    organizationId: options.organizationId,
+    correlationId: options.correlationId,
+  });
+  return publicSecurityContext(context);
+}
+
+export { invalidateSecurityAsync };

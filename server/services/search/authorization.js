@@ -1,9 +1,9 @@
 // Permission-aware search. Object types declare the IAM resource + action that
 // governs read access; the search layer re-evaluates that decision per result
 // so an index entry never leaks data the caller cannot otherwise read.
-import { checkPermission } from "../authorization.js";
-import { objectTypeRow } from "./repository.js";
-import { isPlatformAdmin } from "../tenants.js";
+import { checkPermission, checkPermissionAsync } from "../authorization.js";
+import { objectTypeRow, objectTypeRowAsync } from "./repository.js";
+import { isPlatformAdmin, isPlatformAdminAsync } from "../tenants.js";
 
 function decisionCache() {
   return new Map();
@@ -62,4 +62,55 @@ export function filterAuthorizedDocuments(db, actor, documents, options = {}) {
 
 export function createDecisionCache() {
   return decisionCache();
+}
+
+async function cachedDecisionAsync(db, actor, resource, action, organizationId, cache) {
+  const key = `${resource}|${action}|${organizationId}`;
+  if (cache.has(key)) return cache.get(key);
+  const decision = await checkPermissionAsync(db, actor, resource, action, { organizationId });
+  const allowed = Boolean(decision?.allowed);
+  cache.set(key, allowed);
+  return allowed;
+}
+
+export async function authorizeObjectTypeAsync(db, actor, objectType, options = {}) {
+  const { tenantId, action = null, cache = decisionCache() } = options;
+  const row = await objectTypeRowAsync(db, objectType, tenantId);
+  if (!row) return false;
+  if (!row.permission_resource) return true;
+  const platformAdmin = options.platformAdmin ?? (await isPlatformAdminAsync(db, actor?.id));
+  if (platformAdmin) return true;
+  const organizationId = options.organizationId ?? actor?.organization_id ?? 0;
+  return cachedDecisionAsync(
+    db,
+    actor,
+    row.permission_resource,
+    action || row.permission_action || "read",
+    organizationId,
+    cache
+  );
+}
+
+export async function filterAuthorizedDocumentsAsync(db, actor, documents, options = {}) {
+  const { tenantId, action = null, cache = decisionCache() } = options;
+  const platformAdmin = options.platformAdmin ?? (await isPlatformAdminAsync(db, actor?.id));
+  if (platformAdmin) return documents;
+  const typeDecisions = new Map();
+  const result = [];
+  for (const doc of documents) {
+    if (!typeDecisions.has(doc.object_type)) {
+      typeDecisions.set(
+        doc.object_type,
+        await authorizeObjectTypeAsync(db, actor, doc.object_type, {
+          tenantId: doc.tenant_id ?? tenantId,
+          action,
+          cache,
+          platformAdmin,
+          organizationId: doc.organization_id ?? actor?.organization_id ?? 0,
+        })
+      );
+    }
+    if (typeDecisions.get(doc.object_type)) result.push(doc);
+  }
+  return result;
 }

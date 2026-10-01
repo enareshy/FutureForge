@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 import { HttpError, pagination } from "./validation.js";
 import { queryOne } from "./db.js";
+import { queryOneAsync } from "./db-async.js";
 import * as users from "./services/users.js";
 import * as groups from "./services/groups.js";
 import * as roles from "./services/roles.js";
@@ -75,10 +76,15 @@ import { createReportingRouter } from "./services/reporting/router-reporting.js"
 import * as observability from "./services/observability/index.js";
 import { createObservabilityRouter } from "./services/observability/router-observability.js";
 import { getStorageProvider, verifyDownloadToken, storageConfig, signDownload, signedDownloadPath } from "./services/file-storage.js";
-import { readTenant as metaReadTenant, writeTenant as metaWriteTenant } from "./services/metadata/scope.js";
-import { writeAudit } from "./services/audit.js";
-import { effectiveAccess } from "./services/access.js";
-import { requirePermission, requireFeature } from "./middleware.js";
+import {
+  readTenant as metaReadTenant,
+  readTenantAsync as metaReadTenantAsync,
+  writeTenant as metaWriteTenant,
+  writeTenantAsync as metaWriteTenantAsync,
+} from "./services/metadata/scope.js";
+import { writeAudit, writeAuditAsync } from "./services/audit.js";
+import { effectiveAccess, effectiveAccessAsync } from "./services/access.js";
+import { requirePermission, requirePermissionAsync, requireFeature } from "./middleware.js";
 import { runWithRequestContext } from "./request-context.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -169,12 +175,68 @@ function resolveRequestTenant(db, req) {
   return sessionTenant || null;
 }
 
+// Async counterpart of `requireAuth` used by asynchronous route groups. The
+// session lookup, user load and (only when a tenant override is present) the
+// platform-admin check all run without blocking the event loop.
+function requireAuthAsync(db) {
+  return async (req, res, next) => {
+    try {
+      const header = req.headers.authorization || "";
+      const token = header.startsWith("Bearer ") ? header.slice(7) : req.headers["x-session-token"];
+      if (!token) return next(new HttpError(401, "Authentication required"));
+      const session = await sessions.getSessionByTokenAsync(db, token);
+      if (!session) return next(new HttpError(401, "Invalid session"));
+      const user = await queryOneAsync(
+        db,
+        `SELECT id, username, email, employee_id, display_name, status, organization_id, tenant_id
+         FROM users WHERE id = ?`,
+        [session.user_id]
+      );
+      if (!user || user.status !== "active") return next(new HttpError(403, "Account is not active"));
+      req.actor = user;
+      req.sessionToken = token;
+      req.sessionRow = session;
+      req.tenantId = await resolveRequestTenantAsync(db, req);
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+async function resolveRequestTenantAsync(db, req) {
+  const override = req.headers["x-tenant-id"] || req.query?.tenantId;
+  const sessionTenant = req.sessionRow?.tenant_id || req.actor?.tenant_id || null;
+  if (override !== undefined && override !== null && override !== "") {
+    if (!(await tenants.isPlatformAdminAsync(db, req.actor.id))) {
+      throw new HttpError(403, "Cannot override tenant context");
+    }
+    const tenant = await tenants.getTenantAsync(db, override);
+    if (Number(tenant.id) !== Number(sessionTenant)) {
+      writeAudit(db, {
+        actor: req.actor,
+        action: "tenant.context.switch",
+        resourceType: "tenant",
+        resourceId: tenant.id,
+        details: { code: tenant.code, via: "header", previous: sessionTenant },
+        ip: clientIp(req),
+      });
+    }
+    return tenant.id;
+  }
+  return sessionTenant || null;
+}
+
 function tenantFilter(req) {
   return { tenantId: req.tenantId || -1 };
 }
 
 function scopedOrg(db, req, id) {
   return orgs.getOrganization(db, id, tenantFilter(req));
+}
+
+async function scopedOrgAsync(db, req, id) {
+  return orgs.getOrganizationAsync(db, id, tenantFilter(req));
 }
 
 function wrap(fn) {
@@ -335,29 +397,36 @@ export function createApp(db) {
     res.json({ ok: true, service: "helix-iam" });
   });
 
-  function handleLogin(req, res) {
-    res.json(authentication.login(db, req.body || {}, requestMeta(req)));
-  }
-
-  app.post("/api/auth/login", wrap(handleLogin));
-  app.post("/api/authentication/login", wrap(handleLogin));
-
   const auth = requireAuth(db);
   const can = (resource, action) => requirePermission(db, resource, action);
+  // Asynchronous pipeline for migrated route groups. A route uses either the
+  // synchronous guards (`auth`/`can`) or the async ones (`authAsync`/`canAsync`),
+  // never both, so its whole request path stays on one data layer.
+  const authAsync = requireAuthAsync(db);
+  const canAsync = (resource, action) => requirePermissionAsync(db, resource, action);
+
+  async function handleLoginAsync(req, res) {
+    res.json(await authentication.loginAsync(db, req.body || {}, requestMeta(req)));
+  }
+
+  app.post("/api/auth/login", wrap(handleLoginAsync));
+  app.post("/api/authentication/login", wrap(handleLoginAsync));
 
   app.get(
     "/api/auth/me",
-    auth,
-    wrap((req, res) => {
-      const currentTenant = req.tenantId ? tenants.publicTenant(tenants.getTenant(db, req.tenantId)) : null;
-      const capabilities = deployment.Features.resolveCapabilities(db);
+    authAsync,
+    wrap(async (req, res) => {
+      const currentTenant = req.tenantId
+        ? tenants.publicTenant(await tenants.getTenantAsync(db, req.tenantId))
+        : null;
+      const capabilities = await deployment.Features.resolveCapabilitiesAsync(db);
       res.json({
         user: req.actor,
-        access: effectiveAccess(db, req.actor.id),
+        access: await effectiveAccessAsync(db, req.actor.id),
         session: sessions.publicSession(req.sessionRow),
-        mfa: mfa.mfaStatus(db, req.actor.id),
+        mfa: await mfa.mfaStatusAsync(db, req.actor.id),
         tenant: currentTenant,
-        tenants: tenants.switchableTenants(db, req.actor).map(tenants.publicTenant),
+        tenants: (await tenants.switchableTenantsAsync(db, req.actor)).map(tenants.publicTenant),
         deployment: {
           mode: capabilities.mode,
           edition: capabilities.edition,
@@ -368,43 +437,43 @@ export function createApp(db) {
     })
   );
 
-  function handleLogout(req, res) {
-    res.json(sessions.logoutToken(db, req.sessionToken, req.actor, clientIp(req)));
+  async function handleLogoutAsync(req, res) {
+    res.json(await sessions.logoutTokenAsync(db, req.sessionToken, req.actor, clientIp(req)));
   }
 
-  app.post("/api/auth/logout", auth, wrap(handleLogout));
-  app.post("/api/authentication/logout", auth, wrap(handleLogout));
+  app.post("/api/auth/logout", authAsync, wrap(handleLogoutAsync));
+  app.post("/api/authentication/logout", authAsync, wrap(handleLogoutAsync));
 
   app.get(
     "/api/authentication/providers",
-    wrap((req, res) => {
-      res.json({ items: providers.listProviders(db, { enabledOnly: true }) });
+    wrap(async (_req, res) => {
+      res.json({ items: await providers.listProvidersAsync(db, { enabledOnly: true }) });
     })
   );
 
   app.get(
     "/api/authentication/providers/admin",
-    auth,
-    can("iam.authentication", "read"),
-    wrap((_req, res) => {
-      res.json({ items: providers.listProviders(db) });
+    authAsync,
+    canAsync("iam.authentication", "read"),
+    wrap(async (_req, res) => {
+      res.json({ items: await providers.listProvidersAsync(db) });
     })
   );
 
   app.get(
     "/api/authentication/settings",
-    auth,
-    can("iam.authentication", "read"),
-    wrap((_req, res) => {
-      res.json(authentication.authSettings(db));
+    authAsync,
+    canAsync("iam.authentication", "read"),
+    wrap(async (_req, res) => {
+      res.json(await authentication.authSettingsAsync(db));
     })
   );
 
   app.put(
     "/api/authentication/settings",
-    auth,
-    can("iam.authentication", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.authentication", "update"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       const values = body.values || {
         "auth.mfa_required": body.mfaRequired,
@@ -419,164 +488,167 @@ export function createApp(db) {
       for (const [k, v] of Object.entries(values)) {
         if (v !== undefined) patch[k] = v;
       }
-      hierarchy.updateSettings(db, { values: patch }, req.actor, clientIp(req));
-      res.json(authentication.authSettings(db));
+      await hierarchy.updateSettingsAsync(db, { values: patch }, req.actor, clientIp(req));
+      res.json(await authentication.authSettingsAsync(db));
     })
   );
 
   app.post(
     "/api/authentication/providers",
-    auth,
-    can("iam.authentication", "create"),
-    wrap((req, res) => {
-      res.status(201).json(providers.createProvider(db, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.authentication", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await providers.createProviderAsync(db, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.put(
     "/api/authentication/providers/:id",
-    auth,
-    can("iam.authentication", "update"),
-    wrap((req, res) => {
-      res.json(providers.updateProvider(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.authentication", "update"),
+    wrap(async (req, res) => {
+      res.json(await providers.updateProviderAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/authentication/password-reset/request",
-    wrap((req, res) => {
-      authentication.requestPasswordReset(db, req.body || {}, requestMeta(req));
+    wrap(async (req, res) => {
+      await authentication.requestPasswordResetAsync(db, req.body || {}, requestMeta(req));
       res.json({ ok: true });
     })
   );
 
   app.post(
     "/api/authentication/password-reset/complete",
-    wrap((req, res) => {
-      res.json(authentication.completePasswordReset(db, req.body || {}, requestMeta(req)));
+    wrap(async (req, res) => {
+      res.json(await authentication.completePasswordResetAsync(db, req.body || {}, requestMeta(req)));
     })
   );
 
   app.get(
     "/api/sessions",
-    auth,
-    wrap((req, res) => {
-      res.json({ items: sessions.listMySessions(db, req.actor.id) });
+    authAsync,
+    wrap(async (req, res) => {
+      res.json({ items: await sessions.listMySessionsAsync(db, req.actor.id) });
     })
   );
 
   app.delete(
     "/api/sessions/:id",
-    auth,
-    wrap((req, res) => {
-      res.json(sessions.revokeSession(db, req.params.id, req.actor, clientIp(req), { ownerId: req.actor.id }));
+    authAsync,
+    wrap(async (req, res) => {
+      res.json(
+        await sessions.revokeSessionAsync(db, req.params.id, req.actor, clientIp(req), { ownerId: req.actor.id })
+      );
     })
   );
 
   app.post(
     "/api/sessions/revoke-all",
-    auth,
-    wrap((req, res) => {
+    authAsync,
+    wrap(async (req, res) => {
       res.json(
-        sessions.revokeAllSessions(db, req.actor.id, req.actor, clientIp(req), { exceptToken: req.sessionToken })
+        await sessions.revokeAllSessionsAsync(db, req.actor.id, req.actor, clientIp(req), {
+          exceptToken: req.sessionToken,
+        })
       );
     })
   );
 
   app.get(
     "/api/sessions/admin",
-    auth,
-    can("iam.sessions", "read"),
-    wrap((req, res) => {
-      res.json(sessions.listSessions(db, req.query));
+    authAsync,
+    canAsync("iam.sessions", "read"),
+    wrap(async (req, res) => {
+      res.json(await sessions.listSessionsAsync(db, req.query));
     })
   );
 
   app.delete(
     "/api/sessions/admin/:id",
-    auth,
-    can("iam.sessions", "delete"),
-    wrap((req, res) => {
-      res.json(sessions.revokeSession(db, req.params.id, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.sessions", "delete"),
+    wrap(async (req, res) => {
+      res.json(await sessions.revokeSessionAsync(db, req.params.id, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/mfa/status",
-    auth,
-    wrap((req, res) => {
-      res.json(mfa.mfaStatus(db, req.actor.id));
+    authAsync,
+    wrap(async (req, res) => {
+      res.json(await mfa.mfaStatusAsync(db, req.actor.id));
     })
   );
 
   app.post(
     "/api/mfa/totp/enroll",
-    auth,
-    wrap((req, res) => {
-      res.json(mfa.enrollTotp(db, req.actor, clientIp(req)));
+    authAsync,
+    wrap(async (req, res) => {
+      res.json(await mfa.enrollTotpAsync(db, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/mfa/totp/verify",
-    auth,
-    wrap((req, res) => {
-      res.json(mfa.verifyTotpEnrollment(db, req.actor, req.body?.code, clientIp(req)));
+    authAsync,
+    wrap(async (req, res) => {
+      res.json(await mfa.verifyTotpEnrollmentAsync(db, req.actor, req.body?.code, clientIp(req)));
     })
   );
 
   app.post(
     "/api/mfa/totp/disable",
-    auth,
-    wrap((req, res) => {
-      res.json(mfa.disableTotp(db, req.actor, req.body || {}, clientIp(req)));
+    authAsync,
+    wrap(async (req, res) => {
+      res.json(await mfa.disableTotpAsync(db, req.actor, req.body || {}, clientIp(req)));
     })
   );
 
   app.post(
     "/api/mfa/recovery/regenerate",
-    auth,
-    wrap((req, res) => {
-      res.json(mfa.regenerateRecovery(db, req.actor, req.body?.code, clientIp(req)));
+    authAsync,
+    wrap(async (req, res) => {
+      res.json(await mfa.regenerateRecoveryAsync(db, req.actor, req.body?.code, clientIp(req)));
     })
   );
 
   app.post(
     "/api/mfa/challenge/verify",
-    wrap((req, res) => {
-      res.json(authentication.completeMfa(db, req.body || {}, requestMeta(req)));
+    wrap(async (req, res) => {
+      res.json(await authentication.completeMfaAsync(db, req.body || {}, requestMeta(req)));
     })
   );
 
   app.post(
     "/api/mfa/admin/:userId/reset",
-    auth,
-    can("iam.users", "execute"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.userId);
-      res.json(mfa.adminResetMfa(db, req.params.userId, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.users", "execute"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.userId);
+      res.json(await mfa.adminResetMfaAsync(db, req.params.userId, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/sso/providers",
-    wrap((_req, res) => {
-      res.json({
-        items: providers.listProviders(db, { enabledOnly: true }).filter((p) => p.type !== "password"),
-      });
+    wrap(async (_req, res) => {
+      const items = await providers.listProvidersAsync(db, { enabledOnly: true });
+      res.json({ items: items.filter((p) => p.type !== "password") });
     })
   );
 
   app.post(
     "/api/sso/:code/start",
-    wrap((req, res) => {
-      res.json(authentication.startSso(db, req.params.code, req.body || {}, requestMeta(req)));
+    wrap(async (req, res) => {
+      res.json(await authentication.startSsoAsync(db, req.params.code, req.body || {}, requestMeta(req)));
     })
   );
 
-  function handleSsoCallback(req, res) {
+  async function handleSsoCallback(req, res) {
     const body = { ...(req.query || {}), ...(req.body || {}) };
-    res.json(authentication.completeSso(db, req.params.code, body, requestMeta(req)));
+    res.json(await authentication.completeSsoAsync(db, req.params.code, body, requestMeta(req)));
   }
 
   app.post("/api/sso/:code/callback", wrap(handleSsoCallback));
@@ -584,114 +656,114 @@ export function createApp(db) {
 
   app.get(
     "/api/sso/:code/metadata",
-    wrap((req, res) => {
-      res.json(authentication.ssoMetadata(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await authentication.ssoMetadataAsync(db, req.params.code));
     })
   );
 
   app.get(
     "/api/tenants",
-    auth,
-    can("iam.tenants", "read"),
-    wrap((req, res) => {
-      res.json(tenants.listTenants(db, req.query));
+    authAsync,
+    canAsync("iam.tenants", "read"),
+    wrap(async (req, res) => {
+      res.json(await tenants.listTenantsAsync(db, req.query));
     })
   );
 
   app.post(
     "/api/tenants",
-    auth,
-    can("iam.tenants", "create"),
-    wrap((req, res) => {
-      res.status(201).json(tenants.createTenant(db, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.tenants", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await tenants.createTenantAsync(db, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/tenants/:id",
-    auth,
-    can("iam.tenants", "read"),
-    wrap((req, res) => {
-      res.json(tenants.getTenant(db, req.params.id));
+    authAsync,
+    canAsync("iam.tenants", "read"),
+    wrap(async (req, res) => {
+      res.json(await tenants.getTenantAsync(db, req.params.id));
     })
   );
 
   app.put(
     "/api/tenants/:id",
-    auth,
-    can("iam.tenants", "update"),
-    wrap((req, res) => {
-      res.json(tenants.updateTenant(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.tenants", "update"),
+    wrap(async (req, res) => {
+      res.json(await tenants.updateTenantAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/tenants/:id/activate",
-    auth,
-    can("iam.tenants", "update"),
-    wrap((req, res) => {
-      res.json(tenants.setTenantStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.tenants", "update"),
+    wrap(async (req, res) => {
+      res.json(await tenants.setTenantStatusAsync(db, req.params.id, "active", req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/tenants/:id/deactivate",
-    auth,
-    can("iam.tenants", "update"),
-    wrap((req, res) => {
-      res.json(tenants.setTenantStatus(db, req.params.id, "inactive", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.tenants", "update"),
+    wrap(async (req, res) => {
+      res.json(await tenants.setTenantStatusAsync(db, req.params.id, "inactive", req.actor, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/tenants/:id",
-    auth,
-    can("iam.tenants", "delete"),
-    wrap((req, res) => {
-      res.json(tenants.deleteTenant(db, req.params.id, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.tenants", "delete"),
+    wrap(async (req, res) => {
+      res.json(await tenants.deleteTenantAsync(db, req.params.id, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/tenants/:id/select",
-    auth,
-    wrap((req, res) => {
-      res.json(tenants.selectTenant(db, req.sessionToken, req.params.id, req.actor, clientIp(req)));
+    authAsync,
+    wrap(async (req, res) => {
+      res.json(await tenants.selectTenantAsync(db, req.sessionToken, req.params.id, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/tenants/:id/context",
-    auth,
-    can("iam.tenants", "read"),
-    wrap((req, res) => {
-      res.json(tenants.tenantContext(db, req.params.id));
+    authAsync,
+    canAsync("iam.tenants", "read"),
+    wrap(async (req, res) => {
+      res.json(await tenants.tenantContextAsync(db, req.params.id));
     })
   );
 
   app.get(
     "/api/tenants/:id/config",
-    auth,
-    can("iam.config", "read"),
-    wrap((req, res) => {
-      tenants.getTenant(db, req.params.id);
+    authAsync,
+    canAsync("iam.config", "read"),
+    wrap(async (req, res) => {
+      await tenants.getTenantAsync(db, req.params.id);
       res.json({
         scope: "tenant",
         scope_id: Number(req.params.id),
-        items: config.listScopeValues(db, "tenant", req.params.id),
-        effective: config.resolveAll(db, { tenantId: req.params.id }),
+        items: await config.listScopeValuesAsync(db, "tenant", req.params.id),
+        effective: await config.resolveAllAsync(db, { tenantId: req.params.id }),
       });
     })
   );
 
   app.put(
     "/api/tenants/:id/config",
-    auth,
-    can("iam.config", "update"),
-    wrap((req, res) => {
-      tenants.getTenant(db, req.params.id);
+    authAsync,
+    canAsync("iam.config", "update"),
+    wrap(async (req, res) => {
+      await tenants.getTenantAsync(db, req.params.id);
       res.json(
-        config.putValues(
+        await config.putValuesAsync(
           db,
           { scope: "tenant", scopeId: req.params.id, values: req.body?.values || req.body || {} },
           req.actor,
@@ -703,13 +775,13 @@ export function createApp(db) {
 
   app.get(
     "/api/config",
-    auth,
-    can("iam.config", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.config", "read"),
+    wrap(async (req, res) => {
       const organizationId = req.query.organizationId;
-      if (organizationId) scopedOrg(db, req, organizationId);
+      if (organizationId) await scopedOrgAsync(db, req, organizationId);
       res.json(
-        config.catalogAndEffective(db, {
+        await config.catalogAndEffectiveAsync(db, {
           tenantId: req.tenantId,
           organizationId,
         })
@@ -719,14 +791,21 @@ export function createApp(db) {
 
   app.put(
     "/api/config",
-    auth,
-    can("iam.config", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.config", "update"),
+    wrap(async (req, res) => {
       const scope = req.body?.scope;
       const scopeId = req.body?.scopeId ?? req.body?.scope_id;
-      if (scope === "tenant") tenants.getTenant(db, scopeId);
-      if (scope === "organization") scopedOrg(db, req, scopeId);
-      res.json(config.putValues(db, { scope, scopeId, values: req.body?.values || {} }, req.actor, clientIp(req)));
+      if (scope === "tenant") await tenants.getTenantAsync(db, scopeId);
+      if (scope === "organization") await scopedOrgAsync(db, req, scopeId);
+      res.json(
+        await config.putValuesAsync(
+          db,
+          { scope, scopeId, values: req.body?.values || {} },
+          req.actor,
+          clientIp(req)
+        )
+      );
     })
   );
 
@@ -737,119 +816,129 @@ export function createApp(db) {
   // -------------------------------------------------------------------------
 
   const canMeta = (action) => can("iam.metadata", action);
+  const canMetaAsync = (action) => canAsync("iam.metadata", action);
   const metaRead = (req, source) => metaReadTenant(db, req.actor, source || req.query, req.tenantId);
+  const metaReadAsync = (req, source) => metaReadTenantAsync(db, req.actor, source || req.query, req.tenantId);
   const metaWrite = (req, body) => metaWriteTenant(db, req.actor, body ?? req.body, req.tenantId);
+  const metaWriteAsync = (req, body) => metaWriteTenantAsync(db, req.actor, body ?? req.body, req.tenantId);
 
   app.get(
     "/api/metadata/types",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.listTypes(db, req.query, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.listTypesAsync(db, req.query, await metaReadAsync(req)));
     })
   );
 
   app.get(
     "/api/metadata/types/tree",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json({ items: metadata.typeTree(db, metaRead(req)) });
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json({ items: await metadata.typeTreeAsync(db, await metaReadAsync(req)) });
     })
   );
 
   app.post(
     "/api/metadata/types",
-    auth,
-    canMeta("create"),
-    wrap((req, res) => {
-      const tenantId = metaWrite(req, req.body);
-      res.status(201).json(metadata.createType(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    authAsync,
+    canMetaAsync("create"),
+    wrap(async (req, res) => {
+      const tenantId = await metaWriteAsync(req, req.body);
+      res.status(201).json(await metadata.createTypeAsync(db, req.body || {}, req.actor, clientIp(req), tenantId));
     })
   );
 
   app.get(
     "/api/metadata/types/:id",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.getType(db, req.params.id, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.getTypeAsync(db, req.params.id, await metaReadAsync(req)));
     })
   );
 
   app.put(
     "/api/metadata/types/:id",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
-      const tenantId = metaRead(req);
-      res.json(metadata.updateType(db, req.params.id, req.body || {}, req.actor, clientIp(req), tenantId));
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
+      const tenantId = await metaReadAsync(req);
+      res.json(await metadata.updateTypeAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), tenantId));
     })
   );
 
   app.delete(
     "/api/metadata/types/:id",
-    auth,
-    canMeta("delete"),
-    wrap((req, res) => {
-      res.json(metadata.deleteType(db, req.params.id, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await metadata.deleteTypeAsync(db, req.params.id, req.actor, clientIp(req), await metaReadAsync(req)));
     })
   );
 
   app.post(
     "/api/metadata/types/:id/status",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        metadata.setTypeStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), metaRead(req))
+        await metadata.setTypeStatusAsync(
+          db,
+          req.params.id,
+          req.body?.status,
+          req.actor,
+          clientIp(req),
+          await metaReadAsync(req)
+        )
       );
     })
   );
 
   app.get(
     "/api/metadata/types/:id/resolve",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.resolveType(db, req.params.id, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.resolveTypeAsync(db, req.params.id, await metaReadAsync(req)));
     })
   );
 
   app.get(
     "/api/metadata/types/:id/contract",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json({ items: metadata.attributeContract(db, req.params.id, metaRead(req)) });
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json({ items: await metadata.attributeContractAsync(db, req.params.id, await metaReadAsync(req)) });
     })
   );
 
   app.post(
     "/api/metadata/types/:id/attributes",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       res.status(201).json(
-        metadata.addTypeAttribute(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req))
+        await metadata.addTypeAttributeAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await metaReadAsync(req))
       );
     })
   );
 
   app.put(
     "/api/metadata/types/:id/attributes/:attributeId",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        metadata.updateTypeAttribute(
+        await metadata.updateTypeAttributeAsync(
           db,
           req.params.id,
           req.params.attributeId,
           req.body || {},
           req.actor,
           clientIp(req),
-          metaRead(req)
+          await metaReadAsync(req)
         )
       );
     })
@@ -857,17 +946,17 @@ export function createApp(db) {
 
   app.delete(
     "/api/metadata/types/:id/attributes/:attributeId",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        metadata.removeTypeAttribute(
+        await metadata.removeTypeAttributeAsync(
           db,
           req.params.id,
           req.params.attributeId,
           req.actor,
           clientIp(req),
-          metaRead(req)
+          await metaReadAsync(req)
         )
       );
     })
@@ -875,69 +964,69 @@ export function createApp(db) {
 
   app.get(
     "/api/metadata/attributes",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.listAttributes(db, req.query, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.listAttributesAsync(db, req.query, await metaReadAsync(req)));
     })
   );
 
   app.post(
     "/api/metadata/attributes",
-    auth,
-    canMeta("create"),
-    wrap((req, res) => {
-      const tenantId = metaWrite(req, req.body);
-      res.status(201).json(metadata.createAttribute(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    authAsync,
+    canMetaAsync("create"),
+    wrap(async (req, res) => {
+      const tenantId = await metaWriteAsync(req, req.body);
+      res.status(201).json(await metadata.createAttributeAsync(db, req.body || {}, req.actor, clientIp(req), tenantId));
     })
   );
 
   app.get(
     "/api/metadata/attributes/:id",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.getAttribute(db, req.params.id, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.getAttributeAsync(db, req.params.id, await metaReadAsync(req)));
     })
   );
 
   app.put(
     "/api/metadata/attributes/:id",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        metadata.updateAttribute(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req))
+        await metadata.updateAttributeAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await metaReadAsync(req))
       );
     })
   );
 
   app.delete(
     "/api/metadata/attributes/:id",
-    auth,
-    canMeta("delete"),
-    wrap((req, res) => {
-      const attribute = metadata.getAttribute(db, req.params.id, metaRead(req));
+    authAsync,
+    canMetaAsync("delete"),
+    wrap(async (req, res) => {
+      const attribute = await metadata.getAttributeAsync(db, req.params.id, await metaReadAsync(req));
       // Attributes are retained when referenced so records keep their contract.
       res.json(
-        metadata.setAttributeStatus(db, attribute.id, "inactive", req.actor, clientIp(req), metaRead(req))
+        await metadata.setAttributeStatusAsync(db, attribute.id, "inactive", req.actor, clientIp(req), await metaReadAsync(req))
       );
     })
   );
 
   app.post(
     "/api/metadata/attributes/:id/status",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        metadata.setAttributeStatus(
+        await metadata.setAttributeStatusAsync(
           db,
           req.params.id,
           req.body?.status,
           req.actor,
           clientIp(req),
-          metaRead(req)
+          await metaReadAsync(req)
         )
       );
     })
@@ -945,94 +1034,98 @@ export function createApp(db) {
 
   app.get(
     "/api/metadata/lovs",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.listLovs(db, req.query, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.listLovsAsync(db, req.query, await metaReadAsync(req)));
     })
   );
 
   app.post(
     "/api/metadata/lovs",
-    auth,
-    canMeta("create"),
-    wrap((req, res) => {
-      const tenantId = metaWrite(req, req.body);
-      res.status(201).json(metadata.createLov(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    authAsync,
+    canMetaAsync("create"),
+    wrap(async (req, res) => {
+      const tenantId = await metaWriteAsync(req, req.body);
+      res.status(201).json(await metadata.createLovAsync(db, req.body || {}, req.actor, clientIp(req), tenantId));
     })
   );
 
   app.get(
     "/api/metadata/lovs/:id",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.getLov(db, req.params.id, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.getLovAsync(db, req.params.id, await metaReadAsync(req)));
     })
   );
 
   app.put(
     "/api/metadata/lovs/:id",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
-      res.json(metadata.updateLov(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
+      res.json(
+        await metadata.updateLovAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await metaReadAsync(req))
+      );
     })
   );
 
   app.delete(
     "/api/metadata/lovs/:id",
-    auth,
-    canMeta("delete"),
-    wrap((req, res) => {
-      res.json(metadata.deleteLov(db, req.params.id, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await metadata.deleteLovAsync(db, req.params.id, req.actor, clientIp(req), await metaReadAsync(req)));
     })
   );
 
   app.post(
     "/api/metadata/lovs/:id/status",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
-      res.json(metadata.setLovStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
+      res.json(
+        await metadata.setLovStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req), await metaReadAsync(req))
+      );
     })
   );
 
   app.get(
     "/api/metadata/lovs/:id/values",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      const lov = metadata.getLov(db, req.params.id, metaRead(req));
-      res.json({ items: metadata.listValues(db, lov.id) });
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      const lov = await metadata.getLovAsync(db, req.params.id, await metaReadAsync(req));
+      res.json({ items: await metadata.listValuesAsync(db, lov.id) });
     })
   );
 
   app.post(
     "/api/metadata/lovs/:id/values",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       res
         .status(201)
-        .json(metadata.addValue(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+        .json(await metadata.addValueAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await metaReadAsync(req)));
     })
   );
 
   app.put(
     "/api/metadata/lovs/:id/values/:valueId",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        metadata.updateValue(
+        await metadata.updateValueAsync(
           db,
           req.params.id,
           req.params.valueId,
           req.body || {},
           req.actor,
           clientIp(req),
-          metaRead(req)
+          await metaReadAsync(req)
         )
       );
     })
@@ -1040,17 +1133,17 @@ export function createApp(db) {
 
   app.delete(
     "/api/metadata/lovs/:id/values/:valueId",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        metadata.removeValue(
+        await metadata.removeValueAsync(
           db,
           req.params.id,
           req.params.valueId,
           req.actor,
           clientIp(req),
-          metaRead(req)
+          await metaReadAsync(req)
         )
       );
     })
@@ -1058,15 +1151,15 @@ export function createApp(db) {
 
   app.get(
     "/api/metadata/lovs/:id/cascade",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
       res.json({
-        items: metadata.cascadeOptions(
+        items: await metadata.cascadeOptionsAsync(
           db,
           req.params.id,
           req.query.parentValueId ?? req.query.parent_value_id,
-          metaRead(req)
+          await metaReadAsync(req)
         ),
       });
     })
@@ -1074,103 +1167,109 @@ export function createApp(db) {
 
   app.get(
     "/api/metadata/lovs/:id/usage",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json({ items: metadata.listUsage(db, req.params.id) });
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json({ items: await metadata.listUsageAsync(db, req.params.id) });
     })
   );
 
   app.get(
     "/api/metadata/forms",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.listForms(db, req.query, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.listFormsAsync(db, req.query, await metaReadAsync(req)));
     })
   );
 
   app.post(
     "/api/metadata/forms",
-    auth,
-    canMeta("create"),
-    wrap((req, res) => {
-      const tenantId = metaWrite(req, req.body);
-      res.status(201).json(metadata.createForm(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    authAsync,
+    canMetaAsync("create"),
+    wrap(async (req, res) => {
+      const tenantId = await metaWriteAsync(req, req.body);
+      res.status(201).json(await metadata.createFormAsync(db, req.body || {}, req.actor, clientIp(req), tenantId));
     })
   );
 
   app.get(
     "/api/metadata/forms/:id",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.getForm(db, req.params.id, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.getFormAsync(db, req.params.id, await metaReadAsync(req)));
     })
   );
 
   app.put(
     "/api/metadata/forms/:id",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
-      res.json(metadata.updateForm(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
+      res.json(
+        await metadata.updateFormAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await metaReadAsync(req))
+      );
     })
   );
 
   app.delete(
     "/api/metadata/forms/:id",
-    auth,
-    canMeta("delete"),
-    wrap((req, res) => {
-      res.json(metadata.deleteForm(db, req.params.id, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await metadata.deleteFormAsync(db, req.params.id, req.actor, clientIp(req), await metaReadAsync(req)));
     })
   );
 
   app.post(
     "/api/metadata/forms/:id/status",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
-      res.json(metadata.setFormStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
+      res.json(
+        await metadata.setFormStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req), await metaReadAsync(req))
+      );
     })
   );
 
   app.put(
     "/api/metadata/forms/:id/layout",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
-      res.json(metadata.replaceLayout(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
+      res.json(
+        await metadata.replaceLayoutAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await metaReadAsync(req))
+      );
     })
   );
 
   app.get(
     "/api/metadata/forms/:id/versions",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json({ items: metadata.formVersions(db, req.params.id) });
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json({ items: await metadata.formVersionsAsync(db, req.params.id) });
     })
   );
 
   app.get(
     "/api/metadata/forms/:id/render",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.renderForm(db, req.params.id, metaRead(req), { mode: req.query.mode }));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.renderFormAsync(db, req.params.id, await metaReadAsync(req), { mode: req.query.mode }));
     })
   );
 
   app.post(
     "/api/metadata/forms/:id/render",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      const tenantId = metaRead(req);
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      const tenantId = await metaReadAsync(req);
       res.json(
-        metadata.renderForm(db, req.params.id, tenantId, {
+        await metadata.renderFormAsync(db, req.params.id, tenantId, {
           mode: req.body?.mode,
           values: req.body?.values || {},
           context: req.body?.context || {},
@@ -1181,102 +1280,106 @@ export function createApp(db) {
 
   app.get(
     "/api/metadata/rules",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.listRules(db, req.query, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.listRulesAsync(db, req.query, await metaReadAsync(req)));
     })
   );
 
   app.post(
     "/api/metadata/rules",
-    auth,
-    canMeta("create"),
-    wrap((req, res) => {
-      const tenantId = metaWrite(req, req.body);
-      res.status(201).json(metadata.createRule(db, req.body || {}, req.actor, clientIp(req), tenantId));
+    authAsync,
+    canMetaAsync("create"),
+    wrap(async (req, res) => {
+      const tenantId = await metaWriteAsync(req, req.body);
+      res.status(201).json(await metadata.createRuleAsync(db, req.body || {}, req.actor, clientIp(req), tenantId));
     })
   );
 
   app.get(
     "/api/metadata/rules/:id",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      res.json(metadata.getRule(db, req.params.id, metaRead(req)));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await metadata.getRuleAsync(db, req.params.id, await metaReadAsync(req)));
     })
   );
 
   app.put(
     "/api/metadata/rules/:id",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
-      res.json(metadata.updateRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
+      res.json(
+        await metadata.updateRuleAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await metaReadAsync(req))
+      );
     })
   );
 
   app.delete(
     "/api/metadata/rules/:id",
-    auth,
-    canMeta("delete"),
-    wrap((req, res) => {
-      res.json(metadata.deleteRule(db, req.params.id, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await metadata.deleteRuleAsync(db, req.params.id, req.actor, clientIp(req), await metaReadAsync(req)));
     })
   );
 
   app.post(
     "/api/metadata/rules/:id/status",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
-      res.json(metadata.setRuleStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), metaRead(req)));
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
+      res.json(
+        await metadata.setRuleStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req), await metaReadAsync(req))
+      );
     })
   );
 
   app.post(
     "/api/metadata/rules/:id/test",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      const rule = metadata.getRule(db, req.params.id, metaRead(req));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      const rule = await metadata.getRuleAsync(db, req.params.id, await metaReadAsync(req));
       res.json(metadata.testRule(db, rule, req.body?.context || {}));
     })
   );
 
   app.post(
     "/api/metadata/validate",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
-      const tenantId = metaRead(req, { ...req.query, ...(req.body || {}) });
-      res.json(metadata.validateRecord(db, req.body || {}, tenantId));
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
+      const tenantId = await metaReadAsync(req, { ...req.query, ...(req.body || {}) });
+      res.json(await metadata.validateRecordAsync(db, req.body || {}, tenantId));
     })
   );
 
   app.get(
     "/api/metadata/configurations",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
       const scope = req.query.scope || "system";
       const scopeId = req.query.scopeId ?? req.query.scope_id;
-      if (scope === "organization" && scopeId) scopedOrg(db, req, scopeId);
+      if (scope === "organization" && scopeId) await scopedOrgAsync(db, req, scopeId);
       res.json({
-        items: metadata.listConfigurations(db, { scope, scopeId, artifactType: req.query.artifactType }),
+        items: await metadata.listConfigurationsAsync(db, { scope, scopeId, artifactType: req.query.artifactType }),
       });
     })
   );
 
   app.get(
     "/api/metadata/configurations/effective",
-    auth,
-    canMeta("read"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("read"),
+    wrap(async (req, res) => {
       const organizationId = req.query.organizationId;
-      if (organizationId) scopedOrg(db, req, organizationId);
+      if (organizationId) await scopedOrgAsync(db, req, organizationId);
       res.json({
-        items: metadata.effectiveCatalog(db, {
+        items: await metadata.effectiveCatalogAsync(db, {
           artifactType: req.query.artifactType,
           tenantId: req.tenantId,
           organizationId,
@@ -1287,24 +1390,24 @@ export function createApp(db) {
 
   app.post(
     "/api/metadata/configurations",
-    auth,
-    canMeta("update"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("update"),
+    wrap(async (req, res) => {
       const scope = req.body?.scope || "system";
       const scopeId = req.body?.scopeId ?? req.body?.scope_id;
-      if (scope === "tenant") tenants.getTenant(db, scopeId);
-      if (scope === "organization") scopedOrg(db, req, scopeId);
-      res.json(metadata.setConfiguration(db, req.body || {}, req.actor, clientIp(req)));
+      if (scope === "tenant") await tenants.getTenantAsync(db, scopeId);
+      if (scope === "organization") await scopedOrgAsync(db, req, scopeId);
+      res.json(await metadata.setConfigurationAsync(db, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/metadata/configurations",
-    auth,
-    canMeta("delete"),
-    wrap((req, res) => {
+    authAsync,
+    canMetaAsync("delete"),
+    wrap(async (req, res) => {
       res.json(
-        metadata.deleteConfiguration(
+        await metadata.deleteConfigurationAsync(
           db,
           {
             scope: req.query.scope || "system",
@@ -1327,27 +1430,32 @@ export function createApp(db) {
   // -------------------------------------------------------------------------
 
   const canObjects = (action) => can("iam.objects", action);
+  const canObjectsAsync = (action) => canAsync("iam.objects", action);
   const canRelationships = (action) => can("iam.objects.relationships", action);
   const canReferences = (action) => can("iam.objects.references", action);
   const canDependencies = (action) => can("iam.objects.dependencies", action);
+  const canRelationshipsAsync = (action) => canAsync("iam.objects.relationships", action);
+  const canReferencesAsync = (action) => canAsync("iam.objects.references", action);
+  const canDependenciesAsync = (action) => canAsync("iam.objects.dependencies", action);
   const relTypeRead = (req, source) => metaReadTenant(db, req.actor, source || req.query, req.tenantId);
+  const relTypeReadAsync = (req, source) => metaReadTenantAsync(db, req.actor, source || req.query, req.tenantId);
 
   app.get(
     "/api/object-types",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(objects.objectTypes(db, req.tenantId));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.objectTypesAsync(db, req.tenantId));
     })
   );
 
   app.get(
     "/api/object-types/:id/form",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
       res.json(
-        metadata.renderType(db, req.params.id, req.tenantId, {
+        await metadata.renderTypeAsync(db, req.params.id, req.tenantId, {
           mode: req.query.mode || "create",
         })
       );
@@ -1356,300 +1464,300 @@ export function createApp(db) {
 
   app.get(
     "/api/objects/summary",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(objects.objectSummary(db, req.tenantId));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.objectSummaryAsync(db, req.tenantId));
     })
   );
 
   app.get(
     "/api/objects",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(objects.listObjects(db, req.query, req.tenantId));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.listObjectsAsync(db, req.query, req.tenantId));
     })
   );
 
   app.post(
     "/api/objects",
-    auth,
-    canObjects("create"),
-    wrap((req, res) => {
-      res.status(201).json(objects.createObject(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canObjectsAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await objects.createObjectAsync(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/objects/bulk",
-    auth,
-    canObjects("create"),
-    wrap((req, res) => {
-      res.status(201).json(objects.bulkCreateObjects(db, req.body?.items || [], req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canObjectsAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await objects.bulkCreateObjectsAsync(db, req.body?.items || [], req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.patch(
     "/api/objects/bulk",
-    auth,
-    canObjects("update"),
-    wrap((req, res) => {
-      res.json(objects.bulkMutateObjects(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canObjectsAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await objects.bulkMutateObjectsAsync(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/objects/:id",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(objects.getObject(db, req.params.id, req.tenantId));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.getObjectAsync(db, req.params.id, req.tenantId));
     })
   );
 
   app.put(
     "/api/objects/:id",
-    auth,
-    canObjects("update"),
-    wrap((req, res) => {
-      res.json(objects.updateObject(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canObjectsAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await objects.updateObjectAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/objects/:id",
-    auth,
-    canObjects("delete"),
-    wrap((req, res) => {
+    authAsync,
+    canObjectsAsync("delete"),
+    wrap(async (req, res) => {
       const force = req.query.force === "true" || req.query.force === true;
       res.json(
-        objects.softDeleteObject(db, req.params.id, { force, summary: req.query.summary }, req.actor, req.tenantId, clientIp(req))
+        await objects.softDeleteObjectAsync(db, req.params.id, { force, summary: req.query.summary }, req.actor, req.tenantId, clientIp(req))
       );
     })
   );
 
   app.post(
     "/api/objects/:id/restore",
-    auth,
-    canObjects("update"),
-    wrap((req, res) => {
-      res.json(objects.restoreObject(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canObjectsAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await objects.restoreObjectAsync(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/objects/:id/status",
-    auth,
-    canObjects("update"),
-    wrap((req, res) => {
-      res.json(objects.setObjectStatus(db, req.params.id, req.body?.status, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canObjectsAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await objects.setObjectStatusAsync(db, req.params.id, req.body?.status, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/objects/:id/checkout",
-    auth,
-    canObjects("update"),
-    wrap((req, res) => {
-      res.json(objects.checkoutObject(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canObjectsAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await objects.checkoutObjectAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/objects/:id/checkin",
-    auth,
-    canObjects("update"),
-    wrap((req, res) => {
-      res.json(objects.checkinObject(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canObjectsAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await objects.checkinObjectAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/objects/:id/locks",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(objects.objectLocks(db, req.params.id, req.tenantId));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.objectLocksAsync(db, req.params.id, req.tenantId));
     })
   );
 
   app.get(
     "/api/objects/:id/versions",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(objects.listObjectVersions(db, req.params.id, req.tenantId, req.query));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.listObjectVersionsAsync(db, req.params.id, req.tenantId, req.query));
     })
   );
 
   app.get(
     "/api/objects/:id/versions/:revision",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(objects.getObjectVersion(db, req.params.id, req.params.revision, req.tenantId));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.getObjectVersionAsync(db, req.params.id, req.params.revision, req.tenantId));
     })
   );
 
   app.get(
     "/api/objects/:id/relationships",
-    auth,
-    canRelationships("read"),
-    wrap((req, res) => {
-      res.json(objects.relationshipsForObject(db, req.params.id, req.tenantId, req.query));
+    authAsync,
+    canRelationshipsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.relationshipsForObjectAsync(db, req.params.id, req.tenantId, req.query));
     })
   );
 
   app.get(
     "/api/objects/:id/tree",
-    auth,
-    canRelationships("read"),
-    wrap((req, res) => {
-      res.json(objects.traverse(db, req.params.id, req.query, req.tenantId));
+    authAsync,
+    canRelationshipsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.traverseAsync(db, req.params.id, req.query, req.tenantId));
     })
   );
 
   app.get(
     "/api/objects/:id/graph",
-    auth,
-    canRelationships("read"),
-    wrap((req, res) => {
-      res.json(objects.graph(db, req.params.id, req.tenantId, req.query));
+    authAsync,
+    canRelationshipsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.graphAsync(db, req.params.id, req.tenantId, req.query));
     })
   );
 
   app.get(
     "/api/objects/:id/dependencies",
-    auth,
-    canDependencies("read"),
-    wrap((req, res) => {
-      res.json(objects.directDependencies(db, req.params.id, req.tenantId));
+    authAsync,
+    canDependenciesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.directDependenciesAsync(db, req.params.id, req.tenantId));
     })
   );
 
   app.get(
     "/api/objects/:id/safe-delete",
-    auth,
-    canDependencies("read"),
-    wrap((req, res) => {
-      res.json(objects.safeDeleteReport(db, req.params.id, req.tenantId));
+    authAsync,
+    canDependenciesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.safeDeleteReportAsync(db, req.params.id, req.tenantId));
     })
   );
 
   app.get(
     "/api/relationship-types",
-    auth,
-    canRelationships("read"),
-    wrap((req, res) => {
-      res.json(objects.listRelationshipTypes(db, req.query, relTypeRead(req)));
+    authAsync,
+    canRelationshipsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.listRelationshipTypesAsync(db, req.query, await relTypeReadAsync(req)));
     })
   );
 
   app.post(
     "/api/relationship-types",
-    auth,
-    canRelationships("create"),
-    wrap((req, res) => {
+    authAsync,
+    canRelationshipsAsync("create"),
+    wrap(async (req, res) => {
       res
         .status(201)
-        .json(objects.createRelationshipType(db, req.body || {}, req.actor, clientIp(req), req.tenantId, req.query));
+        .json(await objects.createRelationshipTypeAsync(db, req.body || {}, req.actor, clientIp(req), req.tenantId, req.query));
     })
   );
 
   app.get(
     "/api/relationship-types/:id",
-    auth,
-    canRelationships("read"),
-    wrap((req, res) => {
-      res.json(objects.getRelationshipType(db, req.params.id, relTypeRead(req)));
+    authAsync,
+    canRelationshipsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.getRelationshipTypeAsync(db, req.params.id, await relTypeReadAsync(req)));
     })
   );
 
   app.put(
     "/api/relationship-types/:id",
-    auth,
-    canRelationships("update"),
-    wrap((req, res) => {
+    authAsync,
+    canRelationshipsAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        objects.updateRelationshipType(db, req.params.id, req.body || {}, req.actor, clientIp(req), req.tenantId)
+        await objects.updateRelationshipTypeAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), req.tenantId)
       );
     })
   );
 
   app.post(
     "/api/relationship-types/:id/status",
-    auth,
-    canRelationships("update"),
-    wrap((req, res) => {
+    authAsync,
+    canRelationshipsAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        objects.setRelationshipTypeStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), req.tenantId)
+        await objects.setRelationshipTypeStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req), req.tenantId)
       );
     })
   );
 
   app.delete(
     "/api/relationship-types/:id",
-    auth,
-    canRelationships("delete"),
-    wrap((req, res) => {
-      res.json(objects.deleteRelationshipType(db, req.params.id, req.actor, clientIp(req), req.tenantId));
+    authAsync,
+    canRelationshipsAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await objects.deleteRelationshipTypeAsync(db, req.params.id, req.actor, clientIp(req), req.tenantId));
     })
   );
 
   app.get(
     "/api/relationships",
-    auth,
-    canRelationships("read"),
-    wrap((req, res) => {
-      res.json(objects.listRelationships(db, req.query, req.tenantId));
+    authAsync,
+    canRelationshipsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.listRelationshipsAsync(db, req.query, req.tenantId));
     })
   );
 
   app.post(
     "/api/relationships/validate",
-    auth,
-    canRelationships("read"),
-    wrap((req, res) => {
-      res.json(objects.validateRelationship(db, req.body || {}, req.tenantId));
+    authAsync,
+    canRelationshipsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.validateRelationshipAsync(db, req.body || {}, req.tenantId));
     })
   );
 
   app.post(
     "/api/relationships",
-    auth,
-    canRelationships("create"),
-    wrap((req, res) => {
-      res.status(201).json(objects.createRelationship(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canRelationshipsAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await objects.createRelationshipAsync(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/relationships/:id",
-    auth,
-    canRelationships("read"),
-    wrap((req, res) => {
-      res.json(objects.getRelationship(db, req.params.id, req.tenantId));
+    authAsync,
+    canRelationshipsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.getRelationshipAsync(db, req.params.id, req.tenantId));
     })
   );
 
   app.put(
     "/api/relationships/:id",
-    auth,
-    canRelationships("update"),
-    wrap((req, res) => {
-      res.json(objects.updateRelationship(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canRelationshipsAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await objects.updateRelationshipAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/relationships/:id/validate",
-    auth,
-    canRelationships("read"),
-    wrap((req, res) => {
-      const existing = objects.getRelationship(db, req.params.id, req.tenantId);
+    authAsync,
+    canRelationshipsAsync("read"),
+    wrap(async (req, res) => {
+      const existing = await objects.getRelationshipAsync(db, req.params.id, req.tenantId);
       res.json(
-        objects.validateRelationship(
+        await objects.validateRelationshipAsync(
           db,
           {
             ...(req.body || {}),
@@ -1665,94 +1773,94 @@ export function createApp(db) {
 
   app.delete(
     "/api/relationships/:id",
-    auth,
-    canRelationships("delete"),
-    wrap((req, res) => {
+    authAsync,
+    canRelationshipsAsync("delete"),
+    wrap(async (req, res) => {
       const force = req.query.force === "true" || req.query.force === true;
-      res.json(objects.deleteRelationship(db, req.params.id, { force }, req.actor, req.tenantId, clientIp(req)));
+      res.json(await objects.deleteRelationshipAsync(db, req.params.id, { force }, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/references/orphans",
-    auth,
-    canReferences("read"),
-    wrap((req, res) => {
-      res.json(objects.orphanReferences(db, req.tenantId, req.query));
+    authAsync,
+    canReferencesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.orphanReferencesAsync(db, req.tenantId, req.query));
     })
   );
 
   app.get(
     "/api/references",
-    auth,
-    canReferences("read"),
-    wrap((req, res) => {
-      res.json(objects.listReferences(db, req.query, req.tenantId));
+    authAsync,
+    canReferencesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.listReferencesAsync(db, req.query, req.tenantId));
     })
   );
 
   app.post(
     "/api/references",
-    auth,
-    canReferences("create"),
-    wrap((req, res) => {
-      res.status(201).json(objects.createReference(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canReferencesAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await objects.createReferenceAsync(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/references/:id",
-    auth,
-    canReferences("read"),
-    wrap((req, res) => {
-      res.json(objects.getReference(db, req.params.id, req.tenantId));
+    authAsync,
+    canReferencesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.getReferenceAsync(db, req.params.id, req.tenantId));
     })
   );
 
   app.put(
     "/api/references/:id",
-    auth,
-    canReferences("update"),
-    wrap((req, res) => {
-      res.json(objects.updateReference(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canReferencesAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await objects.updateReferenceAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/references/:id",
-    auth,
-    canReferences("delete"),
-    wrap((req, res) => {
-      res.json(objects.deleteReference(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canReferencesAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await objects.deleteReferenceAsync(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/dependencies/cycles",
-    auth,
-    canDependencies("read"),
-    wrap((req, res) => {
-      res.json(objects.detectCycles(db, req.tenantId, req.query));
+    authAsync,
+    canDependenciesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.detectCyclesAsync(db, req.tenantId, req.query));
     })
   );
 
   app.get(
     "/api/dependencies/impact",
-    auth,
-    canDependencies("read"),
-    wrap((req, res) => {
+    authAsync,
+    canDependenciesAsync("read"),
+    wrap(async (req, res) => {
       const objectId = req.query.objectId ?? req.query.object_id ?? req.query.id;
       if (!objectId) throw new HttpError(400, "objectId is required");
-      res.json(objects.impactOf(db, objectId, req.tenantId, req.query));
+      res.json(await objects.impactOfAsync(db, objectId, req.tenantId, req.query));
     })
   );
 
   app.get(
     "/api/dependencies/:objectId",
-    auth,
-    canDependencies("read"),
-    wrap((req, res) => {
-      res.json(objects.directDependencies(db, req.params.objectId, req.tenantId));
+    authAsync,
+    canDependenciesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await objects.directDependenciesAsync(db, req.params.objectId, req.tenantId));
     })
   );
 
@@ -1763,391 +1871,380 @@ export function createApp(db) {
   // iam.lifecycle.* sub-resources; object transitions re-use the object IAM.
   // -------------------------------------------------------------------------
 
-  const canLifecycle = (action) => can("iam.lifecycle", action);
-  const canLifecycleStatuses = (action) => can("iam.lifecycle.statuses", action);
-  const canLifecycleDefinitions = (action) => can("iam.lifecycle.definitions", action);
-  const canLifecycleTransitions = (action) => can("iam.lifecycle.transitions", action);
-  const canReleaseRules = (action) => can("iam.lifecycle.release-rules", action);
-  const canApprovals = (action) => can("iam.lifecycle.approvals", action);
-  const lifecycleRead = (req, source) => metaReadTenant(db, req.actor, source || req.query, req.tenantId);
-  const lifecycleWrite = (req, body) => metaWriteTenant(db, req.actor, body ?? req.body, req.tenantId);
+  // Async twins for the migrated lifecycle routes.
+  const canLifecycleStatusesAsync = (action) => canAsync("iam.lifecycle.statuses", action);
+  const canLifecycleDefinitionsAsync = (action) => canAsync("iam.lifecycle.definitions", action);
+  const canLifecycleTransitionsAsync = (action) => canAsync("iam.lifecycle.transitions", action);
+  const canReleaseRulesAsync = (action) => canAsync("iam.lifecycle.release-rules", action);
+  const canApprovalsAsync = (action) => canAsync("iam.lifecycle.approvals", action);
+  const canLifecycleAsync = (action) => canAsync("iam.lifecycle", action);
+  const lifecycleReadAsync = (req, source) => metaReadTenantAsync(db, req.actor, source || req.query, req.tenantId);
+  const lifecycleWriteAsync = (req, body) => metaWriteTenantAsync(db, req.actor, body ?? req.body, req.tenantId);
 
   app.get(
     "/api/statuses",
-    auth,
-    canLifecycleStatuses("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.listStatuses(db, req.query, lifecycleRead(req)));
+    authAsync,
+    canLifecycleStatusesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.listStatusesAsync(db, req.query, await lifecycleReadAsync(req)));
     })
   );
 
   app.post(
     "/api/statuses",
-    auth,
-    canLifecycleStatuses("create"),
-    wrap((req, res) => {
+    authAsync,
+    canLifecycleStatusesAsync("create"),
+    wrap(async (req, res) => {
       const body = req.body || {};
-      res.status(201).json(lifecycle.createStatus(db, body, req.actor, clientIp(req), lifecycleWrite(req, body)));
+      res.status(201).json(await lifecycle.createStatusAsync(db, body, req.actor, clientIp(req), await lifecycleWriteAsync(req, body)));
     })
   );
 
   app.get(
     "/api/statuses/:id",
-    auth,
-    canLifecycleStatuses("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.getStatus(db, req.params.id, lifecycleRead(req)));
+    authAsync,
+    canLifecycleStatusesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.getStatusAsync(db, req.params.id, await lifecycleReadAsync(req)));
     })
   );
 
   app.put(
     "/api/statuses/:id",
-    auth,
-    canLifecycleStatuses("update"),
-    wrap((req, res) => {
-      res.json(lifecycle.updateStatus(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleStatusesAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.updateStatusAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
   app.post(
     "/api/statuses/:id/status",
-    auth,
-    canLifecycleStatuses("update"),
-    wrap((req, res) => {
-      res.json(lifecycle.setStatusStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleStatusesAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.setStatusStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
   app.delete(
     "/api/statuses/:id",
-    auth,
-    canLifecycleStatuses("delete"),
-    wrap((req, res) => {
-      res.json(lifecycle.deleteStatus(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleStatusesAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.deleteStatusAsync(db, req.params.id, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
   app.get(
     "/api/lifecycle-definitions",
-    auth,
-    canLifecycleDefinitions("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.listDefinitions(db, req.query, lifecycleRead(req)));
+    authAsync,
+    canLifecycleDefinitionsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.listDefinitionsAsync(db, req.query, await lifecycleReadAsync(req)));
     })
   );
 
   app.post(
     "/api/lifecycle-definitions",
-    auth,
-    canLifecycleDefinitions("create"),
-    wrap((req, res) => {
+    authAsync,
+    canLifecycleDefinitionsAsync("create"),
+    wrap(async (req, res) => {
       const body = req.body || {};
-      res.status(201).json(lifecycle.createDefinition(db, body, req.actor, clientIp(req), lifecycleWrite(req, body)));
+      res.status(201).json(await lifecycle.createDefinitionAsync(db, body, req.actor, clientIp(req), await lifecycleWriteAsync(req, body)));
     })
   );
 
   app.get(
     "/api/lifecycle-definitions/:id",
-    auth,
-    canLifecycleDefinitions("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.getDefinition(db, req.params.id, lifecycleRead(req)));
+    authAsync,
+    canLifecycleDefinitionsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.getDefinitionAsync(db, req.params.id, await lifecycleReadAsync(req)));
     })
   );
 
   app.put(
     "/api/lifecycle-definitions/:id",
-    auth,
-    canLifecycleDefinitions("update"),
-    wrap((req, res) => {
+    authAsync,
+    canLifecycleDefinitionsAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        lifecycle.updateDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req))
+        await lifecycle.updateDefinitionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await lifecycleReadAsync(req))
       );
     })
   );
 
   app.post(
     "/api/lifecycle-definitions/:id/status",
-    auth,
-    canLifecycleDefinitions("update"),
-    wrap((req, res) => {
+    authAsync,
+    canLifecycleDefinitionsAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        lifecycle.setDefinitionStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), lifecycleRead(req))
+        await lifecycle.setDefinitionStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req), await lifecycleReadAsync(req))
       );
     })
   );
 
   app.delete(
     "/api/lifecycle-definitions/:id",
-    auth,
-    canLifecycleDefinitions("delete"),
-    wrap((req, res) => {
-      res.json(lifecycle.deleteDefinition(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleDefinitionsAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.deleteDefinitionAsync(db, req.params.id, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
   app.get(
     "/api/lifecycle-definitions/:id/versions",
-    auth,
-    canLifecycleDefinitions("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.listVersions(db, req.params.id, lifecycleRead(req)));
+    authAsync,
+    canLifecycleDefinitionsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.listVersionsAsync(db, req.params.id, await lifecycleReadAsync(req)));
     })
   );
 
   app.post(
     "/api/lifecycle-definitions/:id/versions",
-    auth,
-    canLifecycleDefinitions("update"),
-    wrap((req, res) => {
+    authAsync,
+    canLifecycleDefinitionsAsync("update"),
+    wrap(async (req, res) => {
       res.status(201).json(
-        lifecycle.createVersion(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req))
+        await lifecycle.createVersionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await lifecycleReadAsync(req))
       );
     })
   );
 
   app.get(
     "/api/lifecycle-definitions/:id/validate",
-    auth,
-    canLifecycleDefinitions("read"),
-    wrap((req, res) => {
+    authAsync,
+    canLifecycleDefinitionsAsync("read"),
+    wrap(async (req, res) => {
       res.json(
-        lifecycle.validateDefinition(db, req.params.id, lifecycleRead(req), { version: req.query.version })
+        await lifecycle.validateDefinitionAsync(db, req.params.id, await lifecycleReadAsync(req), { version: req.query.version })
       );
     })
   );
 
   app.post(
     "/api/lifecycle-definitions/:id/publish",
-    auth,
-    canLifecycleDefinitions("update"),
-    wrap((req, res) => {
+    authAsync,
+    canLifecycleDefinitionsAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        lifecycle.publishDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req))
+        await lifecycle.publishDefinitionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await lifecycleReadAsync(req))
       );
     })
   );
 
   app.get(
     "/api/lifecycle-states",
-    auth,
-    canLifecycleTransitions("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.listStates(db, req.query, lifecycleRead(req)));
+    authAsync,
+    canLifecycleTransitionsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.listStatesAsync(db, req.query, await lifecycleReadAsync(req)));
     })
   );
 
   app.post(
     "/api/lifecycle-states",
-    auth,
-    canLifecycleTransitions("update"),
-    wrap((req, res) => {
-      res.status(201).json(lifecycle.createState(db, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleTransitionsAsync("update"),
+    wrap(async (req, res) => {
+      res.status(201).json(await lifecycle.createStateAsync(db, req.body || {}, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
   app.put(
     "/api/lifecycle-states/:id",
-    auth,
-    canLifecycleTransitions("update"),
-    wrap((req, res) => {
-      res.json(lifecycle.updateState(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleTransitionsAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.updateStateAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
   app.delete(
     "/api/lifecycle-states/:id",
-    auth,
-    canLifecycleTransitions("delete"),
-    wrap((req, res) => {
-      res.json(lifecycle.deleteState(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleTransitionsAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.deleteStateAsync(db, req.params.id, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
   app.get(
     "/api/lifecycle-transitions",
-    auth,
-    canLifecycleTransitions("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.listTransitions(db, req.query, lifecycleRead(req)));
+    authAsync,
+    canLifecycleTransitionsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.listTransitionsAsync(db, req.query, await lifecycleReadAsync(req)));
     })
   );
 
   app.post(
     "/api/lifecycle-transitions",
-    auth,
-    canLifecycleTransitions("update"),
-    wrap((req, res) => {
-      res.status(201).json(lifecycle.createTransition(db, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleTransitionsAsync("update"),
+    wrap(async (req, res) => {
+      res.status(201).json(await lifecycle.createTransitionAsync(db, req.body || {}, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
   app.put(
     "/api/lifecycle-transitions/:id",
-    auth,
-    canLifecycleTransitions("update"),
-    wrap((req, res) => {
+    authAsync,
+    canLifecycleTransitionsAsync("update"),
+    wrap(async (req, res) => {
       res.json(
-        lifecycle.updateTransition(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req))
+        await lifecycle.updateTransitionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await lifecycleReadAsync(req))
       );
     })
   );
 
   app.delete(
     "/api/lifecycle-transitions/:id",
-    auth,
-    canLifecycleTransitions("delete"),
-    wrap((req, res) => {
-      res.json(lifecycle.deleteTransition(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleTransitionsAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.deleteTransitionAsync(db, req.params.id, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
   app.get(
     "/api/lifecycle-assignments",
-    auth,
-    canLifecycleDefinitions("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.listAssignments(db, req.query, lifecycleRead(req)));
+    authAsync,
+    canLifecycleDefinitionsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.listAssignmentsAsync(db, req.query, await lifecycleReadAsync(req)));
     })
   );
 
   app.post(
     "/api/lifecycle-assignments",
-    auth,
-    canLifecycleDefinitions("update"),
-    wrap((req, res) => {
-      res.status(201).json(lifecycle.createAssignment(db, req.body || {}, req.actor, clientIp(req), lifecycleWrite(req)));
+    authAsync,
+    canLifecycleDefinitionsAsync("update"),
+    wrap(async (req, res) => {
+      res.status(201).json(await lifecycle.createAssignmentAsync(db, req.body || {}, req.actor, clientIp(req), await lifecycleWriteAsync(req)));
     })
   );
 
   app.delete(
     "/api/lifecycle-assignments/:id",
-    auth,
-    canLifecycleDefinitions("delete"),
-    wrap((req, res) => {
-      res.json(lifecycle.deleteAssignment(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+    authAsync,
+    canLifecycleDefinitionsAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.deleteAssignmentAsync(db, req.params.id, req.actor, clientIp(req), await lifecycleReadAsync(req)));
     })
   );
 
-  const ruleRoutes = (base, kind, gate) => {
+  const ruleRoutes = (base, kind, gate, readAsync, writeAsync) => {
     app.get(
       base,
-      auth,
+      authAsync,
       gate("read"),
-      wrap((req, res) => {
-        res.json(lifecycle.listRules(db, { ...req.query, kind }, lifecycleRead(req)));
+      wrap(async (req, res) => {
+        res.json(await lifecycle.listRulesAsync(db, { ...req.query, kind }, await readAsync(req)));
       })
     );
     app.get(
       `${base}/:id`,
-      auth,
+      authAsync,
       gate("read"),
-      wrap((req, res) => {
-        res.json(lifecycle.getRule(db, req.params.id, lifecycleRead(req)));
+      wrap(async (req, res) => {
+        res.json(await lifecycle.getRuleAsync(db, req.params.id, await readAsync(req)));
       })
     );
     app.post(
       base,
-      auth,
+      authAsync,
       gate("create"),
-      wrap((req, res) => {
+      wrap(async (req, res) => {
         const body = { ...(req.body || {}), kind };
-        res.status(201).json(lifecycle.createRule(db, body, req.actor, clientIp(req), lifecycleWrite(req, body)));
+        res.status(201).json(await lifecycle.createRuleAsync(db, body, req.actor, clientIp(req), await writeAsync(req, body)));
       })
     );
     app.put(
       `${base}/:id`,
-      auth,
+      authAsync,
       gate("update"),
-      wrap((req, res) => {
-        res.json(lifecycle.updateRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), lifecycleRead(req)));
+      wrap(async (req, res) => {
+        res.json(await lifecycle.updateRuleAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await readAsync(req)));
       })
     );
     app.delete(
       `${base}/:id`,
-      auth,
+      authAsync,
       gate("delete"),
-      wrap((req, res) => {
-        res.json(lifecycle.deleteRule(db, req.params.id, req.actor, clientIp(req), lifecycleRead(req)));
+      wrap(async (req, res) => {
+        res.json(await lifecycle.deleteRuleAsync(db, req.params.id, req.actor, clientIp(req), await readAsync(req)));
       })
     );
   };
-  ruleRoutes("/api/release-rules", "release", canReleaseRules);
-  ruleRoutes("/api/approval-rules", "approval", canReleaseRules);
+  ruleRoutes("/api/release-rules", "release", canReleaseRulesAsync, lifecycleReadAsync, lifecycleWriteAsync);
+  ruleRoutes("/api/approval-rules", "approval", canReleaseRulesAsync, lifecycleReadAsync, lifecycleWriteAsync);
 
   app.get(
     "/api/objects/:id/lifecycle",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.objectLifecycle(db, req.params.id, req.tenantId));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.objectLifecycleAsync(db, req.params.id, req.tenantId));
     })
   );
 
   app.get(
     "/api/objects/:id/transitions",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json({ items: lifecycle.objectLifecycle(db, req.params.id, req.tenantId).transitions });
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json({ items: (await lifecycle.objectLifecycleAsync(db, req.params.id, req.tenantId)).transitions });
     })
   );
 
   app.post(
     "/api/objects/:id/transitions",
-    auth,
-    canLifecycle("execute"),
-    wrap((req, res) => {
-      res.json(
-        lifecycle.transitionObject(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req))
-      );
+    authAsync,
+    canLifecycleAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.transitionObjectAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/objects/:id/status-history",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.statusHistory(db, req.params.id, req.tenantId, req.query));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.statusHistoryAsync(db, req.params.id, req.tenantId, req.query));
     })
   );
 
   app.post(
     "/api/objects/:id/release",
-    auth,
-    canReleaseRules("execute"),
-    wrap((req, res) => {
-      res.status(201).json(
-        lifecycle.requestObjectRelease(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req))
-      );
+    authAsync,
+    canReleaseRulesAsync("execute"),
+    wrap(async (req, res) => {
+      res.status(201).json(await lifecycle.requestObjectReleaseAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/objects/:id/releases",
-    auth,
-    canObjects("read"),
-    wrap((req, res) => {
-      res.json(lifecycle.objectReleases(db, req.params.id, req.tenantId, req.query));
+    authAsync,
+    canObjectsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await lifecycle.objectReleasesAsync(db, req.params.id, req.tenantId, req.query));
     })
   );
 
   app.post(
     "/api/objects/:id/approvals/:approvalId",
-    auth,
-    canApprovals("execute"),
-    wrap((req, res) => {
+    authAsync,
+    canApprovalsAsync("execute"),
+    wrap(async (req, res) => {
       res.json(
-        lifecycle.decideApproval(
-          db,
-          req.params.id,
-          req.params.approvalId,
-          req.body || {},
-          req.actor,
-          req.tenantId,
-          clientIp(req)
-        )
+        await lifecycle.decideApprovalAsync(db, req.params.id, req.params.approvalId, req.body || {}, req.actor, req.tenantId, clientIp(req))
       );
     })
   );
@@ -2155,266 +2252,268 @@ export function createApp(db) {
   // Workflow & Process Engine: templates, designer, runtime instances, tasks,
   // approvals and configuration (routing, escalation, notifications, bindings,
   // delegations). Gated by iam.workflow.*; instances are tenant-scoped.
-  const canWorkflow = (action) => can("iam.workflow", action);
-  const canWorkflowTemplates = (action) => can("iam.workflow.templates", action);
-  const canWorkflowDesigner = (action) => can("iam.workflow.designer", action);
-  const canWorkflowInstances = (action) => can("iam.workflow.instances", action);
-  const canWorkflowTasks = (action) => can("iam.workflow.tasks", action);
-  const canWorkflowApprovals = (action) => can("iam.workflow.approvals", action);
   const canWorkflowConfig = (action) => can("iam.workflow.config", action);
-  const wfRead = (req, source) => metaReadTenant(db, req.actor, source || req.query, req.tenantId);
-  const wfWrite = (req, body) => metaWriteTenant(db, req.actor, body ?? req.body, req.tenantId);
+  // Async twins for the migrated workflow routes.
+  const canWorkflowTemplatesAsync = (action) => canAsync("iam.workflow.templates", action);
+  const canWorkflowDesignerAsync = (action) => canAsync("iam.workflow.designer", action);
+  const canWorkflowInstancesAsync = (action) => canAsync("iam.workflow.instances", action);
+  const canWorkflowTasksAsync = (action) => canAsync("iam.workflow.tasks", action);
+  const canWorkflowApprovalsAsync = (action) => canAsync("iam.workflow.approvals", action);
+  const canWorkflowConfigAsync = (action) => canAsync("iam.workflow.config", action);
+  const canWorkflowAsync = (action) => canAsync("iam.workflow", action);
+  const wfReadAsync = (req, source) => metaReadTenantAsync(db, req.actor, source || req.query, req.tenantId);
+  const wfWriteAsync = (req, body) => metaWriteTenantAsync(db, req.actor, body ?? req.body, req.tenantId);
 
   app.get(
     "/api/workflow-templates",
-    auth,
-    canWorkflowTemplates("read"),
-    wrap((req, res) => {
-      res.json(workflow.listDefinitions(db, req.query, wfRead(req)));
+    authAsync,
+    canWorkflowTemplatesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listDefinitionsAsync(db, req.query, await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-templates",
-    auth,
-    canWorkflowTemplates("create"),
-    wrap((req, res) => {
+    authAsync,
+    canWorkflowTemplatesAsync("create"),
+    wrap(async (req, res) => {
       const body = req.body || {};
-      res.status(201).json(workflow.createDefinition(db, body, req.actor, clientIp(req), wfWrite(req, body)));
+      res.status(201).json(await workflow.createDefinitionAsync(db, body, req.actor, clientIp(req), await wfWriteAsync(req, body)));
     })
   );
 
   app.get(
     "/api/workflow-templates/:id",
-    auth,
-    canWorkflowTemplates("read"),
-    wrap((req, res) => {
-      res.json(workflow.getDefinition(db, req.params.id, wfRead(req)));
+    authAsync,
+    canWorkflowTemplatesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.getDefinitionAsync(db, req.params.id, await wfReadAsync(req)));
     })
   );
 
-  const updateWorkflowTemplate = wrap((req, res) => {
-    res.json(workflow.updateDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+  const updateWorkflowTemplate = wrap(async (req, res) => {
+    res.json(await workflow.updateDefinitionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
   });
-  app.put("/api/workflow-templates/:id", auth, canWorkflowTemplates("update"), updateWorkflowTemplate);
-  app.patch("/api/workflow-templates/:id", auth, canWorkflowTemplates("update"), updateWorkflowTemplate);
+  app.put("/api/workflow-templates/:id", authAsync, canWorkflowTemplatesAsync("update"), updateWorkflowTemplate);
+  app.patch("/api/workflow-templates/:id", authAsync, canWorkflowTemplatesAsync("update"), updateWorkflowTemplate);
 
   app.post(
     "/api/workflow-templates/:id/status",
-    auth,
-    canWorkflowTemplates("update"),
-    wrap((req, res) => {
-      res.json(workflow.setDefinitionStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowTemplatesAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.setDefinitionStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.delete(
     "/api/workflow-templates/:id",
-    auth,
-    canWorkflowTemplates("delete"),
-    wrap((req, res) => {
-      res.json(workflow.deleteDefinition(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowTemplatesAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await workflow.deleteDefinitionAsync(db, req.params.id, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.get(
     "/api/workflow-templates/:id/versions",
-    auth,
-    canWorkflowTemplates("read"),
-    wrap((req, res) => {
-      res.json(workflow.listVersions(db, req.params.id, wfRead(req)));
+    authAsync,
+    canWorkflowTemplatesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listVersionsAsync(db, req.params.id, await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-templates/:id/versions",
-    auth,
-    canWorkflowTemplates("create"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.createVersion(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowTemplatesAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.createVersionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.get(
     "/api/workflow-templates/:id/versions/:version",
-    auth,
-    canWorkflowTemplates("read"),
-    wrap((req, res) => {
-      res.json(workflow.getVersion(db, req.params.id, req.params.version, wfRead(req)));
+    authAsync,
+    canWorkflowTemplatesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.getVersionAsync(db, req.params.id, req.params.version, await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-templates/:id/validate",
-    auth,
-    canWorkflowTemplates("read"),
-    wrap((req, res) => {
-      res.json(workflow.validateDefinition(db, req.params.id, wfRead(req), { version: req.body?.version ?? req.query.version }));
+    authAsync,
+    canWorkflowTemplatesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.validateDefinitionAsync(db, req.params.id, await wfReadAsync(req), { version: req.body?.version ?? req.query.version }));
     })
   );
 
   app.post(
     "/api/workflow-templates/:id/publish",
-    auth,
-    canWorkflowTemplates("update"),
-    wrap((req, res) => {
-      res.json(workflow.publishDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowTemplatesAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.publishDefinitionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-templates/:id/clone",
-    auth,
-    canWorkflowTemplates("create"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.cloneDefinition(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowTemplatesAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.cloneDefinitionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   // --- Designer -----------------------------------------------------------
   app.get(
     "/api/workflow-templates/:id/designer",
-    auth,
-    canWorkflowDesigner("read"),
-    wrap((req, res) => {
-      res.json(workflow.designerContext(db, req.params.id, wfRead(req), req.query));
+    authAsync,
+    canWorkflowDesignerAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.designerContextAsync(db, req.params.id, await wfReadAsync(req), req.query));
     })
   );
 
   app.put(
     "/api/workflow-templates/:id/designer",
-    auth,
-    canWorkflowDesigner("update"),
-    wrap((req, res) => {
-      res.json(workflow.saveDesignerGraph(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowDesignerAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.saveDesignerGraphAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-templates/:id/designer/nodes",
-    auth,
-    canWorkflowDesigner("update"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.addNode(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowDesignerAsync("update"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.addNodeAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.patch(
     "/api/workflow-templates/:id/designer/nodes/:nodeId",
-    auth,
-    canWorkflowDesigner("update"),
-    wrap((req, res) => {
-      res.json(workflow.patchNode(db, req.params.id, req.params.nodeId, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowDesignerAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.patchNodeAsync(db, req.params.id, req.params.nodeId, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.delete(
     "/api/workflow-templates/:id/designer/nodes/:nodeId",
-    auth,
-    canWorkflowDesigner("update"),
-    wrap((req, res) => {
-      res.json(workflow.removeNode(db, req.params.id, req.params.nodeId, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowDesignerAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.removeNodeAsync(db, req.params.id, req.params.nodeId, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-templates/:id/designer/transitions",
-    auth,
-    canWorkflowDesigner("update"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.addTransition(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowDesignerAsync("update"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.addTransitionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.patch(
     "/api/workflow-templates/:id/designer/transitions/:transitionId",
-    auth,
-    canWorkflowDesigner("update"),
-    wrap((req, res) => {
-      res.json(workflow.patchTransition(db, req.params.id, req.params.transitionId, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowDesignerAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.patchTransitionAsync(db, req.params.id, req.params.transitionId, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.delete(
     "/api/workflow-templates/:id/designer/transitions/:transitionId",
-    auth,
-    canWorkflowDesigner("update"),
-    wrap((req, res) => {
-      res.json(workflow.removeTransition(db, req.params.id, req.params.transitionId, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowDesignerAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.removeTransitionAsync(db, req.params.id, req.params.transitionId, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-templates/:id/designer/auto-layout",
-    auth,
-    canWorkflowDesigner("update"),
-    wrap((req, res) => {
-      res.json(workflow.applyAutoLayout(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowDesignerAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.applyAutoLayoutAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-templates/:id/designer/validate",
-    auth,
-    canWorkflowDesigner("read"),
-    wrap((req, res) => {
-      res.json(workflow.validateDesignerGraph(db, req.params.id, req.body || {}, wfRead(req)));
+    authAsync,
+    canWorkflowDesignerAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.validateDesignerGraphAsync(db, req.params.id, req.body || {}, await wfReadAsync(req)));
     })
   );
 
   // --- Instances ----------------------------------------------------------
   app.get(
     "/api/workflow-instances",
-    auth,
-    canWorkflowInstances("read"),
-    wrap((req, res) => {
-      res.json(workflow.listInstances(db, req.query, req.tenantId));
+    authAsync,
+    canWorkflowInstancesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listInstancesAsync(db, req.query, req.tenantId));
     })
   );
 
   app.post(
     "/api/workflow-instances",
-    auth,
-    canWorkflowInstances("create"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.startInstance(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowInstancesAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.startInstanceAsync(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/workflow-instances/:id",
-    auth,
-    canWorkflowInstances("read"),
-    wrap((req, res) => {
-      res.json(workflow.getInstance(db, req.params.id, req.tenantId));
+    authAsync,
+    canWorkflowInstancesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.getInstanceAsync(db, req.params.id, req.tenantId));
     })
   );
 
   app.get(
     "/api/workflow-instances/:id/nodes",
-    auth,
-    canWorkflowInstances("read"),
-    wrap((req, res) => {
-      res.json({ items: workflow.instanceNodes(db, req.params.id, req.tenantId) });
+    authAsync,
+    canWorkflowInstancesAsync("read"),
+    wrap(async (req, res) => {
+      res.json({ items: await workflow.instanceNodesAsync(db, req.params.id, req.tenantId) });
     })
   );
 
   app.get(
     "/api/workflow-instances/:id/history",
-    auth,
-    canWorkflowInstances("read"),
-    wrap((req, res) => {
-      res.json(workflow.instanceHistory(db, req.params.id, req.tenantId, req.query));
+    authAsync,
+    canWorkflowInstancesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.instanceHistoryAsync(db, req.params.id, req.tenantId, req.query));
     })
   );
 
   app.post(
     "/api/workflow-instances/:id/cancel",
-    auth,
-    canWorkflowInstances("execute"),
-    wrap((req, res) => {
+    authAsync,
+    canWorkflowInstancesAsync("execute"),
+    wrap(async (req, res) => {
       res.json(
-        workflow.cancelInstance(db, req.params.id, {
+        await workflow.cancelInstanceAsync(db, req.params.id, {
           reason: req.body?.reason || req.body?.comments || "",
           actor: req.actor,
           ip: clientIp(req),
@@ -2425,272 +2524,272 @@ export function createApp(db) {
 
   app.post(
     "/api/workflow-instances/:id/pause",
-    auth,
-    canWorkflowInstances("execute"),
-    wrap((req, res) => {
-      res.json(workflow.pauseInstance(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowInstancesAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.pauseInstanceAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/workflow-instances/:id/resume",
-    auth,
-    canWorkflowInstances("execute"),
-    wrap((req, res) => {
-      res.json(workflow.resumeInstance(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowInstancesAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.resumeInstanceAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/workflow-instances/:id/retry",
-    auth,
-    canWorkflowInstances("execute"),
-    wrap((req, res) => {
-      res.json(workflow.retryInstance(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowInstancesAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.retryInstanceAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   // --- Tasks --------------------------------------------------------------
   app.get(
     "/api/tasks",
-    auth,
-    canWorkflowTasks("read"),
-    wrap((req, res) => {
-      res.json(workflow.listTasks(db, req.query, req.tenantId, req.actor, { scope: req.query.scope || "mine" }));
+    authAsync,
+    canWorkflowTasksAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listTasksAsync(db, req.query, req.tenantId, req.actor, { scope: req.query.scope || "mine" }));
     })
   );
 
   app.get(
     "/api/tasks/:id",
-    auth,
-    canWorkflowTasks("read"),
-    wrap((req, res) => {
-      res.json(workflow.getTask(db, req.params.id, req.tenantId, req.actor));
+    authAsync,
+    canWorkflowTasksAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.getTaskAsync(db, req.params.id, req.tenantId, req.actor));
     })
   );
 
   app.post(
     "/api/tasks/:id/complete",
-    auth,
-    canWorkflowTasks("execute"),
-    wrap((req, res) => {
-      res.json(workflow.completeTask(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowTasksAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.completeTaskAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/tasks/:id/assign",
-    auth,
-    canWorkflowTasks("update"),
-    wrap((req, res) => {
-      res.json(workflow.assignTask(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowTasksAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.assignTaskAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/tasks/:id/claim",
-    auth,
-    canWorkflowTasks("execute"),
-    wrap((req, res) => {
-      res.json(workflow.claimTask(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowTasksAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.claimTaskAsync(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/tasks/:id/delegate",
-    auth,
-    canWorkflowTasks("execute"),
-    wrap((req, res) => {
-      res.json(workflow.delegateTask(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowTasksAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.delegateTaskAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.post(
     "/api/tasks/:id/status",
-    auth,
-    canWorkflowTasks("update"),
-    wrap((req, res) => {
-      res.json(workflow.updateTaskStatus(db, req.params.id, req.body?.status, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowTasksAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.updateTaskStatusAsync(db, req.params.id, req.body?.status, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/tasks/:id/comments",
-    auth,
-    canWorkflowTasks("read"),
-    wrap((req, res) => {
-      res.json({ items: workflow.listComments(db, req.params.id, req.tenantId) });
+    authAsync,
+    canWorkflowTasksAsync("read"),
+    wrap(async (req, res) => {
+      res.json({ items: await workflow.listCommentsAsync(db, req.params.id, req.tenantId) });
     })
   );
 
   app.post(
     "/api/tasks/:id/comments",
-    auth,
-    canWorkflowTasks("execute"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.addComment(db, req.params.id, req.body || {}, req.actor, req.tenantId));
+    authAsync,
+    canWorkflowTasksAsync("execute"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.addCommentAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId));
     })
   );
 
   app.get(
     "/api/tasks/:id/attachments",
-    auth,
-    canWorkflowTasks("read"),
-    wrap((req, res) => {
-      res.json({ items: workflow.listAttachments(db, req.params.id, req.tenantId) });
+    authAsync,
+    canWorkflowTasksAsync("read"),
+    wrap(async (req, res) => {
+      res.json({ items: await workflow.listAttachmentsAsync(db, req.params.id, req.tenantId) });
     })
   );
 
   app.post(
     "/api/tasks/:id/attachments",
-    auth,
-    canWorkflowTasks("execute"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.addAttachment(db, req.params.id, req.body || {}, req.actor, req.tenantId));
+    authAsync,
+    canWorkflowTasksAsync("execute"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.addAttachmentAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId));
     })
   );
 
   app.post(
     "/api/tasks/:id/subtasks",
-    auth,
-    canWorkflowTasks("execute"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.addSubtask(db, req.params.id, req.body || {}, req.actor, req.tenantId));
+    authAsync,
+    canWorkflowTasksAsync("execute"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.addSubtaskAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId));
     })
   );
 
   app.patch(
     "/api/tasks/:id/subtasks/:subtaskId",
-    auth,
-    canWorkflowTasks("execute"),
-    wrap((req, res) => {
-      res.json(workflow.updateSubtask(db, req.params.id, req.params.subtaskId, req.body || {}, req.actor, req.tenantId));
+    authAsync,
+    canWorkflowTasksAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.updateSubtaskAsync(db, req.params.id, req.params.subtaskId, req.body || {}, req.actor, req.tenantId));
     })
   );
 
   app.delete(
     "/api/tasks/:id/subtasks/:subtaskId",
-    auth,
-    canWorkflowTasks("execute"),
-    wrap((req, res) => {
-      res.json(workflow.deleteSubtask(db, req.params.id, req.params.subtaskId, req.actor, req.tenantId));
+    authAsync,
+    canWorkflowTasksAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.deleteSubtaskAsync(db, req.params.id, req.params.subtaskId, req.actor, req.tenantId));
     })
   );
 
   // --- Approvals ----------------------------------------------------------
   app.get(
     "/api/workflow-approvals",
-    auth,
-    canWorkflowApprovals("read"),
-    wrap((req, res) => {
-      res.json(workflow.listApprovals(db, req.query, req.tenantId, req.actor, { scope: req.query.scope || "mine" }));
+    authAsync,
+    canWorkflowApprovalsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listApprovalsAsync(db, req.query, req.tenantId, req.actor, { scope: req.query.scope || "mine" }));
     })
   );
 
   app.get(
     "/api/workflow-approvals/:id",
-    auth,
-    canWorkflowApprovals("read"),
-    wrap((req, res) => {
-      res.json(workflow.getApproval(db, req.params.id, req.tenantId, req.actor));
+    authAsync,
+    canWorkflowApprovalsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.getApprovalAsync(db, req.params.id, req.tenantId, req.actor));
     })
   );
 
   app.post(
     "/api/workflow-approvals/:id/decision",
-    auth,
-    canWorkflowApprovals("execute"),
-    wrap((req, res) => {
-      res.json(workflow.decideApproval(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowApprovalsAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.decideApprovalAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   const approvalDecision = (decision) =>
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       res.json(
-        workflow.decideApproval(db, req.params.id, { ...(req.body || {}), decision }, req.actor, req.tenantId, clientIp(req))
+        await workflow.decideApprovalAsync(db, req.params.id, { ...(req.body || {}), decision }, req.actor, req.tenantId, clientIp(req))
       );
     });
-  app.post("/api/workflow-approvals/:id/approve", auth, canWorkflowApprovals("execute"), approvalDecision("approve"));
-  app.post("/api/workflow-approvals/:id/reject", auth, canWorkflowApprovals("execute"), approvalDecision("reject"));
+  app.post("/api/workflow-approvals/:id/approve", authAsync, canWorkflowApprovalsAsync("execute"), approvalDecision("approve"));
+  app.post("/api/workflow-approvals/:id/reject", authAsync, canWorkflowApprovalsAsync("execute"), approvalDecision("reject"));
   app.post(
     "/api/workflow-approvals/:id/request-changes",
-    auth,
-    canWorkflowApprovals("execute"),
+    authAsync,
+    canWorkflowApprovalsAsync("execute"),
     approvalDecision("request_changes")
   );
 
   // --- Routing rules ------------------------------------------------------
   app.get(
     "/api/workflow-routing-rules",
-    auth,
-    canWorkflowConfig("read"),
-    wrap((req, res) => {
-      res.json(workflow.listRoutingRules(db, req.query, wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listRoutingRulesAsync(db, req.query, await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-routing-rules",
-    auth,
-    canWorkflowConfig("create"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.createRoutingRule(db, req.body || {}, req.actor, clientIp(req), wfWrite(req)));
+    authAsync,
+    canWorkflowConfigAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.createRoutingRuleAsync(db, req.body || {}, req.actor, clientIp(req), await wfWriteAsync(req)));
     })
   );
 
   app.patch(
     "/api/workflow-routing-rules/:id",
-    auth,
-    canWorkflowConfig("update"),
-    wrap((req, res) => {
-      res.json(workflow.updateRoutingRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.updateRoutingRuleAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.delete(
     "/api/workflow-routing-rules/:id",
-    auth,
-    canWorkflowConfig("delete"),
-    wrap((req, res) => {
-      res.json(workflow.deleteRoutingRule(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await workflow.deleteRoutingRuleAsync(db, req.params.id, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   // --- Escalation ---------------------------------------------------------
   app.get(
     "/api/workflow-escalation-rules",
-    auth,
-    canWorkflowConfig("read"),
-    wrap((req, res) => {
-      res.json(workflow.listEscalationRules(db, req.query, wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listEscalationRulesAsync(db, req.query, await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-escalation-rules",
-    auth,
-    canWorkflowConfig("create"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.createEscalationRule(db, req.body || {}, req.actor, clientIp(req), wfWrite(req)));
+    authAsync,
+    canWorkflowConfigAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.createEscalationRuleAsync(db, req.body || {}, req.actor, clientIp(req), await wfWriteAsync(req)));
     })
   );
 
   app.patch(
     "/api/workflow-escalation-rules/:id",
-    auth,
-    canWorkflowConfig("update"),
-    wrap((req, res) => {
-      res.json(workflow.updateEscalationRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.updateEscalationRuleAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.delete(
     "/api/workflow-escalation-rules/:id",
-    auth,
-    canWorkflowConfig("delete"),
-    wrap((req, res) => {
-      res.json(workflow.deleteEscalationRule(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await workflow.deleteEscalationRuleAsync(db, req.params.id, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
@@ -2706,236 +2805,239 @@ export function createApp(db) {
   // --- Notifications ------------------------------------------------------
   app.get(
     "/api/workflow-notifications",
-    auth,
-    canWorkflow("read"),
-    wrap((req, res) => {
-      res.json(workflow.listNotifications(db, req.query, req.tenantId));
+    authAsync,
+    canWorkflowAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listNotificationsAsync(db, req.query, req.tenantId));
     })
   );
 
   app.post(
     "/api/workflow-notifications/:id/read",
-    auth,
-    canWorkflow("execute"),
-    wrap((req, res) => {
-      res.json(workflow.markNotificationRead(db, req.params.id, req.tenantId, req.actor, clientIp(req)));
+    authAsync,
+    canWorkflowAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.markNotificationReadAsync(db, req.params.id, req.tenantId, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/workflow-notification-templates",
-    auth,
-    canWorkflowConfig("read"),
-    wrap((req, res) => {
-      res.json(workflow.listTemplates(db, req.query, wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listTemplatesAsync(db, req.query, await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-notification-templates",
-    auth,
-    canWorkflowConfig("create"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.createTemplate(db, req.body || {}, req.actor, clientIp(req), wfWrite(req)));
+    authAsync,
+    canWorkflowConfigAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.createTemplateAsync(db, req.body || {}, req.actor, clientIp(req), await wfWriteAsync(req)));
     })
   );
 
   app.patch(
     "/api/workflow-notification-templates/:id",
-    auth,
-    canWorkflowConfig("update"),
-    wrap((req, res) => {
-      res.json(workflow.updateTemplate(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.updateTemplateAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.delete(
     "/api/workflow-notification-templates/:id",
-    auth,
-    canWorkflowConfig("delete"),
-    wrap((req, res) => {
-      res.json(workflow.deleteTemplate(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await workflow.deleteTemplateAsync(db, req.params.id, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   // --- Bindings -----------------------------------------------------------
   app.get(
     "/api/workflow-bindings",
-    auth,
-    canWorkflowConfig("read"),
-    wrap((req, res) => {
-      res.json(workflow.listBindings(db, req.query, wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listBindingsAsync(db, req.query, await wfReadAsync(req)));
     })
   );
 
   app.post(
     "/api/workflow-bindings",
-    auth,
-    canWorkflowConfig("create"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.createBinding(db, req.body || {}, req.actor, clientIp(req), wfWrite(req)));
+    authAsync,
+    canWorkflowConfigAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.createBindingAsync(db, req.body || {}, req.actor, clientIp(req), await wfWriteAsync(req)));
     })
   );
 
   app.patch(
     "/api/workflow-bindings/:id",
-    auth,
-    canWorkflowConfig("update"),
-    wrap((req, res) => {
-      res.json(workflow.updateBinding(db, req.params.id, req.body || {}, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await workflow.updateBindingAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   app.delete(
     "/api/workflow-bindings/:id",
-    auth,
-    canWorkflowConfig("delete"),
-    wrap((req, res) => {
-      res.json(workflow.deleteBinding(db, req.params.id, req.actor, clientIp(req), wfRead(req)));
+    authAsync,
+    canWorkflowConfigAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await workflow.deleteBindingAsync(db, req.params.id, req.actor, clientIp(req), await wfReadAsync(req)));
     })
   );
 
   // --- Delegations --------------------------------------------------------
   app.get(
     "/api/workflow-delegations",
-    auth,
-    canWorkflow("read"),
-    wrap((req, res) => {
-      res.json(workflow.listDelegations(db, req.query, req.tenantId, req.actor));
+    authAsync,
+    canWorkflowAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await workflow.listDelegationsAsync(db, req.query, req.tenantId, req.actor));
     })
   );
 
   app.post(
     "/api/workflow-delegations",
-    auth,
-    canWorkflow("execute"),
-    wrap((req, res) => {
-      res.status(201).json(workflow.createDelegation(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowAsync("execute"),
+    wrap(async (req, res) => {
+      res.status(201).json(await workflow.createDelegationAsync(db, req.body || {}, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/workflow-delegations/:id",
-    auth,
-    canWorkflow("execute"),
-    wrap((req, res) => {
-      res.json(workflow.revokeDelegation(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
+    authAsync,
+    canWorkflowAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.revokeDelegationAsync(db, req.params.id, req.actor, req.tenantId, clientIp(req)));
     })
   );
 
   app.get(
     "/api/organizations",
-    auth,
-    can("iam.organizations", "read"),
-    wrap((req, res) => {
-      res.json(orgs.listOrganizations(db, { ...req.query, ...tenantFilter(req) }));
+    authAsync,
+    canAsync("iam.organizations", "read"),
+    wrap(async (req, res) => {
+      res.json(await orgs.listOrganizationsAsync(db, { ...req.query, ...tenantFilter(req) }));
     })
   );
 
   app.get(
     "/api/organizations/tree",
-    auth,
-    can("iam.organizations", "read"),
-    wrap((req, res) => {
-      res.json(orgs.organizationTree(db, { ...req.query, ...tenantFilter(req) }));
+    authAsync,
+    canAsync("iam.organizations", "read"),
+    wrap(async (req, res) => {
+      res.json(await orgs.organizationTreeAsync(db, { ...req.query, ...tenantFilter(req) }));
     })
   );
 
   app.post(
     "/api/organizations",
-    auth,
-    can("iam.organizations", "create"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.organizations", "create"),
+    wrap(async (req, res) => {
       const body = req.body || {};
-      if (body.parent_id) scopedOrg(db, req, body.parent_id);
-      const org = orgs.createOrganization(db, body, req.actor, clientIp(req));
+      if (body.parent_id) await scopedOrgAsync(db, req, body.parent_id);
+      const org = await orgs.createOrganizationAsync(db, body, req.actor, clientIp(req));
       res.status(201).json(org);
     })
   );
 
   app.get(
     "/api/organizations/:id",
-    auth,
-    can("iam.organizations", "read"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      res.json(orgs.organizationDetail(db, req.params.id));
+    authAsync,
+    canAsync("iam.organizations", "read"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      res.json(await orgs.organizationDetailAsync(db, req.params.id));
     })
   );
 
   app.put(
     "/api/organizations/:id",
-    auth,
-    can("iam.organizations", "update"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      res.json(orgs.updateOrganization(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.organizations", "update"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      res.json(await orgs.updateOrganizationAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/organizations/:id",
-    auth,
-    can("iam.organizations", "delete"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      res.json(orgs.deleteOrganization(db, req.params.id, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.organizations", "delete"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      res.json(await orgs.deleteOrganizationAsync(db, req.params.id, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/organizations/:id/activate",
-    auth,
-    can("iam.organizations", "update"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      res.json(orgs.setOrganizationStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.organizations", "update"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      res.json(await orgs.setOrganizationStatusAsync(db, req.params.id, "active", req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/organizations/:id/deactivate",
-    auth,
-    can("iam.organizations", "update"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      res.json(orgs.setOrganizationStatus(db, req.params.id, "inactive", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.organizations", "update"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      res.json(await orgs.setOrganizationStatusAsync(db, req.params.id, "inactive", req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/organizations/:id/sites",
-    auth,
-    can("iam.organizations", "read"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      res.json({ items: orgs.listSites(db, req.params.id) });
+    authAsync,
+    canAsync("iam.organizations", "read"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      res.json({ items: await orgs.listSitesAsync(db, req.params.id) });
     })
   );
 
   app.get(
     "/api/organizations/:id/config",
-    auth,
-    can("iam.config", "read"),
-    wrap((req, res) => {
-      const org = scopedOrg(db, req, req.params.id);
+    authAsync,
+    canAsync("iam.config", "read"),
+    wrap(async (req, res) => {
+      const org = await scopedOrgAsync(db, req, req.params.id);
       res.json({
         scope: "organization",
         scope_id: Number(req.params.id),
-        items: config.listScopeValues(db, "organization", req.params.id),
-        effective: config.resolveAll(db, { tenantId: org.tenant_id || req.tenantId, organizationId: req.params.id }),
+        items: await config.listScopeValuesAsync(db, "organization", req.params.id),
+        effective: await config.resolveAllAsync(db, {
+          tenantId: org.tenant_id || req.tenantId,
+          organizationId: req.params.id,
+        }),
       });
     })
   );
 
   app.put(
     "/api/organizations/:id/config",
-    auth,
-    can("iam.config", "update"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
+    authAsync,
+    canAsync("iam.config", "update"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
       res.json(
-        config.putValues(
+        await config.putValuesAsync(
           db,
           { scope: "organization", scopeId: req.params.id, values: req.body?.values || req.body || {} },
           req.actor,
@@ -2947,11 +3049,11 @@ export function createApp(db) {
 
   app.post(
     "/api/organizations/:id/sites",
-    auth,
-    can("iam.organizations", "create"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      const site = orgs.createOrganization(
+    authAsync,
+    canAsync("iam.organizations", "create"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      const site = await orgs.createOrganizationAsync(
         db,
         { ...(req.body || {}), kind: "site", parent_id: Number(req.params.id) },
         req.actor,
@@ -2963,173 +3065,180 @@ export function createApp(db) {
 
   app.post(
     "/api/organizations/:id/move",
-    auth,
-    can("iam.organizations", "update"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      if (req.body?.parent_id) scopedOrg(db, req, req.body.parent_id);
-      res.json(orgs.moveOrganization(db, req.params.id, req.body?.parent_id, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.organizations", "update"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      if (req.body?.parent_id) await scopedOrgAsync(db, req, req.body.parent_id);
+      res.json(await orgs.moveOrganizationAsync(db, req.params.id, req.body?.parent_id, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/organizations/:id/members",
-    auth,
-    can("iam.organizations", "read"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      res.json({ items: orgs.listMembers(db, req.params.id) });
+    authAsync,
+    canAsync("iam.organizations", "read"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      res.json({ items: await orgs.listMembersAsync(db, req.params.id) });
     })
   );
 
   app.post(
     "/api/organizations/:id/members",
-    auth,
-    can("iam.organizations", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.organizations", "update"),
+    wrap(async (req, res) => {
       const { userId, isPrimary } = req.body || {};
-      scopedOrg(db, req, req.params.id);
+      await scopedOrgAsync(db, req, req.params.id);
       if (!userId) throw new HttpError(400, "userId is required");
-      users.getUser(db, userId, tenantFilter(req));
-      res.status(201).json({ items: orgs.addMember(db, req.params.id, userId, isPrimary, req.actor, clientIp(req)) });
+      await users.getUserAsync(db, userId, tenantFilter(req));
+      res.status(201).json({
+        items: await orgs.addMemberAsync(db, req.params.id, userId, isPrimary, req.actor, clientIp(req)),
+      });
     })
   );
 
   app.delete(
     "/api/organizations/:id/members/:userId",
-    auth,
-    can("iam.organizations", "update"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
+    authAsync,
+    canAsync("iam.organizations", "update"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
       res.json({
-        items: orgs.removeMember(db, req.params.id, req.params.userId, req.actor, clientIp(req)),
+        items: await orgs.removeMemberAsync(db, req.params.id, req.params.userId, req.actor, clientIp(req)),
       });
     })
   );
 
   app.get(
     "/api/organizations/:id/context",
-    auth,
-    can("iam.organizations", "read"),
-    wrap((req, res) => {
-      scopedOrg(db, req, req.params.id);
-      res.json(orgs.organizationContext(db, req.params.id));
+    authAsync,
+    canAsync("iam.organizations", "read"),
+    wrap(async (req, res) => {
+      await scopedOrgAsync(db, req, req.params.id);
+      res.json(await orgs.organizationContextAsync(db, req.params.id));
     })
   );
 
   app.get(
     "/api/hierarchy",
-    auth,
-    can("iam.organizations", "read"),
-    wrap((_req, res) => {
-      res.json(hierarchy.getHierarchy(db));
+    authAsync,
+    canAsync("iam.organizations", "read"),
+    wrap(async (_req, res) => {
+      res.json(await hierarchy.getHierarchyAsync(db));
     })
   );
 
   app.get(
     "/api/platform/hierarchy",
-    auth,
-    can("iam.platform", "read"),
-    wrap((_req, res) => {
-      res.json(hierarchy.getHierarchy(db, { includeInactive: true }));
+    authAsync,
+    canAsync("iam.platform", "read"),
+    wrap(async (_req, res) => {
+      res.json(await hierarchy.getHierarchyAsync(db, { includeInactive: true }));
     })
   );
 
   app.put(
     "/api/platform/hierarchy",
-    auth,
-    can("iam.platform", "update"),
-    wrap((req, res) => {
-      res.json(hierarchy.replaceHierarchy(db, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.platform", "update"),
+    wrap(async (req, res) => {
+      res.json(await hierarchy.replaceHierarchyAsync(db, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/platform/settings",
-    auth,
-    can("iam.platform", "read"),
-    wrap((_req, res) => {
-      res.json(hierarchy.getSettings(db));
+    authAsync,
+    canAsync("iam.platform", "read"),
+    wrap(async (_req, res) => {
+      res.json(await hierarchy.getSettingsAsync(db));
     })
   );
 
   app.put(
     "/api/platform/settings",
-    auth,
-    can("iam.platform", "update"),
-    wrap((req, res) => {
-      res.json(hierarchy.updateSettings(db, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.platform", "update"),
+    wrap(async (req, res) => {
+      res.json(await hierarchy.updateSettingsAsync(db, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   for (const [prefix, kind] of Object.entries(orgs.typedCollections(db))) {
     app.get(
       `/api/${prefix}`,
-      auth,
-      can("iam.organizations", "read"),
-      wrap((req, res) => {
-        res.json(orgs.listOrganizations(db, { ...req.query, kind, ...tenantFilter(req) }));
+      authAsync,
+      canAsync("iam.organizations", "read"),
+      wrap(async (req, res) => {
+        res.json(await orgs.listOrganizationsAsync(db, { ...req.query, kind, ...tenantFilter(req) }));
       })
     );
     app.post(
       `/api/${prefix}`,
-      auth,
-      can("iam.organizations", "create"),
-      wrap((req, res) => {
-        if (req.body?.parent_id) scopedOrg(db, req, req.body.parent_id);
-        const org = orgs.createOrganization(db, { ...(req.body || {}), kind }, req.actor, clientIp(req));
+      authAsync,
+      canAsync("iam.organizations", "create"),
+      wrap(async (req, res) => {
+        if (req.body?.parent_id) await scopedOrgAsync(db, req, req.body.parent_id);
+        const org = await orgs.createOrganizationAsync(
+          db,
+          { ...(req.body || {}), kind },
+          req.actor,
+          clientIp(req)
+        );
         res.status(201).json(org);
       })
     );
     app.get(
       `/api/${prefix}/:id`,
-      auth,
-      can("iam.organizations", "read"),
-      wrap((req, res) => {
-        orgs.getOrganizationOfKind(db, req.params.id, kind);
-        scopedOrg(db, req, req.params.id);
-        res.json(orgs.organizationDetail(db, req.params.id));
+      authAsync,
+      canAsync("iam.organizations", "read"),
+      wrap(async (req, res) => {
+        await orgs.getOrganizationOfKindAsync(db, req.params.id, kind);
+        await scopedOrgAsync(db, req, req.params.id);
+        res.json(await orgs.organizationDetailAsync(db, req.params.id));
       })
     );
     app.put(
       `/api/${prefix}/:id`,
-      auth,
-      can("iam.organizations", "update"),
-      wrap((req, res) => {
-        orgs.getOrganizationOfKind(db, req.params.id, kind);
-        scopedOrg(db, req, req.params.id);
+      authAsync,
+      canAsync("iam.organizations", "update"),
+      wrap(async (req, res) => {
+        await orgs.getOrganizationOfKindAsync(db, req.params.id, kind);
+        await scopedOrgAsync(db, req, req.params.id);
         res.json(
-          orgs.updateOrganization(db, req.params.id, { ...(req.body || {}), kind }, req.actor, clientIp(req))
+          await orgs.updateOrganizationAsync(db, req.params.id, { ...(req.body || {}), kind }, req.actor, clientIp(req))
         );
       })
     );
     app.delete(
       `/api/${prefix}/:id`,
-      auth,
-      can("iam.organizations", "delete"),
-      wrap((req, res) => {
-        orgs.getOrganizationOfKind(db, req.params.id, kind);
-        scopedOrg(db, req, req.params.id);
-        res.json(orgs.deleteOrganization(db, req.params.id, req.actor, clientIp(req)));
+      authAsync,
+      canAsync("iam.organizations", "delete"),
+      wrap(async (req, res) => {
+        await orgs.getOrganizationOfKindAsync(db, req.params.id, kind);
+        await scopedOrgAsync(db, req, req.params.id);
+        res.json(await orgs.deleteOrganizationAsync(db, req.params.id, req.actor, clientIp(req)));
       })
     );
   }
 
   app.get(
     "/api/users",
-    auth,
-    can("iam.users", "read"),
-    wrap((req, res) => {
-      res.json(users.listUsers(db, { ...req.query, ...tenantFilter(req) }));
+    authAsync,
+    canAsync("iam.users", "read"),
+    wrap(async (req, res) => {
+      res.json(await users.listUsersAsync(db, { ...req.query, ...tenantFilter(req) }));
     })
   );
 
   app.post(
     "/api/users",
-    auth,
-    can("iam.users", "create"),
-    wrap((req, res) => {
-      const user = users.createUser(
+    authAsync,
+    canAsync("iam.users", "create"),
+    wrap(async (req, res) => {
+      const user = await users.createUserAsync(
         db,
         { ...(req.body || {}), contextTenantId: req.tenantId },
         req.actor,
@@ -3141,135 +3250,133 @@ export function createApp(db) {
 
   app.get(
     "/api/users/:id",
-    auth,
-    can("iam.users", "read"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
-      const { user, groups: memberships, roles: assigned, organizations } = users.userMemberships(
-        db,
-        req.params.id
-      );
+    authAsync,
+    canAsync("iam.users", "read"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      const { user, groups: memberships, roles: assigned, organizations } =
+        await users.userMembershipsAsync(db, req.params.id);
       res.json({
         ...user,
         groups: memberships,
         roles: assigned,
         organizations,
-        access: effectiveAccess(db, req.params.id),
+        access: await effectiveAccessAsync(db, req.params.id),
       });
     })
   );
 
   app.put(
     "/api/users/:id",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
-      res.json(users.updateUser(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      res.json(await users.updateUserAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/users/:id/activate",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
-      res.json(users.setUserStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      res.json(await users.setUserStatusAsync(db, req.params.id, "active", req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/users/:id/deactivate",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
-      res.json(users.setUserStatus(db, req.params.id, "inactive", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      res.json(await users.setUserStatusAsync(db, req.params.id, "inactive", req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/users/:id/lock",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
-      res.json(users.setUserStatus(db, req.params.id, "locked", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      res.json(await users.setUserStatusAsync(db, req.params.id, "locked", req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/users/:id/unlock",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
-      res.json(users.setUserStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      res.json(await users.setUserStatusAsync(db, req.params.id, "active", req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/users/:id/reset-password",
-    auth,
-    can("iam.users", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.users", "execute"),
+    wrap(async (req, res) => {
       const { password } = req.body || {};
-      users.getUser(db, req.params.id, tenantFilter(req));
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
       if (!password) throw new HttpError(400, "password is required");
-      res.json(users.resetPassword(db, req.params.id, password, req.actor, clientIp(req)));
+      res.json(await users.resetPasswordAsync(db, req.params.id, password, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/users/:id/groups",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
       const { groupId } = req.body || {};
-      users.getUser(db, req.params.id, tenantFilter(req));
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
       if (!groupId) throw new HttpError(400, "groupId is required");
-      groups.getGroup(db, groupId, tenantFilter(req));
-      res.json({ members: groups.addGroupMember(db, groupId, req.params.id, req.actor, clientIp(req)) });
+      await groups.getGroupAsync(db, groupId, tenantFilter(req));
+      res.json({ members: await groups.addGroupMemberAsync(db, groupId, req.params.id, req.actor, clientIp(req)) });
     })
   );
 
   app.delete(
     "/api/users/:id/groups/:groupId",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
-      groups.getGroup(db, req.params.groupId, tenantFilter(req));
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      await groups.getGroupAsync(db, req.params.groupId, tenantFilter(req));
       res.json({
-        members: groups.removeGroupMember(db, req.params.groupId, req.params.id, req.actor, clientIp(req)),
+        members: await groups.removeGroupMemberAsync(db, req.params.groupId, req.params.id, req.actor, clientIp(req)),
       });
     })
   );
 
   app.post(
     "/api/users/:id/roles",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
       const { roleId, organizationId } = req.body || {};
-      users.getUser(db, req.params.id, tenantFilter(req));
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
       if (!roleId) throw new HttpError(400, "roleId is required");
-      if (organizationId) scopedOrg(db, req, organizationId);
+      if (organizationId) await scopedOrgAsync(db, req, organizationId);
       res.json({
-        roles: roles.assignUserRole(db, req.params.id, roleId, organizationId, req.actor, clientIp(req)),
+        roles: await roles.assignUserRoleAsync(db, req.params.id, roleId, organizationId, req.actor, clientIp(req)),
       });
     })
   );
 
   app.delete(
     "/api/users/:id/roles/:roleId",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
       res.json({
-        roles: roles.unassignUserRole(
+        roles: await roles.unassignUserRoleAsync(
           db,
           req.params.id,
           req.params.roleId,
@@ -3283,56 +3390,56 @@ export function createApp(db) {
 
   app.get(
     "/api/users/:id/organizations",
-    auth,
-    can("iam.users", "read"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
-      res.json({ items: orgs.listUserOrganizations(db, req.params.id) });
+    authAsync,
+    canAsync("iam.users", "read"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      res.json({ items: await orgs.listUserOrganizationsAsync(db, req.params.id) });
     })
   );
 
   app.post(
     "/api/users/:id/organizations",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
       const { organizationId, isPrimary } = req.body || {};
       if (!organizationId) throw new HttpError(400, "organizationId is required");
-      users.getUser(db, req.params.id, tenantFilter(req));
-      scopedOrg(db, req, organizationId);
-      orgs.addMember(db, organizationId, req.params.id, isPrimary, req.actor, clientIp(req));
-      res.status(201).json({ items: orgs.listUserOrganizations(db, req.params.id) });
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      await scopedOrgAsync(db, req, organizationId);
+      await orgs.addMemberAsync(db, organizationId, req.params.id, isPrimary, req.actor, clientIp(req));
+      res.status(201).json({ items: await orgs.listUserOrganizationsAsync(db, req.params.id) });
     })
   );
 
   app.delete(
     "/api/users/:id/organizations/:orgId",
-    auth,
-    can("iam.users", "update"),
-    wrap((req, res) => {
-      users.getUser(db, req.params.id, tenantFilter(req));
-      scopedOrg(db, req, req.params.orgId);
-      orgs.removeMember(db, req.params.orgId, req.params.id, req.actor, clientIp(req));
-      res.json({ items: orgs.listUserOrganizations(db, req.params.id) });
+    authAsync,
+    canAsync("iam.users", "update"),
+    wrap(async (req, res) => {
+      await users.getUserAsync(db, req.params.id, tenantFilter(req));
+      await scopedOrgAsync(db, req, req.params.orgId);
+      await orgs.removeMemberAsync(db, req.params.orgId, req.params.id, req.actor, clientIp(req));
+      res.json({ items: await orgs.listUserOrganizationsAsync(db, req.params.id) });
     })
   );
 
   app.get(
     "/api/groups",
-    auth,
-    can("iam.groups", "read"),
-    wrap((req, res) => {
-      res.json(groups.listGroups(db, { ...req.query, ...tenantFilter(req) }));
+    authAsync,
+    canAsync("iam.groups", "read"),
+    wrap(async (req, res) => {
+      res.json(await groups.listGroupsAsync(db, { ...req.query, ...tenantFilter(req) }));
     })
   );
 
   app.post(
     "/api/groups",
-    auth,
-    can("iam.groups", "create"),
-    wrap((req, res) => {
-      if (req.body?.organization_id) scopedOrg(db, req, req.body.organization_id);
-      const group = groups.createGroup(
+    authAsync,
+    canAsync("iam.groups", "create"),
+    wrap(async (req, res) => {
+      if (req.body?.organization_id) await scopedOrgAsync(db, req, req.body.organization_id);
+      const group = await groups.createGroupAsync(
         db,
         { ...(req.body || {}), tenant_id: req.tenantId },
         req.actor,
@@ -3344,94 +3451,94 @@ export function createApp(db) {
 
   app.get(
     "/api/groups/:id",
-    auth,
-    can("iam.groups", "read"),
-    wrap((req, res) => {
-      const group = groups.getGroup(db, req.params.id, tenantFilter(req));
-      res.json({
-        ...group,
-        members: groups.listGroupMembers(db, req.params.id),
-        roles: roles.listGroupRoles(db, req.params.id),
-        ancestors: groups.ancestorGroups(db, req.params.id).slice(1),
-      });
+    authAsync,
+    canAsync("iam.groups", "read"),
+    wrap(async (req, res) => {
+      const group = await groups.getGroupAsync(db, req.params.id, tenantFilter(req));
+      const [members, roles_, ancestors] = await Promise.all([
+        groups.listGroupMembersAsync(db, req.params.id),
+        roles.listGroupRolesAsync(db, req.params.id),
+        groups.ancestorGroupsAsync(db, req.params.id),
+      ]);
+      res.json({ ...group, members, roles: roles_, ancestors: ancestors.slice(1) });
     })
   );
 
   app.put(
     "/api/groups/:id",
-    auth,
-    can("iam.groups", "update"),
-    wrap((req, res) => {
-      groups.getGroup(db, req.params.id, tenantFilter(req));
-      if (req.body?.organization_id) scopedOrg(db, req, req.body.organization_id);
-      res.json(groups.updateGroup(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.groups", "update"),
+    wrap(async (req, res) => {
+      await groups.getGroupAsync(db, req.params.id, tenantFilter(req));
+      if (req.body?.organization_id) await scopedOrgAsync(db, req, req.body.organization_id);
+      res.json(await groups.updateGroupAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/groups/:id",
-    auth,
-    can("iam.groups", "delete"),
-    wrap((req, res) => {
-      groups.getGroup(db, req.params.id, tenantFilter(req));
-      res.json(groups.deleteGroup(db, req.params.id, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.groups", "delete"),
+    wrap(async (req, res) => {
+      await groups.getGroupAsync(db, req.params.id, tenantFilter(req));
+      res.json(await groups.deleteGroupAsync(db, req.params.id, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/groups/:id/members",
-    auth,
-    can("iam.groups", "read"),
-    wrap((req, res) => {
-      groups.getGroup(db, req.params.id, tenantFilter(req));
-      res.json({ items: groups.listGroupMembers(db, req.params.id) });
+    authAsync,
+    canAsync("iam.groups", "read"),
+    wrap(async (req, res) => {
+      await groups.getGroupAsync(db, req.params.id, tenantFilter(req));
+      res.json({ items: await groups.listGroupMembersAsync(db, req.params.id) });
     })
   );
 
   app.post(
     "/api/groups/:id/members",
-    auth,
-    can("iam.groups", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.groups", "update"),
+    wrap(async (req, res) => {
       const { userId } = req.body || {};
-      groups.getGroup(db, req.params.id, tenantFilter(req));
+      await groups.getGroupAsync(db, req.params.id, tenantFilter(req));
       if (!userId) throw new HttpError(400, "userId is required");
-      users.getUser(db, userId, tenantFilter(req));
-      res.json({ items: groups.addGroupMember(db, req.params.id, userId, req.actor, clientIp(req)) });
+      await users.getUserAsync(db, userId, tenantFilter(req));
+      res.json({ items: await groups.addGroupMemberAsync(db, req.params.id, userId, req.actor, clientIp(req)) });
     })
   );
 
   app.delete(
     "/api/groups/:id/members/:userId",
-    auth,
-    can("iam.groups", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.groups", "update"),
+    wrap(async (req, res) => {
       res.json({
-        items: groups.removeGroupMember(db, req.params.id, req.params.userId, req.actor, clientIp(req)),
+        items: await groups.removeGroupMemberAsync(db, req.params.id, req.params.userId, req.actor, clientIp(req)),
       });
     })
   );
 
   app.post(
     "/api/groups/:id/roles",
-    auth,
-    can("iam.groups", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.groups", "update"),
+    wrap(async (req, res) => {
       const { roleId, organizationId } = req.body || {};
       if (!roleId) throw new HttpError(400, "roleId is required");
       res.json({
-        roles: roles.assignGroupRole(db, req.params.id, roleId, organizationId, req.actor, clientIp(req)),
+        roles: await roles.assignGroupRoleAsync(db, req.params.id, roleId, organizationId, req.actor, clientIp(req)),
       });
     })
   );
 
   app.delete(
     "/api/groups/:id/roles/:roleId",
-    auth,
-    can("iam.groups", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.groups", "update"),
+    wrap(async (req, res) => {
       res.json({
-        roles: roles.unassignGroupRole(
+        roles: await roles.unassignGroupRoleAsync(
           db,
           req.params.id,
           req.params.roleId,
@@ -3445,98 +3552,98 @@ export function createApp(db) {
 
   app.get(
     "/api/roles",
-    auth,
-    can("iam.roles", "read"),
-    wrap((req, res) => {
-      res.json(roles.listRoles(db, req.query));
+    authAsync,
+    canAsync("iam.roles", "read"),
+    wrap(async (req, res) => {
+      res.json(await roles.listRolesAsync(db, req.query));
     })
   );
 
   app.post(
     "/api/roles",
-    auth,
-    can("iam.roles", "create"),
-    wrap((req, res) => {
-      const role = roles.createRole(db, req.body || {}, req.actor, clientIp(req));
+    authAsync,
+    canAsync("iam.roles", "create"),
+    wrap(async (req, res) => {
+      const role = await roles.createRoleAsync(db, req.body || {}, req.actor, clientIp(req));
       res.status(201).json(role);
     })
   );
 
   app.get(
     "/api/roles/:id",
-    auth,
-    can("iam.roles", "read"),
-    wrap((req, res) => {
-      const role = roles.getRole(db, req.params.id);
-      res.json({
-        ...role,
-        ancestors: roles.ancestorRoles(db, req.params.id).slice(1),
-        assignments: roles.roleAssignments(db, req.params.id),
-        permissions: grants.listRolePermissions(db, req.params.id),
-      });
+    authAsync,
+    canAsync("iam.roles", "read"),
+    wrap(async (req, res) => {
+      const role = await roles.getRoleAsync(db, req.params.id);
+      const [ancestors, assignments, permissions] = await Promise.all([
+        roles.ancestorRolesAsync(db, req.params.id),
+        roles.roleAssignmentsAsync(db, req.params.id),
+        grants.listRolePermissionsAsync(db, req.params.id),
+      ]);
+      res.json({ ...role, ancestors: ancestors.slice(1), assignments, permissions });
     })
   );
 
   app.put(
     "/api/roles/:id",
-    auth,
-    can("iam.roles", "update"),
-    wrap((req, res) => {
-      res.json(roles.updateRole(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.roles", "update"),
+    wrap(async (req, res) => {
+      res.json(await roles.updateRoleAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/roles/:id",
-    auth,
-    can("iam.roles", "delete"),
-    wrap((req, res) => {
-      res.json(roles.deleteRole(db, req.params.id, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.roles", "delete"),
+    wrap(async (req, res) => {
+      res.json(await roles.deleteRoleAsync(db, req.params.id, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/roles/:id/users",
-    auth,
-    can("iam.roles", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.roles", "update"),
+    wrap(async (req, res) => {
       const { userId, organizationId } = req.body || {};
       if (!userId) throw new HttpError(400, "userId is required");
       res.json({
-        roles: roles.assignUserRole(db, userId, req.params.id, organizationId, req.actor, clientIp(req)),
+        roles: await roles.assignUserRoleAsync(db, userId, req.params.id, organizationId, req.actor, clientIp(req)),
       });
     })
   );
 
   app.post(
     "/api/roles/:id/groups",
-    auth,
-    can("iam.roles", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.roles", "update"),
+    wrap(async (req, res) => {
       const { groupId, organizationId } = req.body || {};
       if (!groupId) throw new HttpError(400, "groupId is required");
       res.json({
-        roles: roles.assignGroupRole(db, groupId, req.params.id, organizationId, req.actor, clientIp(req)),
+        roles: await roles.assignGroupRoleAsync(db, groupId, req.params.id, organizationId, req.actor, clientIp(req)),
       });
     })
   );
 
   app.get(
     "/api/password-policy",
-    auth,
-    can("iam.policy", "read"),
-    wrap((_req, res) => {
-      res.json(policy.getPolicy(db));
+    authAsync,
+    canAsync("iam.policy", "read"),
+    wrap(async (_req, res) => {
+      res.json(await policy.getPolicyAsync(db));
     })
   );
 
   app.put(
     "/api/password-policy",
-    auth,
-    can("iam.policy", "update"),
-    wrap((req, res) => {
-      const next = policy.updatePolicy(db, req.body || {});
-      audit.writeAudit(db, {
+    authAsync,
+    canAsync("iam.policy", "update"),
+    wrap(async (req, res) => {
+      const next = await policy.updatePolicyAsync(db, req.body || {});
+      await writeAuditAsync(db, {
         actor: req.actor,
         action: "policy.update",
         resourceType: "password_policy",
@@ -3550,12 +3657,12 @@ export function createApp(db) {
 
   app.get(
     "/api/audit-logs",
-    auth,
-    can("iam.audit", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit", "read"),
+    wrap(async (req, res) => {
       const page = pagination(req.query);
       res.json(
-        audit.listAuditLogs(db, {
+        await audit.listAuditLogsAsync(db, {
           ...page,
           action: req.query.action,
           resourceType: req.query.resourceType,
@@ -3631,37 +3738,37 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/events",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
-      res.json(audit.listEvents(db, eventFilters(req), auditScope(req)));
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.listEventsAsync(db, eventFilters(req), auditScope(req)));
     })
   );
 
   app.get(
     "/api/audit/summary",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
-      res.json(audit.auditSummary(db, eventFilters(req), auditScope(req)));
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.auditSummaryAsync(db, eventFilters(req), auditScope(req)));
     })
   );
 
   app.get(
     "/api/audit/facets",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
-      res.json(audit.eventFacets(db, eventFilters(req), auditScope(req)));
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.eventFacetsAsync(db, eventFilters(req), auditScope(req)));
     })
   );
 
   app.get(
     "/api/audit/events/:id",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
-      res.json(audit.getEvent(db, req.params.id, auditScope(req)));
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.getEventAsync(db, req.params.id, auditScope(req)));
     })
   );
 
@@ -4246,57 +4353,57 @@ export function createApp(db) {
 
   app.get(
     "/api/applications",
-    auth,
-    can("iam.permissions", "read"),
-    wrap((_req, res) => {
-      res.json({ items: catalog.listApplications(db) });
+    authAsync,
+    canAsync("iam.permissions", "read"),
+    wrap(async (_req, res) => {
+      res.json({ items: await catalog.listApplicationsAsync(db) });
     })
   );
 
   app.post(
     "/api/applications",
-    auth,
-    can("iam.permissions", "create"),
-    wrap((req, res) => {
-      const appItem = catalog.createApplication(db, req.body || {}, req.actor, clientIp(req));
+    authAsync,
+    canAsync("iam.permissions", "create"),
+    wrap(async (req, res) => {
+      const appItem = await catalog.createApplicationAsync(db, req.body || {}, req.actor, clientIp(req));
       res.status(201).json(appItem);
     })
   );
 
   app.get(
     "/api/resources",
-    auth,
-    can("iam.permissions", "read"),
-    wrap((req, res) => {
-      res.json({ items: catalog.listResources(db, req.query) });
+    authAsync,
+    canAsync("iam.permissions", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await catalog.listResourcesAsync(db, req.query) });
     })
   );
 
   app.post(
     "/api/resources",
-    auth,
-    can("iam.permissions", "create"),
-    wrap((req, res) => {
-      const resource = catalog.createResource(db, req.body || {}, req.actor, clientIp(req));
+    authAsync,
+    canAsync("iam.permissions", "create"),
+    wrap(async (req, res) => {
+      const resource = await catalog.createResourceAsync(db, req.body || {}, req.actor, clientIp(req));
       res.status(201).json(resource);
     })
   );
 
   app.put(
     "/api/resources/:id",
-    auth,
-    can("iam.permissions", "update"),
-    wrap((req, res) => {
-      res.json(catalog.updateResource(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.permissions", "update"),
+    wrap(async (req, res) => {
+      res.json(await catalog.updateResourceAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/permissions",
-    auth,
-    can("iam.permissions", "read"),
-    wrap((req, res) => {
-      res.json(catalog.listPermissions(db, req.query));
+    authAsync,
+    canAsync("iam.permissions", "read"),
+    wrap(async (req, res) => {
+      res.json(await catalog.listPermissionsAsync(db, req.query));
     })
   );
 
@@ -4311,38 +4418,38 @@ export function createApp(db) {
 
   app.post(
     "/api/permissions",
-    auth,
-    can("iam.permissions", "create"),
-    wrap((req, res) => {
-      const permission = catalog.createPermission(db, req.body || {}, req.actor, clientIp(req));
+    authAsync,
+    canAsync("iam.permissions", "create"),
+    wrap(async (req, res) => {
+      const permission = await catalog.createPermissionAsync(db, req.body || {}, req.actor, clientIp(req));
       res.status(201).json(permission);
     })
   );
 
   app.delete(
     "/api/permissions/:id",
-    auth,
-    can("iam.permissions", "delete"),
-    wrap((req, res) => {
-      res.json(catalog.deletePermission(db, req.params.id, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.permissions", "delete"),
+    wrap(async (req, res) => {
+      res.json(await catalog.deletePermissionAsync(db, req.params.id, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/roles/:id/permissions",
-    auth,
-    can("iam.permissions", "read"),
-    wrap((req, res) => {
-      res.json({ items: grants.listRolePermissions(db, req.params.id) });
+    authAsync,
+    canAsync("iam.permissions", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await grants.listRolePermissionsAsync(db, req.params.id) });
     })
   );
 
   app.put(
     "/api/roles/:id/permissions",
-    auth,
-    can("iam.permissions", "update"),
-    wrap((req, res) => {
-      const items = grants.replaceRolePermissionMatrix(
+    authAsync,
+    canAsync("iam.permissions", "update"),
+    wrap(async (req, res) => {
+      const items = await grants.replaceRolePermissionMatrixAsync(
         db,
         req.params.id,
         req.body?.grants || [],
@@ -4355,22 +4462,22 @@ export function createApp(db) {
 
   app.post(
     "/api/roles/:id/permissions",
-    auth,
-    can("iam.permissions", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.permissions", "update"),
+    wrap(async (req, res) => {
       res.status(201).json({
-        items: grants.grantRolePermission(db, req.params.id, req.body || {}, req.actor, clientIp(req)),
+        items: await grants.grantRolePermissionAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)),
       });
     })
   );
 
   app.delete(
     "/api/roles/:id/permissions/:permissionId",
-    auth,
-    can("iam.permissions", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.permissions", "update"),
+    wrap(async (req, res) => {
       res.json({
-        items: grants.revokeRolePermission(
+        items: await grants.revokeRolePermissionAsync(
           db,
           req.params.id,
           req.params.permissionId,
@@ -4425,24 +4532,24 @@ export function createApp(db) {
     return req.tenantId || -1;
   }
 
-  function notificationAdminScope(req) {
-    if (tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true") return null;
+  async function notificationAdminScopeAsync(req) {
+    if ((await tenants.isPlatformAdminAsync(db, req.actor.id)) && req.query.all === "true") return null;
     return req.tenantId || -1;
   }
 
   app.get(
     "/api/notifications/unread-count",
-    auth,
-    can("iam.notifications.inbox", "read"),
-    wrap((req, res) => {
-      res.json(notifications.unreadCount(db, req.actor.id, notificationSelfTenant(req)));
+    authAsync,
+    canAsync("iam.notifications.inbox", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.unreadCountAsync(db, req.actor.id, notificationSelfTenant(req)));
     })
   );
 
   app.get(
     "/api/notifications/meta",
-    auth,
-    can("iam.notifications.inbox", "read"),
+    authAsync,
+    canAsync("iam.notifications.inbox", "read"),
     wrap((_req, res) => {
       res.json({
         channels: notifications.CHANNELS,
@@ -4460,101 +4567,101 @@ export function createApp(db) {
 
   app.get(
     "/api/notifications",
-    auth,
-    can("iam.notifications.inbox", "read"),
-    wrap((req, res) => {
-      res.json(notifications.listInbox(db, req.actor.id, notificationSelfTenant(req), req.query));
+    authAsync,
+    canAsync("iam.notifications.inbox", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.listInboxAsync(db, req.actor.id, notificationSelfTenant(req), req.query));
     })
   );
 
   app.post(
     "/api/notifications/mark-all-read",
-    auth,
-    can("iam.notifications.inbox", "update"),
-    wrap((req, res) => {
-      res.json(notifications.markAllRead(db, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.notifications.inbox", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.markAllReadAsync(db, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/notifications/archive-all-read",
-    auth,
-    can("iam.notifications.inbox", "update"),
-    wrap((req, res) => {
-      res.json(notifications.archiveAllRead(db, req.actor.id, notificationSelfTenant(req)));
+    authAsync,
+    canAsync("iam.notifications.inbox", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.archiveAllReadAsync(db, req.actor.id, notificationSelfTenant(req)));
     })
   );
 
   app.get(
     "/api/notifications/:id",
-    auth,
-    can("iam.notifications.inbox", "read"),
-    wrap((req, res) => {
-      res.json(notifications.getNotification(db, req.params.id, req.actor.id, notificationSelfTenant(req)));
+    authAsync,
+    canAsync("iam.notifications.inbox", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.getNotificationAsync(db, req.params.id, req.actor.id, notificationSelfTenant(req)));
     })
   );
 
   app.put(
     "/api/notifications/:id/read",
-    auth,
-    can("iam.notifications.inbox", "update"),
-    wrap((req, res) => {
-      res.json(notifications.markRead(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.notifications.inbox", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.markReadAsync(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
     })
   );
 
   app.put(
     "/api/notifications/:id/unread",
-    auth,
-    can("iam.notifications.inbox", "update"),
-    wrap((req, res) => {
-      res.json(notifications.markUnread(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.notifications.inbox", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.markUnreadAsync(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
     })
   );
 
   app.put(
     "/api/notifications/:id/archive",
-    auth,
-    can("iam.notifications.inbox", "update"),
-    wrap((req, res) => {
-      res.json(notifications.archiveNotification(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.notifications.inbox", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.archiveNotificationAsync(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/notifications/:id",
-    auth,
-    can("iam.notifications.inbox", "update"),
-    wrap((req, res) => {
-      res.json(notifications.deleteNotification(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.notifications.inbox", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.deleteNotificationAsync(db, req.params.id, req.actor.id, notificationSelfTenant(req), req.actor, clientIp(req)));
     })
   );
 
   // ── Preferences (self-service) ───────────────────────────────────────────
   app.get(
     "/api/notification-preferences",
-    auth,
-    can("iam.notifications.preferences", "read"),
-    wrap((req, res) => {
-      res.json(notifications.getPreferences(db, req.actor.id, notificationSelfTenant(req)));
+    authAsync,
+    canAsync("iam.notifications.preferences", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.getPreferencesAsync(db, req.actor.id, notificationSelfTenant(req)));
     })
   );
 
   app.put(
     "/api/notification-preferences",
-    auth,
-    can("iam.notifications.preferences", "update"),
-    wrap((req, res) => {
-      res.json(notifications.updatePreferences(db, req.actor.id, req.body || {}, req.actor, clientIp(req), notificationSelfTenant(req)));
+    authAsync,
+    canAsync("iam.notifications.preferences", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.updatePreferencesAsync(db, req.actor.id, req.body || {}, req.actor, clientIp(req), notificationSelfTenant(req)));
     })
   );
 
   app.get(
     "/api/notification-preferences/mandatory",
-    auth,
-    can("iam.notifications.preferences", "read"),
-    wrap((req, res) => {
-      res.json({ items: notifications.mandatoryEvents(db, notificationSelfTenant(req)) });
+    authAsync,
+    canAsync("iam.notifications.preferences", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await notifications.mandatoryEventsAsync(db, notificationSelfTenant(req)) });
     })
   );
 
@@ -4570,110 +4677,111 @@ export function createApp(db) {
 
   app.get(
     "/api/notification-templates",
-    auth,
-    can("iam.notifications.templates", "read"),
-    wrap((req, res) => {
-      res.json(notifications.listTemplates(db, req.query, notificationSelfTenant(req)));
+    authAsync,
+    canAsync("iam.notifications.templates", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.listTemplatesAsync(db, req.query, notificationSelfTenant(req)));
     })
   );
 
   app.post(
     "/api/notification-templates",
-    auth,
-    can("iam.notifications.templates", "create"),
-    wrap((req, res) => {
-      res.status(201).json(notifications.createTemplate(db, req.body || {}, req.actor, clientIp(req), req.tenantId));
+    authAsync,
+    canAsync("iam.notifications.templates", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await notifications.createTemplateAsync(db, req.body || {}, req.actor, clientIp(req), req.tenantId));
     })
   );
 
   app.get(
     "/api/notification-templates/:id",
-    auth,
-    can("iam.notifications.templates", "read"),
-    wrap((req, res) => {
-      res.json(notifications.publicTemplate(notifications.findTemplate(db, { id: req.params.id }, notificationSelfTenant(req))));
+    authAsync,
+    canAsync("iam.notifications.templates", "read"),
+    wrap(async (req, res) => {
+      const row = await notifications.findTemplateAsync(db, { id: req.params.id }, notificationSelfTenant(req));
+      res.json(notifications.publicTemplate(row));
     })
   );
 
   app.get(
     "/api/notification-templates/:id/versions",
-    auth,
-    can("iam.notifications.templates", "read"),
-    wrap((req, res) => {
-      res.json({ items: notifications.listTemplateVersions(db, req.params.id, notificationSelfTenant(req)) });
+    authAsync,
+    canAsync("iam.notifications.templates", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await notifications.listTemplateVersionsAsync(db, req.params.id, notificationSelfTenant(req)) });
     })
   );
 
   app.put(
     "/api/notification-templates/:id",
-    auth,
-    can("iam.notifications.templates", "update"),
-    wrap((req, res) => {
-      res.json(notifications.updateTemplate(db, req.params.id, req.body || {}, req.actor, clientIp(req), req.tenantId));
+    authAsync,
+    canAsync("iam.notifications.templates", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.updateTemplateAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), req.tenantId));
     })
   );
 
   app.put(
     "/api/notification-templates/:id/status",
-    auth,
-    can("iam.notifications.templates", "update"),
-    wrap((req, res) => {
-      res.json(notifications.setTemplateStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), req.tenantId));
+    authAsync,
+    canAsync("iam.notifications.templates", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.setTemplateStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req), req.tenantId));
     })
   );
 
   app.post(
     "/api/notification-templates/:id/preview",
-    auth,
-    can("iam.notifications.templates", "execute"),
-    wrap((req, res) => {
-      res.json(notifications.previewTemplate(db, req.params.id, req.body?.context || {}, notificationSelfTenant(req)));
+    authAsync,
+    canAsync("iam.notifications.templates", "execute"),
+    wrap(async (req, res) => {
+      res.json(await notifications.previewTemplateAsync(db, req.params.id, req.body?.context || {}, notificationSelfTenant(req)));
     })
   );
 
   app.post(
     "/api/notification-templates/:id/test-send",
-    auth,
-    can("iam.notifications.templates", "execute"),
-    wrap((req, res) => {
-      res.status(201).json(notifications.testSendTemplate(db, req.params.id, req.body || {}, req.actor, clientIp(req), notificationSelfTenant(req)));
+    authAsync,
+    canAsync("iam.notifications.templates", "execute"),
+    wrap(async (req, res) => {
+      res.status(201).json(await notifications.testSendTemplateAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), notificationSelfTenant(req)));
     })
   );
 
   app.delete(
     "/api/notification-templates/:id",
-    auth,
-    can("iam.notifications.templates", "delete"),
-    wrap((req, res) => {
-      res.json(notifications.deleteTemplate(db, req.params.id, req.actor, clientIp(req), req.tenantId));
+    authAsync,
+    canAsync("iam.notifications.templates", "delete"),
+    wrap(async (req, res) => {
+      res.json(await notifications.deleteTemplateAsync(db, req.params.id, req.actor, clientIp(req), req.tenantId));
     })
   );
 
   // ── Rules ────────────────────────────────────────────────────────────────
   app.get(
     "/api/notification-rules",
-    auth,
-    can("iam.notifications.rules", "read"),
-    wrap((req, res) => {
-      res.json(notifications.listRules(db, req.query, notificationSelfTenant(req)));
+    authAsync,
+    canAsync("iam.notifications.rules", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.listRulesAsync(db, req.query, notificationSelfTenant(req)));
     })
   );
 
   app.post(
     "/api/notification-rules",
-    auth,
-    can("iam.notifications.rules", "create"),
-    wrap((req, res) => {
-      res.status(201).json(notifications.createRule(db, req.body || {}, req.actor, clientIp(req), req.tenantId));
+    authAsync,
+    canAsync("iam.notifications.rules", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await notifications.createRuleAsync(db, req.body || {}, req.actor, clientIp(req), req.tenantId));
     })
   );
 
   app.get(
     "/api/notification-rules/:id",
-    auth,
-    can("iam.notifications.rules", "read"),
-    wrap((req, res) => {
-      const row = notifications.getRuleRow(db, req.params.id);
+    authAsync,
+    canAsync("iam.notifications.rules", "read"),
+    wrap(async (req, res) => {
+      const row = await notifications.getRuleRowAsync(db, req.params.id);
       if (!row) throw new HttpError(404, "Notification rule not found");
       res.json(notifications.publicRule(row));
     })
@@ -4681,138 +4789,138 @@ export function createApp(db) {
 
   app.put(
     "/api/notification-rules/:id",
-    auth,
-    can("iam.notifications.rules", "update"),
-    wrap((req, res) => {
-      res.json(notifications.updateRule(db, req.params.id, req.body || {}, req.actor, clientIp(req), req.tenantId));
+    authAsync,
+    canAsync("iam.notifications.rules", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.updateRuleAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req), req.tenantId));
     })
   );
 
   app.put(
     "/api/notification-rules/:id/status",
-    auth,
-    can("iam.notifications.rules", "update"),
-    wrap((req, res) => {
-      res.json(notifications.setRuleStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req), req.tenantId));
+    authAsync,
+    canAsync("iam.notifications.rules", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.setRuleStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req), req.tenantId));
     })
   );
 
   app.post(
     "/api/notification-rules/:id/simulate",
-    auth,
-    can("iam.notifications.rules", "execute"),
-    wrap((req, res) => {
-      res.json(notifications.simulateRule(db, req.params.id, req.body || {}, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.notifications.rules", "execute"),
+    wrap(async (req, res) => {
+      res.json(await notifications.simulateRuleAsync(db, req.params.id, req.body || {}, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.delete(
     "/api/notification-rules/:id",
-    auth,
-    can("iam.notifications.rules", "delete"),
-    wrap((req, res) => {
-      res.json(notifications.deleteRule(db, req.params.id, req.actor, clientIp(req), req.tenantId));
+    authAsync,
+    canAsync("iam.notifications.rules", "delete"),
+    wrap(async (req, res) => {
+      res.json(await notifications.deleteRuleAsync(db, req.params.id, req.actor, clientIp(req), req.tenantId));
     })
   );
 
   // ── Providers ────────────────────────────────────────────────────────────
   app.get(
     "/api/notification-providers",
-    auth,
-    can("iam.notifications.providers", "read"),
-    wrap((req, res) => {
-      res.json({ items: notifications.listProviders(db, { channel: req.query.channel }) });
+    authAsync,
+    canAsync("iam.notifications.providers", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await notifications.listProvidersAsync(db, { channel: req.query.channel }) });
     })
   );
 
   app.post(
     "/api/notification-providers",
-    auth,
-    can("iam.notifications.providers", "create"),
-    wrap((req, res) => {
-      res.status(201).json(notifications.createProvider(db, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.notifications.providers", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await notifications.createProviderAsync(db, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.put(
     "/api/notification-providers/:id",
-    auth,
-    can("iam.notifications.providers", "update"),
-    wrap((req, res) => {
-      res.json(notifications.updateProvider(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.notifications.providers", "update"),
+    wrap(async (req, res) => {
+      res.json(await notifications.updateProviderAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/notification-providers/:id/test",
-    auth,
-    can("iam.notifications.providers", "execute"),
-    wrap((req, res) => {
-      res.json(notifications.testProvider(db, req.params.id, { recipient: req.body?.recipient }));
+    authAsync,
+    canAsync("iam.notifications.providers", "execute"),
+    wrap(async (req, res) => {
+      res.json(await notifications.testProviderAsync(db, req.params.id, { recipient: req.body?.recipient }));
     })
   );
 
   app.delete(
     "/api/notification-providers/:id",
-    auth,
-    can("iam.notifications.providers", "delete"),
-    wrap((req, res) => {
-      res.json(notifications.deleteProvider(db, req.params.id, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.notifications.providers", "delete"),
+    wrap(async (req, res) => {
+      res.json(await notifications.deleteProviderAsync(db, req.params.id, req.actor, clientIp(req)));
     })
   );
 
   // ── History, delivery queue, reminders ───────────────────────────────────
   app.get(
     "/api/notification-history",
-    auth,
-    can("iam.notifications.history", "read"),
-    wrap((req, res) => {
-      res.json(notifications.listHistory(db, req.query, notificationAdminScope(req)));
+    authAsync,
+    canAsync("iam.notifications.history", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.listHistoryAsync(db, req.query, await notificationAdminScopeAsync(req)));
     })
   );
 
   app.get(
     "/api/notification-events",
-    auth,
-    can("iam.notifications.history", "read"),
-    wrap((req, res) => {
-      res.json(notifications.listEvents(db, req.query, notificationAdminScope(req)));
+    authAsync,
+    canAsync("iam.notifications.history", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.listEventsAsync(db, req.query, await notificationAdminScopeAsync(req)));
     })
   );
 
   app.post(
     "/api/notification-events/publish",
-    auth,
-    can("iam.notifications.history", "execute"),
-    wrap((req, res) => {
-      res.status(201).json(notifications.publish(db, req.body || {}, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.notifications.history", "execute"),
+    wrap(async (req, res) => {
+      res.status(201).json(await notifications.publishAsync(db, req.body || {}, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.get(
     "/api/notification-events/:id",
-    auth,
-    can("iam.notifications.history", "read"),
-    wrap((req, res) => {
-      res.json(notifications.getEvent(db, req.params.id, notificationAdminScope(req)));
+    authAsync,
+    canAsync("iam.notifications.history", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.getEventAsync(db, req.params.id, await notificationAdminScopeAsync(req)));
     })
   );
 
   app.get(
     "/api/notification-deliveries/stats",
-    auth,
-    can("iam.notifications.history", "read"),
-    wrap((req, res) => {
-      res.json(notifications.deliveryStats(db, notificationAdminScope(req)));
+    authAsync,
+    canAsync("iam.notifications.history", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.deliveryStatsAsync(db, await notificationAdminScopeAsync(req)));
     })
   );
 
   app.get(
     "/api/notification-deliveries",
-    auth,
-    can("iam.notifications.history", "read"),
-    wrap((req, res) => {
-      res.json(notifications.listDeliveries(db, req.query, notificationAdminScope(req)));
+    authAsync,
+    canAsync("iam.notifications.history", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.listDeliveriesAsync(db, req.query, await notificationAdminScopeAsync(req)));
     })
   );
 
@@ -4827,19 +4935,19 @@ export function createApp(db) {
 
   app.post(
     "/api/notification-deliveries/:id/retry",
-    auth,
-    can("iam.notifications.history", "execute"),
-    wrap((req, res) => {
-      res.json(notifications.retryDelivery(db, req.params.id, notificationAdminScope(req)));
+    authAsync,
+    canAsync("iam.notifications.history", "execute"),
+    wrap(async (req, res) => {
+      res.json(await notifications.retryDeliveryAsync(db, req.params.id, await notificationAdminScopeAsync(req)));
     })
   );
 
   app.get(
     "/api/notification-reminders",
-    auth,
-    can("iam.notifications.history", "read"),
-    wrap((req, res) => {
-      res.json(notifications.listReminders(db, req.query, notificationAdminScope(req)));
+    authAsync,
+    canAsync("iam.notifications.history", "read"),
+    wrap(async (req, res) => {
+      res.json(await notifications.listRemindersAsync(db, req.query, await notificationAdminScopeAsync(req)));
     })
   );
 
@@ -4868,8 +4976,8 @@ export function createApp(db) {
 
   app.get(
     "/api/delivery/meta",
-    auth,
-    can("iam.delivery.providers", "read"),
+    authAsync,
+    canAsync("iam.delivery.providers", "read"),
     wrap((_req, res) => {
       res.json({
         statuses: delivery.DELIVERY_STATUSES,
@@ -4889,58 +4997,58 @@ export function createApp(db) {
 
   app.get(
     "/api/delivery/requests",
-    auth,
-    can("iam.delivery.requests", "read"),
-    wrap((req, res) => {
-      res.json(delivery.listRequests(db, deliveryQuery(req), deliveryScope(req)));
+    authAsync,
+    canAsync("iam.delivery.requests", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.listRequestsAsync(db, deliveryQuery(req), deliveryScope(req)));
     })
   );
 
   app.post(
     "/api/delivery/requests",
-    auth,
-    can("iam.delivery.requests", "create"),
-    wrap((req, res) => {
-      res.status(201).json(delivery.submitRequest(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.requests", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await delivery.submitRequestAsync(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.get(
     "/api/delivery/requests/:id",
-    auth,
-    can("iam.delivery.requests", "read"),
-    wrap((req, res) => {
-      const request = delivery.getRequest(db, req.params.id, deliveryScope(req));
-      request.attempts = delivery.listAttempts(db, request.id);
+    authAsync,
+    canAsync("iam.delivery.requests", "read"),
+    wrap(async (req, res) => {
+      const request = await delivery.getRequestAsync(db, req.params.id, deliveryScope(req));
+      request.attempts = await delivery.listAttemptsAsync(db, request.id);
       res.json(request);
     })
   );
 
   app.get(
     "/api/delivery/requests/:id/attempts",
-    auth,
-    can("iam.delivery.requests", "read"),
-    wrap((req, res) => {
-      const request = delivery.getRequest(db, req.params.id, deliveryScope(req));
-      res.json({ items: delivery.listAttempts(db, request.id) });
+    authAsync,
+    canAsync("iam.delivery.requests", "read"),
+    wrap(async (req, res) => {
+      const request = await delivery.getRequestAsync(db, req.params.id, deliveryScope(req));
+      res.json({ items: await delivery.listAttemptsAsync(db, request.id) });
     })
   );
 
   app.post(
     "/api/delivery/requests/:id/cancel",
-    auth,
-    can("iam.delivery.requests", "execute"),
-    wrap((req, res) => {
-      res.json(delivery.cancelRequest(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.requests", "execute"),
+    wrap(async (req, res) => {
+      res.json(await delivery.cancelRequestAsync(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.post(
     "/api/delivery/requests/:id/retry",
-    auth,
-    can("iam.delivery.requests", "execute"),
-    wrap((req, res) => {
-      res.json(delivery.retryRequest(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.requests", "execute"),
+    wrap(async (req, res) => {
+      res.json(await delivery.retryRequestAsync(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
     })
   );
 
@@ -4956,128 +5064,132 @@ export function createApp(db) {
   // Providers
   app.get(
     "/api/delivery/providers",
-    auth,
-    can("iam.delivery.providers", "read"),
-    wrap((req, res) => {
-      res.json({ items: delivery.listDeliveryProviders(db, deliveryQuery(req)) });
+    authAsync,
+    canAsync("iam.delivery.providers", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await delivery.listDeliveryProvidersAsync(db, deliveryQuery(req)) });
     })
   );
 
   app.post(
     "/api/delivery/providers",
-    auth,
-    can("iam.delivery.providers", "create"),
-    wrap((req, res) => {
-      res.status(201).json(delivery.createDeliveryProvider(db, { ...(req.body || {}), tenant_id: req.tenantId }, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.delivery.providers", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await delivery.createDeliveryProviderAsync(db, { ...(req.body || {}), tenant_id: req.tenantId }, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/delivery/providers/:id",
-    auth,
-    can("iam.delivery.providers", "read"),
-    wrap((req, res) => {
-      res.json(delivery.getDeliveryProvider(db, req.params.id));
+    authAsync,
+    canAsync("iam.delivery.providers", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.getDeliveryProviderAsync(db, req.params.id));
     })
   );
 
   app.put(
     "/api/delivery/providers/:id",
-    auth,
-    can("iam.delivery.providers", "update"),
-    wrap((req, res) => {
-      res.json(delivery.updateDeliveryProvider(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.delivery.providers", "update"),
+    wrap(async (req, res) => {
+      res.json(await delivery.updateDeliveryProviderAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.put(
     "/api/delivery/providers/:id/status",
-    auth,
-    can("iam.delivery.providers", "update"),
-    wrap((req, res) => {
-      res.json(delivery.setDeliveryProviderStatus(db, req.params.id, req.body?.status, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.delivery.providers", "update"),
+    wrap(async (req, res) => {
+      res.json(await delivery.setDeliveryProviderStatusAsync(db, req.params.id, req.body?.status, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/delivery/providers/:id/test",
-    auth,
-    can("iam.delivery.providers", "execute"),
-    wrap((req, res) => {
-      res.json(delivery.testDeliveryProvider(db, req.params.id, { recipient: req.body?.recipient }));
+    authAsync,
+    canAsync("iam.delivery.providers", "execute"),
+    wrap(async (req, res) => {
+      res.json(await delivery.testDeliveryProviderAsync(db, req.params.id, { recipient: req.body?.recipient }));
     })
   );
 
   app.delete(
     "/api/delivery/providers/:id",
-    auth,
-    can("iam.delivery.providers", "delete"),
-    wrap((req, res) => {
-      res.json(delivery.deleteDeliveryProvider(db, req.params.id, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.delivery.providers", "delete"),
+    wrap(async (req, res) => {
+      res.json(await delivery.deleteDeliveryProviderAsync(db, req.params.id, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/delivery/provider-failures",
-    auth,
-    can("iam.delivery.providers", "read"),
-    wrap((req, res) => {
-      res.json({ items: delivery.listProviderFailures(db, req.query, deliveryScope(req)), summary: delivery.providerFailureSummary(db, deliveryScope(req)) });
+    authAsync,
+    canAsync("iam.delivery.providers", "read"),
+    wrap(async (req, res) => {
+      const [items, summary] = await Promise.all([
+        delivery.listProviderFailuresAsync(db, req.query, deliveryScope(req)),
+        delivery.providerFailureSummaryAsync(db, deliveryScope(req)),
+      ]);
+      res.json({ items, summary });
     })
   );
 
   app.get(
     "/api/delivery/provider-health",
-    auth,
-    can("iam.delivery.providers", "read"),
-    wrap((req, res) => {
-      res.json(delivery.providerHealth(db, deliveryScope(req)));
+    authAsync,
+    canAsync("iam.delivery.providers", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.providerHealthAsync(db, deliveryScope(req)));
     })
   );
 
   // Reminders
   app.get(
     "/api/delivery/reminders",
-    auth,
-    can("iam.delivery.reminders", "read"),
-    wrap((req, res) => {
-      res.json(delivery.listReminders(db, deliveryQuery(req), deliveryScope(req)));
+    authAsync,
+    canAsync("iam.delivery.reminders", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.listRemindersAsync(db, deliveryQuery(req), deliveryScope(req)));
     })
   );
 
   app.post(
     "/api/delivery/reminders",
-    auth,
-    can("iam.delivery.reminders", "create"),
-    wrap((req, res) => {
-      res.status(201).json(delivery.scheduleReminder(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.reminders", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await delivery.scheduleReminderAsync(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.get(
     "/api/delivery/reminders/:id",
-    auth,
-    can("iam.delivery.reminders", "read"),
-    wrap((req, res) => {
-      res.json(delivery.getReminder(db, req.params.id, deliveryScope(req)));
+    authAsync,
+    canAsync("iam.delivery.reminders", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.getReminderAsync(db, req.params.id, deliveryScope(req)));
     })
   );
 
   app.put(
     "/api/delivery/reminders/:id",
-    auth,
-    can("iam.delivery.reminders", "update"),
-    wrap((req, res) => {
-      res.json(delivery.updateReminder(db, req.params.id, req.body || {}, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.reminders", "update"),
+    wrap(async (req, res) => {
+      res.json(await delivery.updateReminderAsync(db, req.params.id, req.body || {}, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.post(
     "/api/delivery/reminders/:id/cancel",
-    auth,
-    can("iam.delivery.reminders", "execute"),
-    wrap((req, res) => {
-      res.json(delivery.cancelReminder(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.reminders", "execute"),
+    wrap(async (req, res) => {
+      res.json(await delivery.cancelReminderAsync(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
     })
   );
 
@@ -5093,37 +5205,37 @@ export function createApp(db) {
   // Escalations
   app.get(
     "/api/delivery/escalations",
-    auth,
-    can("iam.delivery.reminders", "read"),
-    wrap((req, res) => {
-      res.json(delivery.listEscalations(db, deliveryQuery(req), deliveryScope(req)));
+    authAsync,
+    canAsync("iam.delivery.reminders", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.listEscalationsAsync(db, deliveryQuery(req), deliveryScope(req)));
     })
   );
 
   app.post(
     "/api/delivery/escalations",
-    auth,
-    can("iam.delivery.reminders", "create"),
-    wrap((req, res) => {
-      res.status(201).json(delivery.scheduleEscalation(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.reminders", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await delivery.scheduleEscalationAsync(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.get(
     "/api/delivery/escalations/:id",
-    auth,
-    can("iam.delivery.reminders", "read"),
-    wrap((req, res) => {
-      res.json(delivery.getEscalation(db, req.params.id, deliveryScope(req)));
+    authAsync,
+    canAsync("iam.delivery.reminders", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.getEscalationAsync(db, req.params.id, deliveryScope(req)));
     })
   );
 
   app.post(
     "/api/delivery/escalations/:id/cancel",
-    auth,
-    can("iam.delivery.reminders", "execute"),
-    wrap((req, res) => {
-      res.json(delivery.cancelEscalation(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.reminders", "execute"),
+    wrap(async (req, res) => {
+      res.json(await delivery.cancelEscalationAsync(db, req.params.id, { tenantId: deliveryScope(req), actor: req.actor, ip: clientIp(req) }));
     })
   );
 
@@ -5139,56 +5251,56 @@ export function createApp(db) {
   // Monitoring, alerts and run history
   app.get(
     "/api/delivery/metrics",
-    auth,
-    can("iam.delivery.monitoring", "read"),
-    wrap((req, res) => {
-      res.json(delivery.deliveryMetrics(db, { tenantId: deliveryScope(req), from: req.query.from, to: req.query.to }));
+    authAsync,
+    canAsync("iam.delivery.monitoring", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.deliveryMetricsAsync(db, { tenantId: deliveryScope(req), from: req.query.from, to: req.query.to }));
     })
   );
 
   app.get(
     "/api/delivery/stats",
-    auth,
-    can("iam.delivery.monitoring", "read"),
-    wrap((req, res) => {
-      res.json(delivery.deliveryStats(db, deliveryScope(req)));
+    authAsync,
+    canAsync("iam.delivery.monitoring", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.deliveryStatsAsync(db, deliveryScope(req)));
     })
   );
 
   app.get(
     "/api/delivery/timeseries",
-    auth,
-    can("iam.delivery.monitoring", "read"),
-    wrap((req, res) => {
-      res.json({ items: delivery.deliveryTimeseries(db, { tenantId: deliveryScope(req), from: req.query.from, to: req.query.to }) });
+    authAsync,
+    canAsync("iam.delivery.monitoring", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await delivery.deliveryTimeseriesAsync(db, { tenantId: deliveryScope(req), from: req.query.from, to: req.query.to }) });
     })
   );
 
   app.get(
     "/api/delivery/alerts",
-    auth,
-    can("iam.delivery.monitoring", "read"),
-    wrap((req, res) => {
-      res.json(delivery.listAlerts(db, req.query, deliveryScope(req)));
+    authAsync,
+    canAsync("iam.delivery.monitoring", "read"),
+    wrap(async (req, res) => {
+      res.json(await delivery.listAlertsAsync(db, req.query, deliveryScope(req)));
     })
   );
 
   app.post(
     "/api/delivery/alerts/:id/acknowledge",
-    auth,
-    can("iam.delivery.monitoring", "update"),
-    wrap((req, res) => {
-      res.json(delivery.acknowledgeAlert(db, req.params.id, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.monitoring", "update"),
+    wrap(async (req, res) => {
+      res.json(await delivery.acknowledgeAlertAsync(db, req.params.id, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.get(
     "/api/delivery/runs",
-    auth,
-    can("iam.delivery.monitoring", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.delivery.monitoring", "read"),
+    wrap(async (req, res) => {
       res.json({
-        items: delivery.listRuns(db, {
+        items: await delivery.listRunsAsync(db, {
           kind: req.query.kind,
           reminderId: req.query.reminderId,
           escalationId: req.query.escalationId,
@@ -5203,14 +5315,9 @@ export function createApp(db) {
   // asynchronous jobs. Business modules submit work and receive a Job ID; the
   // Job Scheduling & Execution Engine reports progress/outcomes back here.
   // Every route is tenant-scoped; platform admins may request ?all=true.
-  function jobScope(req) {
-    if (tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true") return null;
+  async function jobScopeAsync(req) {
+    if (req.query.all === "true" && (await tenants.isPlatformAdminAsync(db, req.actor.id))) return null;
     return req.tenantId || -1;
-  }
-
-  function jobQuery(req) {
-    const scope = jobScope(req);
-    return scope === null ? { ...req.query } : { ...req.query, tenantId: scope };
   }
 
   app.get(
@@ -5233,236 +5340,240 @@ export function createApp(db) {
 
   app.get(
     "/api/job-types",
-    auth,
-    can("iam.jobs.types", "read"),
-    wrap((req, res) => {
-      res.json(jobs.listJobTypes(db, req.query));
+    authAsync,
+    canAsync("iam.jobs.types", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobs.listJobTypesAsync(db, req.query));
     })
   );
 
   app.get(
     "/api/job-types/:code",
-    auth,
-    can("iam.jobs.types", "read"),
-    wrap((req, res) => {
-      res.json(jobs.getJobType(db, req.params.code));
+    authAsync,
+    canAsync("iam.jobs.types", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobs.getJobTypeAsync(db, req.params.code));
     })
   );
 
   app.post(
     "/api/job-types",
-    auth,
-    can("iam.jobs.types", "create"),
-    wrap((req, res) => {
-      res.status(201).json(jobs.createJobType(db, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.types", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await jobs.createJobTypeAsync(db, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.patch(
     "/api/job-types/:code",
-    auth,
-    can("iam.jobs.types", "update"),
-    wrap((req, res) => {
-      res.json(jobs.updateJobType(db, req.params.code, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.types", "update"),
+    wrap(async (req, res) => {
+      res.json(await jobs.updateJobTypeAsync(db, req.params.code, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/job-types/:code/status",
-    auth,
-    can("iam.jobs.types", "update"),
-    wrap((req, res) => {
-      res.json(jobs.setJobTypeStatus(db, req.params.code, req.body?.active !== false, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.types", "update"),
+    wrap(async (req, res) => {
+      res.json(await jobs.setJobTypeStatusAsync(db, req.params.code, req.body?.active !== false, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/job-metrics",
-    auth,
-    can("iam.jobs.monitoring", "read"),
-    wrap((req, res) => {
-      res.json(jobs.jobMetrics(db, jobScope(req)));
+    authAsync,
+    canAsync("iam.jobs.monitoring", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobs.jobMetricsAsync(db, await jobScopeAsync(req)));
     })
   );
 
   app.get(
     "/api/job-metrics/timeseries",
-    auth,
-    can("iam.jobs.monitoring", "read"),
-    wrap((req, res) => {
-      res.json({ items: jobs.jobTimeseries(db, jobScope(req), { days: req.query.days }) });
+    authAsync,
+    canAsync("iam.jobs.monitoring", "read"),
+    wrap(async (req, res) => {
+      const scope = await jobScopeAsync(req);
+      res.json({ items: await jobs.jobTimeseriesAsync(db, scope, { days: req.query.days }) });
     })
   );
 
   app.get(
     "/api/jobs",
-    auth,
-    can("iam.jobs.list", "read"),
-    wrap((req, res) => {
-      res.json(jobs.listJobs(db, jobQuery(req), jobScope(req)));
+    authAsync,
+    canAsync("iam.jobs.list", "read"),
+    wrap(async (req, res) => {
+      const scope = await jobScopeAsync(req);
+      const query = scope === null ? { ...req.query } : { ...req.query, tenantId: scope };
+      res.json(await jobs.listJobsAsync(db, query, scope));
     })
   );
 
   app.post(
     "/api/jobs",
-    auth,
-    can("iam.jobs.list", "create"),
-    wrap((req, res) => {
-      res.status(201).json(jobs.submitJob(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.jobs.list", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await jobs.submitJobAsync(db, { ...(req.body || {}), tenant_id: req.tenantId }, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.get(
     "/api/jobs/:id",
-    auth,
-    can("iam.jobs.details", "read"),
-    wrap((req, res) => {
-      const job = jobs.getJob(db, req.params.id, jobScope(req));
-      job.dependencies_state = jobs.dependencyState(db, job.id, jobScope(req));
+    authAsync,
+    canAsync("iam.jobs.details", "read"),
+    wrap(async (req, res) => {
+      const scope = await jobScopeAsync(req);
+      const job = await jobs.getJobAsync(db, req.params.id, scope);
+      job.dependencies_state = await jobs.dependencyStateAsync(db, job.id, scope);
       res.json(job);
     })
   );
 
   app.get(
     "/api/jobs/:id/status",
-    auth,
-    can("iam.jobs.details", "read"),
-    wrap((req, res) => {
-      res.json(jobs.getStatus(db, req.params.id, jobScope(req)));
+    authAsync,
+    canAsync("iam.jobs.details", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobs.getStatusAsync(db, req.params.id, await jobScopeAsync(req)));
     })
   );
 
   app.get(
     "/api/jobs/:id/history",
-    auth,
-    can("iam.jobs.details", "read"),
-    wrap((req, res) => {
-      const job = jobs.getJob(db, req.params.id, jobScope(req));
-      res.json(jobs.listHistory(db, job.id, req.query));
+    authAsync,
+    canAsync("iam.jobs.details", "read"),
+    wrap(async (req, res) => {
+      const job = await jobs.getJobAsync(db, req.params.id, await jobScopeAsync(req));
+      res.json(await jobs.listHistoryAsync(db, job.id, req.query));
     })
   );
 
   app.get(
     "/api/jobs/:id/dependencies",
-    auth,
-    can("iam.jobs.details", "read"),
-    wrap((req, res) => {
-      res.json(jobs.listDependencies(db, req.params.id, jobScope(req)));
+    authAsync,
+    canAsync("iam.jobs.details", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobs.listDependenciesAsync(db, req.params.id, await jobScopeAsync(req)));
     })
   );
 
   app.post(
     "/api/jobs/:id/dependencies",
-    auth,
-    can("iam.jobs.control", "execute"),
-    wrap((req, res) => {
-      const job = jobs.getJob(db, req.params.id, jobScope(req));
+    authAsync,
+    canAsync("iam.jobs.control", "execute"),
+    wrap(async (req, res) => {
+      const job = await jobs.getJobAsync(db, req.params.id, await jobScopeAsync(req));
       const dependencies = req.body?.dependencies || req.body?.depends_on || [];
-      res.status(201).json({ items: jobs.addDependencies(db, job.id, dependencies, { actor: req.actor, ip: clientIp(req) }) });
+      res.status(201).json({ items: await jobs.addDependenciesAsync(db, job.id, dependencies, { actor: req.actor, ip: clientIp(req) }) });
     })
   );
 
   app.delete(
     "/api/jobs/:id/dependencies/:dependsOnId",
-    auth,
-    can("iam.jobs.control", "execute"),
-    wrap((req, res) => {
-      const job = jobs.getJob(db, req.params.id, jobScope(req));
-      res.json(jobs.removeDependency(db, job.id, req.params.dependsOnId, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.jobs.control", "execute"),
+    wrap(async (req, res) => {
+      const job = await jobs.getJobAsync(db, req.params.id, await jobScopeAsync(req));
+      res.json(await jobs.removeDependencyAsync(db, job.id, req.params.dependsOnId, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.post(
     "/api/jobs/:id/progress",
-    auth,
-    can("iam.jobs.control", "execute"),
-    wrap((req, res) => {
-      res.json(jobs.updateProgress(db, req.params.id, req.body || {}, { tenantId: jobScope(req), actor: req.actor }));
+    authAsync,
+    canAsync("iam.jobs.control", "execute"),
+    wrap(async (req, res) => {
+      res.json(await jobs.updateProgressAsync(db, req.params.id, req.body || {}, { tenantId: await jobScopeAsync(req), actor: req.actor }));
     })
   );
 
   app.post(
     "/api/jobs/:id/cancel",
-    auth,
-    can("iam.jobs.control", "execute"),
-    wrap((req, res) => {
-      res.json(jobs.cancelJob(db, req.params.id, { tenantId: jobScope(req), reason: req.body?.reason, actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.jobs.control", "execute"),
+    wrap(async (req, res) => {
+      res.json(await jobs.cancelJobAsync(db, req.params.id, { tenantId: await jobScopeAsync(req), reason: req.body?.reason, actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.post(
     "/api/jobs/:id/retry",
-    auth,
-    can("iam.jobs.control", "execute"),
-    wrap((req, res) => {
-      res.json(jobs.retryJob(db, req.params.id, { tenantId: jobScope(req), actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.jobs.control", "execute"),
+    wrap(async (req, res) => {
+      res.json(await jobs.retryJobAsync(db, req.params.id, { tenantId: await jobScopeAsync(req), actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.post(
     "/api/jobs/:id/pause",
-    auth,
-    can("iam.jobs.control", "execute"),
-    wrap((req, res) => {
-      res.json(jobs.pauseJob(db, req.params.id, { tenantId: jobScope(req), reason: req.body?.reason, actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.jobs.control", "execute"),
+    wrap(async (req, res) => {
+      res.json(await jobs.pauseJobAsync(db, req.params.id, { tenantId: await jobScopeAsync(req), reason: req.body?.reason, actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.post(
     "/api/jobs/:id/resume",
-    auth,
-    can("iam.jobs.control", "execute"),
-    wrap((req, res) => {
-      res.json(jobs.resumeJob(db, req.params.id, { tenantId: jobScope(req), actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.jobs.control", "execute"),
+    wrap(async (req, res) => {
+      res.json(await jobs.resumeJobAsync(db, req.params.id, { tenantId: await jobScopeAsync(req), actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.get(
     "/api/jobs/:id/result",
-    auth,
-    can("iam.jobs.results", "read"),
-    wrap((req, res) => {
-      const job = jobs.getJobRow(db, req.params.id, jobScope(req));
-      res.json(jobs.resultPayload(db, job));
+    authAsync,
+    canAsync("iam.jobs.results", "read"),
+    wrap(async (req, res) => {
+      const job = await jobs.getJobRowAsync(db, req.params.id, await jobScopeAsync(req));
+      res.json(await jobs.resultPayloadAsync(db, job));
     })
   );
 
   app.post(
     "/api/jobs/:id/result",
-    auth,
-    can("iam.jobs.results", "create"),
-    wrap((req, res) => {
-      const job = jobs.getJobRow(db, req.params.id, jobScope(req));
-      res.json(jobs.setJobResult(db, job, req.body || {}, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.jobs.results", "create"),
+    wrap(async (req, res) => {
+      const job = await jobs.getJobRowAsync(db, req.params.id, await jobScopeAsync(req));
+      res.json(await jobs.setJobResultAsync(db, job, req.body || {}, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.get(
     "/api/jobs/:id/artifacts",
-    auth,
-    can("iam.jobs.results", "read"),
-    wrap((req, res) => {
-      const job = jobs.getJob(db, req.params.id, jobScope(req));
-      res.json({ items: jobs.listArtifacts(db, job.id) });
+    authAsync,
+    canAsync("iam.jobs.results", "read"),
+    wrap(async (req, res) => {
+      const job = await jobs.getJobAsync(db, req.params.id, await jobScopeAsync(req));
+      res.json({ items: await jobs.listArtifactsAsync(db, job.id) });
     })
   );
 
   app.post(
     "/api/jobs/:id/artifacts",
-    auth,
-    can("iam.jobs.results", "create"),
-    wrap((req, res) => {
-      const job = jobs.getJob(db, req.params.id, jobScope(req));
-      res.status(201).json(jobs.addArtifact(db, job.id, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.results", "create"),
+    wrap(async (req, res) => {
+      const job = await jobs.getJobAsync(db, req.params.id, await jobScopeAsync(req));
+      res.status(201).json(await jobs.addArtifactAsync(db, job.id, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/jobs/:id/children",
-    auth,
-    can("iam.jobs.details", "read"),
-    wrap((req, res) => {
-      res.json({ items: jobs.listChildren(db, req.params.id, jobScope(req)) });
+    authAsync,
+    canAsync("iam.jobs.details", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await jobs.listChildrenAsync(db, req.params.id, await jobScopeAsync(req)) });
     })
   );
 
@@ -5471,6 +5582,11 @@ export function createApp(db) {
   // The engine owns execution; these routes expose configuration and control.
   function execScope(req) {
     if (tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true") return null;
+    return req.tenantId || -1;
+  }
+
+  async function execScopeAsync(req) {
+    if (req.query.all === "true" && (await tenants.isPlatformAdminAsync(db, req.actor.id))) return null;
     return req.tenantId || -1;
   }
 
@@ -5498,56 +5614,56 @@ export function createApp(db) {
 
   app.get(
     "/api/job-queues",
-    auth,
-    can("iam.jobs.queues", "read"),
-    wrap((req, res) => {
-      res.json(jobExecution.listQueues(db, req.query, execScope(req)));
+    authAsync,
+    canAsync("iam.jobs.queues", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.listQueuesAsync(db, req.query, await execScopeAsync(req)));
     })
   );
 
   app.post(
     "/api/job-queues",
-    auth,
-    can("iam.jobs.queues", "create"),
-    wrap((req, res) => {
-      res.status(201).json(jobExecution.createQueue(db, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.queues", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await jobExecution.createQueueAsync(db, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/job-queues/:id/health",
-    auth,
-    can("iam.jobs.queues", "read"),
-    wrap((req, res) => {
-      res.json(jobExecution.queueHealth(db, req.params.id));
+    authAsync,
+    canAsync("iam.jobs.queues", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.queueHealthAsync(db, req.params.id));
     })
   );
 
   app.get(
     "/api/job-queues/:id",
-    auth,
-    can("iam.jobs.queues", "read"),
-    wrap((req, res) => {
-      res.json(jobExecution.getQueue(db, req.params.id));
+    authAsync,
+    canAsync("iam.jobs.queues", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.getQueueAsync(db, req.params.id));
     })
   );
 
-  const updateQueueHandler = (req, res) => {
-    res.json(jobExecution.updateQueue(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+  const updateQueueHandler = async (req, res) => {
+    res.json(await jobExecution.updateQueueAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
   };
-  app.put("/api/job-queues/:id", auth, can("iam.jobs.queues", "update"), wrap(updateQueueHandler));
-  app.patch("/api/job-queues/:id", auth, can("iam.jobs.queues", "update"), wrap(updateQueueHandler));
+  app.put("/api/job-queues/:id", authAsync, canAsync("iam.jobs.queues", "update"), wrap(updateQueueHandler));
+  app.patch("/api/job-queues/:id", authAsync, canAsync("iam.jobs.queues", "update"), wrap(updateQueueHandler));
 
   app.post(
     "/api/job-queues/:id/status",
-    auth,
-    can("iam.jobs.queues", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.jobs.queues", "update"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       if (body.paused !== undefined) {
-        res.json(jobExecution.setQueuePaused(db, req.params.id, body.paused !== false, req.actor, clientIp(req)));
+        res.json(await jobExecution.setQueuePausedAsync(db, req.params.id, body.paused !== false, req.actor, clientIp(req)));
       } else {
-        res.json(jobExecution.setQueueEnabled(db, req.params.id, body.enabled !== false, req.actor, clientIp(req)));
+        res.json(await jobExecution.setQueueEnabledAsync(db, req.params.id, body.enabled !== false, req.actor, clientIp(req)));
       }
     })
   );
@@ -5555,88 +5671,88 @@ export function createApp(db) {
   // ── Schedules ──
   app.get(
     "/api/schedules",
-    auth,
-    can("iam.jobs.schedules", "read"),
-    wrap((req, res) => {
-      res.json(jobExecution.listSchedules(db, req.query, execScope(req)));
+    authAsync,
+    canAsync("iam.jobs.schedules", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.listSchedulesAsync(db, req.query, await execScopeAsync(req)));
     })
   );
 
   app.post(
     "/api/schedules",
-    auth,
-    can("iam.jobs.schedules", "create"),
-    wrap((req, res) => {
-      res.status(201).json(jobExecution.createSchedule(db, { ...(req.body || {}), tenant_id: req.tenantId }, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.schedules", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await jobExecution.createScheduleAsync(db, { ...(req.body || {}), tenant_id: req.tenantId }, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/schedules/:id",
-    auth,
-    can("iam.jobs.schedules", "read"),
-    wrap((req, res) => {
-      res.json(jobExecution.getSchedule(db, req.params.id, execScope(req)));
+    authAsync,
+    canAsync("iam.jobs.schedules", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.getScheduleAsync(db, req.params.id, await execScopeAsync(req)));
     })
   );
 
-  const updateScheduleHandler = (req, res) => {
-    res.json(jobExecution.updateSchedule(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
+  const updateScheduleHandler = async (req, res) => {
+    res.json(await jobExecution.updateScheduleAsync(db, req.params.id, req.body || {}, req.actor, clientIp(req)));
   };
-  app.put("/api/schedules/:id", auth, can("iam.jobs.schedules", "update"), wrap(updateScheduleHandler));
-  app.patch("/api/schedules/:id", auth, can("iam.jobs.schedules", "update"), wrap(updateScheduleHandler));
+  app.put("/api/schedules/:id", authAsync, canAsync("iam.jobs.schedules", "update"), wrap(updateScheduleHandler));
+  app.patch("/api/schedules/:id", authAsync, canAsync("iam.jobs.schedules", "update"), wrap(updateScheduleHandler));
 
   app.post(
     "/api/schedules/:id/enable",
-    auth,
-    can("iam.jobs.schedules", "update"),
-    wrap((req, res) => {
-      res.json(jobExecution.setScheduleEnabled(db, req.params.id, true, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.schedules", "update"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.setScheduleEnabledAsync(db, req.params.id, true, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/schedules/:id/disable",
-    auth,
-    can("iam.jobs.schedules", "update"),
-    wrap((req, res) => {
-      res.json(jobExecution.setScheduleEnabled(db, req.params.id, false, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.schedules", "update"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.setScheduleEnabledAsync(db, req.params.id, false, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/schedules/:id/pause",
-    auth,
-    can("iam.jobs.schedules", "update"),
-    wrap((req, res) => {
-      res.json(jobExecution.setScheduleStatus(db, req.params.id, "paused", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.schedules", "update"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.setScheduleStatusAsync(db, req.params.id, "paused", req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/schedules/:id/resume",
-    auth,
-    can("iam.jobs.schedules", "update"),
-    wrap((req, res) => {
-      res.json(jobExecution.setScheduleStatus(db, req.params.id, "active", req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.jobs.schedules", "update"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.setScheduleStatusAsync(db, req.params.id, "active", req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/schedules/:id/run-now",
-    auth,
-    can("iam.jobs.schedules", "execute"),
-    wrap((req, res) => {
-      res.status(202).json(jobExecution.runScheduleNow(db, req.params.id, { actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.jobs.schedules", "execute"),
+    wrap(async (req, res) => {
+      res.status(202).json(await jobExecution.runScheduleNowAsync(db, req.params.id, { actor: req.actor, ip: clientIp(req) }));
     })
   );
 
   app.get(
     "/api/schedules/:id/runs",
-    auth,
-    can("iam.jobs.schedules", "read"),
-    wrap((req, res) => {
-      res.json(jobExecution.listScheduleRuns(db, req.params.id, req.query));
+    authAsync,
+    canAsync("iam.jobs.schedules", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.listScheduleRunsAsync(db, req.params.id, req.query));
     })
   );
 
@@ -5756,6 +5872,8 @@ export function createApp(db) {
   const fileTenant = (req) => req.tenantId || -1;
   const filePlatformAll = (req) =>
     tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true";
+  const filePlatformAllAsync = async (req) =>
+    req.query.all === "true" && (await tenants.isPlatformAdminAsync(db, req.actor.id));
   const RAW_UPLOAD_LIMIT = process.env.FILE_HTTP_UPLOAD_LIMIT || "64mb";
   const rawBody = express.raw({ type: () => true, limit: RAW_UPLOAD_LIMIT });
 
@@ -5799,28 +5917,28 @@ export function createApp(db) {
 
   app.get(
     "/api/files/metrics",
-    auth,
-    can("iam.files.browser", "read"),
-    wrap((req, res) => {
-      res.json(files.fileMetrics(db, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.browser", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.fileMetricsAsync(db, req.actor, fileTenant(req)));
     })
   );
 
   app.get(
     "/api/files/metrics/storage",
-    auth,
-    can("iam.files.browser", "read"),
-    wrap((req, res) => {
-      res.json(files.storageBreakdown(db, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.browser", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.storageBreakdownAsync(db, req.actor, fileTenant(req)));
     })
   );
 
   app.get(
     "/api/files/metrics/processing",
-    auth,
-    can("iam.files.browser", "read"),
-    wrap((req, res) => {
-      res.json(files.processingSummary(db, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.browser", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.processingSummaryAsync(db, req.actor, fileTenant(req)));
     })
   );
 
@@ -5842,50 +5960,50 @@ export function createApp(db) {
 
   app.get(
     "/api/files/facets",
-    auth,
-    can("iam.files.browser", "read"),
-    wrap((req, res) => {
-      res.json(files.fileFacets(db, req.query, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.browser", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.fileFacetsAsync(db, req.query, req.actor, fileTenant(req)));
     })
   );
 
   // File ACL administration.
   app.get(
     "/api/files/permissions",
-    auth,
-    can("iam.files.permissions", "read"),
-    wrap((req, res) => {
-      res.json(files.listPermissions(db, req.query, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.permissions", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.listPermissionsAsync(db, req.query, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/files/permissions",
-    auth,
-    can("iam.files.permissions", "create"),
-    wrap((req, res) => {
-      res.status(201).json(files.grantPermission(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.permissions", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await files.grantPermissionAsync(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.delete(
     "/api/files/permissions/:id",
-    auth,
-    can("iam.files.permissions", "delete"),
-    wrap((req, res) => {
-      res.json(files.revokePermission(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.permissions", "delete"),
+    wrap(async (req, res) => {
+      res.json(await files.revokePermissionAsync(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   // Associations by business object (the file-side view lives under /api/files/:ref).
   app.get(
     "/api/file-associations",
-    auth,
-    can("iam.files.associations", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.files.associations", "read"),
+    wrap(async (req, res) => {
       if (req.query.businessObjectType || req.query.business_object_type) {
         return res.json(
-          files.listObjectAssociations(
+          await files.listObjectAssociationsAsync(
             db,
             {
               businessObjectType: req.query.businessObjectType || req.query.business_object_type,
@@ -5897,97 +6015,97 @@ export function createApp(db) {
           )
         );
       }
-      res.json(files.listAssociations(db, req.query, req.actor, fileTenant(req)));
+      res.json(await files.listAssociationsAsync(db, req.query, req.actor, fileTenant(req)));
     })
   );
 
   app.patch(
     "/api/file-associations/:id",
-    auth,
-    can("iam.files.associations", "update"),
-    wrap((req, res) => {
-      res.json(files.updateAssociation(db, req.params.id, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.associations", "update"),
+    wrap(async (req, res) => {
+      res.json(await files.updateAssociationAsync(db, req.params.id, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.delete(
     "/api/file-associations/:id",
-    auth,
-    can("iam.files.associations", "delete"),
-    wrap((req, res) => {
-      res.json(files.removeAssociation(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.associations", "delete"),
+    wrap(async (req, res) => {
+      res.json(await files.removeAssociationAsync(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   // ── Uploads (single, multipart/chunked, resumable) ──
   app.get(
     "/api/files/uploads",
-    auth,
-    can("iam.files.uploads", "read"),
-    wrap((req, res) => {
-      res.json(files.listUploads(db, req.query, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.uploads", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.listUploadsAsync(db, req.query, req.actor, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/files/uploads",
-    auth,
-    can("iam.files.uploads", "create"),
-    wrap((req, res) => {
-      res.status(201).json(files.initiateUpload(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.uploads", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await files.initiateUploadAsync(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.get(
     "/api/files/uploads/:uploadId",
-    auth,
-    can("iam.files.uploads", "read"),
-    wrap((req, res) => {
-      res.json(files.getUpload(db, req.params.uploadId, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.uploads", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.getUploadAsync(db, req.params.uploadId, req.actor, fileTenant(req)));
     })
   );
 
   app.put(
     "/api/files/uploads/:uploadId/chunks/:index",
-    auth,
-    can("iam.files.uploads", "create"),
+    authAsync,
+    canAsync("iam.files.uploads", "create"),
     rawBody,
     wrap(async (req, res) => {
       const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body?.data || "", "base64");
-      res.json(await files.uploadChunk(db, req.params.uploadId, req.params.index, buffer, req.actor, fileTenant(req)));
+      res.json(await files.uploadChunkAsync(db, req.params.uploadId, req.params.index, buffer, req.actor, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/files/uploads/:uploadId/complete",
-    auth,
-    can("iam.files.uploads", "create"),
+    authAsync,
+    canAsync("iam.files.uploads", "create"),
     rawBody,
     wrap(async (req, res) => {
       const payload = Buffer.isBuffer(req.body) ? { buffer: req.body } : (req.body || {});
-      res.json(await files.completeUpload(db, req.params.uploadId, payload, req.actor, fileTenant(req), clientIp(req)));
+      res.json(await files.completeUploadAsync(db, req.params.uploadId, payload, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.post(
     "/api/files/uploads/:uploadId/abort",
-    auth,
-    can("iam.files.uploads", "create"),
-    wrap((req, res) => {
-      res.json(files.abortUpload(db, req.params.uploadId, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.uploads", "create"),
+    wrap(async (req, res) => {
+      res.json(await files.abortUploadAsync(db, req.params.uploadId, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   // Convenience: initiate + complete a single-shot upload in one request.
   app.post(
     "/api/files/upload",
-    auth,
-    can("iam.files.uploads", "create"),
+    authAsync,
+    canAsync("iam.files.uploads", "create"),
     rawBody,
     wrap(async (req, res) => {
       const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body?.data || "", "base64");
       const name = req.query.name || req.headers["x-file-name"] || req.body?.name || "upload.bin";
-      const initiated = files.initiateUpload(
+      const initiated = await files.initiateUploadAsync(
         db,
         {
           name,
@@ -6002,7 +6120,7 @@ export function createApp(db) {
         clientIp(req)
       );
       res.status(201).json(
-        await files.completeUpload(
+        await files.completeUploadAsync(
           db,
           initiated.upload.upload_id,
           { buffer },
@@ -6038,56 +6156,56 @@ export function createApp(db) {
   // ── Folders ──
   app.get(
     "/api/folders",
-    auth,
-    can("iam.files.folders", "read"),
-    wrap((req, res) => {
-      res.json(files.listFolders(db, req.query, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.folders", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.listFoldersAsync(db, req.query, fileTenant(req)));
     })
   );
 
   app.get(
     "/api/folders/tree",
-    auth,
-    can("iam.files.folders", "read"),
-    wrap((req, res) => {
-      res.json(files.folderTree(db, fileTenant(req), { rootId: req.query.rootId }));
+    authAsync,
+    canAsync("iam.files.folders", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.folderTreeAsync(db, fileTenant(req), { rootId: req.query.rootId }));
     })
   );
 
   app.post(
     "/api/folders",
-    auth,
-    can("iam.files.folders", "create"),
-    wrap((req, res) => {
-      res.status(201).json(files.createFolder(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.folders", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await files.createFolderAsync(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.get(
     "/api/folders/:id/breadcrumb",
-    auth,
-    can("iam.files.folders", "read"),
-    wrap((req, res) => {
-      res.json(files.folderBreadcrumb(db, req.params.id, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.folders", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.folderBreadcrumbAsync(db, req.params.id, fileTenant(req)));
     })
   );
 
   app.get(
     "/api/folders/:id/files",
-    auth,
-    can("iam.files.folders", "read"),
-    wrap((req, res) => {
-      res.json(files.listFolderFiles(db, req.params.id, req.query, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.folders", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.listFolderFilesAsync(db, req.params.id, req.query, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/folders/:id/files",
-    auth,
-    can("iam.files.folders", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.files.folders", "update"),
+    wrap(async (req, res) => {
       res.json(
-        files.moveFilesToFolder(
+        await files.moveFilesToFolderAsync(
           db,
           req.params.id,
           (req.body || {}).file_ids || (req.body || {}).fileIds || [],
@@ -6101,35 +6219,35 @@ export function createApp(db) {
 
   app.delete(
     "/api/folders/:id/files/:fileId",
-    auth,
-    can("iam.files.folders", "update"),
-    wrap((req, res) => {
-      res.json(files.removeFileFromFolder(db, req.params.id, req.params.fileId, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.folders", "update"),
+    wrap(async (req, res) => {
+      res.json(await files.removeFileFromFolderAsync(db, req.params.id, req.params.fileId, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.get(
     "/api/folders/:id",
-    auth,
-    can("iam.files.folders", "read"),
-    wrap((req, res) => {
-      res.json(files.getFolder(db, req.params.id, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.folders", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.getFolderAsync(db, req.params.id, fileTenant(req)));
     })
   );
 
-  const updateFolderHandler = (req, res) => {
-    res.json(files.updateFolder(db, req.params.id, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+  const updateFolderHandlerAsync = async (req, res) => {
+    res.json(await files.updateFolderAsync(db, req.params.id, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
   };
-  app.put("/api/folders/:id", auth, can("iam.files.folders", "update"), wrap(updateFolderHandler));
-  app.patch("/api/folders/:id", auth, can("iam.files.folders", "update"), wrap(updateFolderHandler));
+  app.put("/api/folders/:id", authAsync, canAsync("iam.files.folders", "update"), wrap(updateFolderHandlerAsync));
+  app.patch("/api/folders/:id", authAsync, canAsync("iam.files.folders", "update"), wrap(updateFolderHandlerAsync));
 
   app.delete(
     "/api/folders/:id",
-    auth,
-    can("iam.files.folders", "delete"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.files.folders", "delete"),
+    wrap(async (req, res) => {
       res.json(
-        files.deleteFolder(
+        await files.deleteFolderAsync(
           db,
           req.params.id,
           { force: req.query.force === "true" || (req.body || {}).force === true },
@@ -6143,64 +6261,64 @@ export function createApp(db) {
 
   app.post(
     "/api/folders/:id/restore",
-    auth,
-    can("iam.files.folders", "update"),
-    wrap((req, res) => {
-      res.json(files.restoreFolder(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.folders", "update"),
+    wrap(async (req, res) => {
+      res.json(await files.restoreFolderAsync(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   // ── Collections ──
   app.get(
     "/api/file-collections",
-    auth,
-    can("iam.files.folders", "read"),
-    wrap((req, res) => {
-      res.json(files.listCollections(db, req.query, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.folders", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.listCollectionsAsync(db, req.query, req.actor, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/file-collections",
-    auth,
-    can("iam.files.folders", "create"),
-    wrap((req, res) => {
-      res.status(201).json(files.createCollection(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.folders", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await files.createCollectionAsync(db, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.get(
     "/api/file-collections/:id",
-    auth,
-    can("iam.files.folders", "read"),
-    wrap((req, res) => {
-      res.json(files.getCollection(db, req.params.id, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.folders", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.getCollectionAsync(db, req.params.id, req.actor, fileTenant(req)));
     })
   );
 
-  const updateCollectionHandler = (req, res) => {
-    res.json(files.updateCollection(db, req.params.id, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+  const updateCollectionHandlerAsync = async (req, res) => {
+    res.json(await files.updateCollectionAsync(db, req.params.id, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
   };
-  app.put("/api/file-collections/:id", auth, can("iam.files.folders", "update"), wrap(updateCollectionHandler));
-  app.patch("/api/file-collections/:id", auth, can("iam.files.folders", "update"), wrap(updateCollectionHandler));
+  app.put("/api/file-collections/:id", authAsync, canAsync("iam.files.folders", "update"), wrap(updateCollectionHandlerAsync));
+  app.patch("/api/file-collections/:id", authAsync, canAsync("iam.files.folders", "update"), wrap(updateCollectionHandlerAsync));
 
   app.delete(
     "/api/file-collections/:id",
-    auth,
-    can("iam.files.folders", "delete"),
-    wrap((req, res) => {
-      res.json(files.deleteCollection(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.folders", "delete"),
+    wrap(async (req, res) => {
+      res.json(await files.deleteCollectionAsync(db, req.params.id, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.post(
     "/api/file-collections/:id/members",
-    auth,
-    can("iam.files.associations", "create"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.files.associations", "create"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       res.json(
-        files.addCollectionMembers(
+        await files.addCollectionMembersAsync(
           db,
           req.params.id,
           body.file_ids || body.fileIds || [],
@@ -6214,66 +6332,66 @@ export function createApp(db) {
 
   app.delete(
     "/api/file-collections/:id/members/:fileId",
-    auth,
-    can("iam.files.associations", "delete"),
-    wrap((req, res) => {
-      res.json(files.removeCollectionMember(db, req.params.id, req.params.fileId, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.associations", "delete"),
+    wrap(async (req, res) => {
+      res.json(await files.removeCollectionMemberAsync(db, req.params.id, req.params.fileId, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   // ── Files (definitions after the more specific /api/files/* routes above) ──
   app.get(
     "/api/files",
-    auth,
-    can("iam.files.browser", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.files.browser", "read"),
+    wrap(async (req, res) => {
       res.json(
-        files.listFiles(db, req.query, req.actor, fileTenant(req), { platformAll: filePlatformAll(req) })
+        await files.listFilesAsync(db, req.query, req.actor, fileTenant(req), { platformAll: await filePlatformAllAsync(req) })
       );
     })
   );
 
   app.get(
     "/api/files/:reference",
-    auth,
-    can("iam.files.details", "read"),
-    wrap((req, res) => {
-      res.json(files.getFile(db, req.params.reference, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.details", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.getFileAsync(db, req.params.reference, req.actor, fileTenant(req)));
     })
   );
 
-  const updateFileHandler = (req, res) => {
-    res.json(files.updateFileMetadata(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+  const updateFileHandlerAsync = async (req, res) => {
+    res.json(await files.updateFileMetadataAsync(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
   };
-  app.put("/api/files/:reference", auth, can("iam.files.details", "update"), wrap(updateFileHandler));
-  app.patch("/api/files/:reference", auth, can("iam.files.details", "update"), wrap(updateFileHandler));
+  app.put("/api/files/:reference", authAsync, canAsync("iam.files.details", "update"), wrap(updateFileHandlerAsync));
+  app.patch("/api/files/:reference", authAsync, canAsync("iam.files.details", "update"), wrap(updateFileHandlerAsync));
 
   app.delete(
     "/api/files/:reference",
-    auth,
-    can("iam.files.details", "delete"),
-    wrap((req, res) => {
-      res.json(files.deleteFile(db, req.params.reference, req.body || req.query || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.details", "delete"),
+    wrap(async (req, res) => {
+      res.json(await files.deleteFileAsync(db, req.params.reference, req.body || req.query || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/restore",
-    auth,
-    can("iam.files.details", "update"),
-    wrap((req, res) => {
-      res.json(files.restoreFile(db, req.params.reference, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.details", "update"),
+    wrap(async (req, res) => {
+      res.json(await files.restoreFileAsync(db, req.params.reference, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/move",
-    auth,
-    can("iam.files.details", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.files.details", "update"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       res.json(
-        files.moveFile(db, req.params.reference, body.folder_id ?? body.folderId ?? null, req.actor, fileTenant(req), clientIp(req))
+        await files.moveFileAsync(db, req.params.reference, body.folder_id ?? body.folderId ?? null, req.actor, fileTenant(req), clientIp(req))
       );
     })
   );
@@ -6290,30 +6408,30 @@ export function createApp(db) {
 
   app.get(
     "/api/files/:reference/permissions",
-    auth,
-    can("iam.files.permissions", "read"),
-    wrap((req, res) => {
-      const file = files.getFile(db, req.params.reference, req.actor, fileTenant(req)).file;
-      res.json(files.listPermissions(db, { resourceType: "file", resourceId: file.id }, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.permissions", "read"),
+    wrap(async (req, res) => {
+      const file = (await files.getFileAsync(db, req.params.reference, req.actor, fileTenant(req))).file;
+      res.json(await files.listPermissionsAsync(db, { resourceType: "file", resourceId: file.id }, fileTenant(req)));
     })
   );
 
   app.get(
     "/api/files/:reference/processing",
-    auth,
-    can("iam.files.details", "read"),
-    wrap((req, res) => {
-      res.json(files.getProcessingStatus(db, req.params.reference, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.details", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.getProcessingStatusAsync(db, req.params.reference, req.actor, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/processing/requeue",
-    auth,
-    can("iam.files.details", "update"),
+    authAsync,
+    canAsync("iam.files.details", "update"),
     wrap(async (req, res) => {
       res.json(
-        await files.requeueProcessing(
+        await files.requeueProcessingAsync(
           db,
           req.params.reference,
           (req.body || {}).type || "virus_scan",
@@ -6328,20 +6446,20 @@ export function createApp(db) {
   // Versions.
   app.get(
     "/api/files/:reference/versions",
-    auth,
-    can("iam.files.versions", "read"),
-    wrap((req, res) => {
-      res.json(files.listVersions(db, req.params.reference, req.query, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.versions", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.listVersionsAsync(db, req.params.reference, req.query, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/versions",
-    auth,
-    can("iam.files.versions", "create"),
+    authAsync,
+    canAsync("iam.files.versions", "create"),
     wrap(async (req, res) => {
       res.status(201).json(
-        await files.createVersion(
+        await files.createVersionAsync(
           db,
           req.params.reference,
           req.body || {},
@@ -6353,20 +6471,20 @@ export function createApp(db) {
 
   app.get(
     "/api/files/:reference/versions/:version",
-    auth,
-    can("iam.files.versions", "read"),
-    wrap((req, res) => {
-      res.json(files.getVersion(db, req.params.reference, req.params.version, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.versions", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.getVersionAsync(db, req.params.reference, req.params.version, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/versions/:version/restore",
-    auth,
-    can("iam.files.versions", "create"),
+    authAsync,
+    canAsync("iam.files.versions", "create"),
     wrap(async (req, res) => {
       res.status(201).json(
-        await files.restoreVersion(
+        await files.restoreVersionAsync(
           db,
           req.params.reference,
           req.params.version,
@@ -6379,104 +6497,104 @@ export function createApp(db) {
 
   app.get(
     "/api/files/:reference/versions/:version/download",
-    auth,
-    can("iam.files.details", "read"),
-    wrap((req, res) => {
-      res.json(fileDownloadResponse(files.versionDownload(db, req.params.reference, req.params.version, req.actor, fileTenant(req))));
+    authAsync,
+    canAsync("iam.files.details", "read"),
+    wrap(async (req, res) => {
+      res.json(fileDownloadResponse(await files.versionDownloadAsync(db, req.params.reference, req.params.version, req.actor, fileTenant(req))));
     })
   );
 
   app.get(
     "/api/files/:reference/download",
-    auth,
-    can("iam.files.details", "read"),
-    wrap((req, res) => {
-      res.json(fileDownloadResponse(files.versionDownload(db, req.params.reference, null, req.actor, fileTenant(req))));
+    authAsync,
+    canAsync("iam.files.details", "read"),
+    wrap(async (req, res) => {
+      res.json(fileDownloadResponse(await files.versionDownloadAsync(db, req.params.reference, null, req.actor, fileTenant(req))));
     })
   );
 
   // Check-out / check-in / locks.
   app.get(
     "/api/files/:reference/lock",
-    auth,
-    can("iam.files.locks", "read"),
-    wrap((req, res) => {
-      res.json(files.getLock(db, req.params.reference, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.locks", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.getLockAsync(db, req.params.reference, req.actor, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/checkout",
-    auth,
-    can("iam.files.locks", "execute"),
-    wrap((req, res) => {
-      res.status(201).json(files.checkOutFile(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.locks", "execute"),
+    wrap(async (req, res) => {
+      res.status(201).json(await files.checkOutFileAsync(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/checkin",
-    auth,
-    can("iam.files.locks", "execute"),
+    authAsync,
+    canAsync("iam.files.locks", "execute"),
     wrap(async (req, res) => {
-      res.json(await files.checkInFile(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+      res.json(await files.checkInFileAsync(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/lock/release",
-    auth,
-    can("iam.files.locks", "execute"),
-    wrap((req, res) => {
-      res.json(files.releaseLock(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.locks", "execute"),
+    wrap(async (req, res) => {
+      res.json(await files.releaseLockAsync(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/lock/force-release",
-    auth,
-    can("iam.files.locks", "execute"),
-    wrap((req, res) => {
-      res.json(files.forceReleaseLock(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.locks", "execute"),
+    wrap(async (req, res) => {
+      res.json(await files.forceReleaseLockAsync(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   // File associations.
   app.get(
     "/api/files/:reference/associations",
-    auth,
-    can("iam.files.associations", "read"),
-    wrap((req, res) => {
-      res.json(files.listFileAssociations(db, req.params.reference, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.associations", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.listFileAssociationsAsync(db, req.params.reference, req.actor, fileTenant(req)));
     })
   );
 
   app.post(
     "/api/files/:reference/associations",
-    auth,
-    can("iam.files.associations", "create"),
-    wrap((req, res) => {
-      res.status(201).json(files.createAssociation(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.files.associations", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await files.createAssociationAsync(db, req.params.reference, req.body || {}, req.actor, fileTenant(req), clientIp(req)));
     })
   );
 
   app.get(
     "/api/files/:reference/collections",
-    auth,
-    can("iam.files.folders", "read"),
-    wrap((req, res) => {
-      const file = files.getFile(db, req.params.reference, req.actor, fileTenant(req)).file;
-      res.json(files.listCollectionsForFile(db, file.id, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.folders", "read"),
+    wrap(async (req, res) => {
+      const file = (await files.getFileAsync(db, req.params.reference, req.actor, fileTenant(req))).file;
+      res.json(await files.listCollectionsForFileAsync(db, file.id, req.actor, fileTenant(req)));
     })
   );
 
   // Locks (tenant-wide view).
   app.get(
     "/api/file-locks",
-    auth,
-    can("iam.files.locks", "read"),
-    wrap((req, res) => {
-      res.json(files.listLocks(db, req.query, req.actor, fileTenant(req)));
+    authAsync,
+    canAsync("iam.files.locks", "read"),
+    wrap(async (req, res) => {
+      res.json(await files.listLocksAsync(db, req.query, req.actor, fileTenant(req)));
     })
   );
 
@@ -6493,70 +6611,70 @@ export function createApp(db) {
 
   app.get(
     "/api/search/meta",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
       res.json({
         ...search.vocabulary,
         providers: search.listSearchProviders(),
-        object_types: search.searchableObjectTypes(db, searchTenant(req)),
-        configuration: search.getConfiguration(db, searchTenant(req)),
+        object_types: await search.searchableObjectTypesAsync(db, searchTenant(req)),
+        configuration: await search.getConfigurationAsync(db, searchTenant(req)),
       });
     })
   );
 
   app.post(
     "/api/search",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.search(db, req.body || {}, req.actor, { tenantId: searchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.searchAsync(db, req.body || {}, req.actor, { tenantId: searchTenant(req) }));
     })
   );
 
   app.get(
     "/api/search",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.search(db, searchInput(req), req.actor, { tenantId: searchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.searchAsync(db, searchInput(req), req.actor, { tenantId: searchTenant(req) }));
     })
   );
 
   app.get(
     "/api/search/suggestions",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.getSuggestions(db, searchInput(req), req.actor, { tenantId: searchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getSuggestionsAsync(db, searchInput(req), req.actor, { tenantId: searchTenant(req) }));
     })
   );
 
   app.get(
     "/api/search/facets",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.getFacets(db, searchInput(req), req.actor, { tenantId: searchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getFacetsAsync(db, searchInput(req), req.actor, { tenantId: searchTenant(req) }));
     })
   );
 
   app.post(
     "/api/search/advanced",
-    auth,
-    can("iam.search.advanced", "read"),
-    wrap((req, res) => {
-      res.json(search.advancedSearch(db, req.body || {}, req.actor, { tenantId: searchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.advanced", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.advancedSearchAsync(db, req.body || {}, req.actor, { tenantId: searchTenant(req) }));
     })
   );
 
   app.post(
     "/api/search/by-type/:objectType",
-    auth,
-    can("iam.search.advanced", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.advanced", "read"),
+    wrap(async (req, res) => {
       res.json(
-        search.searchByType(db, req.params.objectType, req.body || {}, req.actor, {
+        await search.searchByTypeAsync(db, req.params.objectType, req.body || {}, req.actor, {
           tenantId: searchTenant(req),
         })
       );
@@ -6565,12 +6683,12 @@ export function createApp(db) {
 
   app.post(
     "/api/search/by-attributes",
-    auth,
-    can("iam.search.advanced", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.advanced", "read"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       res.json(
-        search.searchByAttributes(db, body.attributes || {}, body, req.actor, {
+        await search.searchByAttributesAsync(db, body.attributes || {}, body, req.actor, {
           tenantId: searchTenant(req),
         })
       );
@@ -6579,12 +6697,12 @@ export function createApp(db) {
 
   app.post(
     "/api/search/by-relationship",
-    auth,
-    can("iam.search.advanced", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.advanced", "read"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       res.json(
-        search.searchByRelationship(db, body.related_to || body.relatedTo || {}, body, req.actor, {
+        await search.searchByRelationshipAsync(db, body.related_to || body.relatedTo || {}, body, req.actor, {
           tenantId: searchTenant(req),
         })
       );
@@ -6594,11 +6712,11 @@ export function createApp(db) {
   // ── Saved searches ──
   app.get(
     "/api/search/saved",
-    auth,
-    can("iam.search.saved", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.saved", "read"),
+    wrap(async (req, res) => {
       res.json({
-        items: search.listSavedSearches(db, {
+        items: await search.listSavedSearchesAsync(db, {
           tenantId: searchTenant(req),
           actorId: req.actor.id,
           includeShared: req.query.include_shared !== "false",
@@ -6609,49 +6727,49 @@ export function createApp(db) {
 
   app.post(
     "/api/search/saved",
-    auth,
-    can("iam.search.saved", "create"),
-    wrap((req, res) => {
-      res.status(201).json(search.createSavedSearch(db, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.search.saved", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await search.createSavedSearchAsync(db, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
     })
   );
 
   app.get(
     "/api/search/saved/:reference",
-    auth,
-    can("iam.search.saved", "read"),
-    wrap((req, res) => {
-      res.json(search.getSavedSearch(db, req.params.reference, req.actor, searchTenant(req)));
+    authAsync,
+    canAsync("iam.search.saved", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getSavedSearchAsync(db, req.params.reference, req.actor, searchTenant(req)));
     })
   );
 
   app.patch(
     "/api/search/saved/:reference",
-    auth,
-    can("iam.search.saved", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.saved", "update"),
+    wrap(async (req, res) => {
       res.json(
-        search.updateSavedSearch(db, req.params.reference, req.body || {}, req.actor, searchTenant(req), clientIp(req))
+        await search.updateSavedSearchAsync(db, req.params.reference, req.body || {}, req.actor, searchTenant(req), clientIp(req))
       );
     })
   );
 
   app.delete(
     "/api/search/saved/:reference",
-    auth,
-    can("iam.search.saved", "delete"),
-    wrap((req, res) => {
-      res.json(search.deleteSavedSearch(db, req.params.reference, req.actor, searchTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.search.saved", "delete"),
+    wrap(async (req, res) => {
+      res.json(await search.deleteSavedSearchAsync(db, req.params.reference, req.actor, searchTenant(req), clientIp(req)));
     })
   );
 
   app.post(
     "/api/search/saved/:reference/run",
-    auth,
-    can("iam.search.saved", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.saved", "read"),
+    wrap(async (req, res) => {
       res.json(
-        search.runSavedSearch(db, req.params.reference, req.body || {}, req.actor, searchTenant(req), clientIp(req))
+        await search.runSavedSearchAsync(db, req.params.reference, req.body || {}, req.actor, searchTenant(req), clientIp(req))
       );
     })
   );
@@ -6659,11 +6777,11 @@ export function createApp(db) {
   // ── Search history ──
   app.get(
     "/api/search/history",
-    auth,
-    can("iam.search.history", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.history", "read"),
+    wrap(async (req, res) => {
       res.json({
-        items: search.listSearchHistory(db, {
+        items: await search.listSearchHistoryAsync(db, {
           tenantId: searchTenant(req),
           actorId: req.actor.id,
           limit: req.query.limit,
@@ -6675,30 +6793,30 @@ export function createApp(db) {
 
   app.delete(
     "/api/search/history",
-    auth,
-    can("iam.search.history", "delete"),
-    wrap((req, res) => {
-      res.json(search.clearSearchHistory(db, req.actor, searchTenant(req), { all: req.query.all === "true" }));
+    authAsync,
+    canAsync("iam.search.history", "delete"),
+    wrap(async (req, res) => {
+      res.json(await search.clearSearchHistoryAsync(db, req.actor, searchTenant(req), { all: req.query.all === "true" }));
     })
   );
 
   app.delete(
     "/api/search/history/:id",
-    auth,
-    can("iam.search.history", "delete"),
-    wrap((req, res) => {
-      res.json(search.deleteSearchHistoryEntry(db, req.params.id, req.actor, searchTenant(req)));
+    authAsync,
+    canAsync("iam.search.history", "delete"),
+    wrap(async (req, res) => {
+      res.json(await search.deleteSearchHistoryEntryAsync(db, req.params.id, req.actor, searchTenant(req)));
     })
   );
 
   // ── Exports ──
   app.get(
     "/api/search/exports",
-    auth,
-    can("iam.search.export", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.export", "read"),
+    wrap(async (req, res) => {
       res.json({
-        items: search.listExports(db, {
+        items: await search.listExportsAsync(db, {
           tenantId: searchTenant(req),
           actorId: req.query.all === "true" ? null : req.actor.id,
           limit: req.query.limit,
@@ -6709,28 +6827,28 @@ export function createApp(db) {
 
   app.post(
     "/api/search/exports",
-    auth,
-    can("iam.search.export", "create"),
-    wrap((req, res) => {
-      res.status(201).json(search.requestExport(db, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.search.export", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await search.requestExportAsync(db, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
     })
   );
 
   app.get(
     "/api/search/exports/:reference",
-    auth,
-    can("iam.search.export", "read"),
-    wrap((req, res) => {
-      res.json(search.getExport(db, req.params.reference, req.actor, searchTenant(req)));
+    authAsync,
+    canAsync("iam.search.export", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getExportAsync(db, req.params.reference, req.actor, searchTenant(req)));
     })
   );
 
   app.get(
     "/api/search/exports/:reference/download",
-    auth,
-    can("iam.search.export", "read"),
-    wrap((req, res) => {
-      const result = search.getExport(db, req.params.reference, req.actor, searchTenant(req), {
+    authAsync,
+    canAsync("iam.search.export", "read"),
+    wrap(async (req, res) => {
+      const result = await search.getExportAsync(db, req.params.reference, req.actor, searchTenant(req), {
         includeContent: true,
       });
       const extension = result.format === "csv" ? "csv" : "json";
@@ -6743,11 +6861,11 @@ export function createApp(db) {
   // ── Index administration ──
   app.get(
     "/api/search/object-types",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (req, res) => {
       res.json({
-        items: search.listObjectTypes(db, {
+        items: await search.listObjectTypesAsync(db, {
           tenantId: searchTenant(req),
           includeDisabled: req.query.include_disabled === "true",
         }),
@@ -6757,66 +6875,66 @@ export function createApp(db) {
 
   app.post(
     "/api/search/object-types",
-    auth,
-    can("iam.search.indexes", "create"),
-    wrap((req, res) => {
-      res.status(201).json(search.registerObjectType(db, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.search.indexes", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await search.registerObjectTypeAsync(db, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
     })
   );
 
   app.get(
     "/api/search/object-types/:code",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((req, res) => {
-      res.json(search.getObjectType(db, req.params.code, searchTenant(req)));
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getObjectTypeAsync(db, req.params.code, searchTenant(req)));
     })
   );
 
   app.patch(
     "/api/search/object-types/:code",
-    auth,
-    can("iam.search.indexes", "update"),
-    wrap((req, res) => {
-      res.json(search.updateObjectType(db, req.params.code, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.search.indexes", "update"),
+    wrap(async (req, res) => {
+      res.json(await search.updateObjectTypeAsync(db, req.params.code, req.body || {}, req.actor, searchTenant(req), clientIp(req)));
     })
   );
 
   app.post(
     "/api/search/object-types/:code/status",
-    auth,
-    can("iam.search.indexes", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "update"),
+    wrap(async (req, res) => {
       res.json(
-        search.setObjectTypeStatus(db, req.params.code, req.body?.status, req.actor, searchTenant(req), clientIp(req))
+        await search.setObjectTypeStatusAsync(db, req.params.code, req.body?.status, req.actor, searchTenant(req), clientIp(req))
       );
     })
   );
 
   app.delete(
     "/api/search/object-types/:code",
-    auth,
-    can("iam.search.indexes", "delete"),
-    wrap((req, res) => {
-      res.json(search.deleteObjectType(db, req.params.code, req.actor, searchTenant(req), clientIp(req)));
+    authAsync,
+    canAsync("iam.search.indexes", "delete"),
+    wrap(async (req, res) => {
+      res.json(await search.deleteObjectTypeAsync(db, req.params.code, req.actor, searchTenant(req), clientIp(req)));
     })
   );
 
   app.get(
     "/api/search/indexes/status",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((req, res) => {
-      res.json(search.indexingStatus(db, { tenantId: searchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.indexingStatusAsync(db, { tenantId: searchTenant(req) }));
     })
   );
 
   app.get(
     "/api/search/indexes/failures",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((req, res) => {
-      res.json({ items: search.listIndexFailures(db, { tenantId: searchTenant(req), limit: req.query.limit }) });
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await search.listIndexFailuresAsync(db, { tenantId: searchTenant(req), limit: req.query.limit }) });
     })
   );
 
@@ -6922,37 +7040,37 @@ export function createApp(db) {
 
   app.get(
     "/api/search/configuration",
-    auth,
-    can("iam.search.configuration", "read"),
-    wrap((req, res) => {
-      res.json(search.getConfiguration(db, searchTenant(req)));
+    authAsync,
+    canAsync("iam.search.configuration", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getConfigurationAsync(db, searchTenant(req)));
     })
   );
 
   app.put(
     "/api/search/configuration",
-    auth,
-    can("iam.search.configuration", "update"),
-    wrap((req, res) => {
-      res.json(search.updateConfiguration(db, searchTenant(req), req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.search.configuration", "update"),
+    wrap(async (req, res) => {
+      res.json(await search.updateConfigurationAsync(db, searchTenant(req), req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.get(
     "/api/search/metrics",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((req, res) => {
-      res.json(search.searchMetrics(db, { tenantId: searchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.searchMetricsAsync(db, { tenantId: searchTenant(req) }));
     })
   );
 
   app.get(
     "/api/search/health",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((_req, res) => {
-      res.json(search.searchHealth(db));
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (_req, res) => {
+      res.json(await search.searchHealthAsync(db));
     })
   );
 
@@ -6964,19 +7082,19 @@ export function createApp(db) {
 
   app.get(
     "/api/v1/search/meta",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.getMeta(db, req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getMetaAsync(db, req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
   app.post(
     "/api/v1/search",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.searchObjects(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.searchObjectsAsync(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
@@ -6991,29 +7109,29 @@ export function createApp(db) {
 
   app.post(
     "/api/v1/search/count",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.countObjects(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.countObjectsAsync(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
   app.post(
     "/api/v1/search/bulk",
-    auth,
-    can("iam.search.advanced", "read"),
-    wrap((req, res) => {
-      res.json(search.bulkSearch(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.advanced", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.bulkSearchAsync(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
   app.get(
     "/api/v1/search/objects",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
       res.json(
-        search.listSearchObjects(db, req.actor, {
+        await search.listSearchObjectsAsync(db, req.actor, {
           tenantId: v1SearchTenant(req),
           includeDisabled: req.query.include_disabled === "true",
         })
@@ -7023,38 +7141,38 @@ export function createApp(db) {
 
   app.get(
     "/api/v1/search/objects/:objectType",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.getSearchObject(db, req.params.objectType, req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getSearchObjectAsync(db, req.params.objectType, req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
   app.get(
     "/api/v1/search/facets",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.getObjectFacets(db, v1SearchInput(req), req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getObjectFacetsAsync(db, v1SearchInput(req), req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
   app.get(
     "/api/v1/search/suggestions",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
-      res.json(search.getObjectSuggestions(db, v1SearchInput(req), req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getObjectSuggestionsAsync(db, v1SearchInput(req), req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
   app.get(
     "/api/v1/search/history",
-    auth,
-    can("iam.search.history", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.history", "read"),
+    wrap(async (req, res) => {
       res.json(
-        search.getHistory(db, req.actor, {
+        await search.getHistoryAsync(db, req.actor, {
           tenantId: v1SearchTenant(req),
           limit: req.query.limit,
           q: req.query.q,
@@ -7065,11 +7183,11 @@ export function createApp(db) {
 
   app.delete(
     "/api/v1/search/history",
-    auth,
-    can("iam.search.history", "delete"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.history", "delete"),
+    wrap(async (req, res) => {
       res.json(
-        search.clearHistory(db, req.actor, {
+        await search.clearHistoryAsync(db, req.actor, {
           tenantId: v1SearchTenant(req),
           all: req.query.all === "true",
         })
@@ -7079,20 +7197,20 @@ export function createApp(db) {
 
   app.delete(
     "/api/v1/search/history/:id",
-    auth,
-    can("iam.search.history", "delete"),
-    wrap((req, res) => {
-      res.json(search.removeHistoryEntry(db, req.params.id, req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.history", "delete"),
+    wrap(async (req, res) => {
+      res.json(await search.removeHistoryEntryAsync(db, req.params.id, req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
   app.get(
     "/api/v1/search/saved",
-    auth,
-    can("iam.search.saved", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.saved", "read"),
+    wrap(async (req, res) => {
       res.json(
-        search.listSaved(db, req.actor, {
+        await search.listSavedAsync(db, req.actor, {
           tenantId: v1SearchTenant(req),
           includeShared: req.query.include_shared !== "false",
         })
@@ -7102,31 +7220,31 @@ export function createApp(db) {
 
   app.post(
     "/api/v1/search/saved",
-    auth,
-    can("iam.search.saved", "create"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.saved", "create"),
+    wrap(async (req, res) => {
       res.status(201).json(
-        search.createSaved(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req), ip: clientIp(req) })
+        await search.createSavedAsync(db, req.body || {}, req.actor, { tenantId: v1SearchTenant(req), ip: clientIp(req) })
       );
     })
   );
 
   app.get(
     "/api/v1/search/saved/:reference",
-    auth,
-    can("iam.search.saved", "read"),
-    wrap((req, res) => {
-      res.json(search.getSaved(db, req.params.reference, req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.saved", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getSavedAsync(db, req.params.reference, req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
   app.put(
     "/api/v1/search/saved/:reference",
-    auth,
-    can("iam.search.saved", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.saved", "update"),
+    wrap(async (req, res) => {
       res.json(
-        search.updateSaved(db, req.params.reference, req.body || {}, req.actor, {
+        await search.updateSavedAsync(db, req.params.reference, req.body || {}, req.actor, {
           tenantId: v1SearchTenant(req),
           ip: clientIp(req),
         })
@@ -7136,11 +7254,11 @@ export function createApp(db) {
 
   app.delete(
     "/api/v1/search/saved/:reference",
-    auth,
-    can("iam.search.saved", "delete"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.saved", "delete"),
+    wrap(async (req, res) => {
       res.json(
-        search.removeSaved(db, req.params.reference, req.actor, {
+        await search.removeSavedAsync(db, req.params.reference, req.actor, {
           tenantId: v1SearchTenant(req),
           ip: clientIp(req),
         })
@@ -7150,11 +7268,11 @@ export function createApp(db) {
 
   app.post(
     "/api/v1/search/saved/:reference/execute",
-    auth,
-    can("iam.search.saved", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.saved", "read"),
+    wrap(async (req, res) => {
       res.json(
-        search.runSaved(db, req.params.reference, req.body || {}, req.actor, {
+        await search.runSavedAsync(db, req.params.reference, req.body || {}, req.actor, {
           tenantId: v1SearchTenant(req),
           ip: clientIp(req),
         })
@@ -7214,11 +7332,11 @@ export function createApp(db) {
 
   app.get(
     "/api/v1/search/index/status",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (req, res) => {
       res.json(
-        search.getIndexStatus(db, req.actor, {
+        await search.getIndexStatusAsync(db, req.actor, {
           tenantId: v1SearchTenant(req),
           limit: req.query.limit,
         })
@@ -7258,11 +7376,11 @@ export function createApp(db) {
 
   app.get(
     "/api/v1/search/fields",
-    auth,
-    can("iam.search.configuration", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.configuration", "read"),
+    wrap(async (req, res) => {
       res.json(
-        search.listFields(db, req.actor, {
+        await search.listFieldsAsync(db, req.actor, {
           tenantId: v1SearchTenant(req),
           objectType: req.query.object_type || req.query.objectType,
         })
@@ -7272,13 +7390,13 @@ export function createApp(db) {
 
   app.post(
     "/api/v1/search/fields",
-    auth,
-    can("iam.search.configuration", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.configuration", "update"),
+    wrap(async (req, res) => {
       res
         .status(201)
         .json(
-          search.createField(db, req.body || {}, req.actor, {
+          await search.createFieldAsync(db, req.body || {}, req.actor, {
             tenantId: v1SearchTenant(req),
             ip: clientIp(req),
           })
@@ -7288,11 +7406,11 @@ export function createApp(db) {
 
   app.delete(
     "/api/v1/search/fields/:objectType/:field",
-    auth,
-    can("iam.search.configuration", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.configuration", "update"),
+    wrap(async (req, res) => {
       res.json(
-        search.removeField(db, req.params.objectType, req.params.field, req.actor, {
+        await search.removeFieldAsync(db, req.params.objectType, req.params.field, req.actor, {
           tenantId: v1SearchTenant(req),
           ip: clientIp(req),
         })
@@ -7318,11 +7436,11 @@ export function createApp(db) {
 
   app.get(
     "/api/v1/search/content-text",
-    auth,
-    can("iam.search.global", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.global", "read"),
+    wrap(async (req, res) => {
       res.json(
-        search.getObjectExtractedText(db, req.actor, {
+        await search.getObjectExtractedTextAsync(db, req.actor, {
           tenantId: v1SearchTenant(req),
           objectType: req.query.object_type || req.query.objectType,
           objectId: req.query.object_id || req.query.objectId,
@@ -7348,19 +7466,19 @@ export function createApp(db) {
 
   app.get(
     "/api/v1/search/health",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((_req, res) => {
-      res.json(search.getHealth(db));
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (_req, res) => {
+      res.json(await search.getHealthAsync(db));
     })
   );
 
   app.get(
     "/api/v1/search/metrics",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((req, res) => {
-      res.json(search.getMetrics(db, req.actor, { tenantId: v1SearchTenant(req) }));
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (req, res) => {
+      res.json(await search.getMetricsAsync(db, req.actor, { tenantId: v1SearchTenant(req) }));
     })
   );
 
@@ -7378,17 +7496,17 @@ export function createApp(db) {
 
   app.get(
     "/api/v1/security/overview",
-    auth,
-    can("iam.security.console", "read"),
-    wrap((req, res) => res.json(security.securityOverview(db, securityTenant(req))))
+    authAsync,
+    canAsync("iam.security.console", "read"),
+    wrap(async (req, res) => res.json(await security.securityOverviewAsync(db, securityTenant(req))))
   );
 
   app.post(
     "/api/v1/security/cache/invalidate",
-    auth,
-    can("iam.security.console", "execute"),
-    wrap((req, res) => {
-      security.invalidateSecurity(db, securityTenant(req), req.body?.scope || "all");
+    authAsync,
+    canAsync("iam.security.console", "execute"),
+    wrap(async (req, res) => {
+      await security.invalidateSecurityAsync(db, securityTenant(req), req.body?.scope || "all");
       res.json({ ok: true });
     })
   );
@@ -7396,27 +7514,27 @@ export function createApp(db) {
   // Object type registration
   app.get(
     "/api/v1/security/object-types",
-    auth,
-    can("iam.security.objecttypes", "read"),
-    wrap((req, res) => res.json(security.listSecurityObjectTypes(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.objecttypes", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityObjectTypesAsync(db, securityTenant(req), req.query || {})))
   );
   app.post(
     "/api/v1/security/object-types",
-    auth,
-    can("iam.security.objecttypes", "create"),
-    wrap((req, res) =>
+    authAsync,
+    canAsync("iam.security.objecttypes", "create"),
+    wrap(async (req, res) =>
       res
         .status(201)
-        .json(security.registerSecurityObjectType(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+        .json(await security.registerSecurityObjectTypeAsync(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
     )
   );
   app.put(
     "/api/v1/security/object-types/:objectType",
-    auth,
-    can("iam.security.objecttypes", "update"),
-    wrap((req, res) =>
+    authAsync,
+    canAsync("iam.security.objecttypes", "update"),
+    wrap(async (req, res) =>
       res.json(
-        security.updateSecurityObjectType(
+        await security.updateSecurityObjectTypeAsync(
           db,
           securityTenant(req),
           req.params.objectType,
@@ -7429,11 +7547,11 @@ export function createApp(db) {
   );
   app.post(
     "/api/v1/security/object-types/:objectType/status",
-    auth,
-    can("iam.security.objecttypes", "update"),
-    wrap((req, res) =>
+    authAsync,
+    canAsync("iam.security.objecttypes", "update"),
+    wrap(async (req, res) =>
       res.json(
-        security.setSecurityObjectTypeStatus(
+        await security.setSecurityObjectTypeStatusAsync(
           db,
           securityTenant(req),
           req.params.objectType,
@@ -7448,151 +7566,151 @@ export function createApp(db) {
   // Policies
   app.get(
     "/api/v1/security/policies",
-    auth,
-    can("iam.security.policies", "read"),
-    wrap((req, res) => res.json(security.listSecurityPolicies(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.policies", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityPoliciesAsync(db, securityTenant(req), req.query || {})))
   );
   app.get(
     "/api/v1/security/policies/:id",
-    auth,
-    can("iam.security.policies", "read"),
-    wrap((req, res) => res.json(security.getSecurityPolicy(db, securityTenant(req), req.params.id)))
+    authAsync,
+    canAsync("iam.security.policies", "read"),
+    wrap(async (req, res) => res.json(await security.getSecurityPolicyAsync(db, securityTenant(req), req.params.id)))
   );
   app.post(
     "/api/v1/security/policies",
-    auth,
-    can("iam.security.policies", "create"),
-    wrap((req, res) =>
-      res.status(201).json(security.createSecurityPolicy(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    authAsync,
+    canAsync("iam.security.policies", "create"),
+    wrap(async (req, res) =>
+      res.status(201).json(await security.createSecurityPolicyAsync(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
     )
   );
   app.put(
     "/api/v1/security/policies/:id",
-    auth,
-    can("iam.security.policies", "update"),
-    wrap((req, res) =>
-      res.json(security.updateSecurityPolicy(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
+    authAsync,
+    canAsync("iam.security.policies", "update"),
+    wrap(async (req, res) =>
+      res.json(await security.updateSecurityPolicyAsync(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
     )
   );
   app.post(
     "/api/v1/security/policies/:id/status",
-    auth,
-    can("iam.security.policies", "update"),
-    wrap((req, res) =>
-      res.json(security.setSecurityPolicyStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
+    authAsync,
+    canAsync("iam.security.policies", "update"),
+    wrap(async (req, res) =>
+      res.json(await security.setSecurityPolicyStatusAsync(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
     )
   );
 
   // Entitlements
   app.get(
     "/api/v1/security/entitlements",
-    auth,
-    can("iam.security.entitlements", "read"),
-    wrap((req, res) => res.json(security.listSecurityEntitlements(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.entitlements", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityEntitlementsAsync(db, securityTenant(req), req.query || {})))
   );
   app.post(
     "/api/v1/security/entitlements",
-    auth,
-    can("iam.security.entitlements", "create"),
-    wrap((req, res) =>
-      res.status(201).json(security.createSecurityEntitlement(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    authAsync,
+    canAsync("iam.security.entitlements", "create"),
+    wrap(async (req, res) =>
+      res.status(201).json(await security.createSecurityEntitlementAsync(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
     )
   );
   app.put(
     "/api/v1/security/entitlements/:id",
-    auth,
-    can("iam.security.entitlements", "update"),
-    wrap((req, res) =>
-      res.json(security.updateSecurityEntitlement(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
+    authAsync,
+    canAsync("iam.security.entitlements", "update"),
+    wrap(async (req, res) =>
+      res.json(await security.updateSecurityEntitlementAsync(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
     )
   );
   app.post(
     "/api/v1/security/entitlements/:id/status",
-    auth,
-    can("iam.security.entitlements", "update"),
-    wrap((req, res) =>
-      res.json(security.setSecurityEntitlementStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
+    authAsync,
+    canAsync("iam.security.entitlements", "update"),
+    wrap(async (req, res) =>
+      res.json(await security.setSecurityEntitlementStatusAsync(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
     )
   );
 
   // Field security & masking
   app.get(
     "/api/v1/security/field-rules",
-    auth,
-    can("iam.security.fields", "read"),
-    wrap((req, res) => res.json(security.listSecurityFieldRules(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.fields", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityFieldRulesAsync(db, securityTenant(req), req.query || {})))
   );
   app.post(
     "/api/v1/security/field-rules",
-    auth,
-    can("iam.security.fields", "create"),
-    wrap((req, res) =>
-      res.status(201).json(security.createSecurityFieldRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    authAsync,
+    canAsync("iam.security.fields", "create"),
+    wrap(async (req, res) =>
+      res.status(201).json(await security.createSecurityFieldRuleAsync(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
     )
   );
   app.put(
     "/api/v1/security/field-rules/:id",
-    auth,
-    can("iam.security.fields", "update"),
-    wrap((req, res) =>
-      res.json(security.updateSecurityFieldRule(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
+    authAsync,
+    canAsync("iam.security.fields", "update"),
+    wrap(async (req, res) =>
+      res.json(await security.updateSecurityFieldRuleAsync(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
     )
   );
   app.post(
     "/api/v1/security/field-rules/:id/status",
-    auth,
-    can("iam.security.fields", "update"),
-    wrap((req, res) =>
-      res.json(security.setSecurityFieldRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
+    authAsync,
+    canAsync("iam.security.fields", "update"),
+    wrap(async (req, res) =>
+      res.json(await security.setSecurityFieldRuleStatusAsync(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
     )
   );
   app.get(
     "/api/v1/security/masking-rules",
-    auth,
-    can("iam.security.fields", "read"),
-    wrap((req, res) => res.json(security.listSecurityMaskingRules(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.fields", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityMaskingRulesAsync(db, securityTenant(req), req.query || {})))
   );
   app.post(
     "/api/v1/security/masking-rules",
-    auth,
-    can("iam.security.fields", "create"),
-    wrap((req, res) =>
-      res.status(201).json(security.createSecurityMaskingRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    authAsync,
+    canAsync("iam.security.fields", "create"),
+    wrap(async (req, res) =>
+      res.status(201).json(await security.createSecurityMaskingRuleAsync(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
     )
   );
   app.post(
     "/api/v1/security/masking-rules/:id/status",
-    auth,
-    can("iam.security.fields", "update"),
-    wrap((req, res) =>
-      res.json(security.setSecurityMaskingRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
+    authAsync,
+    canAsync("iam.security.fields", "update"),
+    wrap(async (req, res) =>
+      res.json(await security.setSecurityMaskingRuleStatusAsync(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req)))
     )
   );
 
   // Classification security
   app.get(
     "/api/v1/security/classification-rules",
-    auth,
-    can("iam.security.classifications", "read"),
-    wrap((req, res) => res.json(security.listSecurityClassificationRules(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.classifications", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityClassificationRulesAsync(db, securityTenant(req), req.query || {})))
   );
   app.post(
     "/api/v1/security/classification-rules",
-    auth,
-    can("iam.security.classifications", "create"),
-    wrap((req, res) =>
+    authAsync,
+    canAsync("iam.security.classifications", "create"),
+    wrap(async (req, res) =>
       res
         .status(201)
-        .json(security.createSecurityClassificationRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+        .json(await security.createSecurityClassificationRuleAsync(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
     )
   );
   app.post(
     "/api/v1/security/classification-rules/:id/status",
-    auth,
-    can("iam.security.classifications", "update"),
-    wrap((req, res) =>
+    authAsync,
+    canAsync("iam.security.classifications", "update"),
+    wrap(async (req, res) =>
       res.json(
-        security.setSecurityClassificationRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req))
+        await security.setSecurityClassificationRuleStatusAsync(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req))
       )
     )
   );
@@ -7600,51 +7718,51 @@ export function createApp(db) {
   // Organization & plant security
   app.get(
     "/api/v1/security/organization-rules",
-    auth,
-    can("iam.security.organizations", "read"),
-    wrap((req, res) => res.json(security.listSecurityOrganizationRules(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.organizations", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityOrganizationRulesAsync(db, securityTenant(req), req.query || {})))
   );
   app.post(
     "/api/v1/security/organization-rules",
-    auth,
-    can("iam.security.organizations", "create"),
-    wrap((req, res) =>
+    authAsync,
+    canAsync("iam.security.organizations", "create"),
+    wrap(async (req, res) =>
       res
         .status(201)
-        .json(security.createSecurityOrganizationRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+        .json(await security.createSecurityOrganizationRuleAsync(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
     )
   );
   app.post(
     "/api/v1/security/organization-rules/:id/status",
-    auth,
-    can("iam.security.organizations", "update"),
-    wrap((req, res) =>
+    authAsync,
+    canAsync("iam.security.organizations", "update"),
+    wrap(async (req, res) =>
       res.json(
-        security.setSecurityOrganizationRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req))
+        await security.setSecurityOrganizationRuleStatusAsync(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req))
       )
     )
   );
   app.get(
     "/api/v1/security/plant-rules",
-    auth,
-    can("iam.security.organizations", "read"),
-    wrap((req, res) => res.json(security.listSecurityPlantRules(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.organizations", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityPlantRulesAsync(db, securityTenant(req), req.query || {})))
   );
   app.post(
     "/api/v1/security/plant-rules",
-    auth,
-    can("iam.security.organizations", "create"),
-    wrap((req, res) =>
-      res.status(201).json(security.createSecurityPlantRule(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+    authAsync,
+    canAsync("iam.security.organizations", "create"),
+    wrap(async (req, res) =>
+      res.status(201).json(await security.createSecurityPlantRuleAsync(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
     )
   );
   app.post(
     "/api/v1/security/plant-rules/:id/status",
-    auth,
-    can("iam.security.organizations", "update"),
-    wrap((req, res) =>
+    authAsync,
+    canAsync("iam.security.organizations", "update"),
+    wrap(async (req, res) =>
       res.json(
-        security.setSecurityPlantRuleStatus(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req))
+        await security.setSecurityPlantRuleStatusAsync(db, securityTenant(req), req.params.id, req.body?.status, req.actor, clientIp(req))
       )
     )
   );
@@ -7652,16 +7770,16 @@ export function createApp(db) {
   // Authorization debugger
   app.get(
     "/api/v1/security/decisions",
-    auth,
-    can("iam.security.decisions", "read"),
-    wrap((req, res) => res.json(security.listSecurityDecisions(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.decisions", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityDecisionsAsync(db, securityTenant(req), req.query || {})))
   );
   app.get(
     "/api/v1/security/context/:userId",
-    auth,
-    can("iam.security.decisions", "read"),
-    wrap((req, res) =>
-      res.json(security.effectiveSecurityContext(db, securityTenant(req), req.params.userId, { organizationId: req.query.organization_id }))
+    authAsync,
+    canAsync("iam.security.decisions", "read"),
+    wrap(async (req, res) =>
+      res.json(await security.effectiveSecurityContextAsync(db, securityTenant(req), req.params.userId, { organizationId: req.query.organization_id }))
     )
   );
   app.post(
@@ -7750,26 +7868,26 @@ export function createApp(db) {
   // Canonical entitlement aliases (spec §16) backed by the same service.
   app.get(
     "/api/v1/entitlements",
-    auth,
-    can("iam.security.entitlements", "read"),
-    wrap((req, res) => res.json(security.listSecurityEntitlements(db, securityTenant(req), req.query || {})))
+    authAsync,
+    canAsync("iam.security.entitlements", "read"),
+    wrap(async (req, res) => res.json(await security.listSecurityEntitlementsAsync(db, securityTenant(req), req.query || {})))
   );
   app.post(
     "/api/v1/entitlements",
-    auth,
-    can("iam.security.entitlements", "create"),
-    wrap((req, res) =>
+    authAsync,
+    canAsync("iam.security.entitlements", "create"),
+    wrap(async (req, res) =>
       res
         .status(201)
-        .json(security.createSecurityEntitlement(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
+        .json(await security.createSecurityEntitlementAsync(db, req.body || {}, req.actor, securityTenant(req), clientIp(req)))
     )
   );
   app.put(
     "/api/v1/entitlements/:id",
-    auth,
-    can("iam.security.entitlements", "update"),
-    wrap((req, res) =>
-      res.json(security.updateSecurityEntitlement(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
+    authAsync,
+    canAsync("iam.security.entitlements", "update"),
+    wrap(async (req, res) =>
+      res.json(await security.updateSecurityEntitlementAsync(db, securityTenant(req), req.params.id, req.body || {}, req.actor, clientIp(req)))
     )
   );
 

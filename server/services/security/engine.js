@@ -24,10 +24,13 @@ import { subjectMatches } from "./context.js";
 import { applyMasking } from "./masking.js";
 import {
   getObjectType,
+  getObjectTypeAsync,
   listClassificationRules,
   listEntitlements,
   listFieldRules,
+  listFieldRulesAsync,
   listMaskingRules,
+  listMaskingRulesAsync,
   listOrganizationRules,
   listPlantRules,
   listPolicies,
@@ -157,27 +160,50 @@ export function effectiveEnforcement(db, tenantId, objectType) {
   return row?.enforcement || DEFAULT_ENFORCEMENT;
 }
 
+export async function effectiveEnforcementAsync(db, tenantId, objectType) {
+  const row = await getObjectTypeAsync(db, tenantId, objectType);
+  return row?.enforcement || DEFAULT_ENFORCEMENT;
+}
+
 // ---------------------------------------------------------------------------
 // Field security
 // ---------------------------------------------------------------------------
 
 export function evaluateFields(db, context, resourceType, action, resource = {}, options = {}) {
   const tenantId = Number(context?.tenantId ?? 0);
+  const rules = listFieldRules(db, tenantId, { object_type: resourceType });
+  const maskingRules = listMaskingRules(db, tenantId);
+  const selected = selectFieldRules(rules, maskingRules, context, resourceType, action, resource, options);
+  return buildFieldDecisions(selected.rules, selected.maskingRules);
+}
+
+export async function evaluateFieldsAsync(db, context, resourceType, action, resource = {}, options = {}) {
+  const tenantId = Number(context?.tenantId ?? 0);
+  const rules = await listFieldRulesAsync(db, tenantId, { object_type: resourceType });
+  const maskingRules = await listMaskingRulesAsync(db, tenantId);
+  const selected = selectFieldRules(rules, maskingRules, context, resourceType, action, resource, options);
+  return buildFieldDecisions(selected.rules, selected.maskingRules);
+}
+
+function selectFieldRules(rules, maskingRules, context, resourceType, action, resource, options) {
   const normalizedAction = String(action).toLowerCase();
   const evalContext = buildEvaluationContext(context, { ...resource, type: resourceType }, normalizedAction, options);
-  const rules = listFieldRules(db, tenantId, { object_type: resourceType }).filter((rule) => {
+  const active = rules.filter((rule) => {
     if (rule.status !== "active") return false;
     if (!actionMatches(rule.action, normalizedAction)) return false;
     if (!subjectMatches(context, rule.subject_type, rule.subject_id)) return false;
     return conditionPasses(rule, evalContext);
   });
-  const maskingRules = listMaskingRules(db, tenantId).filter((rule) => {
+  const masking = maskingRules.filter((rule) => {
     if (rule.status !== "active") return false;
     if (rule.object_type && rule.object_type !== resourceType) return false;
     if (rule.classification && resource.classification && rule.classification !== resource.classification) return false;
     return true;
   });
+  return { rules: active, maskingRules: masking };
+}
 
+function buildFieldDecisions(rules, maskingRules) {
   const fieldMap = new Map();
   const rank = { deny: 3, hide: 3, mask: 2, allow: 1 };
   for (const rule of rules) {

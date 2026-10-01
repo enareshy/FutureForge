@@ -6,6 +6,7 @@
 // below, so swapping the relational provider for OpenSearch/Elasticsearch/Solr
 // never changes this contract.
 import { run } from "../../db.js";
+import { runAsync } from "../../db-async.js";
 import { SearchError, SEARCH_ERROR_CODES } from "./errors.js";
 import {
   PAGE_LIMITS,
@@ -20,22 +21,32 @@ import {
 import { parseSearchQuery, parseSearchText } from "./parser.js";
 import {
   canonicalFieldCatalog,
+  canonicalFieldCatalogAsync,
   deleteFieldDefinition,
+  deleteFieldDefinitionAsync,
   internalFieldFor,
   listFieldDefinitions,
+  listFieldDefinitionsAsync,
   upsertFieldDefinition,
+  upsertFieldDefinitionAsync,
   validateCanonicalQuery,
+  validateCanonicalQueryAsync,
 } from "./fields.js";
 import {
   getObjectType,
+  getObjectTypeAsync,
   listObjectTypes,
+  listObjectTypesAsync,
   searchableObjectTypeCodes,
+  searchableObjectTypeCodesAsync,
 } from "./registry.js";
-import { runSearch } from "./query.js";
+import { runSearch, runSearchAsync } from "./query.js";
 import {
   applyIndexChange,
   indexingStatus,
+  indexingStatusAsync,
   listIndexFailures,
+  listIndexFailuresAsync,
   reindexObject,
   reindexOrganization,
   reindexTenant,
@@ -44,21 +55,30 @@ import {
 } from "./indexing.js";
 import {
   createSavedSearch,
+  createSavedSearchAsync,
   deleteSavedSearch,
+  deleteSavedSearchAsync,
   getSavedSearch,
+  getSavedSearchAsync,
   listSavedSearches,
+  listSavedSearchesAsync,
   updateSavedSearch,
+  updateSavedSearchAsync,
 } from "./saved.js";
-import { getSuggestions } from "./suggestions.js";
+import { getSuggestions, getSuggestionsAsync } from "./suggestions.js";
 import {
   clearSearchHistory,
+  clearSearchHistoryAsync,
   deleteSearchHistoryEntry,
+  deleteSearchHistoryEntryAsync,
   listSearchHistory,
+  listSearchHistoryAsync,
 } from "./history.js";
-import { searchHealth, searchMetrics } from "./metrics.js";
+import { searchHealth, searchHealthAsync, searchMetrics, searchMetricsAsync } from "./metrics.js";
 import {
   deleteExtractedText,
   listExtractedText,
+  listExtractedTextAsync,
   putExtractedText,
 } from "./extracted-text.js";
 import {
@@ -158,6 +178,54 @@ export function bulkSearch(db, input = {}, actor, options = {}) {
   };
 }
 
+export async function executeCanonicalAsync(db, canonical, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  const availableTypes = await searchableObjectTypeCodesAsync(db, tenantId);
+  await validateCanonicalQueryAsync(db, canonical, { tenantId, availableTypes });
+  const internal = canonicalToInternal(canonical);
+  const result = await runSearchAsync(db, internal, actor, { ...options, tenantId });
+  return toCanonicalResult(result, canonical, { facets: result.facets });
+}
+
+export async function searchObjectsAsync(db, input, actor, options = {}) {
+  const canonical = buildCanonicalQuery(input, { parseText: options.parseText !== false });
+  return executeCanonicalAsync(db, canonical, actor, options);
+}
+
+export async function countObjectsAsync(db, input, actor, options = {}) {
+  const canonical = buildCanonicalQuery(input, { parseText: options.parseText !== false });
+  canonical.pageSize = 1;
+  canonical.page = 0;
+  const tenantId = tenantOf(actor, options);
+  const availableTypes = await searchableObjectTypeCodesAsync(db, tenantId);
+  await validateCanonicalQueryAsync(db, canonical, { tenantId, availableTypes });
+  const internal = canonicalToInternal(canonical);
+  const result = await runSearchAsync(db, internal, actor, { ...options, tenantId, recordHistory: false });
+  return {
+    total: result.total || 0,
+    objectTypes: result.object_types || canonical.objectTypes,
+    tookMs: result.took_ms ?? 0,
+    query: canonical.text,
+    disabled: result.disabled === true,
+  };
+}
+
+export async function bulkSearchAsync(db, input = {}, actor, options = {}) {
+  const queries = Array.isArray(input.queries) ? input.queries : [];
+  if (!queries.length) {
+    throw new SearchError(SEARCH_ERROR_CODES.INVALID_QUERY, "At least one query is required");
+  }
+  if (queries.length > MAX_BULK_QUERIES) {
+    throw new SearchError(
+      SEARCH_ERROR_CODES.QUERY_TOO_COMPLEX,
+      `A bulk search may contain at most ${MAX_BULK_QUERIES} queries`
+    );
+  }
+  const results = [];
+  for (const entry of queries) results.push(await searchObjectsAsync(db, entry, actor, options));
+  return { results };
+}
+
 export function parseQuery(input = {}) {
   const { query, parsed } = parseSearchQuery(input);
   return {
@@ -198,11 +266,50 @@ export function getSearchObject(db, code, actor, options = {}) {
   return { objectType, fields };
 }
 
+export async function listSearchObjectsAsync(db, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  return {
+    objects: await listObjectTypesAsync(db, { tenantId, includeDisabled: options.includeDisabled === true }),
+    pageLimits: PAGE_LIMITS,
+    operators: SEARCH_OPERATORS,
+  };
+}
+
+export async function getSearchObjectAsync(db, code, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  const objectType = await getObjectTypeAsync(db, code, tenantId);
+  const catalog = await canonicalFieldCatalogAsync(db, tenantId, { objectTypes: [objectType.code] });
+  const fields = [...(catalog.get(objectType.code)?.values() || [])].map((def) => ({
+    field: def.field,
+    displayName: def.displayName,
+    dataType: def.dataType,
+    searchable: def.searchable,
+    filterable: def.filterable,
+    sortable: def.sortable,
+    facetable: def.facetable,
+    fullText: def.fullText,
+    exactMatch: def.exactMatch,
+    wildcard: def.wildcard,
+    allowedOperators: operatorsForType(def.dataType),
+  }));
+  return { objectType, fields };
+}
+
 export function listFields(db, actor, options = {}) {
   const tenantId = tenantOf(actor, options);
   const objectType = options.objectType ?? options.object_type ?? null;
   return {
     fields: listFieldDefinitions(db, { tenantId, objectType }),
+    dataTypes: SEARCH_DATA_TYPES,
+    operators: SEARCH_OPERATORS,
+  };
+}
+
+export async function listFieldsAsync(db, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  const objectType = options.objectType ?? options.object_type ?? null;
+  return {
+    fields: await listFieldDefinitionsAsync(db, { tenantId, objectType }),
     dataTypes: SEARCH_DATA_TYPES,
     operators: SEARCH_OPERATORS,
   };
@@ -216,6 +323,14 @@ export function removeField(db, objectType, field, actor, options = {}) {
   return deleteFieldDefinition(db, tenantOf(actor, options), objectType, field, actor, options.ip);
 }
 
+export async function createFieldAsync(db, input, actor, options = {}) {
+  return upsertFieldDefinitionAsync(db, input, actor, tenantOf(actor, options), options.ip);
+}
+
+export async function removeFieldAsync(db, objectType, field, actor, options = {}) {
+  return deleteFieldDefinitionAsync(db, tenantOf(actor, options), objectType, field, actor, options.ip);
+}
+
 // ── Facets / suggestions ────────────────────────────────────────────────────
 export function getObjectFacets(db, input, actor, options = {}) {
   const merged = {
@@ -226,8 +341,27 @@ export function getObjectFacets(db, input, actor, options = {}) {
   return { facets: result.facets, total: result.total };
 }
 
+export async function getObjectFacetsAsync(db, input, actor, options = {}) {
+  const merged = {
+    ...input,
+    facets: input.facets ?? input.facet_fields ?? ["object_type", "status", "classification"],
+  };
+  const result = await searchObjectsAsync(db, merged, actor, options);
+  return { facets: result.facets, total: result.total };
+}
+
 export function getObjectSuggestions(db, input, actor, options = {}) {
   const result = getSuggestions(db, input, actor, { tenantId: tenantOf(actor, options) });
+  const suggestions = Array.isArray(result) ? result : result.suggestions || result.items || [];
+  return {
+    suggestions,
+    ranking: listRankingStrategies(),
+    semanticProviders: listSemanticSearchProviders(),
+  };
+}
+
+export async function getObjectSuggestionsAsync(db, input, actor, options = {}) {
+  const result = await getSuggestionsAsync(db, input, actor, { tenantId: tenantOf(actor, options) });
   const suggestions = Array.isArray(result) ? result : result.suggestions || result.items || [];
   return {
     suggestions,
@@ -252,6 +386,21 @@ export function getSaved(db, reference, actor, options = {}) {
   return getSavedSearch(db, reference, actor, tenantOf(actor, options));
 }
 
+export async function listSavedAsync(db, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  return {
+    savedSearches: await listSavedSearchesAsync(db, {
+      tenantId,
+      actorId: actor?.id,
+      includeShared: options.includeShared !== false,
+    }),
+  };
+}
+
+export async function getSavedAsync(db, reference, actor, options = {}) {
+  return getSavedSearchAsync(db, reference, actor, tenantOf(actor, options));
+}
+
 export function createSaved(db, input, actor, options = {}) {
   const query = input.query ?? input;
   const canonical = buildCanonicalQuery(query, { parseText: false });
@@ -270,6 +419,24 @@ export function removeSaved(db, reference, actor, options = {}) {
   return deleteSavedSearch(db, reference, actor, tenantOf(actor, options), options.ip);
 }
 
+export async function createSavedAsync(db, input, actor, options = {}) {
+  const query = input.query ?? input;
+  const canonical = buildCanonicalQuery(query, { parseText: false });
+  return createSavedSearchAsync(db, { ...input, query: canonical }, actor, tenantOf(actor, options), options.ip);
+}
+
+export async function updateSavedAsync(db, reference, patch, actor, options = {}) {
+  const next = { ...patch };
+  if (patch.query !== undefined) {
+    next.query = buildCanonicalQuery(patch.query, { parseText: false });
+  }
+  return updateSavedSearchAsync(db, reference, next, actor, tenantOf(actor, options), options.ip);
+}
+
+export async function removeSavedAsync(db, reference, actor, options = {}) {
+  return deleteSavedSearchAsync(db, reference, actor, tenantOf(actor, options), options.ip);
+}
+
 export function runSaved(db, reference, input = {}, actor, options = {}) {
   const tenantId = tenantOf(actor, options);
   const saved = getSavedSearch(db, reference, actor, tenantId);
@@ -282,6 +449,23 @@ export function runSaved(db, reference, input = {}, actor, options = {}) {
   run(db, "UPDATE search_saved_searches SET use_count = use_count + 1, last_used_at = to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [
     saved.id,
   ]);
+  return { savedSearch: saved, ...result };
+}
+
+export async function runSavedAsync(db, reference, input = {}, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  const saved = await getSavedSearchAsync(db, reference, actor, tenantId);
+  const merged = {
+    ...(saved.query || {}),
+    ...input,
+    savedSearchId: saved.id,
+  };
+  const result = await searchObjectsAsync(db, merged, actor, options);
+  await runAsync(
+    db,
+    "UPDATE search_saved_searches SET use_count = use_count + 1, last_used_at = to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS') WHERE id = ?",
+    [saved.id]
+  );
   return { savedSearch: saved, ...result };
 }
 
@@ -298,12 +482,32 @@ export function getHistory(db, actor, options = {}) {
   };
 }
 
+export async function getHistoryAsync(db, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  return {
+    history: await listSearchHistoryAsync(db, {
+      tenantId,
+      actorId: actor?.id,
+      limit: Number(options.limit) || 20,
+      q: options.q || "",
+    }),
+  };
+}
+
 export function removeHistoryEntry(db, id, actor, options = {}) {
   return deleteSearchHistoryEntry(db, id, actor, tenantOf(actor, options));
 }
 
 export function clearHistory(db, actor, options = {}) {
   return clearSearchHistory(db, actor, tenantOf(actor, options), { all: options.all === true });
+}
+
+export async function removeHistoryEntryAsync(db, id, actor, options = {}) {
+  return deleteSearchHistoryEntryAsync(db, id, actor, tenantOf(actor, options));
+}
+
+export async function clearHistoryAsync(db, actor, options = {}) {
+  return clearSearchHistoryAsync(db, actor, tenantOf(actor, options), { all: options.all === true });
 }
 
 // ── Indexing ────────────────────────────────────────────────────────────────
@@ -386,6 +590,14 @@ export function getIndexStatus(db, actor, options = {}) {
   };
 }
 
+export async function getIndexStatusAsync(db, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  return {
+    status: await indexingStatusAsync(db, { tenantId }),
+    failures: await listIndexFailuresAsync(db, { tenantId, limit: Number(options.limit) || 50 }),
+  };
+}
+
 export function retryFailedIndexing(db, actor, options = {}) {
   return retryIndexFailures(
     db,
@@ -419,6 +631,17 @@ export function putObjectExtractedText(db, input, actor, options = {}) {
 export function getObjectExtractedText(db, actor, options = {}) {
   return {
     items: listExtractedText(db, {
+      tenantId: tenantOf(actor, options),
+      objectType: options.objectType ?? options.object_type ?? null,
+      objectId: options.objectId ?? options.object_id ?? null,
+      limit: Number(options.limit) || 100,
+    }),
+  };
+}
+
+export async function getObjectExtractedTextAsync(db, actor, options = {}) {
+  return {
+    items: await listExtractedTextAsync(db, {
       tenantId: tenantOf(actor, options),
       objectType: options.objectType ?? options.object_type ?? null,
       objectId: options.objectId ?? options.object_id ?? null,
@@ -462,6 +685,14 @@ export function getHealth(db) {
   return searchHealth(db);
 }
 
+export async function getMetricsAsync(db, actor, options = {}) {
+  return searchMetricsAsync(db, { tenantId: tenantOf(actor, options), sinceDays: options.sinceDays });
+}
+
+export async function getHealthAsync(db) {
+  return searchHealthAsync(db);
+}
+
 export function getMeta(db, actor, options = {}) {
   const tenantId = tenantOf(actor, options);
   return {
@@ -474,5 +705,20 @@ export function getMeta(db, actor, options = {}) {
     effectivityResolvers: listEffectivityResolvers(),
     pageLimits: PAGE_LIMITS,
     objectTypes: searchableObjectTypeCodes(db, tenantId),
+  };
+}
+
+export async function getMetaAsync(db, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  return {
+    operators: SEARCH_OPERATORS,
+    extendedOperators: SEARCH_EXTENDED_OPERATORS,
+    dataTypes: SEARCH_DATA_TYPES,
+    effectivityContextFields: EFFECTIVITY_CONTEXT_FIELDS,
+    rankingStrategies: listRankingStrategies(),
+    semanticProviders: listSemanticSearchProviders(),
+    effectivityResolvers: listEffectivityResolvers(),
+    pageLimits: PAGE_LIMITS,
+    objectTypes: await searchableObjectTypeCodesAsync(db, tenantId),
   };
 }

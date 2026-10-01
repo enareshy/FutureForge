@@ -1,7 +1,8 @@
 // Per-tenant search configuration.
 import { queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
-import { publicConfiguration, configRow, defaultConfiguration } from "./repository.js";
+import { runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { publicConfiguration, configRow, configRowAsync, defaultConfiguration } from "./repository.js";
 import { SEARCH_SCOPES, SEARCH_SORTS } from "./validation.js";
 import { HttpError } from "../../validation.js";
 
@@ -22,8 +23,7 @@ export function getConfiguration(db, tenantId) {
   return publicConfiguration(row);
 }
 
-export function updateConfiguration(db, tenantId, patch = {}, actor, ip) {
-  ensureConfiguration(db, tenantId);
+function configurationUpdate(patch) {
   const fields = [];
   const params = [];
   const set = (column, value) => {
@@ -56,9 +56,17 @@ export function updateConfiguration(db, tenantId, patch = {}, actor, ip) {
     set("excluded_types_json", JSON.stringify(list.map((item) => String(item))));
   }
   if (patch.settings !== undefined) set("settings_json", JSON.stringify(patch.settings || {}));
+  return { fields, params };
+}
+
+export function updateConfiguration(db, tenantId, patch = {}, actor, ip) {
+  ensureConfiguration(db, tenantId);
+  const { fields, params } = configurationUpdate(patch);
   if (!fields.length) return getConfiguration(db, tenantId);
-  set("updated_by", actor?.id ?? null);
-  set("updated_at", nowIso());
+  fields.push("updated_by = ?");
+  params.push(actor?.id ?? null);
+  fields.push("updated_at = ?");
+  params.push(nowIso());
   params.push(Number(tenantId));
   run(db, `UPDATE search_configuration SET ${fields.join(", ")} WHERE tenant_id = ?`, params);
   writeAudit(db, {
@@ -72,4 +80,44 @@ export function updateConfiguration(db, tenantId, patch = {}, actor, ip) {
   return getConfiguration(db, tenantId);
 }
 
+export async function updateConfigurationAsync(db, tenantId, patch = {}, actor, ip) {
+  await ensureConfigurationAsync(db, tenantId);
+  const { fields, params } = configurationUpdate(patch);
+  if (!fields.length) return getConfigurationAsync(db, tenantId);
+  fields.push("updated_by = ?");
+  params.push(actor?.id ?? null);
+  fields.push("updated_at = ?");
+  params.push(nowIso());
+  params.push(Number(tenantId));
+  await runAsync(db, `UPDATE search_configuration SET ${fields.join(", ")} WHERE tenant_id = ?`, params);
+  await writeAuditAsync(db, {
+    actor,
+    action: "search.configuration.update",
+    resourceType: "search_configuration",
+    resourceId: String(tenantId),
+    details: { fields: Object.keys(patch) },
+    ip,
+  });
+  return getConfigurationAsync(db, tenantId);
+}
+
 export { defaultConfiguration };
+
+// ── Async twins (configuration reads) ───────────────────────────────────────
+
+export async function ensureConfigurationAsync(db, tenantId) {
+  const existing = await configRowAsync(db, tenantId);
+  if (existing) return existing;
+  const ts = nowIso();
+  await runAsync(db, `INSERT INTO search_configuration (tenant_id, created_at, updated_at) VALUES (?, ?, ?)`, [
+    Number(tenantId),
+    ts,
+    ts,
+  ]);
+  return configRowAsync(db, tenantId);
+}
+
+export async function getConfigurationAsync(db, tenantId) {
+  const row = (await configRowAsync(db, tenantId)) || (await ensureConfigurationAsync(db, tenantId));
+  return publicConfiguration(row);
+}

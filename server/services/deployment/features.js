@@ -9,8 +9,9 @@
 // the operator override (`enabled`) separate. The resolved map is cached per
 // database and invalidated on write (see cache.js).
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync } from "../../db-async.js";
 import { getCachedCapabilities, setCachedCapabilities, invalidateCapabilities } from "./cache.js";
-import { getProfile, publicProfile } from "./profile.js";
+import { getProfile, getProfileAsync, publicProfile } from "./profile.js";
 import { recordDeploymentChange } from "./history.js";
 import { featureNotFound, invalidFeature } from "./errors.js";
 import { SOURCE_MODULE, CONFIG_BOUNDS, editionRank, findEdition, findMode } from "./constants.js";
@@ -67,6 +68,58 @@ export function resolveCapabilities(db) {
 
   const profile = getProfile(db);
   const rows = listFeatures(db);
+  const features = {};
+  const catalog = [];
+  const byCategory = {};
+
+  for (const row of rows) {
+    const { effective, reasons } = evaluateFeature(profile, row);
+    features[row.feature_code] = effective;
+    catalog.push({
+      ...publicFeature(row),
+      effective,
+      reasons,
+      required_edition: findEdition(row.min_edition)?.name || row.min_edition,
+      mode: profile.mode,
+    });
+    const bucket = (byCategory[row.category] ||= { total: 0, effective: 0 });
+    bucket.total += 1;
+    if (effective) bucket.effective += 1;
+  }
+
+  const result = {
+    source_module: SOURCE_MODULE,
+    mode: profile.mode,
+    edition: profile.edition,
+    profile: publicProfile(profile),
+    features,
+    catalog,
+    summary: {
+      total: rows.length,
+      effective: Object.values(features).filter(Boolean).length,
+      by_category: byCategory,
+    },
+    generated_at: nowIso(),
+  };
+  return setCachedCapabilities(db, result);
+}
+
+// Async twins of the read-side resolvers. The per-database cache is shared with
+// the synchronous path; on a cache miss the profile and feature rows are read
+// without blocking the event loop.
+export async function listFeaturesAsync(db) {
+  return queryAllAsync(
+    db,
+    "SELECT * FROM deployment_features ORDER BY category, sort_order, feature_code"
+  );
+}
+
+export async function resolveCapabilitiesAsync(db) {
+  const cached = getCachedCapabilities(db);
+  if (cached) return cached;
+
+  const profile = await getProfileAsync(db);
+  const rows = await listFeaturesAsync(db);
   const features = {};
   const catalog = [];
   const byCategory = {};

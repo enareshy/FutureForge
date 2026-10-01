@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { CATALOG_JOB_TYPES } from "../data-catalog/constants.js";
 import { LIFECYCLE_JOB_TYPES } from "../data-lifecycle/constants.js";
 import { EXCHANGE_JOB_TYPES } from "../data-exchange/constants.js";
@@ -426,6 +427,41 @@ export function getJobTypeRow(db, code) {
   const row = queryOne(db, "SELECT * FROM job_types WHERE lower(code) = lower(?)", [String(code || "")]);
   return row || null;
 }
+export async function getJobTypeRowAsync(db, code) {
+  const row = await queryOneAsync(db, "SELECT * FROM job_types WHERE lower(code) = lower(?)", [String(code || "")]);
+  return row || null;
+}
+export async function getJobTypeAsync(db, code) {
+  const row = await getJobTypeRowAsync(db, code);
+  if (!row) throw new HttpError(404, "Job type not found");
+  return publicJobType(row);
+}
+export async function listJobTypesAsync(db, query = {}) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  if (query.active !== undefined && query.active !== "") {
+    where.push("active = ?");
+    params.push(query.active === "true" || query.active === true || query.active === 1 ? 1 : 0);
+  }
+  if (query.module || query.source_module || query.sourceModule) {
+    where.push("source_module = ?");
+    params.push(query.module || query.source_module || query.sourceModule);
+  }
+  if (query.q) {
+    const like = `%${query.q}%`;
+    where.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
+    params.push(like, like, like);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM job_types ${clause}`, params)).c;
+  const items = await queryAllAsync(
+    db,
+    `SELECT * FROM job_types ${clause} ORDER BY source_module, code LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  return { items: items.map(publicJobType), total, page, pageSize };
+}
 
 export function getJobType(db, code) {
   const row = getJobTypeRow(db, code);
@@ -502,6 +538,48 @@ export function createJobType(db, input = {}, actor = null, ip = null) {
   return publicJobType(getJobTypeRow(db, code));
 }
 
+export async function createJobTypeAsync(db, input = {}, actor = null, ip = null) {
+  const code = String(input.code || "").trim().toUpperCase();
+  assertJobTypeCode(code);
+  if (await getJobTypeRowAsync(db, code)) throw new HttpError(409, `Job type ${code} already exists`);
+  const priority = input.default_priority || input.defaultPriority || "normal";
+  assertPriority(priority);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO job_types
+       (code, name, description, source_module, handler, queues_json, required_permissions_json,
+        timeout_seconds, max_retries, default_priority, retry_policy_json, active, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      code,
+      String(input.name || code),
+      String(input.description || ""),
+      String(input.source_module || input.sourceModule || "platform"),
+      String(input.handler || ""),
+      JSON.stringify(normalizeQueues(input.queues)),
+      JSON.stringify(normalizePermissions(input.required_permissions || input.requiredPermissions)),
+      Math.max(0, Number(input.timeout_seconds ?? input.timeoutSeconds ?? 0) || 0),
+      normalizeMaxRetries(input.max_retries ?? input.maxRetries, 0),
+      priority,
+      JSON.stringify(input.retry_policy || input.retryPolicy || {}),
+      input.active === false ? 0 : 1,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  await writeAuditAsync(db, {
+    actor,
+    action: "jobs.type.create",
+    resourceType: "job_type",
+    resourceId: result.lastInsertId,
+    details: { code, source_module: input.source_module || input.sourceModule || "platform" },
+    ip,
+  });
+  return publicJobType(await getJobTypeRowAsync(db, code));
+}
+
 export function updateJobType(db, code, input = {}, actor = null, ip = null) {
   const row = getJobTypeRow(db, code);
   if (!row) throw new HttpError(404, "Job type not found");
@@ -544,6 +622,48 @@ export function updateJobType(db, code, input = {}, actor = null, ip = null) {
   return publicJobType(getJobTypeRow(db, row.code));
 }
 
+export async function updateJobTypeAsync(db, code, input = {}, actor = null, ip = null) {
+  const row = await getJobTypeRowAsync(db, code);
+  if (!row) throw new HttpError(404, "Job type not found");
+  const fields = [];
+  const params = [];
+  const set = (column, value) => {
+    fields.push(`${column} = ?`);
+    params.push(value);
+  };
+  if (input.name !== undefined) set("name", String(input.name));
+  if (input.description !== undefined) set("description", String(input.description));
+  if (input.source_module !== undefined || input.sourceModule !== undefined) {
+    set("source_module", String(input.source_module ?? input.sourceModule));
+  }
+  if (input.handler !== undefined) set("handler", String(input.handler));
+  if (input.queues !== undefined) set("queues_json", JSON.stringify(normalizeQueues(input.queues)));
+  if (input.required_permissions !== undefined || input.requiredPermissions !== undefined) {
+    set("required_permissions_json", JSON.stringify(normalizePermissions(input.required_permissions ?? input.requiredPermissions)));
+  }
+  if (input.timeout_seconds !== undefined || input.timeoutSeconds !== undefined) {
+    set("timeout_seconds", Math.max(0, Number(input.timeout_seconds ?? input.timeoutSeconds) || 0));
+  }
+  if (input.max_retries !== undefined || input.maxRetries !== undefined) {
+    set("max_retries", normalizeMaxRetries(input.max_retries ?? input.maxRetries, row.max_retries));
+  }
+  if (input.default_priority !== undefined || input.defaultPriority !== undefined) {
+    const priority = input.default_priority ?? input.defaultPriority;
+    assertPriority(priority);
+    set("default_priority", priority);
+  }
+  if (input.retry_policy !== undefined || input.retryPolicy !== undefined) {
+    set("retry_policy_json", JSON.stringify(input.retry_policy ?? input.retryPolicy ?? {}));
+  }
+  if (input.active !== undefined) set("active", input.active ? 1 : 0);
+  if (!fields.length) return publicJobType(row);
+  set("updated_at", nowIso());
+  params.push(row.id);
+  await runAsync(db, `UPDATE job_types SET ${fields.join(", ")} WHERE id = ?`, params);
+  await writeAuditAsync(db, { actor, action: "jobs.type.update", resourceType: "job_type", resourceId: row.id, details: { code: row.code }, ip });
+  return publicJobType(await getJobTypeRowAsync(db, row.code));
+}
+
 export function setJobTypeStatus(db, code, active, actor = null, ip = null) {
   const row = getJobTypeRow(db, code);
   if (!row) throw new HttpError(404, "Job type not found");
@@ -559,13 +679,57 @@ export function setJobTypeStatus(db, code, active, actor = null, ip = null) {
   return publicJobType(getJobTypeRow(db, row.code));
 }
 
-// Inserts the standard enterprise job types once. Safe to call on every seed.
+export async function setJobTypeStatusAsync(db, code, active, actor = null, ip = null) {
+  const row = await getJobTypeRowAsync(db, code);
+  if (!row) throw new HttpError(404, "Job type not found");
+  await runAsync(db, "UPDATE job_types SET active = ?, updated_at = ? WHERE id = ?", [active ? 1 : 0, nowIso(), row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: active ? "jobs.type.activate" : "jobs.type.deactivate",
+    resourceType: "job_type",
+    resourceId: row.id,
+    details: { code: row.code },
+    ip,
+  });
+  return publicJobType(await getJobTypeRowAsync(db, row.code));
+}
 export function ensureDefaultJobTypes(db) {
   let created = 0;
   for (const def of DEFAULT_TYPES) {
     if (getJobTypeRow(db, def.code)) continue;
     const ts = nowIso();
     run(
+      db,
+      `INSERT INTO job_types
+         (code, name, description, source_module, handler, queues_json, required_permissions_json,
+          timeout_seconds, max_retries, default_priority, retry_policy_json, active, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, '{}', 1, NULL, ?, ?)`,
+      [
+        def.code,
+        def.name,
+        def.description,
+        def.source_module,
+        def.handler,
+        JSON.stringify(def.queues),
+        def.timeout_seconds,
+        def.max_retries,
+        def.default_priority,
+        ts,
+        ts,
+      ]
+    );
+    created += 1;
+  }
+  return { created };
+}
+
+// Inserts the standard enterprise job types once. Safe to call on every seed.
+export async function ensureDefaultJobTypesAsync(db) {
+  let created = 0;
+  for (const def of DEFAULT_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    const ts = nowIso();
+    await runAsync(
       db,
       `INSERT INTO job_types
          (code, name, description, source_module, handler, queues_json, required_permissions_json,

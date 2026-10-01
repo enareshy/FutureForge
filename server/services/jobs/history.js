@@ -1,4 +1,5 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { pagination } from "../../validation.js";
 import { safeParse, statusLabel } from "./validation.js";
 
@@ -72,6 +73,31 @@ export function recordHistory(db, jobId, entry = {}) {
   return Number(result.lastInsertId);
 }
 
+export async function recordHistoryAsync(db, jobId, entry = {}) {
+  const ts = entry.created_at || nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO job_history
+       (job_id, event_type, from_status, to_status, progress, stage, message, detail_json, actor_id, actor_type, source, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      Number(jobId),
+      entry.event_type || "status",
+      entry.from_status || "",
+      entry.to_status || "",
+      entry.progress === undefined || entry.progress === null ? null : Math.round(Number(entry.progress)),
+      entry.stage || "",
+      String(entry.message || ""),
+      JSON.stringify(entry.detail || {}),
+      entry.actor_id ?? null,
+      entry.actor_type || (entry.actor_id ? "user" : "system"),
+      entry.source || "platform",
+      ts,
+    ]
+  );
+  return Number(result.lastInsertId);
+}
+
 export function listHistory(db, jobId, query = {}) {
   const { page, pageSize, offset } = pagination(query);
   const where = ["job_id = ?"];
@@ -94,4 +120,23 @@ export function listHistory(db, jobId, query = {}) {
 // Chronological timeline (oldest first) used by the Job Details page.
 export function jobTimeline(db, jobId) {
   return queryAll(db, "SELECT * FROM job_history WHERE job_id = ? ORDER BY id ASC", [Number(jobId)]).map(publicHistory);
+}
+
+export async function listHistoryAsync(db, jobId, query = {}) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = ["job_id = ?"];
+  const params = [Number(jobId)];
+  if (query.event_type || query.eventType) {
+    where.push("event_type = ?");
+    params.push(query.event_type || query.eventType);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM job_history ${clause}`, params)).c;
+  const order = query.order === "asc" ? "ASC" : "DESC";
+  const items = await queryAllAsync(
+    db,
+    `SELECT * FROM job_history ${clause} ORDER BY id ${order} LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  return { items: items.map(publicHistory), total, page, pageSize };
 }

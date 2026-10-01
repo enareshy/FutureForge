@@ -1,4 +1,5 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { pagination } from "../../validation.js";
 import { safeParse } from "./validation.js";
 
@@ -44,4 +45,31 @@ export function listEvents(db, instanceId, query = {}) {
     [Number(instanceId), pageSize, offset]
   ).map(publicEvent);
   return { items, total, page, pageSize };
+}
+
+export async function listEventsAsync(db, instanceId, query = {}) {
+  const { page, pageSize, offset } = pagination(query);
+  const total = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM workflow_events WHERE instance_id = ?", [Number(instanceId)])).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT e.*, u.username AS actor_username FROM workflow_events e
+        LEFT JOIN users u ON u.id = e.actor_id
+       WHERE e.instance_id = ? ORDER BY e.id LIMIT ? OFFSET ?`,
+      [Number(instanceId), pageSize, offset]
+    )
+  ).map(publicEvent);
+  return { items, total, page, pageSize };
+}
+
+export async function recordEventAsync(db, { instanceId, taskId = null, nodeKey = "", eventType, actorId = null, message = "", details = {}, tenantId }) {
+  if (!tenantId) return null;
+  const result = await runAsync(
+    db,
+    `INSERT INTO workflow_events
+      (instance_id, task_id, node_key, event_type, actor_id, message, details_json, tenant_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [Number(instanceId), taskId ?? null, nodeKey || "", eventType, actorId ?? null, message || "", JSON.stringify(details || {}), Number(tenantId), nowIso()]
+  );
+  return queryOneAsync(db, "SELECT * FROM workflow_events WHERE id = ?", [result.lastInsertId]);
 }

@@ -12,6 +12,13 @@ export {
   resolveAttribute,
   ancestorAttributes,
   referencedEntity,
+  listAttributesAsync,
+  getAttributeAsync,
+  resolveAttributeAsync,
+  ancestorAttributesAsync,
+  createAttributeAsync,
+  updateAttributeAsync,
+  setAttributeStatusAsync,
 } from "./metadata/attributes.js";
 
 export {
@@ -30,6 +37,20 @@ export {
   resolveType,
   ancestorTypes,
   typeTree,
+  listTypesAsync,
+  getTypeAsync,
+  findTypeAsync,
+  effectiveAttributesAsync,
+  resolveTypeAsync,
+  ancestorTypesAsync,
+  typeTreeAsync,
+  createTypeAsync,
+  updateTypeAsync,
+  setTypeStatusAsync,
+  deleteTypeAsync,
+  addTypeAttributeAsync,
+  updateTypeAttributeAsync,
+  removeTypeAttributeAsync,
 } from "./metadata/types.js";
 
 export {
@@ -51,6 +72,21 @@ export {
   listUsage,
   assertValueInLov,
   resolveLov,
+  listLovsAsync,
+  getLovAsync,
+  findLovAsync,
+  createLovAsync,
+  updateLovAsync,
+  setLovStatusAsync,
+  deleteLovAsync,
+  listValuesAsync,
+  addValueAsync,
+  updateValueAsync,
+  removeValueAsync,
+  cascadeOptionsAsync,
+  listUsageAsync,
+  assertValueInLovAsync,
+  resolveLovAsync,
 } from "./metadata/lovs.js";
 
 export {
@@ -66,9 +102,25 @@ export {
   deleteForm,
   replaceLayout,
   formVersions,
+  listFormsAsync,
+  getFormAsync,
+  findFormAsync,
+  createFormAsync,
+  updateFormAsync,
+  setFormStatusAsync,
+  deleteFormAsync,
+  replaceLayoutAsync,
+  formVersionsAsync,
 } from "./metadata/forms.js";
 
-export { renderForm, renderType, formByTypeAndMode } from "./metadata/renderer.js";
+export {
+  renderForm,
+  renderType,
+  formByTypeAndMode,
+  renderFormAsync,
+  renderTypeAsync,
+  formByTypeAndModeAsync,
+} from "./metadata/renderer.js";
 
 export {
   RULE_CATEGORIES,
@@ -82,9 +134,24 @@ export {
   rulesFor,
   testRule,
   applyRules,
+  listRulesAsync,
+  getRuleAsync,
+  createRuleAsync,
+  updateRuleAsync,
+  setRuleStatusAsync,
+  deleteRuleAsync,
+  rulesForAsync,
+  applyRulesAsync,
 } from "./metadata/rules.js";
 
-export { validateRecord, assertValidRecord, attributeContract } from "./metadata/validation.js";
+export {
+  validateRecord,
+  assertValidRecord,
+  attributeContract,
+  validateRecordAsync,
+  assertValidRecordAsync,
+  attributeContractAsync,
+} from "./metadata/validation.js";
 export { evaluate, evaluateValue, validateExpression } from "./metadata/expression.js";
 
 export {
@@ -92,6 +159,10 @@ export {
   getVersion,
   latestVersion,
   recordVersion,
+  listVersionsAsync,
+  getVersionAsync,
+  latestVersionAsync,
+  recordVersionAsync,
 } from "./metadata/versions.js";
 
 export {
@@ -103,4 +174,10 @@ export {
   deleteConfiguration,
   effectiveCatalog,
   assertEnabled,
+  listConfigurationsAsync,
+  resolveArtifactConfigAsync,
+  setConfigurationAsync,
+  deleteConfigurationAsync,
+  effectiveCatalogAsync,
+  assertEnabledAsync,
 } from "./metadata/configurations.js";

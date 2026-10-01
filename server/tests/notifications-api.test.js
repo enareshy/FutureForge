@@ -123,6 +123,9 @@ describe("notification REST APIs", () => {
       assert.equal(res.status, 200);
       const count = await request(port, "GET", "/api/notifications/unread-count", { token: userToken });
       assert.equal(count.body.unread, 0);
+      const archived = await request(port, "POST", "/api/notifications/archive-all-read", { token: userToken });
+      assert.equal(archived.status, 200);
+      assert.ok(Number.isInteger(archived.body.archived));
     });
 
     test("archives and deletes own notification", async () => {

@@ -1,4 +1,5 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
 
 // Object persistence layer. All SQL for the objects table (plus the type/owner
@@ -85,6 +86,114 @@ export function assertRowTenant(row, tenantId) {
   return row;
 }
 
+// Async twins of the object read helpers (same SQL and semantics).
+export async function getObjectRowAsync(db, id) {
+  return queryOneAsync(db, `${OBJECT_SELECT} WHERE o.id = ?`, [Number(id)]);
+}
+
+export async function getObjectRowByUuidAsync(db, uuid) {
+  if (!uuid) return null;
+  return queryOneAsync(db, `${OBJECT_SELECT} WHERE o.uuid = ?`, [String(uuid)]);
+}
+
+export async function findObjectRowAsync(db, reference, tenantId) {
+  if (reference === undefined || reference === null || reference === "") return null;
+  const text = String(reference);
+  if (/^\d+$/.test(text)) {
+    const byId = await getObjectRowAsync(db, Number(text));
+    if (byId) {
+      assertRowTenant(byId, tenantId);
+      return byId;
+    }
+  }
+  const byUuid = await getObjectRowByUuidAsync(db, text);
+  if (byUuid) {
+    assertRowTenant(byUuid, tenantId);
+    return byUuid;
+  }
+  if (!tenantId) throw new HttpError(404, "Object not found");
+  const byCode = await queryOneAsync(db, `${OBJECT_SELECT} WHERE o.tenant_id = ? AND o.code = ?`, [
+    Number(tenantId),
+    text,
+  ]);
+  if (!byCode) throw new HttpError(404, "Object not found");
+  return byCode;
+}
+
+export async function listObjectRowsAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = ["o.tenant_id = ?"];
+  const params = [Number(tenantId)];
+  const includeDeleted = query.includeDeleted === true || query.include_deleted === true || query.includeDeleted === "true";
+  const deletedOnly = query.deletedOnly === true || query.deleted_only === true || query.deletedOnly === "true";
+  if (deletedOnly) {
+    where.push("o.deleted_at IS NOT NULL");
+  } else if (!includeDeleted) {
+    where.push("o.deleted_at IS NULL");
+  }
+  if (query.type) {
+    if (/^\d+$/.test(String(query.type))) {
+      where.push("o.object_type_id = ?");
+      params.push(Number(query.type));
+    } else {
+      where.push("t.code = ?");
+      params.push(String(query.type));
+    }
+  }
+  if (query.status) {
+    where.push("o.status = ?");
+    params.push(String(query.status));
+  }
+  if (query.ownerId || query.owner_id) {
+    where.push("o.owner_id = ?");
+    params.push(Number(query.ownerId || query.owner_id));
+  }
+  if (query.organizationId || query.organization_id) {
+    where.push("o.organization_id = ?");
+    params.push(Number(query.organizationId || query.organization_id));
+  }
+  if (query.externalRef || query.external_ref) {
+    where.push("o.external_ref = ?");
+    params.push(String(query.externalRef || query.external_ref));
+  }
+  if (query.ids) {
+    const ids = String(query.ids).split(",").map((v) => Number(v)).filter((n) => Number.isInteger(n));
+    if (ids.length) {
+      where.push(`o.id IN (${ids.map(() => "?").join(",")})`);
+      params.push(...ids);
+    }
+  }
+  if (query.tag) {
+    where.push("o.tags_json ILIKE ?");
+    params.push(`%${String(query.tag)}%`);
+  }
+  if (query.code) {
+    where.push("o.code = ?");
+    params.push(String(query.code));
+  }
+  if (query.q) {
+    where.push("(o.code ILIKE ? OR o.name ILIKE ? OR o.description ILIKE ? OR o.external_ref ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like, like);
+  }
+  const sortKey = SORTABLE[query.sort] || SORTABLE.created_at;
+  const direction = String(query.order || query.direction || "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM objects o JOIN metadata_types t ON t.id = o.object_type_id ${clause}`,
+      params
+    )
+  ).c;
+  const rows = await queryAllAsync(
+    db,
+    `${OBJECT_SELECT} ${clause} ORDER BY ${sortKey} ${direction} LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  return { rows, total, page, pageSize };
+}
+
 export function publicObject(row) {
   if (!row) return null;
   const locked = Number(row.active_lock_count || 0) > 0;
@@ -126,6 +235,22 @@ export function publicObject(row) {
 // Lightweight projection used by traversal and graph exports.
 export function briefObject(db, id, tenantId) {
   const row = getObjectRow(db, id);
+  if (!row) return null;
+  if (!tenantId || Number(row.tenant_id) !== Number(tenantId)) return null;
+  return {
+    id: row.id,
+    uuid: row.uuid,
+    code: row.code,
+    name: row.name,
+    status: row.status,
+    revision: row.revision,
+    type: { id: row.object_type_id, code: row.type_code, name: row.type_name },
+    deleted: Boolean(row.deleted_at),
+  };
+}
+
+export async function briefObjectAsync(db, id, tenantId) {
+  const row = await getObjectRowAsync(db, id);
   if (!row) return null;
   if (!tenantId || Number(row.tenant_id) !== Number(tenantId)) return null;
   return {
@@ -232,4 +357,26 @@ export function listCheckoutRows(db, objectId) {
 
 export function touchObject(db, objectId, actorId) {
   run(db, "UPDATE objects SET updated_at = ?, updated_by = ? WHERE id = ?", [nowIso(), actorId ?? null, Number(objectId)]);
+}
+
+export async function activeCheckoutRowAsync(db, objectId) {
+  return queryOneAsync(
+    db,
+    `SELECT * FROM object_checkouts
+     WHERE object_id = ? AND released_at IS NULL
+       AND (expires_at IS NULL OR expires_at > to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS'))
+     ORDER BY id DESC LIMIT 1`,
+    [Number(objectId)]
+  );
+}
+
+export async function listCheckoutRowsAsync(db, objectId) {
+  return queryAllAsync(
+    db,
+    `SELECT ck.*, u.username AS locked_by_username
+     FROM object_checkouts ck JOIN users u ON u.id = ck.locked_by
+     WHERE ck.object_id = ? AND ck.released_at IS NULL
+     ORDER BY ck.id DESC`,
+    [Number(objectId)]
+  );
 }

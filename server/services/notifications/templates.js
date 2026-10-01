@@ -1,7 +1,16 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, validateCode, requireFields, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import {
+  readTenant,
+  writeTenant,
+  tenantClause,
+  assertReadable,
+  assertMutable,
+  writeTenantAsync,
+  assertMutableAsync,
+} from "../metadata/scope.js";
 import {
   CHANNELS,
   assertChannel,
@@ -11,7 +20,7 @@ import {
   renderTemplate,
   safeParse,
 } from "./validation.js";
-import { deliverDirect } from "./delivery.js";
+import { deliverDirect, deliverDirectAsync } from "./delivery.js";
 
 // Template management. Global templates (tenant_id NULL) are readable by every
 // tenant; a tenant can override a global template by creating the same
@@ -45,6 +54,10 @@ export function getTemplateRow(db, id) {
   return queryOne(db, "SELECT * FROM notification_templates WHERE id = ?", [Number(id)]);
 }
 
+export async function getTemplateRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM notification_templates WHERE id = ?", [Number(id)]);
+}
+
 // Resolves a template by id or code, preferring a tenant override over the
 // global row for the requested channel/locale.
 export function findTemplate(db, { id, code, channel, locale }, tenantId = null) {
@@ -69,6 +82,36 @@ export function findTemplate(db, { id, code, channel, locale }, tenantId = null)
   where.push(scope.sql);
   params.push(...scope.params);
   const row = queryOne(
+    db,
+    `SELECT t.* FROM notification_templates t WHERE ${where.join(" AND ")}
+      ORDER BY (t.tenant_id = ?) DESC, t.version DESC LIMIT 1`,
+    [...params, tenantId ? Number(tenantId) : -1]
+  );
+  return row || null;
+}
+
+export async function findTemplateAsync(db, { id, code, channel, locale }, tenantId = null) {
+  if (id) {
+    const row = await getTemplateRowAsync(db, id);
+    if (!row) throw new HttpError(404, "Notification template not found");
+    assertReadable(row, tenantId, "Notification template not found");
+    return row;
+  }
+  if (!code) return null;
+  const params = [String(code)];
+  const where = ["t.code = ?"];
+  if (channel) {
+    where.push("t.channel = ?");
+    params.push(String(channel));
+  }
+  if (locale) {
+    where.push("t.locale = ?");
+    params.push(String(locale));
+  }
+  const scope = tenantClause("t", tenantId);
+  where.push(scope.sql);
+  params.push(...scope.params);
+  const row = await queryOneAsync(
     db,
     `SELECT t.* FROM notification_templates t WHERE ${where.join(" AND ")}
       ORDER BY (t.tenant_id = ?) DESC, t.version DESC LIMIT 1`,
@@ -368,6 +411,257 @@ export function findTemplateForEvent(db, rule, event, tenantId) {
     return findTemplate(db, { code: rule.template_code, channel }, tenantId);
   }
   return null;
+}
+
+export async function findTemplateForEventAsync(db, rule, event, tenantId) {
+  if (rule.template_id) {
+    const row = await getTemplateRowAsync(db, rule.template_id);
+    if (row) return row;
+  }
+  const channel = (safeParse(rule.channels_json, ["in_app"])[0]) || "in_app";
+  if (rule.template_code) {
+    return findTemplateAsync(db, { code: rule.template_code, channel }, tenantId);
+  }
+  return null;
+}
+
+// ── Async admin twins ───────────────────────────────────────────────────────
+
+export async function listTemplatesAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("t", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.channel) {
+    where.push("t.channel = ?");
+    params.push(query.channel);
+  }
+  if (query.status) {
+    where.push("t.status = ?");
+    params.push(query.status);
+  }
+  if (query.eventType || query.event_type) {
+    where.push("t.event_type = ?");
+    params.push(query.eventType || query.event_type);
+  }
+  if (query.locale) {
+    where.push("t.locale = ?");
+    params.push(query.locale);
+  }
+  if (query.q) {
+    where.push("(t.code ILIKE ? OR t.name ILIKE ? OR t.subject ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM notification_templates t ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT t.* FROM notification_templates t ${clause} ORDER BY t.name, t.channel LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    )
+  ).map(publicTemplate);
+  return { items, total, page, pageSize };
+}
+
+async function snapshotVersionAsync(db, row, changedBy, ts) {
+  await runAsync(
+    db,
+    `INSERT INTO notification_template_versions
+      (template_id, version, subject, html_body, text_body, variables_json, changed_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, row.version, row.subject || "", row.html_body || "", row.text_body || "", row.variables_json || "[]", changedBy ?? null, ts]
+  );
+}
+
+export async function createTemplateAsync(db, body = {}, actor = null, ip = null, reqTenantId = null) {
+  requireFields(body, ["code", "name"]);
+  validateCode(body.code, "Template code");
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const { channel, html, text, subject, variables } = assertTemplateFields(body);
+  const locale = body.locale || "en";
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO notification_templates
+        (code, name, description, event_type, channel, subject, html_body, text_body, variables_json,
+         locale, version, status, tenant_id, is_system, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?, ?)`,
+      [
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        body.event_type || body.eventType || "",
+        channel,
+        subject,
+        sanitizeHtml(html),
+        text,
+        JSON.stringify(variables),
+        locale,
+        body.status || "active",
+        tenantId ?? null,
+        actor?.id ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "A template with this code, channel and locale already exists in this scope");
+    }
+    throw err;
+  }
+  const row = await getTemplateRowAsync(db, result.lastInsertId);
+  await snapshotVersionAsync(db, row, actor?.id ?? null, ts);
+  await writeAuditAsync(db, {
+    actor,
+    action: "notification.template.create",
+    resourceType: "notification_template",
+    resourceId: row.id,
+    details: { code: row.code, channel: row.channel, version: row.version },
+    ip,
+  });
+  return publicTemplate(row);
+}
+
+export async function updateTemplateAsync(db, id, body = {}, actor = null, ip = null, tenantId = null) {
+  const row = await getTemplateRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Notification template not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Template code");
+  const { channel, html, text, subject, variables } = assertTemplateFields(body, row);
+  const nextVersion = Number(row.version) + 1;
+  const ts = nowIso();
+  try {
+    await runAsync(
+      db,
+      `UPDATE notification_templates SET
+         code = ?, name = ?, description = ?, event_type = ?, channel = ?, subject = ?,
+         html_body = ?, text_body = ?, variables_json = ?, locale = ?, version = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        body.event_type ?? body.eventType ?? row.event_type,
+        channel,
+        subject,
+        sanitizeHtml(html),
+        text,
+        JSON.stringify(variables),
+        body.locale ?? row.locale,
+        nextVersion,
+        body.status ?? row.status,
+        ts,
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) {
+      throw new HttpError(409, "A template with this code, channel and locale already exists in this scope");
+    }
+    throw err;
+  }
+  const updated = await getTemplateRowAsync(db, row.id);
+  await snapshotVersionAsync(db, updated, actor?.id ?? null, ts);
+  await writeAuditAsync(db, {
+    actor,
+    action: "notification.template.update",
+    resourceType: "notification_template",
+    resourceId: row.id,
+    details: { code: updated.code, version: updated.version },
+    ip,
+  });
+  return publicTemplate(updated);
+}
+
+export async function setTemplateStatusAsync(db, id, status, actor = null, ip = null, tenantId = null) {
+  const row = await getTemplateRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Notification template not found");
+  if (!["active", "inactive"].includes(status)) throw new HttpError(400, "status must be active or inactive");
+  await runAsync(db, "UPDATE notification_templates SET status = ?, updated_at = ? WHERE id = ?", [status, nowIso(), row.id]);
+  await writeAuditAsync(db, { actor, action: "notification.template.status", resourceType: "notification_template", resourceId: row.id, details: { status }, ip });
+  return publicTemplate(await getTemplateRowAsync(db, row.id));
+}
+
+export async function deleteTemplateAsync(db, id, actor = null, ip = null, tenantId = null) {
+  const row = await getTemplateRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Notification template not found");
+  if (row.is_system === 1) throw new HttpError(400, "System templates cannot be deleted; deactivate them instead");
+  await runAsync(db, "DELETE FROM notification_templates WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, { actor, action: "notification.template.delete", resourceType: "notification_template", resourceId: row.id, details: { code: row.code }, ip });
+  return { deleted: true, id: row.id };
+}
+
+export async function listTemplateVersionsAsync(db, id, tenantId = null) {
+  const row = await getTemplateRowAsync(db, id);
+  assertReadable(row, tenantId, "Notification template not found");
+  return (
+    await queryAllAsync(
+      db,
+      `SELECT v.*, u.username AS changed_by_username
+         FROM notification_template_versions v
+         LEFT JOIN users u ON u.id = v.changed_by
+        WHERE v.template_id = ? ORDER BY v.version DESC`,
+      [row.id]
+    )
+  ).map((version) => ({
+    id: version.id,
+    version: version.version,
+    subject: version.subject,
+    html_body: version.html_body,
+    text_body: version.text_body,
+    variables: safeParse(version.variables_json, []),
+    changed_by: version.changed_by,
+    changed_by_username: version.changed_by_username || "",
+    created_at: version.created_at,
+  }));
+}
+
+export async function previewTemplateAsync(db, id, context = {}, tenantId = null) {
+  const row = await getTemplateRowAsync(db, id);
+  assertReadable(row, tenantId, "Notification template not found");
+  const merged = sampleContext(context && typeof context === "object" ? context : {});
+  const rendered = renderTemplateRow(row, merged, { sanitize: true });
+  return { template: publicTemplate(row), context: merged, rendered };
+}
+
+export async function testSendTemplateAsync(db, id, body = {}, actor = null, ip = null, tenantId = null) {
+  const row = await getTemplateRowAsync(db, id);
+  assertReadable(row, tenantId, "Notification template not found");
+  const ref = body.recipient_id ?? body.user_id ?? body.recipient ?? actor?.id;
+  if (ref === undefined || ref === null || ref === "") throw new HttpError(400, "A test recipient is required");
+  const user = await queryOneAsync(
+    db,
+    `SELECT id, username, email, tenant_id FROM users
+      WHERE id = ? OR username = ? OR email = ? ORDER BY (id = ?) DESC LIMIT 1`,
+    [Number(ref) || 0, String(ref), String(ref), Number(ref) || 0]
+  );
+  if (!user) throw new HttpError(400, "Test recipient not found");
+  const merged = sampleContext(body.context && typeof body.context === "object" ? body.context : {});
+  const rendered = renderTemplateRow(row, merged, { sanitize: true });
+  const notificationId = await deliverDirectAsync(db, {
+    user,
+    tenantId: user.tenant_id ?? tenantId,
+    channel: row.channel,
+    subject: rendered.subject || row.name,
+    body: rendered.html || rendered.text,
+    templateId: row.id,
+    templateCode: row.code,
+    priority: "low",
+    objectType: "notification_template",
+    objectId: String(row.id),
+    objectName: row.name,
+    idempotencyKey: `template-test:${row.id}:${user.id}:${Date.now()}`,
+  });
+  await writeAuditAsync(db, { actor, action: "notification.template.test", resourceType: "notification_template", resourceId: row.id, details: { recipient_id: user.id, channel: row.channel }, ip });
+  return {
+    notification_id: notificationId,
+    recipient: { id: user.id, username: user.username, email: user.email },
+    rendered,
+  };
 }
 
 export { CHANNELS };

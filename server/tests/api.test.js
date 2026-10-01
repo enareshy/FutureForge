@@ -111,6 +111,20 @@ describe("REST APIs", () => {
     assert.equal(locked.body.status, "locked");
     const unlocked = await request(port, "POST", `/api/users/${id}/unlock`, { token });
     assert.equal(unlocked.body.status, "active");
+
+    const detail = await request(port, "GET", `/api/users/${id}`, { token });
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.id, id);
+    assert.equal(detail.body.username, "n.garcia");
+    assert.ok(!("password_hash" in detail.body));
+    assert.ok(Array.isArray(detail.body.groups));
+    assert.ok(Array.isArray(detail.body.roles));
+    assert.ok(Array.isArray(detail.body.organizations));
+    assert.ok(detail.body.access && typeof detail.body.access === "object");
+
+    const orgsRes = await request(port, "GET", `/api/users/${id}/organizations`, { token });
+    assert.equal(orgsRes.status, 200);
+    assert.ok(Array.isArray(orgsRes.body.items));
   });
 
   test("groups CRUD and members", async () => {
@@ -150,8 +164,51 @@ describe("REST APIs", () => {
     assert.ok(access.body.principal.username === "j.patel");
   });
 
-  test("password policy and audit log", async () => {
-    const current = await request(port, "GET", "/api/password-policy", { token });
+  test("IAM read surface: hierarchy, groups, roles and org relations", async () => {
+    const hierarchy = await request(port, "GET", "/api/hierarchy", { token });
+    assert.equal(hierarchy.status, 200);
+    assert.ok(hierarchy.body.levels.some((l) => l.code === "site"));
+
+    const groupsList = await request(port, "GET", "/api/groups", { token });
+    assert.equal(groupsList.status, 200);
+    assert.ok(Array.isArray(groupsList.body.items));
+
+    const group = await request(port, "POST", "/api/groups", {
+      token,
+      body: { code: "read-surface", name: "Read Surface" },
+    });
+    assert.equal(group.status, 201);
+    const groupDetail = await request(port, "GET", `/api/groups/${group.body.id}`, { token });
+    assert.equal(groupDetail.body.code, "read-surface");
+    assert.ok(Array.isArray(groupDetail.body.members));
+    assert.ok(Array.isArray(groupDetail.body.roles));
+    assert.ok(Array.isArray(groupDetail.body.ancestors));
+    const groupMembers = await request(port, "GET", `/api/groups/${group.body.id}/members`, { token });
+    assert.equal(groupMembers.status, 200);
+    assert.ok(Array.isArray(groupMembers.body.items));
+
+    const role = await request(port, "POST", "/api/roles", {
+      token,
+      body: { code: "read-surface-role", name: "Read Surface Role" },
+    });
+    assert.equal(role.status, 201);
+    const roleDetail = await request(port, "GET", `/api/roles/${role.body.id}`, { token });
+    assert.equal(roleDetail.body.code, "read-surface-role");
+    assert.ok(Array.isArray(roleDetail.body.ancestors));
+    assert.ok(roleDetail.body.assignments && Array.isArray(roleDetail.body.assignments.users));
+    assert.ok(Array.isArray(roleDetail.body.permissions));
+
+    const orgsList = await request(port, "GET", "/api/organizations?pageSize=50", { token });
+    const emea = orgsList.body.items.find((o) => o.code === "emea");
+    const sites = await request(port, "GET", `/api/organizations/${emea.id}/sites`, { token });
+    assert.equal(sites.status, 200);
+    assert.ok(sites.body.items.some((s) => s.code === "emea-london"));
+    const members = await request(port, "GET", `/api/organizations/${emea.id}/members`, { token });
+    assert.equal(members.status, 200);
+    assert.ok(Array.isArray(members.body.items));
+  });
+
+  test("password policy and audit log", async () => {    const current = await request(port, "GET", "/api/password-policy", { token });
     assert.equal(current.status, 200);
     const updated = await request(port, "PUT", "/api/password-policy", {
       token,

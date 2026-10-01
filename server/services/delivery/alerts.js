@@ -1,4 +1,5 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
 import { assertAlertSeverity } from "./validation.js";
 
@@ -67,6 +68,39 @@ export function listAlerts(db, query = {}, tenantId = null) {
   return { items, total, page, pageSize, open };
 }
 
+export async function listAlertsAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  if (tenantId) {
+    where.push("COALESCE(tenant_id, 0) = ?");
+    params.push(Number(tenantId));
+  }
+  if (query.status) {
+    where.push("status = ?");
+    params.push(query.status);
+  }
+  if (query.severity) {
+    where.push("severity = ?");
+    params.push(query.severity);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const [countRow, rows, openRow] = await Promise.all([
+    queryOneAsync(db, `SELECT COUNT(*) AS c FROM delivery_alerts ${clause}`, params),
+    queryAllAsync(
+      db,
+      `SELECT * FROM delivery_alerts ${clause} ORDER BY status = 'open' DESC, id DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    ),
+    queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM delivery_alerts WHERE status = 'open' ${tenantId ? "AND COALESCE(tenant_id, 0) = ?" : ""}`,
+      tenantId ? [Number(tenantId)] : []
+    ),
+  ]);
+  return { items: rows.map(publicAlert), total: countRow.c, page, pageSize, open: openRow.c };
+}
+
 export function acknowledgeAlert(db, id, { actor = null, ip = null } = {}) {
   void ip;
   const row = queryOne(db, "SELECT * FROM delivery_alerts WHERE id = ?", [Number(id)]);
@@ -77,4 +111,16 @@ export function acknowledgeAlert(db, id, { actor = null, ip = null } = {}) {
     [actor?.id ?? null, nowIso(), row.id]
   );
   return publicAlert(queryOne(db, "SELECT * FROM delivery_alerts WHERE id = ?", [row.id]));
+}
+
+export async function acknowledgeAlertAsync(db, id, { actor = null, ip = null } = {}) {
+  void ip;
+  const row = await queryOneAsync(db, "SELECT * FROM delivery_alerts WHERE id = ?", [Number(id)]);
+  if (!row) throw new HttpError(404, "Delivery alert not found");
+  await runAsync(
+    db,
+    "UPDATE delivery_alerts SET status = 'acknowledged', acknowledged_by = ?, acknowledged_at = ? WHERE id = ?",
+    [actor?.id ?? null, nowIso(), row.id]
+  );
+  return publicAlert(await queryOneAsync(db, "SELECT * FROM delivery_alerts WHERE id = ?", [row.id]));
 }

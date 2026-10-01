@@ -1,9 +1,10 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable, writeTenantAsync, assertMutableAsync } from "../metadata/scope.js";
 import { NOTIFICATION_CHANNELS, NOTIFICATION_STATUSES, safeParse } from "./validation.js";
-import { usersForAssignee } from "./routing.js";
+import { usersForAssignee, usersForAssigneeAsync } from "./routing.js";
 
 // Notification service. Templates are configuration; every dispatch writes a
 // row so tenants have a durable, auditable record of what was sent. The default
@@ -309,6 +310,230 @@ export function markNotificationRead(db, id, tenantId, actor = null, ip = null) 
 
 export function readNotificationTenant(db, actor, query, reqTenantId) {
   return readTenant(db, actor, query, reqTenantId);
+}
+
+// ── Async twins ───────────────────────────────────────────────────────────────
+
+export async function getTemplateRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM workflow_notification_templates WHERE id = ?", [Number(id)]);
+}
+
+export async function listTemplatesAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("t", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.channel) {
+    where.push("t.channel = ?");
+    params.push(query.channel);
+  }
+  if (query.q) {
+    where.push("(t.code ILIKE ? OR t.name ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM workflow_notification_templates t ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(db, `SELECT t.* FROM workflow_notification_templates t ${clause} ORDER BY t.name LIMIT ? OFFSET ?`, [
+      ...params,
+      pageSize,
+      offset,
+    ])
+  ).map(publicTemplate);
+  return { items, total, page, pageSize };
+}
+
+export async function createTemplateAsync(db, body, actor = null, ip = null, reqTenantId = null) {
+  requireFields(body, ["code", "name"]);
+  validateCode(body.code, "Notification template code");
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const channel = body.channel || "in_app";
+  if (!NOTIFICATION_CHANNELS.includes(channel)) {
+    throw new HttpError(400, `channel must be one of: ${NOTIFICATION_CHANNELS.join(", ")}`);
+  }
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO workflow_notification_templates
+        (code, name, description, channel, subject, body, locale, status, tenant_id, is_system, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        channel,
+        body.subject || "",
+        body.body || "",
+        body.locale || "en",
+        body.status || "active",
+        tenantId ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Notification template code already exists in this scope");
+    throw err;
+  }
+  await writeAuditAsync(db, { actor, action: "workflow.notification_template.create", resourceType: "workflow_notification_template", resourceId: result.lastInsertId, details: { code: body.code }, ip });
+  return publicTemplate(await getTemplateRowAsync(db, result.lastInsertId));
+}
+
+export async function updateTemplateAsync(db, id, body, actor = null, ip = null, tenantId = null) {
+  const row = await getTemplateRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Notification template not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Notification template code");
+  const channel = body.channel ?? row.channel;
+  if (!NOTIFICATION_CHANNELS.includes(channel)) {
+    throw new HttpError(400, `channel must be one of: ${NOTIFICATION_CHANNELS.join(", ")}`);
+  }
+  try {
+    await runAsync(
+      db,
+      `UPDATE workflow_notification_templates SET
+         code = ?, name = ?, description = ?, channel = ?, subject = ?, body = ?, locale = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        channel,
+        body.subject ?? row.subject,
+        body.body ?? row.body,
+        body.locale ?? row.locale,
+        body.status ?? row.status,
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Notification template code already exists in this scope");
+    throw err;
+  }
+  await writeAuditAsync(db, { actor, action: "workflow.notification_template.update", resourceType: "workflow_notification_template", resourceId: row.id, details: { code: row.code }, ip });
+  return publicTemplate(await getTemplateRowAsync(db, row.id));
+}
+
+export async function deleteTemplateAsync(db, id, actor = null, ip = null, tenantId = null) {
+  const row = await getTemplateRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Notification template not found");
+  await runAsync(db, "DELETE FROM workflow_notification_templates WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, { actor, action: "workflow.notification_template.delete", resourceType: "workflow_notification_template", resourceId: row.id, details: { code: row.code }, ip });
+  return { deleted: true, id: row.id };
+}
+
+export async function resolveRecipientsAsync(db, target = {}, tenantId) {
+  if (Array.isArray(target.recipients) && target.recipients.length) return target.recipients;
+  if (target.recipient_id || target.recipient_ref) {
+    return usersForAssigneeAsync(
+      db,
+      { assignee_type: target.recipient_type || "user", assignee_id: target.recipient_id, assignee_ref: target.recipient_ref },
+      tenantId,
+      target.organization_id || 0
+    );
+  }
+  return [];
+}
+
+export async function dispatchAsync(db, { instance = null, task = null, template = null, channel, recipientType, recipientId, recipientRef, subject, body, payload = {}, tenantId, actor = null }) {
+  if (!tenantId) throw new HttpError(400, "A tenant is required to send a notification");
+  const templateCode = template?.code || "";
+  const resolvedChannel = channel || template?.channel || "in_app";
+  const renderedSubject = renderTemplate(subject ?? template?.subject ?? "", payload);
+  const renderedBody = renderTemplate(body ?? template?.body ?? "", payload);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO workflow_notifications
+      (instance_id, task_id, template_code, channel, recipient_type, recipient_id, recipient_ref, subject, body, status, payload_json, sent_at, tenant_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sent', ?, ?, ?, ?)`,
+    [
+      instance?.id ?? null,
+      task?.id ?? null,
+      templateCode,
+      resolvedChannel,
+      recipientType || "user",
+      recipientId ?? null,
+      recipientRef || "",
+      renderedSubject,
+      renderedBody,
+      JSON.stringify(payload),
+      ts,
+      Number(tenantId),
+      ts,
+    ]
+  );
+  if (task?.id) {
+    await runAsync(db, "UPDATE workflow_tasks SET updated_at = ? WHERE id = ?", [ts, task.id]);
+  }
+  return publicNotification(await queryOneAsync(db, "SELECT * FROM workflow_notifications WHERE id = ?", [result.lastInsertId]));
+}
+
+export async function sendToAssigneesAsync(db, { instance = null, task = null, template = null, target = {}, recipients = [], payload = {}, subject, body, tenantId }) {
+  const list = recipients.length ? recipients : await resolveRecipientsAsync(db, target, tenantId);
+  const created = [];
+  for (const recipient of list) {
+    if (!recipient?.id) continue;
+    created.push(
+      await dispatchAsync(db, {
+        instance,
+        task,
+        template,
+        channel: template?.channel,
+        recipientType: "user",
+        recipientId: recipient.id,
+        recipientRef: recipient.username || "",
+        subject,
+        body,
+        payload: { ...payload, username: recipient.username, display_name: recipient.display_name || recipient.username },
+        tenantId,
+      })
+    );
+  }
+  return created;
+}
+
+export async function listNotificationsAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = ["n.tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    where.push("n.status = ?");
+    params.push(query.status);
+  }
+  if (query.channel) {
+    where.push("n.channel = ?");
+    params.push(query.channel);
+  }
+  if (query.instanceId || query.instance_id) {
+    where.push("n.instance_id = ?");
+    params.push(Number(query.instanceId || query.instance_id));
+  }
+  if (query.unread === "true" || query.unread === true) {
+    where.push("n.read_at IS NULL");
+  }
+  if (query.q) {
+    where.push("(n.subject ILIKE ? OR n.body ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM workflow_notifications n ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(db, `${NOTIFICATION_SELECT} ${clause} ORDER BY n.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+  ).map(publicNotification);
+  return { items, total, page, pageSize };
+}
+
+export async function markNotificationReadAsync(db, id, tenantId, actor = null, ip = null) {
+  const row = await queryOneAsync(db, "SELECT * FROM workflow_notifications WHERE id = ? AND tenant_id = ?", [Number(id), Number(tenantId)]);
+  if (!row) throw new HttpError(404, "Notification not found");
+  await runAsync(db, "UPDATE workflow_notifications SET status = 'read', read_at = ? WHERE id = ?", [nowIso(), row.id]);
+  if (actor) await writeAuditAsync(db, { actor, action: "workflow.notification.read", resourceType: "workflow_notification", resourceId: row.id, ip });
+  return publicNotification(await queryOneAsync(db, "SELECT * FROM workflow_notifications WHERE id = ?", [row.id]));
 }
 
 export { NOTIFICATION_STATUSES };

@@ -2,13 +2,14 @@
 // so large result sets never block a request; results are retained for a
 // bounded window and served as CSV or JSON.
 import { queryAll, queryOne, run, nowIso, randomUuid } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { publicExport, exportRow } from "./repository.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { publicExport, exportRow, exportRowAsync } from "./repository.js";
 import { EXPORT_FORMATS, addDays } from "./validation.js";
 import { runSearch } from "./query.js";
 import { getConfiguration } from "./config.js";
-import { submitJob } from "../jobs/jobs.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
 
 const RETENTION_DAYS = Number(process.env.SEARCH_EXPORT_RETENTION_DAYS || 7);
 const EXPORT_ROW_CAP = 5000;
@@ -104,6 +105,67 @@ export function requestExport(db, input = {}, actor, tenantId, ip) {
   }
 }
 
+export async function requestExportAsync(db, input = {}, actor, tenantId, ip) {
+  const format = String(input.format || "json").toLowerCase();
+  if (!EXPORT_FORMATS.includes(format)) {
+    throw new HttpError(400, `format must be one of ${EXPORT_FORMATS.join(", ")}`);
+  }
+  const query = input.query && typeof input.query === "object" ? input.query : input;
+  const uuid = randomUuid();
+  const ts = nowIso();
+  const name = String(input.name || `Search export ${ts}`).slice(0, 255);
+  await runAsync(
+    db,
+    `INSERT INTO search_exports
+       (uuid, tenant_id, requested_by, name, query_json, format, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    [uuid, Number(tenantId), actor?.id ?? null, name, JSON.stringify(query), format, ts, ts]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM search_exports WHERE uuid = ?", [uuid]);
+  try {
+    const job = await submitJobAsync(
+      db,
+      {
+        job_type_code: "SEARCH_EXPORT",
+        name: `Search export ${row.uuid}`,
+        tenant_id: tenantId,
+        organization_id: actor?.organization_id ?? null,
+        input: { export_id: row.id },
+        idempotency_key: `search-export:${row.uuid}`,
+        related_object_type: "search_export",
+        related_object_id: String(row.id),
+        source_module: "search",
+      },
+      { actor, ip }
+    );
+    await runAsync(db, "UPDATE search_exports SET updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+    await writeAuditAsync(db, {
+      actor,
+      action: "search.export.request",
+      resourceType: "search_export",
+      resourceId: row.uuid,
+      details: { format, job: job?.job_ref || null },
+      ip,
+    });
+    return { ...publicExport(await queryOneAsync(db, "SELECT * FROM search_exports WHERE id = ?", [row.id])), job_ref: job?.job_ref || null };
+  } catch (err) {
+    await runAsync(db, "UPDATE search_exports SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", [
+      String(err.message || err).slice(0, 1000),
+      nowIso(),
+      row.id,
+    ]);
+    await writeAuditAsync(db, {
+      actor,
+      action: "search.export.request_failed",
+      resourceType: "search_export",
+      resourceId: row.uuid,
+      details: { error: String(err.message || err) },
+      ip,
+    });
+    throw err;
+  }
+}
+
 export function runExport(db, exportId) {
   const row = queryOne(db, "SELECT * FROM search_exports WHERE id = ?", [Number(exportId)]);
   if (!row) throw new HttpError(404, "Search export not found");
@@ -154,6 +216,34 @@ export function listExports(db, { tenantId, actorId, limit = 50 } = {}) {
 
 export function getExport(db, reference, actor, tenantId, { includeContent = false } = {}) {
   const row = exportRow(db, reference, tenantId);
+  if (!row) throw new HttpError(404, "Search export not found");
+  const dto = publicExport(row);
+  if (!includeContent) return dto;
+  if (row.status !== "completed") throw new HttpError(409, `Export is ${row.status}`);
+  if (row.expires_at && Date.parse(row.expires_at) < Date.now()) {
+    throw new HttpError(410, "Export has expired");
+  }
+  const parsed = row.result_json ? JSON.parse(row.result_json) : { content: "" };
+  return { ...dto, content: parsed.content };
+}
+
+export async function listExportsAsync(db, { tenantId, actorId, limit = 50 } = {}) {
+  const params = [Number(tenantId)];
+  let where = "tenant_id = ?";
+  if (actorId !== undefined && actorId !== null) {
+    where += " AND requested_by = ?";
+    params.push(Number(actorId));
+  }
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM search_exports WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT ?`,
+    [...params, Math.min(Math.max(Number(limit) || 50, 1), 200)]
+  );
+  return rows.map(publicExport);
+}
+
+export async function getExportAsync(db, reference, actor, tenantId, { includeContent = false } = {}) {
+  const row = await exportRowAsync(db, reference, tenantId);
   if (!row) throw new HttpError(404, "Search export not found");
   const dto = publicExport(row);
   if (!includeContent) return dto;

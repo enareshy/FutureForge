@@ -1,8 +1,9 @@
 import { queryAll, queryOne, run, nowIso } from "../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../db-async.js";
 import { HttpError, pagination } from "../validation.js";
-import { writeAudit } from "./audit.js";
+import { writeAudit, writeAuditAsync } from "./audit.js";
 import * as orgs from "./orgs.js";
-import { checkPermission } from "./authorization.js";
+import { checkPermission, checkPermissionAsync } from "./authorization.js";
 
 export function isPlatformAdmin(db, userId) {
   if (!userId) return false;
@@ -10,9 +11,23 @@ export function isPlatformAdmin(db, userId) {
   return Boolean(result.allowed);
 }
 
+// Async twin of `isPlatformAdmin`.
+export async function isPlatformAdminAsync(db, userId) {
+  if (!userId) return false;
+  const result = await checkPermissionAsync(db, userId, "iam.platform", "read", { organizationId: 0 });
+  return Boolean(result.allowed);
+}
+
 export function isTenantAdmin(db, userId) {
   if (!userId) return false;
   const result = checkPermission(db, userId, "iam.tenants", "read", { organizationId: 0 });
+  return Boolean(result.allowed);
+}
+
+// Async twin of `isTenantAdmin`.
+export async function isTenantAdminAsync(db, userId) {
+  if (!userId) return false;
+  const result = await checkPermissionAsync(db, userId, "iam.tenants", "read", { organizationId: 0 });
   return Boolean(result.allowed);
 }
 
@@ -27,8 +42,37 @@ export function tenantIdOfOrganization(db, organizationId) {
   return null;
 }
 
+// Async twin of `tenantIdOfOrganization`.
+export async function tenantIdOfOrganizationAsync(db, organizationId) {
+  if (!organizationId) return null;
+  const org = await queryOneAsync(
+    db,
+    "SELECT id, kind, tenant_id, parent_id FROM organizations WHERE id = ?",
+    [organizationId]
+  );
+  if (!org) return null;
+  if (org.kind === "tenant") return org.id;
+  if (org.tenant_id) return org.tenant_id;
+  return null;
+}
+
 export function getTenant(db, id) {
   const tenant = queryOne(
+    db,
+    `SELECT o.*,
+      (SELECT COUNT(*) FROM organizations c WHERE c.tenant_id = o.id AND c.id != o.id) AS org_count,
+      (SELECT COUNT(*) FROM users u WHERE u.tenant_id = o.id) AS user_count,
+      (SELECT COUNT(*) FROM groups g WHERE g.tenant_id = o.id) AS group_count
+     FROM organizations o WHERE o.id = ? AND o.kind = 'tenant'`,
+    [id]
+  );
+  if (!tenant) throw new HttpError(404, "Tenant not found");
+  return tenant;
+}
+
+// Async twin of `getTenant`.
+export async function getTenantAsync(db, id) {
+  const tenant = await queryOneAsync(
     db,
     `SELECT o.*,
       (SELECT COUNT(*) FROM organizations c WHERE c.tenant_id = o.id AND c.id != o.id) AS org_count,
@@ -57,6 +101,33 @@ export function listTenants(db, query = {}) {
   const clause = `WHERE ${where.join(" AND ")}`;
   const total = queryOne(db, `SELECT COUNT(*) AS c FROM organizations ${clause}`, params).c;
   const items = queryAll(
+    db,
+    `SELECT o.*,
+      (SELECT COUNT(*) FROM organizations c WHERE c.tenant_id = o.id AND c.id != o.id) AS org_count,
+      (SELECT COUNT(*) FROM users u WHERE u.tenant_id = o.id) AS user_count
+     FROM organizations o ${clause} ORDER BY o.name LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  return { items, total, page, pageSize };
+}
+
+// Async twin of `listTenants`.
+export async function listTenantsAsync(db, query = {}) {
+  const { page, pageSize, offset } = pagination({ ...query, pageSize: query.pageSize || 100 });
+  const where = ["kind = 'tenant'"];
+  const params = [];
+  if (query.status) {
+    where.push("status = ?");
+    params.push(query.status);
+  }
+  if (query.q) {
+    where.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM organizations ${clause}`, params)).c;
+  const items = await queryAllAsync(
     db,
     `SELECT o.*,
       (SELECT COUNT(*) FROM organizations c WHERE c.tenant_id = o.id AND c.id != o.id) AS org_count,
@@ -172,6 +243,18 @@ export function assertOrgInTenant(db, organizationId, tenantId) {
   return org;
 }
 
+export async function assertOrgInTenantAsync(db, organizationId, tenantId) {
+  if (!tenantId) throw new HttpError(403, "Tenant context required");
+  if (!organizationId) return null;
+  const org = await queryOneAsync(db, "SELECT id, tenant_id, kind FROM organizations WHERE id = ?", [organizationId]);
+  if (!org) throw new HttpError(404, "Organization not found");
+  const orgTenant = org.kind === "tenant" ? org.id : org.tenant_id;
+  if (Number(orgTenant) !== Number(tenantId)) {
+    throw new HttpError(404, "Organization not found");
+  }
+  return org;
+}
+
 export function assertSameTenant(db, leftId, rightId, message = "Cross-tenant access is not allowed") {
   const left = tenantIdOfOrganization(db, leftId);
   const right = tenantIdOfOrganization(db, rightId);
@@ -184,6 +267,14 @@ export function homeTenantId(db, user) {
   if (!user) return null;
   if (user.tenant_id) return user.tenant_id;
   if (user.organization_id) return tenantIdOfOrganization(db, user.organization_id);
+  return null;
+}
+
+// Async twin of `homeTenantId`.
+export async function homeTenantIdAsync(db, user) {
+  if (!user) return null;
+  if (user.tenant_id) return user.tenant_id;
+  if (user.organization_id) return tenantIdOfOrganizationAsync(db, user.organization_id);
   return null;
 }
 
@@ -200,6 +291,16 @@ export function assertTenantScope(db, actor, tenantId) {
   if (!tenantId) throw new HttpError(403, "Tenant context required");
   if (isPlatformAdmin(db, actor?.id)) return Number(tenantId);
   const home = homeTenantId(db, actor);
+  if (!home || Number(home) !== Number(tenantId)) {
+    throw new HttpError(403, "Cannot access another tenant");
+  }
+  return Number(tenantId);
+}
+
+export async function assertTenantScopeAsync(db, actor, tenantId) {
+  if (!tenantId) throw new HttpError(403, "Tenant context required");
+  if (await isPlatformAdminAsync(db, actor?.id)) return Number(tenantId);
+  const home = await homeTenantIdAsync(db, actor);
   if (!home || Number(home) !== Number(tenantId)) {
     throw new HttpError(403, "Cannot access another tenant");
   }
@@ -243,6 +344,20 @@ export function switchableTenants(db, actor) {
   }
 }
 
+// Async twin of `switchableTenants`.
+export async function switchableTenantsAsync(db, actor) {
+  if ((await isPlatformAdminAsync(db, actor?.id)) || (await isTenantAdminAsync(db, actor?.id))) {
+    return (await listTenantsAsync(db, { status: "active", pageSize: 200 })).items;
+  }
+  const home = await homeTenantIdAsync(db, actor);
+  if (!home) return [];
+  try {
+    return [await getTenantAsync(db, home)];
+  } catch {
+    return [];
+  }
+}
+
 export function publicTenant(row) {
   if (!row) return null;
   return {
@@ -252,6 +367,125 @@ export function publicTenant(row) {
     status: row.status,
     kind: row.kind || "tenant",
   };
+}
+
+// ── Async twins (used by migrated tenant routes) ────────────────────────────
+
+export async function createTenantAsync(db, body, actor, ip) {
+  const org = await orgs.createOrganizationAsync(
+    db,
+    {
+      code: body.code,
+      name: body.name,
+      description: body.description || "",
+      kind: "tenant",
+    },
+    actor,
+    ip
+  );
+  await writeAuditAsync(db, {
+    actor,
+    action: "tenant.create",
+    resourceType: "tenant",
+    resourceId: org.id,
+    details: { code: org.code },
+    ip,
+  });
+  return getTenantAsync(db, org.id);
+}
+
+export async function updateTenantAsync(db, id, body, actor, ip) {
+  await getTenantAsync(db, id);
+  const org = await orgs.updateOrganizationAsync(
+    db,
+    id,
+    {
+      code: body.code,
+      name: body.name,
+      description: body.description,
+      kind: "tenant",
+      parent_id: null,
+    },
+    actor,
+    ip
+  );
+  await writeAuditAsync(db, {
+    actor,
+    action: "tenant.update",
+    resourceType: "tenant",
+    resourceId: id,
+    details: { code: org.code },
+    ip,
+  });
+  return getTenantAsync(db, org.id);
+}
+
+export async function setTenantStatusAsync(db, id, status, actor, ip) {
+  await getTenantAsync(db, id);
+  const org = await orgs.setOrganizationStatusAsync(db, id, status, actor, ip);
+  await writeAuditAsync(db, {
+    actor,
+    action: `tenant.${status}`,
+    resourceType: "tenant",
+    resourceId: id,
+    ip,
+  });
+  return getTenantAsync(db, org.id);
+}
+
+export async function deleteTenantAsync(db, id, actor, ip) {
+  await getTenantAsync(db, id);
+  const result = await orgs.deleteOrganizationAsync(db, id, actor, ip);
+  await writeAuditAsync(db, {
+    actor,
+    action: "tenant.delete",
+    resourceType: "tenant",
+    resourceId: id,
+    ip,
+  });
+  return result;
+}
+
+export async function tenantContextAsync(db, id) {
+  const tenant = await getTenantAsync(db, id);
+  const tree = await orgs.organizationTreeAsync(db, { tenantId: id });
+  return {
+    tenant: {
+      id: tenant.id,
+      code: tenant.code,
+      name: tenant.name,
+      status: tenant.status,
+      kind: tenant.kind,
+    },
+    organizationIds: await orgs.descendantOrganizationIdsAsync(db, id),
+    org_count: tenant.org_count,
+    user_count: tenant.user_count,
+    tree: tree.items,
+  };
+}
+
+export async function selectTenantAsync(db, sessionToken, tenantId, actor, ip) {
+  const tenant = await getTenantAsync(db, tenantId);
+  if (tenant.status !== "active") throw new HttpError(409, "Tenant is not active");
+  const platform = await isPlatformAdminAsync(db, actor?.id);
+  const home = await homeTenantIdAsync(db, actor);
+  if (!platform && Number(home) !== Number(tenant.id)) {
+    throw new HttpError(403, "Cannot switch to another tenant");
+  }
+  await runAsync(db, "UPDATE sessions SET tenant_id = ?, last_seen_at = ? WHERE token = ?", [
+    tenant.id,
+    nowIso(),
+    sessionToken,
+  ]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "tenant.context.switch",
+    resourceType: "tenant",
+    resourceId: tenant.id,
+    details: { code: tenant.code, previous: actor?.tenant_id || null },
+    ip,
+  });
+  return { tenant: { id: tenant.id, code: tenant.code, name: tenant.name, status: tenant.status } };
 }
 
 export function backfillTenants(db) {

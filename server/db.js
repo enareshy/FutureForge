@@ -137,7 +137,7 @@ function createBridge(workerData) {
 
 // Converts `?` positional placeholders to PostgreSQL `$1, $2, ...`, skipping
 // string literals, quoted identifiers, comments and dollar-quoted bodies.
-function numberPlaceholders(sql) {
+export function numberPlaceholders(sql) {
   let out = "";
   let index = 0;
   let i = 0;
@@ -195,7 +195,7 @@ function numberPlaceholders(sql) {
   return out;
 }
 
-function analyze(sql) {
+export function analyze(sql) {
   const trimmed = sql.replace(/^(?:\s|--[^\n]*\n)*/, "");
   const insert = /^INSERT\s/i.test(trimmed);
   const returning = /\bRETURNING\b/i.test(sql);
@@ -219,7 +219,7 @@ function normalizeValue(value) {
   return value;
 }
 
-function flatten(params) {
+export function flatten(params) {
   const list = params.length === 1 && Array.isArray(params[0]) ? params[0] : params;
   let needsNormalization = false;
   for (const value of list) {
@@ -233,7 +233,7 @@ function flatten(params) {
 
 // Worker results cross a MessageChannel, which clones Node Buffers into plain
 // Uint8Arrays. Rehydrate binary columns (bytea) so callers see Buffers.
-function reviveRow(row) {
+export function reviveRow(row) {
   for (const key of Object.keys(row)) {
     const value = row[key];
     if (value instanceof Uint8Array && !Buffer.isBuffer(value)) {
@@ -269,9 +269,15 @@ class Statement {
 }
 
 class Database {
-  constructor(bridge, schema) {
+  constructor(bridge, schema, config) {
     this._bridge = bridge;
     this._schema = schema;
+    // Connection settings and namespace are retained so the asynchronous data
+    // layer (db-async.js) can open a `pg` pool against the very same database
+    // and schema this handle talks to — including per-test clone databases.
+    this.__schema = schema;
+    this.__config = config || null;
+    this.__asyncPool = null;
     this._statements = new Map();
     this._tablesWithId = null;
     this.__inTransaction = false;
@@ -322,7 +328,14 @@ class Database {
   }
 
   close() {
-    return this._bridge.close();
+    const ending = this.__asyncPool
+      ? this.__asyncPool.end().catch(() => {
+          /* pool teardown is best effort */
+        })
+      : null;
+    this.__asyncPool = null;
+    const closing = this._bridge.close();
+    return ending ? Promise.all([closing, ending]) : closing;
   }
 }
 
@@ -331,14 +344,15 @@ class Database {
 // --------------------------------------------------------------------------
 export function openDatabase() {
   const schema = databaseSchema();
+  const config = databaseConfig();
   const bridge = createBridge({
-    config: databaseConfig(),
+    config,
     schema,
     bootstrap: null,
     statementTimeout: statementTimeout(),
     bridgeTimeout: bridgeTimeout(),
   });
-  return new Database(bridge, schema);
+  return new Database(bridge, schema, config);
 }
 
 // Test suite entry point.
@@ -384,6 +398,14 @@ export function hasSeedState(db) {
 
 // Replaces the database behind `db` with a physical clone of `template`.
 export function refreshFromTemplate(db, template) {
+  // Any asynchronous pool holds connections to the database that is about to be
+  // dropped and recreated; release them so the next async query reconnects.
+  if (db.__asyncPool) {
+    db.__asyncPool.end().catch(() => {
+      /* the clone is force-dropped anyway */
+    });
+    db.__asyncPool = null;
+  }
   db._bridge.call({ op: "refresh", template });
 }
 
@@ -490,8 +512,9 @@ export function openTestDatabase() {
   const safe = sanitizeIdentifier(base).slice(0, 24);
   const slot = cloneCounter++ % CLONE_SLOTS;
   const cloneName = `${safe}_c${slot}`;
+  const config = databaseConfig(cloneName);
   const bridge = createBridge({
-    config: databaseConfig(cloneName),
+    config,
     schema: "public",
     maintenanceConfig: maintenanceConfigDefault(),
     bootstrap: {
@@ -506,7 +529,7 @@ export function openTestDatabase() {
     statementTimeout: 0,
     bridgeTimeout: bootstrapTimeout(),
   });
-  const db = new Database(bridge, "public");
+  const db = new Database(bridge, "public", config);
   db.__seedTemplate = names.seed;
   return db;
 }

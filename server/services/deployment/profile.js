@@ -2,6 +2,7 @@
 // Local), the licensed edition and the operator-controlled installation
 // identity. Exactly one row exists per install (id = 1).
 import { queryOne, run, nowIso } from "../../db.js";
+import { queryOneAsync, runAsync } from "../../db-async.js";
 import { validateEmail } from "../../validation.js";
 import { invalidProfile } from "./errors.js";
 import { recordDeploymentChange } from "./history.js";
@@ -75,6 +76,36 @@ export function publicProfile(row) {
 export function getProfile(db) {
   ensureProfileRow(db);
   return queryOne(db, "SELECT * FROM deployment_profile WHERE id = 1");
+}
+
+// Async twins of the profile bootstrap/read helpers.
+export async function ensureProfileRowAsync(db) {
+  const existing = await queryOneAsync(db, "SELECT id FROM deployment_profile WHERE id = 1");
+  if (existing) return false;
+  await runAsync(
+    db,
+    `INSERT INTO deployment_profile
+       (id, mode, edition, installation_name, tenant_strategy, self_registration,
+        telemetry_enabled, support_email, notes, updated_at)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      DEFAULTS.mode,
+      DEFAULTS.edition,
+      DEFAULTS.installation_name,
+      DEFAULTS.tenant_strategy,
+      DEFAULTS.self_registration,
+      DEFAULTS.telemetry_enabled,
+      DEFAULTS.support_email,
+      DEFAULTS.notes,
+      nowIso(),
+    ]
+  );
+  return true;
+}
+
+export async function getProfileAsync(db) {
+  await ensureProfileRowAsync(db);
+  return queryOneAsync(db, "SELECT * FROM deployment_profile WHERE id = 1");
 }
 
 function assertName(value) {

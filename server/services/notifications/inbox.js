@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { safeParse } from "./validation.js";
 
 // In-app notification inbox. Every query is scoped to the recipient so a user
@@ -106,6 +107,59 @@ export function listInbox(db, userId, tenantId, query = {}) {
   return { items, total, page, pageSize };
 }
 
+// Async twin of `listInbox` for the asynchronous request paths.
+export async function listInboxAsync(db, userId, tenantId, query = {}) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = ["n.recipient_id = ?", "n.deleted_at IS NULL"];
+  const params = [Number(userId)];
+  if (tenantId) {
+    where.push("n.tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (query.archived === "true" || query.archived === true) {
+    where.push("n.archived_at IS NOT NULL");
+  } else if (query.includeArchived !== "true") {
+    where.push("n.archived_at IS NULL");
+  }
+  if (query.unread === "true" || query.unread === true) where.push("n.read_at IS NULL");
+  if (query.read === "true" || query.read === true) where.push("n.read_at IS NOT NULL");
+  if (query.channel) {
+    where.push("n.channel = ?");
+    params.push(query.channel);
+  }
+  if (query.priority) {
+    where.push("n.priority = ?");
+    params.push(query.priority);
+  }
+  if (query.objectType || query.object_type) {
+    where.push("n.object_type = ?");
+    params.push(query.objectType || query.object_type);
+  }
+  const tab = query.tab && query.tab !== "all" ? tabClause(query.tab) : null;
+  if (tab) where.push(`(${tab})`);
+  if (query.q) {
+    where.push("(n.subject ILIKE ? OR n.body ILIKE ? OR n.object_name ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM notifications n LEFT JOIN notification_events e ON e.id = n.event_id ${clause}`,
+      params
+    )
+  ).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `${BASE_SELECT} ${clause} ORDER BY n.id DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    )
+  ).map(publicNotification);
+  return { items, total, page, pageSize };
+}
+
 export function unreadCount(db, userId, tenantId) {
   const params = [Number(userId)];
   let clause = "recipient_id = ? AND read_at IS NULL AND deleted_at IS NULL AND archived_at IS NULL";
@@ -115,6 +169,23 @@ export function unreadCount(db, userId, tenantId) {
   }
   const total = queryOne(db, `SELECT COUNT(*) AS c FROM notifications WHERE ${clause}`, params).c;
   const byPriority = queryAll(
+    db,
+    `SELECT priority, COUNT(*) AS count FROM notifications WHERE ${clause} GROUP BY priority`,
+    params
+  );
+  return { unread: total, total, by_priority: byPriority };
+}
+
+// Async twin of `unreadCount`.
+export async function unreadCountAsync(db, userId, tenantId) {
+  const params = [Number(userId)];
+  let clause = "recipient_id = ? AND read_at IS NULL AND deleted_at IS NULL AND archived_at IS NULL";
+  if (tenantId) {
+    clause += " AND tenant_id = ?";
+    params.push(Number(tenantId));
+  }
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM notifications WHERE ${clause}`, params)).c;
+  const byPriority = await queryAllAsync(
     db,
     `SELECT priority, COUNT(*) AS count FROM notifications WHERE ${clause} GROUP BY priority`,
     params
@@ -133,6 +204,23 @@ function ownNotification(db, id, userId, tenantId) {
 export function getNotification(db, id, userId, tenantId) {
   const row = ownNotification(db, id, userId, tenantId);
   const event = row.event_id ? queryOne(db, "SELECT event_type, source_module, correlation_id FROM notification_events WHERE id = ?", [row.event_id]) : null;
+  return publicNotification({ ...row, event_type: event?.event_type, source_module: event?.source_module });
+}
+
+async function ownNotificationAsync(db, id, userId, tenantId) {
+  const row = await queryOneAsync(db, "SELECT * FROM notifications WHERE id = ?", [Number(id)]);
+  if (!row) throw new HttpError(404, "Notification not found");
+  if (Number(row.recipient_id) !== Number(userId)) throw new HttpError(404, "Notification not found");
+  if (tenantId && Number(row.tenant_id) !== Number(tenantId)) throw new HttpError(404, "Notification not found");
+  return row;
+}
+
+// Async twin of `getNotification`.
+export async function getNotificationAsync(db, id, userId, tenantId) {
+  const row = await ownNotificationAsync(db, id, userId, tenantId);
+  const event = row.event_id
+    ? await queryOneAsync(db, "SELECT event_type, source_module, correlation_id FROM notification_events WHERE id = ?", [row.event_id])
+    : null;
   return publicNotification({ ...row, event_type: event?.event_type, source_module: event?.source_module });
 }
 
@@ -193,6 +281,66 @@ export function archiveAllRead(db, userId, tenantId) {
     params.push(Number(tenantId));
   }
   const result = run(db, `UPDATE notifications SET archived_at = ?, updated_at = ? WHERE ${clause}`, params);
+  return { archived: result.changes };
+}
+
+export async function markReadAsync(db, id, userId, tenantId, actor = null, ip = null) {
+  const row = await ownNotificationAsync(db, id, userId, tenantId);
+  if (!row.read_at) {
+    await runAsync(db, "UPDATE notifications SET status = 'read', read_at = ?, updated_at = ? WHERE id = ?", [nowIso(), nowIso(), row.id]);
+  }
+  if (actor) {
+    await writeAuditAsync(db, { actor, action: "notification.read", resourceType: "notification", resourceId: row.id, ip });
+  }
+  return getNotificationAsync(db, row.id, userId, tenantId);
+}
+
+export async function markUnreadAsync(db, id, userId, tenantId, actor = null, ip = null) {
+  const row = await ownNotificationAsync(db, id, userId, tenantId);
+  await runAsync(db, "UPDATE notifications SET status = 'sent', read_at = NULL, updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  if (actor) {
+    await writeAuditAsync(db, { actor, action: "notification.unread", resourceType: "notification", resourceId: row.id, ip });
+  }
+  return getNotificationAsync(db, row.id, userId, tenantId);
+}
+
+export async function markAllReadAsync(db, userId, tenantId, actor = null, ip = null) {
+  const params = [nowIso(), nowIso(), Number(userId)];
+  let clause = "recipient_id = ? AND read_at IS NULL AND deleted_at IS NULL";
+  if (tenantId) {
+    clause += " AND tenant_id = ?";
+    params.push(Number(tenantId));
+  }
+  const result = await runAsync(db, `UPDATE notifications SET status = 'read', read_at = ?, updated_at = ? WHERE ${clause}`, params);
+  if (actor) {
+    await writeAuditAsync(db, { actor, action: "notification.read_all", resourceType: "notification", resourceId: userId, details: { updated: result.changes }, ip });
+  }
+  return { updated: result.changes };
+}
+
+export async function archiveNotificationAsync(db, id, userId, tenantId, actor = null, ip = null) {
+  const row = await ownNotificationAsync(db, id, userId, tenantId);
+  await runAsync(db, "UPDATE notifications SET archived_at = ?, updated_at = ? WHERE id = ?", [nowIso(), nowIso(), row.id]);
+  return { archived: true, id: row.id };
+}
+
+export async function deleteNotificationAsync(db, id, userId, tenantId, actor = null, ip = null) {
+  const row = await ownNotificationAsync(db, id, userId, tenantId);
+  await runAsync(db, "UPDATE notifications SET deleted_at = ?, updated_at = ? WHERE id = ?", [nowIso(), nowIso(), row.id]);
+  if (actor) {
+    await writeAuditAsync(db, { actor, action: "notification.delete", resourceType: "notification", resourceId: row.id, ip });
+  }
+  return { deleted: true, id: row.id };
+}
+
+export async function archiveAllReadAsync(db, userId, tenantId) {
+  const params = [nowIso(), nowIso(), Number(userId)];
+  let clause = "recipient_id = ? AND read_at IS NOT NULL AND archived_at IS NULL AND deleted_at IS NULL";
+  if (tenantId) {
+    clause += " AND tenant_id = ?";
+    params.push(Number(tenantId));
+  }
+  const result = await runAsync(db, `UPDATE notifications SET archived_at = ?, updated_at = ? WHERE ${clause}`, params);
   return { archived: result.changes };
 }
 
@@ -260,6 +408,75 @@ export function listHistory(db, query = {}, tenantId = null) {
     [...params, pageSize, offset]
   ).map(publicNotification);
   const byStatus = queryAll(
+    db,
+    `SELECT n.status, COUNT(*) AS count FROM notifications n LEFT JOIN notification_events e ON e.id = n.event_id LEFT JOIN users u ON u.id = n.recipient_id ${clause} GROUP BY n.status`,
+    params
+  );
+  return { items, total, page, pageSize, by_status: byStatus };
+}
+
+export async function listHistoryAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = ["1 = 1"];
+  const params = [];
+  if (tenantId) {
+    where.push("n.tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (query.recipientId || query.recipient_id) {
+    where.push("n.recipient_id = ?");
+    params.push(Number(query.recipientId || query.recipient_id));
+  }
+  if (query.status) {
+    where.push("n.status = ?");
+    params.push(query.status);
+  }
+  if (query.channel) {
+    where.push("n.channel = ?");
+    params.push(query.channel);
+  }
+  if (query.priority) {
+    where.push("n.priority = ?");
+    params.push(query.priority);
+  }
+  if (query.eventType || query.event_type) {
+    where.push("e.event_type = ?");
+    params.push(query.eventType || query.event_type);
+  }
+  if (query.sourceModule || query.source_module) {
+    where.push("e.source_module = ?");
+    params.push(query.sourceModule || query.source_module);
+  }
+  if (query.objectType || query.object_type) {
+    where.push("n.object_type = ?");
+    params.push(query.objectType || query.object_type);
+  }
+  if (query.unread === "true" || query.unread === true) where.push("n.read_at IS NULL");
+  if (query.from) {
+    where.push("n.created_at >= ?");
+    params.push(query.from);
+  }
+  if (query.to) {
+    where.push("n.created_at <= ?");
+    params.push(query.to);
+  }
+  if (query.q) {
+    where.push("(n.subject ILIKE ? OR n.body ILIKE ? OR n.object_name ILIKE ? OR u.username ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like, like);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM notifications n LEFT JOIN notification_events e ON e.id = n.event_id LEFT JOIN users u ON u.id = n.recipient_id ${clause}`,
+      params
+    )
+  ).c;
+  const items = (
+    await queryAllAsync(db, `${BASE_SELECT} ${clause} ORDER BY n.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+  ).map(publicNotification);
+  const byStatus = await queryAllAsync(
     db,
     `SELECT n.status, COUNT(*) AS count FROM notifications n LEFT JOIN notification_events e ON e.id = n.event_id LEFT JOIN users u ON u.id = n.recipient_id ${clause} GROUP BY n.status`,
     params

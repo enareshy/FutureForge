@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../db-async.js";
 import { HttpError, validateCode } from "../validation.js";
-import { writeAudit } from "./audit.js";
+import { writeAudit, writeAuditAsync } from "./audit.js";
 
 export const ROOT_PARENT = "__root__";
 
@@ -195,6 +196,51 @@ export function getSetting(db, key, fallback) {
   return parseSetting(row.value);
 }
 
+// Async twin of `getSetting`. The hierarchy foundation is already ensured during
+// application boot, so this only reads the setting row.
+export async function getSettingAsync(db, key, fallback) {
+  const row = await queryOneAsync(db, "SELECT value FROM platform_settings WHERE key = ?", [key]);
+  if (!row) return fallback;
+  return parseSetting(row.value);
+}
+
+// Async twins of the hierarchy read surface. As with `getSettingAsync`, the
+// foundation is ensured at boot, so these only read.
+export async function getHierarchyAsync(db, { includeInactive = false } = {}) {
+  const clause = includeInactive ? "" : "WHERE active = 1";
+  const [levels, rules] = await Promise.all([
+    queryAllAsync(db, `SELECT * FROM hierarchy_levels ${clause} ORDER BY sort_order, name`),
+    queryAllAsync(db, "SELECT child_code, parent_code FROM hierarchy_parent_rules ORDER BY child_code, parent_code"),
+  ]);
+  const allowedParents = {};
+  for (const level of levels) allowedParents[level.code] = [];
+  for (const rule of rules) {
+    if (!allowedParents[rule.child_code]) allowedParents[rule.child_code] = [];
+    allowedParents[rule.child_code].push(rule.parent_code === ROOT_PARENT ? null : rule.parent_code);
+  }
+  return {
+    levels,
+    allowedParents,
+    path: levels
+      .filter((l) => l.active && l.code !== "organization")
+      .map((l) => l.name)
+      .join(" → "),
+  };
+}
+
+export async function kindCodesAsync(db, { includeInactive = false } = {}) {
+  return (await getHierarchyAsync(db, { includeInactive })).levels.map((l) => l.code);
+}
+
+export async function allowedParentsForAsync(db, kind) {
+  const hierarchy = await getHierarchyAsync(db, { includeInactive: true });
+  return hierarchy.allowedParents[kind] || [];
+}
+
+export async function levelByCodeAsync(db, code) {
+  return queryOneAsync(db, "SELECT * FROM hierarchy_levels WHERE code = ?", [code]);
+}
+
 function parseSetting(value) {
   if (value === "1" || value === "true") return true;
   if (value === "0" || value === "false") return false;
@@ -357,6 +403,129 @@ export function replaceHierarchy(db, body, actor, ip) {
   }
   const next = getHierarchy(db, { includeInactive: true });
   writeAudit(db, {
+    actor,
+    action: "platform.hierarchy.update",
+    resourceType: "hierarchy",
+    resourceId: "org-structure",
+    details: { levels: levels.map((l) => l.code) },
+    ip,
+  });
+  return next;
+}
+
+// --- Async twins -----------------------------------------------------------
+// Read/write counterparts used by the asynchronous request paths. The hierarchy
+// foundation is ensured during application boot, so the async versions only
+// read/write the definition tables.
+
+export async function getSettingsAsync(db) {
+  const items = await queryAllAsync(db, "SELECT * FROM platform_settings ORDER BY feature, key");
+  const values = {};
+  for (const item of items) values[item.key] = parseSetting(item.value);
+  return { items, values };
+}
+
+export async function updateSettingsAsync(db, body, actor, ip) {
+  const patch = body?.values || body || {};
+  const keys = Object.keys(patch);
+  if (!keys.length) throw new HttpError(400, "No settings provided");
+  for (const key of keys) {
+    const existing = await queryOneAsync(db, "SELECT * FROM platform_settings WHERE key = ?", [key]);
+    if (!existing) throw new HttpError(400, `Unknown setting: ${key}`);
+    const raw = stringifySetting(patch[key]);
+    if (key === "identity.session_hours") {
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 168) {
+        throw new HttpError(400, "identity.session_hours must be between 1 and 168");
+      }
+    }
+    if (key === "auth.rate_limit_max") {
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 3 || n > 100) {
+        throw new HttpError(400, "auth.rate_limit_max must be between 3 and 100");
+      }
+    }
+    if (key === "auth.rate_limit_window_seconds") {
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 10 || n > 3600) {
+        throw new HttpError(400, "auth.rate_limit_window_seconds must be between 10 and 3600");
+      }
+    }
+    if (key === "auth.reset_token_minutes") {
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 5 || n > 1440) {
+        throw new HttpError(400, "auth.reset_token_minutes must be between 5 and 1440");
+      }
+    }
+    await runAsync(db, "UPDATE platform_settings SET value = ?, updated_at = ? WHERE key = ?", [raw, nowIso(), key]);
+  }
+  const next = await getSettingsAsync(db);
+  await writeAuditAsync(db, {
+    actor,
+    action: "platform.settings.update",
+    resourceType: "platform_setting",
+    resourceId: keys.join(","),
+    details: patch,
+    ip,
+  });
+  return next;
+}
+
+async function assertDefinitionSafeAsync(db, levels) {
+  const nextCodes = new Set(levels.filter((l) => l.active).map((l) => l.code));
+  const used = await queryAllAsync(db, "SELECT kind, COUNT(*) AS c FROM organizations GROUP BY kind");
+  for (const row of used) {
+    if (!nextCodes.has(row.kind)) {
+      throw new HttpError(
+        409,
+        `Cannot remove or deactivate level ${row.kind}: ${row.c} organization(s) still use it`
+      );
+    }
+  }
+}
+
+export async function replaceHierarchyAsync(db, body, actor, ip) {
+  const incoming = body?.levels;
+  if (!Array.isArray(incoming) || incoming.length === 0) {
+    throw new HttpError(400, "levels must be a non-empty array");
+  }
+  const seen = new Set();
+  const levels = incoming.map((item, i) => normalizeLevel(item, i, seen));
+  if (!levels.some((l) => l.active && l.allow_root)) {
+    throw new HttpError(400, "At least one active level must allow root");
+  }
+  const rules = normalizeRules(levels, body.allowedParents || {});
+  await assertDefinitionSafeAsync(db, levels);
+  const ts = nowIso();
+  await runAsync(db, "DELETE FROM hierarchy_parent_rules");
+  await runAsync(db, "DELETE FROM hierarchy_levels");
+  for (const level of levels) {
+    await runAsync(
+      db,
+      `INSERT INTO hierarchy_levels (code, name, sort_order, allow_root, collection, active, system, description, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        level.code,
+        level.name,
+        level.sort_order,
+        level.allow_root,
+        level.collection,
+        level.active,
+        level.system,
+        level.description,
+        ts,
+        ts,
+      ]
+    );
+  }
+  for (const rule of rules) {
+    await runAsync(db, "INSERT INTO hierarchy_parent_rules (child_code, parent_code) VALUES (?, ?)", [
+      rule.child_code,
+      rule.parent_code,
+    ]);
+  }
+  const next = await getHierarchyAsync(db, { includeInactive: true });
+  await writeAuditAsync(db, {
     actor,
     action: "platform.hierarchy.update",
     resourceType: "hierarchy",
