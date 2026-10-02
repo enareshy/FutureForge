@@ -7,15 +7,20 @@
 // console resolves it once after login so the UI can reflect the deployment
 // posture. Reading or changing the profile/entitlements remains an explicit
 // administrative permission.
+//
+// Every route that touches the database runs on the asynchronous pg layer
+// (authAsync/canAsync + *Async service twins). Only `/meta` (pure vocabulary)
+// and `/foundation/ensure` (idempotent bootstrap, by convention) stay on the
+// synchronous layer.
 import { Constants, Features, Foundation, History, Profile } from "./index.js";
 
 const R = Constants.DEPLOYMENT_RESOURCES;
 
-export function createDeploymentRouter({ express, db, auth, can, wrap }) {
+export function createDeploymentRouter({ express, db, auth, authAsync, can, canAsync, wrap }) {
   const router = express.Router();
-  const canProfile = (action) => can(R.profile, action);
-  const canFeatures = (action) => can(R.features, action);
-  const canHistory = (action) => can(R.history, action);
+  const canProfileAsync = (action) => canAsync(R.profile, action);
+  const canFeaturesAsync = (action) => canAsync(R.features, action);
+  const canHistoryAsync = (action) => canAsync(R.history, action);
 
   // ── Meta, capabilities, health ─────────────────────────────────────────────
   router.get(
@@ -36,81 +41,81 @@ export function createDeploymentRouter({ express, db, auth, can, wrap }) {
 
   router.get(
     "/capabilities",
-    auth,
-    wrap((_req, res) => res.json(Features.resolveCapabilities(db)))
+    authAsync,
+    wrap(async (_req, res) => res.json(await Features.resolveCapabilitiesAsync(db)))
   );
 
   router.get(
     "/health",
-    auth,
-    canProfile("read"),
-    wrap((_req, res) => res.json(Foundation.deploymentHealth(db)))
+    authAsync,
+    canProfileAsync("read"),
+    wrap(async (_req, res) => res.json(await Foundation.deploymentHealthAsync(db)))
   );
 
   // ── Profile ────────────────────────────────────────────────────────────────
   router.get(
     "/profile",
-    auth,
-    canProfile("read"),
-    wrap((_req, res) => res.json({ profile: Profile.publicProfile(Profile.getProfile(db)) }))
+    authAsync,
+    canProfileAsync("read"),
+    wrap(async (_req, res) => res.json({ profile: Profile.publicProfile(await Profile.getProfileAsync(db)) }))
   );
 
   router.put(
     "/profile",
-    auth,
-    canProfile("update"),
-    wrap((req, res) => res.json({ profile: Profile.updateProfile(db, req.body || {}, req.actor, req.ip) }))
+    authAsync,
+    canProfileAsync("update"),
+    wrap(async (req, res) => res.json({ profile: await Profile.updateProfileAsync(db, req.body || {}, req.actor, req.ip) }))
   );
 
   // ── Feature entitlements ───────────────────────────────────────────────────
   router.get(
     "/features",
-    auth,
-    canFeatures("read"),
-    wrap((_req, res) => {
-      const capabilities = Features.resolveCapabilities(db);
+    authAsync,
+    canFeaturesAsync("read"),
+    wrap(async (_req, res) => {
+      const capabilities = await Features.resolveCapabilitiesAsync(db);
       res.json({ items: capabilities.catalog, summary: capabilities.summary });
     })
   );
 
   router.get(
     "/features/summary",
-    auth,
-    canFeatures("read"),
-    wrap((_req, res) => res.json(Features.featureSummary(db)))
+    authAsync,
+    canFeaturesAsync("read"),
+    wrap(async (_req, res) => res.json(await Features.featureSummaryAsync(db)))
   );
 
   router.get(
     "/features/:code",
-    auth,
-    canFeatures("read"),
-    wrap((req, res) => {
-      const row = Features.featureRow(db, req.params.code);
+    authAsync,
+    canFeaturesAsync("read"),
+    wrap(async (req, res) => {
+      const row = await Features.featureRowAsync(db, req.params.code);
       if (!row) return res.status(404).json({ error: `Unknown feature '${req.params.code}'` });
-      const profile = Profile.getProfile(db);
+      const profile = await Profile.getProfileAsync(db);
       res.json({ ...Features.publicFeature(row), ...Features.evaluateFeature(profile, row) });
     })
   );
 
   router.put(
     "/features/:code",
-    auth,
-    canFeatures("update"),
-    wrap((req, res) => res.json(Features.setFeature(db, req.params.code, req.body || {}, req.actor, req.ip)))
+    authAsync,
+    canFeaturesAsync("update"),
+    wrap(async (req, res) => res.json(await Features.setFeatureAsync(db, req.params.code, req.body || {}, req.actor, req.ip)))
   );
 
   // ── History & bootstrap ────────────────────────────────────────────────────
   router.get(
     "/history",
-    auth,
-    canHistory("read"),
-    wrap((req, res) => res.json(History.listDeploymentHistory(db, req.query)))
+    authAsync,
+    canHistoryAsync("read"),
+    wrap(async (req, res) => res.json(await History.listDeploymentHistoryAsync(db, req.query)))
   );
 
   router.post(
     "/foundation/ensure",
     auth,
-    canProfile("execute"),
+    can(R.profile, "execute"),
     wrap((_req, res) => res.json(Foundation.ensureDeploymentFoundation(db)))
   );
 

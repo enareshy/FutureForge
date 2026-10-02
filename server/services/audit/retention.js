@@ -1,4 +1,5 @@
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { publicPolicy } from "./policies.js";
 import { structuredLog, capture } from "./events.js";
@@ -272,6 +273,97 @@ export function listRetentionPolicies(db, { tenantId, status, category, objectTy
     `SELECT * FROM audit_retention_policies ${clause}
       ORDER BY COALESCE(tenant_id, 0) DESC, priority ASC, id ASC`,
     params
+  ).map(publicRetentionPolicy);
+  return { items, total: items.length };
+}
+
+// ── Async read twins ────────────────────────────────────────────────────────
+
+export async function listRetentionRunsAsync(db, { tenantId, page = 1, pageSize = 25 } = {}) {
+  const where = [];
+  const params = [];
+  if (tenantId) {
+    where.push("(tenant_id = ? OR tenant_id IS NULL)");
+    params.push(Number(tenantId));
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const limit = Math.min(200, Math.max(1, Number(pageSize) || 25));
+  const offset = (Math.max(1, Number(page) || 1) - 1) * limit;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM audit_retention_runs ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM audit_retention_runs ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    )
+  ).map((row) => {
+    let details = {};
+    try {
+      details = row.details_json ? JSON.parse(row.details_json) : {};
+    } catch {
+      details = {};
+    }
+    return { ...row, dry_run: !!row.dry_run, details };
+  });
+  return { items, total, page: Number(page) || 1, pageSize: limit };
+}
+
+export async function archiveStatsAsync(db, { tenantId } = {}) {
+  const where = [];
+  const params = [];
+  if (tenantId) {
+    where.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const archiveClause = clause ? `${clause} AND 1=1` : "";
+  const [live, archived] = await Promise.all([
+    queryOneAsync(db, `SELECT COUNT(*) AS c FROM audit_logs ${clause}`, params),
+    queryOneAsync(db, `SELECT COUNT(*) AS c FROM audit_logs_archive ${archiveClause}`, params),
+  ]);
+  return { live: live.c, archived: archived.c };
+}
+
+export async function getRetentionPolicyRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM audit_retention_policies WHERE id = ?", [Number(id)]);
+}
+
+export async function getRetentionPolicyAsync(db, id, tenantId = null) {
+  const row = await getRetentionPolicyRowAsync(db, id);
+  if (!row) throw new HttpError(404, "Retention policy not found");
+  if (tenantId != null && row.tenant_id != null && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Retention policy not found");
+  }
+  return publicRetentionPolicy(row);
+}
+
+export async function listRetentionPoliciesAsync(db, { tenantId, status, category, objectType, includeSystem = true } = {}) {
+  const where = [];
+  const params = [];
+  if (tenantId) {
+    where.push(includeSystem ? "(tenant_id = ? OR tenant_id IS NULL)" : "tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (status) {
+    where.push("status = ?");
+    params.push(String(status));
+  }
+  if (category) {
+    where.push("category = ?");
+    params.push(String(category).toLowerCase());
+  }
+  if (objectType) {
+    where.push("object_type = ?");
+    params.push(String(objectType));
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM audit_retention_policies ${clause}
+        ORDER BY COALESCE(tenant_id, 0) DESC, priority ASC, id ASC`,
+      params
+    )
   ).map(publicRetentionPolicy);
   return { items, total: items.length };
 }

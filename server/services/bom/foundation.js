@@ -6,6 +6,7 @@
 // platform seams (IAM, events, jobs, search, reference data) and never duplicates
 // them.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { tenantIds } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
 import { ensureBomUnits } from "./units.js";
@@ -69,5 +70,28 @@ export function bomHealth(db, tenantId = null) {
       history: scoped("bom_change_history"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM bom_headers").length,
+  };
+}
+
+// Async twin of `bomHealth` for the migrated read route.
+export async function bomHealthAsync(db, tenantId = null) {
+  const scoped = async (table) =>
+    tenantId
+      ? Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ?`, [Number(tenantId)]))?.c || 0)
+      : Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0);
+  return {
+    source_module: SOURCE_MODULE,
+    counts: {
+      boms: await scoped("bom_headers"),
+      revisions: await scoped("bom_revisions"),
+      lines: await scoped("bom_lines"),
+      substitutes: await scoped("bom_substitutes"),
+      baselines: await scoped("bom_baselines"),
+      transformation_definitions: await scoped("bom_transformation_definitions"),
+      validation_rules: await scoped("bom_validation_rules"),
+      comparisons: await scoped("bom_comparisons"),
+      history: await scoped("bom_change_history"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM bom_headers")).length,
   };
 }

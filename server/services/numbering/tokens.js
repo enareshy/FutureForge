@@ -5,6 +5,7 @@
 // without changing the engine. `{SEQ}` is special: its value is supplied by the
 // sequence engine.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { NumberingError, NUMBERING_ERROR_CODES, invalidPattern } from "./errors.js";
 import { validateTokenCode } from "./validation.js";
@@ -134,8 +135,7 @@ export function renderPatternWithValues(pattern, values = {}) {
   return output;
 }
 
-export function resolveTokenValues(db, context = {}) {
-  const tokens = listTokens(db, { activeOnly: true });
+function tokenValuesFrom(tokens, context) {
   const values = {};
   for (const token of tokens) {
     const resolver = SYSTEM_RESOLVERS[token.resolver];
@@ -147,15 +147,31 @@ export function resolveTokenValues(db, context = {}) {
   return values;
 }
 
+export function resolveTokenValues(db, context = {}) {
+  return tokenValuesFrom(listTokens(db, { activeOnly: true }), context);
+}
+
+export async function resolveTokenValuesAsync(db, context = {}) {
+  return tokenValuesFrom(await listTokensAsync(db, { activeOnly: true }), context);
+}
+
+const LIST_TOKENS_SQL_ACTIVE = "SELECT * FROM numbering_tokens WHERE status = 'active' ORDER BY code";
+const LIST_TOKENS_SQL_ALL = "SELECT * FROM numbering_tokens ORDER BY code";
+
 export function listTokens(db, { activeOnly = false } = {}) {
-  const sql = activeOnly
-    ? "SELECT * FROM numbering_tokens WHERE status = 'active' ORDER BY code"
-    : "SELECT * FROM numbering_tokens ORDER BY code";
-  return queryAll(db, sql);
+  return queryAll(db, activeOnly ? LIST_TOKENS_SQL_ACTIVE : LIST_TOKENS_SQL_ALL);
+}
+
+export async function listTokensAsync(db, { activeOnly = false } = {}) {
+  return queryAllAsync(db, activeOnly ? LIST_TOKENS_SQL_ACTIVE : LIST_TOKENS_SQL_ALL);
 }
 
 export function getToken(db, code) {
   return queryOne(db, "SELECT * FROM numbering_tokens WHERE code = ?", [String(code).toUpperCase()]);
+}
+
+export async function getTokenAsync(db, code) {
+  return queryOneAsync(db, "SELECT * FROM numbering_tokens WHERE code = ?", [String(code).toUpperCase()]);
 }
 
 export function createToken(db, input = {}) {
@@ -185,11 +201,46 @@ export function createToken(db, input = {}) {
   return getToken(db, code);
 }
 
+export async function createTokenAsync(db, input = {}) {
+  const code = String(input.code || "").toUpperCase();
+  validateTokenCode(code);
+  if (SYSTEM_RESOLVERS[input.resolver] === undefined) {
+    throw new HttpError(400, `Unknown token resolver: ${input.resolver}`);
+  }
+  if (await getTokenAsync(db, code)) throw new HttpError(409, `Token ${code} already exists`);
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `INSERT INTO numbering_tokens (code, name, description, resolver, example, requires_permission, status, is_system, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    [
+      code,
+      input.name || code,
+      input.description || "",
+      input.resolver,
+      input.example || "",
+      input.requires_permission || "",
+      input.status || "active",
+      ts,
+      ts,
+    ]
+  );
+  return getTokenAsync(db, code);
+}
+
 // Validates that every token used by a pattern is registered and resolvable.
 export function checkPatternTokens(db, pattern) {
+  return patternTokenCheck(pattern, listTokens(db, { activeOnly: true }));
+}
+
+export async function checkPatternTokensAsync(db, pattern) {
+  return patternTokenCheck(pattern, await listTokensAsync(db, { activeOnly: true }));
+}
+
+function patternTokenCheck(pattern, tokens) {
   const parsed = parsePattern(pattern);
   if (!parsed.valid) return { valid: false, errors: parsed.errors, unknownTokens: [] };
-  const known = new Set(listTokens(db, { activeOnly: true }).map((t) => t.code));
+  const known = new Set(tokens.map((t) => t.code));
   const unknownTokens = parsed.tokens.filter((code) => !known.has(code));
   return {
     valid: unknownTokens.length === 0,

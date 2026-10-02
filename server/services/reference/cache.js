@@ -5,9 +5,15 @@
 // governed mutation bumps a single monotonic epoch so readers invalidate without
 // a network round trip and never serve stale values.
 import { queryOne, run, nowIso } from "../../db.js";
+import { queryOneAsync, runAsync } from "../../db-async.js";
 
 export function getCacheEpoch(db) {
   const row = queryOne(db, "SELECT epoch FROM reference_cache_epoch WHERE id = 1");
+  return Number(row?.epoch ?? 0);
+}
+
+export async function getCacheEpochAsync(db) {
+  const row = await queryOneAsync(db, "SELECT epoch FROM reference_cache_epoch WHERE id = 1");
   return Number(row?.epoch ?? 0);
 }
 
@@ -16,7 +22,17 @@ export function bumpCacheEpoch(db) {
   return getCacheEpoch(db);
 }
 
+export async function bumpCacheEpochAsync(db) {
+  await runAsync(db, "UPDATE reference_cache_epoch SET epoch = epoch + 1, updated_at = ? WHERE id = 1", [nowIso()]);
+  return getCacheEpochAsync(db);
+}
+
 export function ensureCacheEpoch(db) {
   run(db, "INSERT INTO reference_cache_epoch (id, epoch) VALUES (1, 0) ON CONFLICT DO NOTHING", []);
   return getCacheEpoch(db);
+}
+
+export async function ensureCacheEpochAsync(db) {
+  await runAsync(db, "INSERT INTO reference_cache_epoch (id, epoch) VALUES (1, 0) ON CONFLICT DO NOTHING", []);
+  return getCacheEpochAsync(db);
 }

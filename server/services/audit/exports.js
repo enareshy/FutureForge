@@ -2,6 +2,7 @@
 // materialised by a background job through the Job Scheduling & Execution
 // Engine. Results are retained for a bounded window and streamed on download.
 import { queryAll, queryOne, run, nowIso, randomUuid } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { listEvents } from "./query.js";
 import { EXPORT_COLUMNS, toCsv, toExcelXml, EXPORT_FORMATS } from "./export.js";
@@ -268,6 +269,63 @@ export function expireAuditExports(db, { tenantId = null } = {}) {
   }
   const result = run(db, `UPDATE audit_export_requests SET status = 'expired', updated_at = ? WHERE ${where}`, params);
   return { expired: result.changes };
+}
+
+// ── Async read twins ────────────────────────────────────────────────────────
+
+export async function listAuditExportsAsync(db, { tenantId, actorId, status, limit = 50 } = {}) {
+  const where = [];
+  const params = [];
+  if (tenantId != null) {
+    where.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (actorId !== undefined && actorId !== null) {
+    where.push("requested_by = ?");
+    params.push(Number(actorId));
+  }
+  if (status) {
+    where.push("status = ?");
+    params.push(String(status));
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM audit_export_requests ${clause} ORDER BY created_at DESC, id DESC LIMIT ?`,
+      [...params, Math.min(Math.max(Number(limit) || 50, 1), 200)]
+    )
+  ).map(publicAuditExport);
+  return { items, total: items.length };
+}
+
+export async function getAuditExportAsync(db, reference, { tenantId = null, includeContent = false } = {}) {
+  const isNumeric = /^\d+$/.test(String(reference));
+  const row = await queryOneAsync(
+    db,
+    `SELECT * FROM audit_export_requests WHERE ${isNumeric ? "id = ?" : "uuid = ?"}`,
+    [isNumeric ? Number(reference) : String(reference)]
+  );
+  if (!row) throw new HttpError(404, "Audit export not found");
+  if (tenantId != null && row.tenant_id != null && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Audit export not found");
+  }
+  const dto = publicAuditExport(row);
+  if (!includeContent) return dto;
+  if (row.status !== "completed") throw new HttpError(409, `Export is ${row.status}`);
+  if (row.expires_at && Date.parse(row.expires_at.replace(" ", "T") + "Z") < Date.now()) {
+    throw new HttpError(410, "Export has expired");
+  }
+  const filename = `audit-export-${row.uuid}.${extensionFor(row.format)}`;
+  return { ...dto, content: row.content || "", filename, content_type: row.content_type || contentTypeFor(row.format) };
+}
+
+export async function markAuditExportDownloadedAsync(db, id) {
+  await runAsync(
+    db,
+    "UPDATE audit_export_requests SET downloaded_at = ?, download_count = download_count + 1 WHERE id = ?",
+    [nowIso(), Number(id)]
+  );
 }
 
 export { EXPORT_FORMATS, EXPORT_ROW_CAP, RETENTION_DAYS as EXPORT_RETENTION_DAYS };

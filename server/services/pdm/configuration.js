@@ -2,7 +2,8 @@
 // limits, bulk batch size, cache TTL, history retention, defaults) is data an
 // administrator can change without a deployment.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { CONFIG_DEFAULTS } from "./constants.js";
 import { assertConfigurationValue } from "./validation.js";
 import { invalidate } from "./cache.js";
@@ -76,4 +77,62 @@ export function ensurePdmConfig(db, tenantId) {
     created += 1;
   }
   return { created };
+}
+
+// ── Async twins (used by migrated read routes) ───────────────────────────────
+
+export async function getConfigRowAsync(db, tenantId, key) {
+  return queryOneAsync(db, "SELECT * FROM pdm_configuration WHERE tenant_id = ? AND key = ?", [Number(tenantId), String(key)]);
+}
+
+export async function getConfigAsync(db, tenantId, key) {
+  const value = parseValue(await getConfigRowAsync(db, tenantId, key));
+  return value === undefined || value === null ? CONFIG_DEFAULTS[key] ?? null : value;
+}
+
+export async function listConfigAsync(db, tenantId) {
+  const rows = await queryAllAsync(db, "SELECT * FROM pdm_configuration WHERE tenant_id = ? ORDER BY key", [Number(tenantId)]);
+  const config = { ...CONFIG_DEFAULTS };
+  for (const row of rows) {
+    const value = parseValue(row);
+    if (value !== undefined && value !== null) config[row.key] = value;
+  }
+  return config;
+}
+
+// ── Async write twins (used by migrated write routes) ────────────────────────
+// Mirrors `setConfig` statement-for-statement: same normalization, upsert,
+// cache invalidation and audit semantics.
+
+export async function setConfigAsync(db, tenantId, key, value, actor = null, ip = null) {
+  const normalized = assertConfigurationValue(key, value);
+  const ts = nowIso();
+  const existing = await getConfigRowAsync(db, tenantId, key);
+  if (existing) {
+    await runAsync(db, "UPDATE pdm_configuration SET value_json = ?, updated_by = ?, updated_at = ? WHERE id = ?", [
+      JSON.stringify(normalized ?? null),
+      actor?.id ?? null,
+      ts,
+      existing.id,
+    ]);
+  } else {
+    await runAsync(db, "INSERT INTO pdm_configuration (tenant_id, key, value_json, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", [
+      Number(tenantId),
+      key,
+      JSON.stringify(normalized ?? null),
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]);
+  }
+  invalidate(tenantId);
+  await writeAuditAsync(db, {
+    actor,
+    action: "pdm.configuration.set",
+    resourceType: "pdm_configuration",
+    resourceId: key,
+    details: { key, value: normalized },
+    ip,
+  });
+  return normalized;
 }

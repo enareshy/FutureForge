@@ -5,7 +5,7 @@ import { queryOne, run, nowIso } from "../../db.js";
 import { queryOneAsync, runAsync } from "../../db-async.js";
 import { validateEmail } from "../../validation.js";
 import { invalidProfile } from "./errors.js";
-import { recordDeploymentChange } from "./history.js";
+import { recordDeploymentChange, recordDeploymentChangeAsync } from "./history.js";
 import { invalidateCapabilities } from "./cache.js";
 import {
   MODE_CODES,
@@ -116,8 +116,7 @@ function assertName(value) {
   return name;
 }
 
-export function updateProfile(db, body = {}, actor, ip) {
-  const before = getProfile(db);
+function buildProfilePatch(before, body = {}) {
   const patch = {};
 
   if (body.mode !== undefined) {
@@ -179,19 +178,56 @@ export function updateProfile(db, body = {}, actor, ip) {
     patch.notes = notes;
   }
 
+  return patch;
+}
+
+function profileUpdateAssignments(columns) {
+  return columns.map((c) => `${c} = ?`).join(", ");
+}
+
+export function updateProfile(db, body = {}, actor, ip) {
+  const before = getProfile(db);
+  const patch = buildProfilePatch(before, body);
   if (!Object.keys(patch).length) return publicProfile(before);
 
   const columns = Object.keys(patch);
-  const assignments = columns.map((c) => `${c} = ?`).join(", ");
   run(
     db,
-    `UPDATE deployment_profile SET ${assignments}, updated_by = ?, updated_at = ? WHERE id = 1`,
+    `UPDATE deployment_profile SET ${profileUpdateAssignments(columns)}, updated_by = ?, updated_at = ? WHERE id = 1`,
     [...columns.map((c) => patch[c]), actor?.id ?? null, nowIso()]
   );
   invalidateCapabilities(db);
   const after = getProfile(db);
 
   recordDeploymentChange(db, {
+    action: "profile.updated",
+    entityType: "profile",
+    entityRef: "deployment",
+    before: publicProfile(before),
+    after: publicProfile(after),
+    details: { changed: columns },
+    actor,
+    ip,
+  });
+
+  return publicProfile(after);
+}
+
+export async function updateProfileAsync(db, body = {}, actor, ip) {
+  const before = await getProfileAsync(db);
+  const patch = buildProfilePatch(before, body);
+  if (!Object.keys(patch).length) return publicProfile(before);
+
+  const columns = Object.keys(patch);
+  await runAsync(
+    db,
+    `UPDATE deployment_profile SET ${profileUpdateAssignments(columns)}, updated_by = ?, updated_at = ? WHERE id = 1`,
+    [...columns.map((c) => patch[c]), actor?.id ?? null, nowIso()]
+  );
+  invalidateCapabilities(db);
+  const after = await getProfileAsync(db);
+
+  await recordDeploymentChangeAsync(db, {
     action: "profile.updated",
     entityType: "profile",
     entityRef: "deployment",

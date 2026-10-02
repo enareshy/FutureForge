@@ -2,8 +2,9 @@
 // registers the standard object types, token catalogue and scope registry, the
 // domain event types and the search resolver. Safe to call repeatedly.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { ensureDefaultTokens } from "./tokens.js";
 import { ensureNumberingEventTypes } from "./events.js";
 import { ensureNumberingSearchRegistration } from "./search.js";
@@ -98,7 +99,7 @@ export function ensureNumberingFoundation(db) {
   return { object_types: objectTypes, scopes, tokens, event_types: events, search };
 }
 
-export function listObjectTypes(db, { tenantId, status } = {}) {
+function objectTypeFilter({ tenantId, status } = {}) {
   const clauses = [];
   const params = [];
   if (tenantId !== undefined && tenantId !== null) {
@@ -110,10 +111,25 @@ export function listObjectTypes(db, { tenantId, status } = {}) {
     params.push(String(status));
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  const rows = queryAll(db, `SELECT * FROM numbering_object_types ${where} ORDER BY code`, params);
+  return { where, params };
+}
+
+function projectObjectTypes(rows) {
   const dedup = new Map();
   for (const row of rows) dedup.set(row.code, row);
   return [...dedup.values()].map(publicObjectType);
+}
+
+export function listObjectTypes(db, { tenantId, status } = {}) {
+  const { where, params } = objectTypeFilter({ tenantId, status });
+  const rows = queryAll(db, `SELECT * FROM numbering_object_types ${where} ORDER BY code`, params);
+  return projectObjectTypes(rows);
+}
+
+export async function listObjectTypesAsync(db, { tenantId, status } = {}) {
+  const { where, params } = objectTypeFilter({ tenantId, status });
+  const rows = await queryAllAsync(db, `SELECT * FROM numbering_object_types ${where} ORDER BY code`, params);
+  return projectObjectTypes(rows);
 }
 
 export function publicObjectType(row) {
@@ -174,6 +190,47 @@ export function createObjectType(db, input = {}, actor = null, tenantId = null, 
   return publicObjectType(row);
 }
 
+export async function createObjectTypeAsync(db, input = {}, actor = null, tenantId = null, ip = null) {
+  const code = String(input.code || "").trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9_]{1,63}$/.test(code)) {
+    throw new HttpError(400, "Object type code must be 2-64 uppercase letters, digits or underscore");
+  }
+  const existing = await queryOneAsync(
+    db,
+    "SELECT id FROM numbering_object_types WHERE code = ? AND COALESCE(tenant_id, 0) = COALESCE(?, 0)",
+    [code, tenantId]
+  );
+  if (existing) throw new HttpError(409, `Object type ${code} already exists`);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO numbering_object_types (code, name, description, module, classification, status, is_system, tenant_id, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+    [
+      code,
+      input.name || code,
+      input.description || "",
+      input.module || "",
+      input.classification || "",
+      input.status === "inactive" ? "inactive" : "active",
+      tenantId,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM numbering_object_types WHERE id = ?", [Number(result.lastInsertId)]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "numbering.object_type.create",
+    resourceType: "numbering_object_type",
+    resourceId: row.id,
+    details: { code },
+    ip,
+  });
+  return publicObjectType(row);
+}
+
 export function setObjectTypeStatus(db, code, status, actor = null, ip = null) {
   if (!["active", "inactive"].includes(status)) throw new HttpError(400, "status must be active or inactive");
   const row = queryOne(db, "SELECT * FROM numbering_object_types WHERE code = ?", [String(code).toUpperCase()]);
@@ -188,4 +245,20 @@ export function setObjectTypeStatus(db, code, status, actor = null, ip = null) {
     ip,
   });
   return publicObjectType(queryOne(db, "SELECT * FROM numbering_object_types WHERE id = ?", [row.id]));
+}
+
+export async function setObjectTypeStatusAsync(db, code, status, actor = null, ip = null) {
+  if (!["active", "inactive"].includes(status)) throw new HttpError(400, "status must be active or inactive");
+  const row = await queryOneAsync(db, "SELECT * FROM numbering_object_types WHERE code = ?", [String(code).toUpperCase()]);
+  if (!row) throw new HttpError(404, "Numbering object type not found");
+  await runAsync(db, "UPDATE numbering_object_types SET status = ?, updated_at = ? WHERE id = ?", [status, nowIso(), row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "numbering.object_type.status",
+    resourceType: "numbering_object_type",
+    resourceId: row.id,
+    details: { code: row.code, status },
+    ip,
+  });
+  return publicObjectType(await queryOneAsync(db, "SELECT * FROM numbering_object_types WHERE id = ?", [row.id]));
 }

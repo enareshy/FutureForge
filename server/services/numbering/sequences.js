@@ -3,6 +3,7 @@
 // boundaries can never receive the same value. Reset policies create a fresh,
 // period-scoped counter instead of mutating history in place.
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { sequenceExhausted, NUMBERING_ERROR_CODES, NumberingError } from "./errors.js";
 import { buildPeriodKey, buildScopeKey, toSqlDate } from "./scopes.js";
@@ -80,6 +81,53 @@ export function getOrCreateSequence(db, scheme, scopeInput, at = new Date()) {
   return sequence;
 }
 
+export async function getOrCreateSequenceAsync(db, scheme, scopeInput, at = new Date()) {
+  const scopeKey = buildScopeKey(scopeContextForScheme(scheme, scopeInput));
+  const periodKey = buildPeriodKey(scheme.reset_policy, at);
+  let sequence = await queryOneAsync(
+    db,
+    "SELECT * FROM numbering_sequences WHERE scheme_id = ? AND scope_key = ? AND period_key = ?",
+    [scheme.id, scopeKey, periodKey]
+  );
+  if (sequence) return sequence;
+  const ts = nowIso();
+  const columns = scopeColumns(scopeInput);
+  await runAsync(
+    db,
+    `INSERT INTO numbering_sequences
+       (scheme_id, scheme_version, scope_key, period_key, reset_policy, start_value, current_value, min_value, max_value,
+        increment, padding, status, allocated_count, last_reset_at, tenant_id, organization_id, plant_id, site_id,
+        classification, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, NULL, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+    [
+      scheme.id,
+      scheme.current_version,
+      scopeKey,
+      periodKey,
+      scheme.reset_policy,
+      scheme.start_value,
+      scheme.start_value - scheme.increment,
+      scheme.min_value,
+      scheme.max_value,
+      scheme.increment,
+      scheme.padding,
+      columns.tenant_id,
+      columns.organization_id,
+      columns.plant_id,
+      columns.site_id,
+      columns.classification,
+      ts,
+      ts,
+    ]
+  );
+  sequence = await queryOneAsync(
+    db,
+    "SELECT * FROM numbering_sequences WHERE scheme_id = ? AND scope_key = ? AND period_key = ?",
+    [scheme.id, scopeKey, periodKey]
+  );
+  return sequence;
+}
+
 // Atomically reserves the next sequence value. Must be called inside a
 // transaction for multi-process safety. Returns the sequence row (updated),
 // the raw value and the padded representation.
@@ -131,6 +179,56 @@ export function allocateSequenceValue(db, scheme, scopeInput, options = {}) {
   );
 }
 
+// Asynchronous twin of `allocateSequenceValue`. Must run inside `transactionAsync`
+// for multi-process safety.
+export async function allocateSequenceValueAsync(db, scheme, scopeInput, options = {}) {
+  const at = options.at || new Date();
+  const nowStr = toSqlDate(at) || nowIso();
+  const scopeKey = buildScopeKey(scopeContextForScheme(scheme, scopeInput));
+  const periodKey = buildPeriodKey(scheme.reset_policy, at);
+
+  for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
+    const sequence = await getOrCreateSequenceAsync(db, scheme, scopeInput, at);
+    if (sequence.status !== "active") {
+      throw new NumberingError(409, `Sequence ${sequence.id} is ${sequence.status}`, NUMBERING_ERROR_CODES.SEQUENCE_NOT_FOUND, {
+        sequenceId: sequence.id,
+        status: sequence.status,
+      });
+    }
+    const next = Number(sequence.current_value) + Number(sequence.increment);
+    if (next > Number(sequence.max_value)) {
+      await runAsync(db, "UPDATE numbering_sequences SET status = 'exhausted', updated_at = ? WHERE id = ?", [nowStr, sequence.id]);
+      throw sequenceExhausted({
+        sequenceId: sequence.id,
+        scopeKey,
+        maxValue: Number(sequence.max_value),
+        currentValue: Number(sequence.current_value),
+      });
+    }
+    const result = await runAsync(
+      db,
+      `UPDATE numbering_sequences
+         SET current_value = ?, allocated_count = allocated_count + 1, last_allocated_at = ?, updated_at = ?
+       WHERE id = ? AND current_value = ?`,
+      [next, nowStr, nowStr, sequence.id, sequence.current_value]
+    );
+    if (result.changes === 1) {
+      return {
+        sequence: { ...sequence, current_value: next, last_allocated_at: nowStr },
+        value: next,
+        formatted: formatSequence(next, sequence.padding),
+        scopeKey,
+        periodKey,
+      };
+    }
+  }
+  throw new NumberingError(
+    409,
+    "Concurrent sequence update could not be completed",
+    NUMBERING_ERROR_CODES.CONCURRENCY_CONFLICT
+  );
+}
+
 // Non-mutating preview of the next value. Never advances or reserves.
 export function previewSequenceValue(db, scheme, scopeInput, at = new Date()) {
   const scopeKey = buildScopeKey(scopeContextForScheme(scheme, scopeInput));
@@ -140,6 +238,21 @@ export function previewSequenceValue(db, scheme, scopeInput, at = new Date()) {
     "SELECT * FROM numbering_sequences WHERE scheme_id = ? AND scope_key = ? AND period_key = ?",
     [scheme.id, scopeKey, periodKey]
   );
+  return projectSequencePreview(scheme, sequence, scopeKey, periodKey);
+}
+
+export async function previewSequenceValueAsync(db, scheme, scopeInput, at = new Date()) {
+  const scopeKey = buildScopeKey(scopeContextForScheme(scheme, scopeInput));
+  const periodKey = buildPeriodKey(scheme.reset_policy, at);
+  const sequence = await queryOneAsync(
+    db,
+    "SELECT * FROM numbering_sequences WHERE scheme_id = ? AND scope_key = ? AND period_key = ?",
+    [scheme.id, scopeKey, periodKey]
+  );
+  return projectSequencePreview(scheme, sequence, scopeKey, periodKey);
+}
+
+function projectSequencePreview(scheme, sequence, scopeKey, periodKey) {
   const current = sequence ? Number(sequence.current_value) : Number(scheme.start_value) - Number(scheme.increment);
   const value = current + Number(scheme.increment);
   const padding = sequence ? sequence.padding : scheme.padding;
@@ -161,11 +274,28 @@ export function getSequenceRow(db, ref) {
   return queryOne(db, "SELECT * FROM numbering_sequences WHERE id = ?", [Number.isFinite(id) ? id : -1]);
 }
 
+export async function getSequenceRowAsync(db, ref) {
+  const id = Number(ref);
+  return queryOneAsync(db, "SELECT * FROM numbering_sequences WHERE id = ?", [Number.isFinite(id) ? id : -1]);
+}
+
 export function publicSequence(db, row) {
   if (!row) return null;
   const scheme = row.scheme_id
     ? queryOne(db, "SELECT code, name, object_type_code FROM numbering_schemes WHERE id = ?", [row.scheme_id])
     : null;
+  return projectSequence(row, scheme);
+}
+
+export async function publicSequenceAsync(db, row) {
+  if (!row) return null;
+  const scheme = row.scheme_id
+    ? await queryOneAsync(db, "SELECT code, name, object_type_code FROM numbering_schemes WHERE id = ?", [row.scheme_id])
+    : null;
+  return projectSequence(row, scheme);
+}
+
+function projectSequence(row, scheme) {
   const next = Number(row.current_value) + Number(row.increment);
   return {
     id: row.id,
@@ -205,7 +335,7 @@ export function publicSequence(db, row) {
   };
 }
 
-export function listSequences(db, { schemeId, scopeKey, status, tenantId, objectType, page = 1, pageSize = 25 } = {}) {
+function sequenceListFilter({ schemeId, scopeKey, status, tenantId, objectType }) {
   const clauses = [];
   const params = [];
   if (schemeId) {
@@ -229,6 +359,11 @@ export function listSequences(db, { schemeId, scopeKey, status, tenantId, object
     params.push(String(objectType).toUpperCase());
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  return { where, params };
+}
+
+export function listSequences(db, { schemeId, scopeKey, status, tenantId, objectType, page = 1, pageSize = 25 } = {}) {
+  const { where, params } = sequenceListFilter({ schemeId, scopeKey, status, tenantId, objectType });
   const base = `FROM numbering_sequences s LEFT JOIN numbering_schemes sc ON sc.id = s.scheme_id ${where}`;
   const total = queryOne(db, `SELECT COUNT(*) AS c ${base}`, params).c;
   const rows = queryAll(
@@ -237,6 +372,19 @@ export function listSequences(db, { schemeId, scopeKey, status, tenantId, object
     [...params, Number(pageSize), (Number(page) - 1) * Number(pageSize)]
   );
   return { items: rows.map((row) => publicSequence(db, row)), total, page: Number(page), page_size: Number(pageSize) };
+}
+
+export async function listSequencesAsync(db, { schemeId, scopeKey, status, tenantId, objectType, page = 1, pageSize = 25 } = {}) {
+  const { where, params } = sequenceListFilter({ schemeId, scopeKey, status, tenantId, objectType });
+  const base = `FROM numbering_sequences s LEFT JOIN numbering_schemes sc ON sc.id = s.scheme_id ${where}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c ${base}`, params)).c;
+  const rows = await queryAllAsync(
+    db,
+    `SELECT s.* ${base} ORDER BY s.updated_at DESC, s.id DESC LIMIT ? OFFSET ?`,
+    [...params, Number(pageSize), (Number(page) - 1) * Number(pageSize)]
+  );
+  const items = await Promise.all(rows.map((row) => publicSequenceAsync(db, row)));
+  return { items, total, page: Number(page), page_size: Number(pageSize) };
 }
 
 // Administrative reset. Sets the counter so the next allocation is `startValue`
@@ -257,6 +405,24 @@ export function resetSequence(db, ref, input = {}, actor = null, ip = null) {
     [Number(startValue), current, ts, ts, row.id]
   );
   return publicSequence(db, getSequenceRow(db, row.id));
+}
+
+export async function resetSequenceAsync(db, ref, input = {}, actor = null, ip = null) {
+  const row = await getSequenceRowAsync(db, ref);
+  if (!row) throw new HttpError(404, "Numbering sequence not found");
+  const scheme = await queryOneAsync(db, "SELECT * FROM numbering_schemes WHERE id = ?", [row.scheme_id]);
+  const startValue = input.startValue ?? input.start_value ?? scheme?.start_value ?? row.start_value;
+  const increment = scheme?.increment ?? row.increment;
+  const current = Number(startValue) - Number(increment);
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `UPDATE numbering_sequences
+       SET start_value = ?, current_value = ?, status = 'active', last_reset_at = ?, updated_at = ?
+     WHERE id = ?`,
+    [Number(startValue), current, ts, ts, row.id]
+  );
+  return publicSequenceAsync(db, await getSequenceRowAsync(db, row.id));
 }
 
 export { MAX_CAS_ATTEMPTS };

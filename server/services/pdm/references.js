@@ -6,6 +6,7 @@
 // instead of a per-service scan. References complement, and never replace, the
 // shared Object & Relationship Framework.
 import { queryAll, queryOne, run } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { publicReference } from "./repository.js";
 import { referenceRef } from "./refs.js";
 import { normalizeReferenceInput, normalizeUpper, paginate } from "./validation.js";
@@ -104,4 +105,107 @@ export function referenceCategoriesForTarget(db, tenantId, targetType, targetId)
     [Number(tenantId), normalizeUpper(targetType), String(targetId)]
   );
   return rows.map((row) => ({ category: row.category, count: Number(row.c) }));
+}
+
+// ── Async twins (used by migrated read routes) ───────────────────────────────
+
+export async function listReferencesAsync(db, { tenantId, sourceType, sourceId, targetType, targetId, category, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (sourceType) {
+    clauses.push("source_type = ?");
+    params.push(normalizeUpper(sourceType));
+  }
+  if (sourceId != null) {
+    clauses.push("source_id = ?");
+    params.push(String(sourceId));
+  }
+  if (targetType) {
+    clauses.push("target_type = ?");
+    params.push(normalizeUpper(targetType));
+  }
+  if (targetId != null) {
+    clauses.push("target_id = ?");
+    params.push(String(targetId));
+  }
+  if (category) {
+    clauses.push("category = ?");
+    params.push(normalizeUpper(category));
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 100, maxPageSize: 1000 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM pdm_references ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM pdm_references ${where} ORDER BY category, id LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicReference), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
+export async function referenceCategoriesForTargetAsync(db, tenantId, targetType, targetId) {
+  const rows = await queryAllAsync(
+    db,
+    "SELECT category, COUNT(*) AS c FROM pdm_references WHERE tenant_id = ? AND target_type = ? AND target_id = ? GROUP BY category ORDER BY c DESC",
+    [Number(tenantId), normalizeUpper(targetType), String(targetId)]
+  );
+  return rows.map((row) => ({ category: row.category, count: Number(row.c) }));
+}
+
+// ── Async write twins (used by migrated write routes) ───────────────────────
+
+export async function recordReferenceAsync(db, tenantId, input = {}) {
+  let normalized;
+  try {
+    normalized = normalizeReferenceInput(input);
+  } catch {
+    return null;
+  }
+  const ts = new Date().toISOString();
+  try {
+    await runAsync(
+      db,
+      `INSERT INTO pdm_references
+         (reference_ref, tenant_id, organization_id, source_type, source_id, source_ref, target_type, target_id, target_ref, category, relationship_type, metadata_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+      [
+        referenceRef(),
+        Number(tenantId),
+        input.organization_id != null ? Number(input.organization_id) : null,
+        normalized.source_type,
+        normalized.source_id,
+        normalized.source_ref,
+        normalized.target_type,
+        normalized.target_id,
+        normalized.target_ref,
+        normalized.category,
+        normalized.relationship_type,
+        JSON.stringify(normalized.metadata || {}),
+        ts,
+      ]
+    );
+  } catch {
+    return null;
+  }
+  return queryOneAsync(
+    db,
+    "SELECT * FROM pdm_references WHERE tenant_id = ? AND source_type = ? AND source_id = ? AND target_type = ? AND target_id = ? AND category = ?",
+    [Number(tenantId), normalized.source_type, normalized.source_id, normalized.target_type, normalized.target_id, normalized.category]
+  );
+}
+
+export async function removeReferenceAsync(db, tenantId, { source_type, source_id, target_type, target_id, category }) {
+  return (
+    await runAsync(
+      db,
+      "DELETE FROM pdm_references WHERE tenant_id = ? AND source_type = ? AND source_id = ? AND target_type = ? AND target_id = ? AND category = ?",
+      [Number(tenantId), normalizeUpper(source_type), String(source_id), normalizeUpper(target_type), String(target_id), normalizeUpper(category)]
+    )
+  ).changes;
+}
+
+export async function removeReferencesForSourceAsync(db, tenantId, sourceType, sourceId) {
+  return (
+    await runAsync(db, "DELETE FROM pdm_references WHERE tenant_id = ? AND source_type = ? AND source_id = ?", [
+      Number(tenantId),
+      normalizeUpper(sourceType),
+      String(sourceId),
+    ])
+  ).changes;
 }

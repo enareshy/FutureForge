@@ -3667,7 +3667,7 @@ export function createApp(db) {
           action: req.query.action,
           resourceType: req.query.resourceType,
           q: req.query.q,
-          scope: auditScope(req),
+          scope: await auditScopeAsync(req),
         })
       );
     })
@@ -3678,6 +3678,13 @@ export function createApp(db) {
     return {
       tenantId: req.tenantId || -1,
       scopeAll: tenants.isPlatformAdmin(db, req.actor.id),
+    };
+  }
+
+  async function auditScopeAsync(req) {
+    return {
+      tenantId: req.tenantId || -1,
+      scopeAll: await tenants.isPlatformAdminAsync(db, req.actor.id),
     };
   }
 
@@ -3736,12 +3743,27 @@ export function createApp(db) {
     // read this object's timeline; rows remain tenant-scoped by the query.
   }
 
+  async function assertHistoryVisibleAsync(req, objectType) {
+    if (await tenants.isPlatformAdminAsync(db, req.actor.id)) return;
+    const { policy } = await audit.resolvePolicyAsync(db, req.tenantId, objectType);
+    if (policy.visibility === "admin") {
+      const check = await authorization.checkPermissionAsync(db, req.actor.id, "iam.audit.events", "read");
+      if (!check.allowed) throw new HttpError(403, "Audit history for this object requires administrator access");
+      return;
+    }
+    if (policy.visibility === "manager") {
+      const check = await authorization.checkPermissionAsync(db, req.actor.id, "iam.objects.instances", "read");
+      if (!check.allowed) throw new HttpError(403, "You do not have manager access to this object's history");
+      return;
+    }
+  }
+
   app.get(
     "/api/audit/events",
     authAsync,
     canAsync("iam.audit.events", "read"),
     wrap(async (req, res) => {
-      res.json(await audit.listEventsAsync(db, eventFilters(req), auditScope(req)));
+      res.json(await audit.listEventsAsync(db, eventFilters(req), await auditScopeAsync(req)));
     })
   );
 
@@ -3750,7 +3772,7 @@ export function createApp(db) {
     authAsync,
     canAsync("iam.audit.events", "read"),
     wrap(async (req, res) => {
-      res.json(await audit.auditSummaryAsync(db, eventFilters(req), auditScope(req)));
+      res.json(await audit.auditSummaryAsync(db, eventFilters(req), await auditScopeAsync(req)));
     })
   );
 
@@ -3759,7 +3781,7 @@ export function createApp(db) {
     authAsync,
     canAsync("iam.audit.events", "read"),
     wrap(async (req, res) => {
-      res.json(await audit.eventFacetsAsync(db, eventFilters(req), auditScope(req)));
+      res.json(await audit.eventFacetsAsync(db, eventFilters(req), await auditScopeAsync(req)));
     })
   );
 
@@ -3768,7 +3790,7 @@ export function createApp(db) {
     authAsync,
     canAsync("iam.audit.events", "read"),
     wrap(async (req, res) => {
-      res.json(await audit.getEventAsync(db, req.params.id, auditScope(req)));
+      res.json(await audit.getEventAsync(db, req.params.id, await auditScopeAsync(req)));
     })
   );
 
@@ -3806,16 +3828,16 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/objects/:objectType/:objectId/history",
-    auth,
-    can("iam.audit.history", "read"),
-    wrap((req, res) => {
-      assertHistoryVisible(req, req.params.objectType);
+    authAsync,
+    canAsync("iam.audit.history", "read"),
+    wrap(async (req, res) => {
+      await assertHistoryVisibleAsync(req, req.params.objectType);
       res.json(
-        audit.objectHistory(
+        await audit.objectHistoryAsync(
           db,
           { objectType: req.params.objectType, objectId: req.params.objectId },
           eventFilters(req),
-          auditScope(req)
+          await auditScopeAsync(req)
         )
       );
     })
@@ -3823,10 +3845,10 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/users/:userId/activity",
-    auth,
-    can("iam.audit.history", "read"),
-    wrap((req, res) => {
-      res.json(audit.userActivity(db, req.params.userId, eventFilters(req), auditScope(req)));
+    authAsync,
+    canAsync("iam.audit.history", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.userActivityAsync(db, req.params.userId, eventFilters(req), await auditScopeAsync(req)));
     })
   );
 
@@ -3857,13 +3879,13 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/policies",
-    auth,
-    can("iam.audit.policies", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.policies", "read"),
+    wrap(async (req, res) => {
       const includeSystem = req.query.includeSystem !== "false";
       res.json(
-        audit.listPolicies(db, {
-          tenantId: tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true" ? null : req.tenantId,
+        await audit.listPoliciesAsync(db, {
+          tenantId: (await tenants.isPlatformAdminAsync(db, req.actor.id)) && req.query.all === "true" ? null : req.tenantId,
           objectType: req.query.objectType,
           status: req.query.status,
           includeSystem,
@@ -3874,10 +3896,10 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/policies/:id",
-    auth,
-    can("iam.audit.policies", "read"),
-    wrap((req, res) => {
-      res.json(audit.getPolicy(db, req.params.id, tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId));
+    authAsync,
+    canAsync("iam.audit.policies", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.getPolicyAsync(db, req.params.id, (await tenants.isPlatformAdminAsync(db, req.actor.id)) ? null : req.tenantId));
     })
   );
 
@@ -3943,11 +3965,11 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/retention/runs",
-    auth,
-    can("iam.audit.retention", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.retention", "read"),
+    wrap(async (req, res) => {
       const page = pagination(req.query);
-      res.json(audit.listRetentionRuns(db, { ...page, tenantId: req.tenantId }));
+      res.json(await audit.listRetentionRunsAsync(db, { ...page, tenantId: req.tenantId }));
     })
   );
 
@@ -4030,37 +4052,37 @@ export function createApp(db) {
   for (const [path, fn] of Object.entries(historyViews)) {
     app.get(
       `/api/audit/${path}`,
-      auth,
-      can("iam.audit.events", "read"),
-      wrap((req, res) => {
-        res.json(audit[fn](db, eventFilters(req), auditScope(req)));
+      authAsync,
+      canAsync("iam.audit.events", "read"),
+      wrap(async (req, res) => {
+        res.json(await audit[`${fn}Async`](db, eventFilters(req), await auditScopeAsync(req)));
       })
     );
   }
 
   app.get(
     "/api/audit/metrics",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
-      res.json(audit.auditMetrics(db, eventFilters(req), auditScope(req)));
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.auditMetricsAsync(db, eventFilters(req), await auditScopeAsync(req)));
     })
   );
 
   app.get(
     "/api/audit/attributes/:objectType/:objectId/history",
-    auth,
-    can("iam.audit.history", "read"),
-    wrap((req, res) => {
-      assertHistoryVisible(req, req.params.objectType);
+    authAsync,
+    canAsync("iam.audit.history", "read"),
+    wrap(async (req, res) => {
+      await assertHistoryVisibleAsync(req, req.params.objectType);
       const attribute = req.query.attribute || req.query.changedAttribute;
       if (!attribute) throw new HttpError(400, "attribute query parameter is required");
       res.json(
-        audit.attributeHistory(
+        await audit.attributeHistoryAsync(
           db,
           { objectType: req.params.objectType, objectId: req.params.objectId, attribute },
           eventFilters(req),
-          auditScope(req)
+          await auditScopeAsync(req)
         )
       );
     })
@@ -4068,16 +4090,16 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/relationships/:objectType/:objectId/history",
-    auth,
-    can("iam.audit.history", "read"),
-    wrap((req, res) => {
-      assertHistoryVisible(req, req.params.objectType);
+    authAsync,
+    canAsync("iam.audit.history", "read"),
+    wrap(async (req, res) => {
+      await assertHistoryVisibleAsync(req, req.params.objectType);
       res.json(
-        audit.relationshipHistory(
+        await audit.relationshipHistoryAsync(
           db,
           { objectType: req.params.objectType, objectId: req.params.objectId },
           eventFilters(req),
-          auditScope(req)
+          await auditScopeAsync(req)
         )
       );
     })
@@ -4085,12 +4107,12 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/exports",
-    auth,
-    can("iam.audit.export", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.export", "read"),
+    wrap(async (req, res) => {
       const page = pagination(req.query);
       res.json(
-        audit.listAuditExports(db, {
+        await audit.listAuditExportsAsync(db, {
           tenantId: req.tenantId,
           actorId: req.query.mine === "true" ? req.actor.id : null,
           status: req.query.status,
@@ -4128,20 +4150,20 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/exports/:id",
-    auth,
-    can("iam.audit.export", "read"),
-    wrap((req, res) => {
-      res.json(audit.getAuditExport(db, req.params.id, { tenantId: req.tenantId }));
+    authAsync,
+    canAsync("iam.audit.export", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.getAuditExportAsync(db, req.params.id, { tenantId: req.tenantId }));
     })
   );
 
   app.get(
     "/api/audit/exports/:id/download",
-    auth,
-    can("iam.audit.export", "read"),
-    wrap((req, res) => {
-      const result = audit.getAuditExport(db, req.params.id, { tenantId: req.tenantId, includeContent: true });
-      audit.markAuditExportDownloaded(db, result.id);
+    authAsync,
+    canAsync("iam.audit.export", "read"),
+    wrap(async (req, res) => {
+      const result = await audit.getAuditExportAsync(db, req.params.id, { tenantId: req.tenantId, includeContent: true });
+      await audit.markAuditExportDownloadedAsync(db, result.id);
       res.setHeader("Content-Type", result.content_type);
       res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
       res.send(result.content);
@@ -4159,11 +4181,11 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/action-types",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
       res.json(
-        audit.listActionTypes(db, {
+        await audit.listActionTypesAsync(db, {
           category: req.query.category,
           active: req.query.active,
           mandatory: req.query.mandatory,
@@ -4175,10 +4197,10 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/action-types/:code",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
-      res.json(audit.getActionType(db, req.params.code));
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.getActionTypeAsync(db, req.params.code));
     })
   );
 
@@ -4211,11 +4233,11 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/filters",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
       res.json(
-        audit.listSavedFilters(db, {
+        await audit.listSavedFiltersAsync(db, {
           tenantId: req.tenantId,
           ownerId: req.actor.id,
           scope: req.query.scope,
@@ -4253,12 +4275,12 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/retention/policies",
-    auth,
-    can("iam.audit.retention", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.retention", "read"),
+    wrap(async (req, res) => {
       res.json(
-        audit.listRetentionPolicies(db, {
-          tenantId: tenants.isPlatformAdmin(db, req.actor.id) && req.query.all === "true" ? null : req.tenantId,
+        await audit.listRetentionPoliciesAsync(db, {
+          tenantId: (await tenants.isPlatformAdminAsync(db, req.actor.id)) && req.query.all === "true" ? null : req.tenantId,
           status: req.query.status,
           category: req.query.category,
           objectType: req.query.objectType,
@@ -4270,10 +4292,16 @@ export function createApp(db) {
 
   app.get(
     "/api/audit/retention/policies/:id",
-    auth,
-    can("iam.audit.retention", "read"),
-    wrap((req, res) => {
-      res.json(audit.getRetentionPolicy(db, req.params.id, tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId));
+    authAsync,
+    canAsync("iam.audit.retention", "read"),
+    wrap(async (req, res) => {
+      res.json(
+        await audit.getRetentionPolicyAsync(
+          db,
+          req.params.id,
+          (await tenants.isPlatformAdminAsync(db, req.actor.id)) ? null : req.tenantId
+        )
+      );
     })
   );
 
@@ -9920,6 +9948,17 @@ export function createApp(db) {
   const canNumberingRelease = (action) => can("iam.numbering.release", action);
   const canNumberingManual = (action) => can("iam.numbering.manual", action);
   const canNumberingMetrics = (action) => can("iam.numbering.metrics", action);
+  const canNumberingAsync = (action) => canAsync("iam.numbering", action);
+  const canNumberingObjectTypesAsync = (action) => canAsync("iam.numbering.objecttypes", action);
+  const canNumberingSchemesAsync = (action) => canAsync("iam.numbering.schemes", action);
+  const canNumberingSequencesAsync = (action) => canAsync("iam.numbering.sequences", action);
+  const canNumberingAllocationsAsync = (action) => canAsync("iam.numbering.allocations", action);
+  const canNumberingGenerateAsync = (action) => canAsync("iam.numbering.generate", action);
+  const canNumberingReserveAsync = (action) => canAsync("iam.numbering.reserve", action);
+  const canNumberingConsumeAsync = (action) => canAsync("iam.numbering.consume", action);
+  const canNumberingReleaseAsync = (action) => canAsync("iam.numbering.release", action);
+  const canNumberingManualAsync = (action) => canAsync("iam.numbering.manual", action);
+  const canNumberingMetricsAsync = (action) => canAsync("iam.numbering.metrics", action);
   const manualGuard = (req, res, next) => {
     const wantsManual =
       req.body?.manualNumber !== undefined ||
@@ -9929,6 +9968,15 @@ export function createApp(db) {
     if (!wantsManual) return next();
     return canNumberingManual("create")(req, res, next);
   };
+  const manualGuardAsync = async (req, res, next) => {
+    const wantsManual =
+      req.body?.manualNumber !== undefined ||
+      req.body?.manual_number !== undefined ||
+      req.body?.number !== undefined ||
+      req.body?.preferredNumber !== undefined;
+    if (!wantsManual) return next();
+    return canNumberingManualAsync("create")(req, res, next);
+  };
   const idempotencyKeyOf = (req) =>
     req.get("Idempotency-Key") || req.get("idempotency-key") || req.body?.idempotencyKey || null;
 
@@ -9936,12 +9984,12 @@ export function createApp(db) {
 
   numberingRouter.get(
     "/meta",
-    auth,
-    canNumbering("read"),
-    wrap((_req, res) => {
+    authAsync,
+    canNumberingAsync("read"),
+    wrap(async (_req, res) => {
       res.json({
         ...numbering.Validation.vocabulary(),
-        tokens: numbering.Tokens.listTokens(db),
+        tokens: await numbering.Tokens.listTokensAsync(db),
         scopes: numbering.Foundation.DEFAULT_SCOPES,
       });
     })
@@ -9949,11 +9997,11 @@ export function createApp(db) {
 
   numberingRouter.get(
     "/object-types",
-    auth,
-    canNumberingObjectTypes("read"),
-    wrap((req, res) => {
+    authAsync,
+    canNumberingObjectTypesAsync("read"),
+    wrap(async (req, res) => {
       res.json({
-        items: numbering.Foundation.listObjectTypes(db, {
+        items: await numbering.Foundation.listObjectTypesAsync(db, {
           tenantId: numberingTenant(req),
           status: req.query.status || undefined,
         }),
@@ -9962,126 +10010,126 @@ export function createApp(db) {
   );
   numberingRouter.post(
     "/object-types",
-    auth,
-    canNumberingObjectTypes("create"),
-    wrap((req, res) => {
-      res.status(201).json(numbering.Foundation.createObjectType(db, req.body || {}, req.actor, numberingTenant(req), req.ip));
+    authAsync,
+    canNumberingObjectTypesAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await numbering.Foundation.createObjectTypeAsync(db, req.body || {}, req.actor, numberingTenant(req), req.ip));
     })
   );
   numberingRouter.post(
     "/object-types/:code/status",
-    auth,
-    canNumberingObjectTypes("update"),
-    wrap((req, res) => {
-      res.json(numbering.Foundation.setObjectTypeStatus(db, req.params.code, req.body?.status, req.actor, req.ip));
+    authAsync,
+    canNumberingObjectTypesAsync("update"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Foundation.setObjectTypeStatusAsync(db, req.params.code, req.body?.status, req.actor, req.ip));
     })
   );
 
   numberingRouter.get(
     "/scopes",
-    auth,
-    canNumbering("read"),
-    wrap((_req, res) => {
-      res.json({ items: numbering.Scopes.listScopes(db) });
+    authAsync,
+    canNumberingAsync("read"),
+    wrap(async (_req, res) => {
+      res.json({ items: await numbering.Scopes.listScopesAsync(db) });
     })
   );
   numberingRouter.get(
     "/tokens",
-    auth,
-    canNumbering("read"),
-    wrap((_req, res) => {
-      res.json({ items: numbering.Tokens.listTokens(db) });
+    authAsync,
+    canNumberingAsync("read"),
+    wrap(async (_req, res) => {
+      res.json({ items: await numbering.Tokens.listTokensAsync(db) });
     })
   );
   numberingRouter.post(
     "/tokens",
-    auth,
-    canNumberingSchemes("create"),
-    wrap((req, res) => {
-      res.status(201).json(numbering.Tokens.createToken(db, req.body || {}));
+    authAsync,
+    canNumberingSchemesAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await numbering.Tokens.createTokenAsync(db, req.body || {}));
     })
   );
 
   // ── Schemes ────────────────────────────────────────────────────────────────
   numberingRouter.get(
     "/schemes",
-    auth,
-    canNumberingSchemes("read"),
-    wrap((req, res) => {
-      res.json(numbering.Schemes.listSchemes(db, { ...req.query, tenantId: numberingTenant(req) }));
+    authAsync,
+    canNumberingSchemesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Schemes.listSchemesAsync(db, { ...req.query, tenantId: numberingTenant(req) }));
     })
   );
   numberingRouter.post(
     "/schemes",
-    auth,
-    canNumberingSchemes("create"),
-    wrap((req, res) => {
-      const scheme = numbering.Schemes.createScheme(db, req.body || {}, req.actor, numberingTenant(req), req.ip);
+    authAsync,
+    canNumberingSchemesAsync("create"),
+    wrap(async (req, res) => {
+      const scheme = await numbering.Schemes.createSchemeAsync(db, req.body || {}, req.actor, numberingTenant(req), req.ip);
       res.status(201).json(scheme);
     })
   );
   numberingRouter.get(
     "/schemes/:ref",
-    auth,
-    canNumberingSchemes("read"),
-    wrap((req, res) => {
-      res.json(numbering.Schemes.getScheme(db, req.params.ref));
+    authAsync,
+    canNumberingSchemesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Schemes.getSchemeAsync(db, req.params.ref));
     })
   );
-  const updateSchemeHandler = wrap((req, res) => {
-    res.json(numbering.Schemes.updateScheme(db, req.params.ref, req.body || {}, req.actor, req.ip));
+  const updateSchemeHandler = wrap(async (req, res) => {
+    res.json(await numbering.Schemes.updateSchemeAsync(db, req.params.ref, req.body || {}, req.actor, req.ip));
   });
-  numberingRouter.put("/schemes/:ref", auth, canNumberingSchemes("update"), updateSchemeHandler);
-  numberingRouter.patch("/schemes/:ref", auth, canNumberingSchemes("update"), updateSchemeHandler);
+  numberingRouter.put("/schemes/:ref", authAsync, canNumberingSchemesAsync("update"), updateSchemeHandler);
+  numberingRouter.patch("/schemes/:ref", authAsync, canNumberingSchemesAsync("update"), updateSchemeHandler);
   numberingRouter.delete(
     "/schemes/:ref",
-    auth,
-    canNumberingSchemes("delete"),
-    wrap((req, res) => {
-      res.json(numbering.Schemes.deleteScheme(db, req.params.ref, req.actor, req.ip));
+    authAsync,
+    canNumberingSchemesAsync("delete"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Schemes.deleteSchemeAsync(db, req.params.ref, req.actor, req.ip));
     })
   );
   numberingRouter.get(
     "/schemes/:ref/versions",
-    auth,
-    canNumberingSchemes("read"),
-    wrap((req, res) => {
-      const scheme = numbering.Schemes.getScheme(db, req.params.ref, { includeVersions: false });
-      res.json({ items: numbering.Schemes.listVersions(db, scheme.id) });
+    authAsync,
+    canNumberingSchemesAsync("read"),
+    wrap(async (req, res) => {
+      const scheme = await numbering.Schemes.getSchemeAsync(db, req.params.ref, { includeVersions: false });
+      res.json({ items: await numbering.Schemes.listVersionsAsync(db, scheme.id) });
     })
   );
   numberingRouter.post(
     "/schemes/:ref/validate",
-    auth,
-    canNumberingSchemes("read"),
-    wrap((req, res) => {
-      res.json(numbering.Schemes.validateScheme(db, req.params.ref));
+    authAsync,
+    canNumberingSchemesAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Schemes.validateSchemeAsync(db, req.params.ref));
     })
   );
   numberingRouter.post(
     "/schemes/:ref/clone",
-    auth,
-    canNumberingSchemes("create"),
-    wrap((req, res) => {
-      res.status(201).json(numbering.Schemes.cloneScheme(db, req.params.ref, req.body || {}, req.actor, numberingTenant(req), req.ip));
+    authAsync,
+    canNumberingSchemesAsync("create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await numbering.Schemes.cloneSchemeAsync(db, req.params.ref, req.body || {}, req.actor, numberingTenant(req), req.ip));
     })
   );
   const schemeStatusHandler = (status) =>
-    wrap((req, res) => {
-      res.json(numbering.Schemes.setSchemeStatus(db, req.params.ref, status, req.actor, req.ip));
+    wrap(async (req, res) => {
+      res.json(await numbering.Schemes.setSchemeStatusAsync(db, req.params.ref, status, req.actor, req.ip));
     });
-  numberingRouter.post("/schemes/:ref/activate", auth, canNumberingSchemes("execute"), schemeStatusHandler("active"));
-  numberingRouter.post("/schemes/:ref/deactivate", auth, canNumberingSchemes("execute"), schemeStatusHandler("inactive"));
-  numberingRouter.post("/schemes/:ref/retire", auth, canNumberingSchemes("execute"), schemeStatusHandler("retired"));
+  numberingRouter.post("/schemes/:ref/activate", authAsync, canNumberingSchemesAsync("execute"), schemeStatusHandler("active"));
+  numberingRouter.post("/schemes/:ref/deactivate", authAsync, canNumberingSchemesAsync("execute"), schemeStatusHandler("inactive"));
+  numberingRouter.post("/schemes/:ref/retire", authAsync, canNumberingSchemesAsync("execute"), schemeStatusHandler("retired"));
 
   // ── Generation ─────────────────────────────────────────────────────────────
   numberingRouter.post(
     "/generate",
-    auth,
-    canNumberingGenerate("create"),
-    manualGuard,
-    wrap((req, res) => {
-      const allocation = numbering.Allocations.generateNumber(db, req.body || {}, req.actor, {
+    authAsync,
+    canNumberingGenerateAsync("create"),
+    manualGuardAsync,
+    wrap(async (req, res) => {
+      const allocation = await numbering.Allocations.generateNumberAsync(db, req.body || {}, req.actor, {
         tenantId: numberingTenant(req),
         ip: req.ip,
         idempotencyKey: idempotencyKeyOf(req),
@@ -10091,11 +10139,11 @@ export function createApp(db) {
   );
   numberingRouter.post(
     "/reserve",
-    auth,
-    canNumberingReserve("create"),
-    manualGuard,
-    wrap((req, res) => {
-      const allocation = numbering.Allocations.generateNumber(
+    authAsync,
+    canNumberingReserveAsync("create"),
+    manualGuardAsync,
+    wrap(async (req, res) => {
+      const allocation = await numbering.Allocations.generateNumberAsync(
         db,
         { ...(req.body || {}), reserve: true },
         req.actor,
@@ -10106,46 +10154,46 @@ export function createApp(db) {
   );
   numberingRouter.post(
     "/preview",
-    auth,
-    canNumberingGenerate("read"),
-    wrap((req, res) => {
-      res.json(numbering.Allocations.previewNumber(db, req.body || {}, { tenantId: numberingTenant(req) }));
+    authAsync,
+    canNumberingGenerateAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Allocations.previewNumberAsync(db, req.body || {}, { tenantId: numberingTenant(req) }));
     })
   );
   numberingRouter.post(
     "/validate",
-    auth,
-    canNumberingGenerate("read"),
-    wrap((req, res) => {
-      res.json(numbering.Allocations.validateIdentifier(db, req.body || {}, { tenantId: numberingTenant(req) }));
+    authAsync,
+    canNumberingGenerateAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Allocations.validateIdentifierAsync(db, req.body || {}, { tenantId: numberingTenant(req) }));
     })
   );
 
   // ── Allocations ────────────────────────────────────────────────────────────
   numberingRouter.get(
     "/allocations",
-    auth,
-    canNumberingAllocations("read"),
-    wrap((req, res) => {
+    authAsync,
+    canNumberingAllocationsAsync("read"),
+    wrap(async (req, res) => {
       const query = numbering.Validation.normalizeAllocationQuery(req.query || {});
-      res.json(numbering.Allocations.listAllocations(db, { ...query, tenantId: numberingTenant(req) }));
+      res.json(await numbering.Allocations.listAllocationsAsync(db, { ...query, tenantId: numberingTenant(req) }));
     })
   );
   numberingRouter.get(
     "/allocations/:ref",
-    auth,
-    canNumberingAllocations("read"),
-    wrap((req, res) => {
-      res.json(numbering.Allocations.getAllocation(db, req.params.ref));
+    authAsync,
+    canNumberingAllocationsAsync("read"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Allocations.getAllocationAsync(db, req.params.ref));
     })
   );
   numberingRouter.post(
     "/allocations/:ref/consume",
-    auth,
-    canNumberingConsume("execute"),
-    wrap((req, res) => {
+    authAsync,
+    canNumberingConsumeAsync("execute"),
+    wrap(async (req, res) => {
       res.json(
-        numbering.Allocations.consumeNumber(db, req.params.ref, req.body || {}, req.actor, {
+        await numbering.Allocations.consumeNumberAsync(db, req.params.ref, req.body || {}, req.actor, {
           tenantId: numberingTenant(req),
           ip: req.ip,
         })
@@ -10154,11 +10202,11 @@ export function createApp(db) {
   );
   numberingRouter.post(
     "/allocations/:ref/release",
-    auth,
-    canNumberingRelease("execute"),
-    wrap((req, res) => {
+    authAsync,
+    canNumberingReleaseAsync("execute"),
+    wrap(async (req, res) => {
       res.json(
-        numbering.Allocations.releaseNumber(db, req.params.ref, req.body || {}, req.actor, {
+        await numbering.Allocations.releaseNumberAsync(db, req.params.ref, req.body || {}, req.actor, {
           tenantId: numberingTenant(req),
           ip: req.ip,
         })
@@ -10167,11 +10215,11 @@ export function createApp(db) {
   );
   numberingRouter.post(
     "/allocations/:ref/cancel",
-    auth,
-    canNumberingRelease("execute"),
-    wrap((req, res) => {
+    authAsync,
+    canNumberingReleaseAsync("execute"),
+    wrap(async (req, res) => {
       res.json(
-        numbering.Allocations.cancelNumber(db, req.params.ref, req.body || {}, req.actor, {
+        await numbering.Allocations.cancelNumberAsync(db, req.params.ref, req.body || {}, req.actor, {
           tenantId: numberingTenant(req),
           ip: req.ip,
         })
@@ -10182,11 +10230,11 @@ export function createApp(db) {
   // ── Sequences ──────────────────────────────────────────────────────────────
   numberingRouter.get(
     "/sequences",
-    auth,
-    canNumberingSequences("read"),
-    wrap((req, res) => {
+    authAsync,
+    canNumberingSequencesAsync("read"),
+    wrap(async (req, res) => {
       res.json(
-        numbering.Sequences.listSequences(db, {
+        await numbering.Sequences.listSequencesAsync(db, {
           schemeId: req.query.schemeId || req.query.scheme_id,
           scopeKey: req.query.scopeKey || req.query.scope_key,
           status: req.query.status,
@@ -10200,42 +10248,45 @@ export function createApp(db) {
   );
   numberingRouter.get(
     "/sequences/:id",
-    auth,
-    canNumberingSequences("read"),
-    wrap((req, res) => {
-      const sequence = numbering.Sequences.publicSequence(db, numbering.Sequences.getSequenceRow(db, req.params.id));
+    authAsync,
+    canNumberingSequencesAsync("read"),
+    wrap(async (req, res) => {
+      const sequence = await numbering.Sequences.publicSequenceAsync(
+        db,
+        await numbering.Sequences.getSequenceRowAsync(db, req.params.id)
+      );
       if (!sequence) throw new HttpError(404, "Numbering sequence not found");
       res.json(sequence);
     })
   );
   numberingRouter.post(
     "/sequences/:id/reset",
-    auth,
-    canNumberingSequences("execute"),
-    wrap((req, res) => {
-      res.json(numbering.Sequences.resetSequence(db, req.params.id, req.body || {}, req.actor, req.ip));
+    authAsync,
+    canNumberingSequencesAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Sequences.resetSequenceAsync(db, req.params.id, req.body || {}, req.actor, req.ip));
     })
   );
 
   // ── Monitoring ─────────────────────────────────────────────────────────────
   numberingRouter.get(
     "/metrics",
-    auth,
-    canNumberingMetrics("read"),
-    wrap((req, res) => {
+    authAsync,
+    canNumberingMetricsAsync("read"),
+    wrap(async (req, res) => {
       res.json({
-        ...numbering.Allocations.metricsSnapshot(db, { tenantId: numberingTenant(req) }),
-        generation_latency: numbering.Metrics.generationLatency(db, { tenantId: numberingTenant(req) }),
+        ...(await numbering.Allocations.metricsSnapshotAsync(db, { tenantId: numberingTenant(req) })),
+        generation_latency: await numbering.Metrics.generationLatencyAsync(db, { tenantId: numberingTenant(req) }),
       });
     })
   );
   numberingRouter.get(
     "/dashboard",
-    auth,
-    canNumberingMetrics("read"),
-    wrap((req, res) => {
+    authAsync,
+    canNumberingMetricsAsync("read"),
+    wrap(async (req, res) => {
       res.json(
-        numbering.Metrics.dashboardSummary(db, {
+        await numbering.Metrics.dashboardSummaryAsync(db, {
           tenantId: numberingTenant(req),
           from: req.query.from,
           to: req.query.to,
@@ -10245,24 +10296,27 @@ export function createApp(db) {
   );
   numberingRouter.post(
     "/maintenance/expire",
-    auth,
-    canNumberingSequences("execute"),
-    wrap((req, res) => {
-      res.json(numbering.Allocations.expireReservations(db, { limit: Number(req.body?.limit) || 200 }));
+    authAsync,
+    canNumberingSequencesAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await numbering.Allocations.expireReservationsAsync(db, { limit: Number(req.body?.limit) || 200 }));
     })
   );
   numberingRouter.get(
     "/health",
-    wrap((req, res) => {
-      const health = numbering.Metrics.healthCheck(db, { tenantId: numberingTenant(req) });
+    wrap(async (req, res) => {
+      const health = await numbering.Metrics.healthCheckAsync(db, { tenantId: numberingTenant(req) });
       res.status(health.healthy ? 200 : 503).json(health);
     })
   );
   numberingRouter.get("/health/live", wrap((_req, res) => res.json({ status: "ok", live: true })));
-  numberingRouter.get("/health/ready", (req, res) => {
-    const health = numbering.Metrics.healthCheck(db, { tenantId: numberingTenant(req) });
-    res.status(health.ready ? 200 : 503).json(health);
-  });
+  numberingRouter.get(
+    "/health/ready",
+    wrap(async (req, res) => {
+      const health = await numbering.Metrics.healthCheckAsync(db, { tenantId: numberingTenant(req) });
+      res.status(health.ready ? 200 : 503).json(health);
+    })
+  );
 
   app.use("/api/numbering", numberingRouter);
   app.use("/api/v1/numbering", numberingRouter);
@@ -10274,7 +10328,7 @@ export function createApp(db) {
   app.use("/api/v1", versioningRouter);
 
   // ── Enterprise Reference Data Management ──────────────────────────────────
-  const referenceRouter = createReferenceRouter({ express, db, auth, can, wrap });
+  const referenceRouter = createReferenceRouter({ express, db, auth, can, authAsync, canAsync, wrap });
   app.use("/api/reference-data", referenceRouter);
   app.use("/api/v1/reference-data", referenceRouter);
 
@@ -10322,12 +10376,12 @@ export function createApp(db) {
   app.use("/api/v1/classification", classificationRouter);
 
   // ── P1 BOM Engine ─────────────────────────────────────────────────────────
-  const bomRouter = createBomRouter({ express, db, auth, can, wrap });
+  const bomRouter = createBomRouter({ express, db, auth, can, authAsync, canAsync, wrap });
   app.use("/api/bom", bomRouter);
   app.use("/api/v1/bom", bomRouter);
 
   // ── P1 PDM domain ─────────────────────────────────────────────────────────
-  const pdmRouter = createPdmRouter({ express, db, auth, can, wrap });
+  const pdmRouter = createPdmRouter({ express, db, auth, can, authAsync, canAsync, wrap });
   app.use("/api/pdm", pdmRouter);
   app.use("/api/v1/pdm", pdmRouter);
 
@@ -10357,7 +10411,7 @@ export function createApp(db) {
   app.use("/api/v1/observability", requireFeature(db, "observability"), observabilityRouter);
 
   // ── Deployment & Edition framework ───────────────────────────────────────
-  const deploymentRouter = createDeploymentRouter({ express, db, auth, can, wrap });
+  const deploymentRouter = createDeploymentRouter({ express, db, auth, authAsync, can, canAsync, wrap });
   app.use("/api/deployment", deploymentRouter);
   app.use("/api/v1/deployment", deploymentRouter);
 

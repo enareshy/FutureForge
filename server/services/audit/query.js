@@ -537,3 +537,185 @@ function archiveStatsFor(db, scope) {
     archived: queryOne(db, "SELECT COUNT(*) AS c FROM audit_logs_archive WHERE tenant_id = ?", [tenantId ?? -1]).c,
   };
 }
+
+// ── Async read twins ────────────────────────────────────────────────────────
+
+export async function objectHistoryAsync(db, { objectType, objectId }, filters = {}, scope = {}) {
+  if (!objectType || !objectId) throw new HttpError(400, "objectType and objectId are required");
+  return listEventsAsync(db, { ...filters, objectType, objectId }, scope);
+}
+
+export async function userActivityAsync(db, userId, filters = {}, scope = {}) {
+  if (!userId) throw new HttpError(400, "userId is required");
+  return listEventsAsync(db, { ...filters, actorId: userId }, scope);
+}
+
+export async function attributeHistoryAsync(db, { objectType, objectId, attribute }, filters = {}, scope = {}) {
+  if (!objectType || !objectId) throw new HttpError(400, "objectType and objectId are required");
+  if (!attribute) throw new HttpError(400, "attribute is required");
+  const { where, params } = buildEventFilters(
+    { ...filters, objectType, objectId, changedAttribute: attribute },
+    scope
+  );
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const limit = Math.min(500, Math.max(1, Number(filters.pageSize) || 100));
+  const rows = await queryAllAsync(
+    db,
+    `SELECT audit_logs.id, audit_logs.action, audit_logs.event_type, audit_logs.category,
+            audit_logs.actor_id, audit_logs.actor_username, audit_logs.status, audit_logs.reason,
+            audit_logs.created_at, c.old_value, c.new_value, c.value_type, c.masked
+       FROM audit_logs
+       JOIN audit_event_changes c ON c.event_id = audit_logs.id
+       ${clause ? `${clause} AND` : "WHERE"} c.attribute = ?
+      ORDER BY audit_logs.created_at DESC, audit_logs.id DESC LIMIT ?`,
+    [...params, String(attribute), limit]
+  );
+  return {
+    object_type: objectType,
+    object_id: String(objectId),
+    attribute,
+    items: rows.map((row) => ({
+      event_id: row.id,
+      action: row.action,
+      event_type: row.event_type,
+      category: row.category,
+      actor_id: row.actor_id ?? null,
+      actor_username: row.actor_username ?? null,
+      status: row.status,
+      reason: row.reason ?? null,
+      old_value: safeJson(row.old_value),
+      new_value: safeJson(row.new_value),
+      value_type: row.value_type,
+      masked: !!row.masked,
+      occurred_at: row.created_at,
+    })),
+  };
+}
+
+export async function relationshipHistoryAsync(db, { objectType, objectId }, filters = {}, scope = {}) {
+  if (!objectType || !objectId) throw new HttpError(400, "objectType and objectId are required");
+  const base = buildEventFilters({ ...filters, objectType, objectId }, scope);
+  const related = buildEventFilters(
+    { ...filters, relatedResourceType: objectType, relatedResourceId: objectId },
+    scope
+  );
+  const clause = `WHERE (${base.where.join(" AND ")}) OR (${related.where.join(" AND ")})`;
+  const page = Math.max(1, Number(filters.page) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number(filters.pageSize) || 25));
+  const offset = (page - 1) * pageSize;
+  const params = [...base.params, ...related.params];
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM audit_logs ${clause}`, params)).c;
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM audit_logs ${clause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  return { items: rows.map(publicEvent), total, page, pageSize };
+}
+
+function asyncCategoryView(category) {
+  return (db, filters = {}, scope = {}) => listEventsAsync(db, { ...filters, category }, scope);
+}
+
+export const securityActivityAsync = asyncCategoryView("security");
+export const workflowAuditAsync = asyncCategoryView("workflow");
+export const lifecycleAuditAsync = asyncCategoryView("lifecycle");
+export const configurationAuditAsync = asyncCategoryView("configuration");
+export const approvalAuditAsync = asyncCategoryView("approval");
+export const documentAuditAsync = asyncCategoryView("document");
+export const integrationAuditAsync = asyncCategoryView("integration");
+export const backgroundJobAuditAsync = asyncCategoryView("background_job");
+
+export async function auditMetricsAsync(db, filters = {}, scope = {}) {
+  const { where, params } = buildEventFilters(filters, scope);
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const totals = await queryOneAsync(
+    db,
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN security_classification IN ('confidential','restricted') THEN 1 ELSE 0 END) AS sensitive,
+            SUM(CASE WHEN status IN ('failure','denied') THEN 1 ELSE 0 END) AS failed,
+            SUM(CASE WHEN event_type = 'LOGIN_FAILED' THEN 1 ELSE 0 END) AS login_failures,
+            SUM(CASE WHEN event_type = 'ACCESS_DENIED' THEN 1 ELSE 0 END) AS access_denials,
+            SUM(CASE WHEN event_type = 'EXPORT' THEN 1 ELSE 0 END) AS exports,
+            MIN(created_at) AS oldest,
+            MAX(created_at) AS newest
+     FROM audit_logs ${clause}`,
+    params
+  );
+  const byCategory = await queryAllAsync(
+    db,
+    `SELECT category, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY category ORDER BY count DESC`,
+    params
+  );
+  const byActorType = await queryAllAsync(
+    db,
+    `SELECT actor_type, COUNT(*) AS count FROM audit_logs ${clause} GROUP BY actor_type ORDER BY count DESC`,
+    params
+  );
+  const byDayClause = where.length
+    ? `WHERE ${where.join(" AND ")} AND created_at >= to_char((now() at time zone 'utc') + interval '-30 days','YYYY-MM-DD HH24:MI:SS')`
+    : "WHERE created_at >= to_char((now() at time zone 'utc') + interval '-30 days','YYYY-MM-DD HH24:MI:SS')";
+  const byDay = await queryAllAsync(
+    db,
+    `SELECT left(created_at, 10) AS day, COUNT(*) AS count FROM audit_logs ${byDayClause}
+     GROUP BY day ORDER BY day ASC`,
+    params
+  );
+  const growth = (await queryAllAsync(
+    db,
+    `SELECT
+        SUM(CASE WHEN created_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') THEN 1 ELSE 0 END) AS last_24h,
+        SUM(CASE WHEN created_at >= to_char((now() at time zone 'utc') + interval '-7 days','YYYY-MM-DD HH24:MI:SS') THEN 1 ELSE 0 END) AS last_7d,
+        SUM(CASE WHEN created_at >= to_char((now() at time zone 'utc') + interval '-30 days','YYYY-MM-DD HH24:MI:SS') THEN 1 ELSE 0 END) AS last_30d
+     FROM audit_logs ${clause}`,
+    params
+  ))[0] || {};
+  const archive = await archiveStatsForAsync(db, scope);
+  const retention = await queryOneAsync(
+    db,
+    "SELECT COUNT(*) AS runs FROM audit_retention_runs WHERE tenant_id IS NULL OR tenant_id = ?",
+    [normalizeScope(scope).tenantId ?? -1]
+  );
+  const exports = await queryOneAsync(
+    db,
+    "SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed FROM audit_export_requests WHERE tenant_id IS NULL OR tenant_id = ?",
+    [normalizeScope(scope).tenantId ?? -1]
+  );
+  return {
+    total: totals.total || 0,
+    sensitive: totals.sensitive || 0,
+    failed: totals.failed || 0,
+    login_failures: totals.login_failures || 0,
+    access_denials: totals.access_denials || 0,
+    export_events: totals.exports || 0,
+    oldest: totals.oldest || null,
+    newest: totals.newest || null,
+    growth: {
+      last_24h: growth.last_24h || 0,
+      last_7d: growth.last_7d || 0,
+      last_30d: growth.last_30d || 0,
+    },
+    by_category: byCategory,
+    by_actor_type: byActorType,
+    by_day: byDay,
+    archive,
+    retention_runs: retention?.runs || 0,
+    exports: { total: exports?.total || 0, completed: exports?.completed || 0 },
+  };
+}
+
+async function archiveStatsForAsync(db, scope) {
+  const { tenantId, scopeAll } = normalizeScope(scope);
+  if (scopeAll) {
+    const [live, archived] = await Promise.all([
+      queryOneAsync(db, "SELECT COUNT(*) AS c FROM audit_logs"),
+      queryOneAsync(db, "SELECT COUNT(*) AS c FROM audit_logs_archive"),
+    ]);
+    return { live: live.c, archived: archived.c };
+  }
+  const [live, archived] = await Promise.all([
+    queryOneAsync(db, "SELECT COUNT(*) AS c FROM audit_logs WHERE tenant_id = ?", [tenantId ?? -1]),
+    queryOneAsync(db, "SELECT COUNT(*) AS c FROM audit_logs_archive WHERE tenant_id = ?", [tenantId ?? -1]),
+  ]);
+  return { live: live.c, archived: archived.c };
+}

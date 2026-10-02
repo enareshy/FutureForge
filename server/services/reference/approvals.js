@@ -3,14 +3,15 @@
 // approval record has been approved; the workflow engine can be attached via
 // workflow_definition_code for multi-step routing.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { approvalNotFound, conflict, invalidApprovalTransition, invalidItem, itemNotFound } from "./errors.js";
 import { APPROVAL_STATUSES, CHANGE_TYPES, normalizeText, pagination } from "./validation.js";
 import { approvalRef, changeRef } from "./refs.js";
-import { bumpCacheEpoch } from "./cache.js";
-import { emitItemEvent } from "./events.js";
-import { getActiveGovernancePolicy } from "./governance.js";
-import { requireItem, setItemStatus } from "./items.js";
+import { bumpCacheEpoch, bumpCacheEpochAsync } from "./cache.js";
+import { emitItemEvent, emitItemEventAsync } from "./events.js";
+import { getActiveGovernancePolicy, getActiveGovernancePolicyAsync } from "./governance.js";
+import { requireItem, requireItemAsync, setItemStatus, setItemStatusAsync } from "./items.js";
 
 export function publicApproval(row) {
   if (!row) return null;
@@ -63,6 +64,34 @@ export function listApprovals(db, { itemId, domainId, status, assigneeId, page, 
   return { items: rows.map((row) => ({ ...publicApproval(row), item_code: row.item_code })), total, page: pageNum, page_size: limit };
 }
 
+export async function listApprovalsAsync(db, { itemId, domainId, status, assigneeId, page, pageSize } = {}) {
+  const clauses = [];
+  const params = [];
+  if (itemId !== undefined && itemId !== null) {
+    clauses.push("a.item_id = ?");
+    params.push(Number(itemId));
+  }
+  if (domainId !== undefined && domainId !== null) {
+    clauses.push("a.domain_id = ?");
+    params.push(Number(domainId));
+  }
+  if (status) {
+    const statuses = Array.isArray(status) ? status : String(status).split(",").map((s) => s.trim()).filter(Boolean);
+    clauses.push(`a.status IN (${statuses.map(() => "?").join(", ")})`);
+    params.push(...statuses);
+  }
+  if (assigneeId !== undefined && assigneeId !== null) {
+    clauses.push("a.decided_by = ?");
+    params.push(Number(assigneeId));
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const { limit, offset, page: pageNum } = pagination({ page, pageSize }, { defaultPageSize: 50, maxPageSize: 200 });
+  const totalRow = await queryOneAsync(db, `SELECT COUNT(*) AS c FROM reference_approvals a ${where}`, params);
+  const total = Number(totalRow?.c ?? 0);
+  const rows = await queryAllAsync(db, `SELECT a.*, i.code AS item_code FROM reference_approvals a LEFT JOIN reference_data_items i ON i.id = a.item_id ${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map((row) => ({ ...publicApproval(row), item_code: row.item_code })), total, page: pageNum, page_size: limit };
+}
+
 export function getApprovalRow(db, ref) {
   if (ref === null || ref === undefined || ref === "") return null;
   const numeric = Number(ref);
@@ -73,8 +102,24 @@ export function getApprovalRow(db, ref) {
   return queryOne(db, "SELECT * FROM reference_approvals WHERE approval_ref = ?", [String(ref)]) || null;
 }
 
+export async function getApprovalRowAsync(db, ref) {
+  if (ref === null || ref === undefined || ref === "") return null;
+  const numeric = Number(ref);
+  if (Number.isInteger(numeric) && String(numeric) === String(ref).trim()) {
+    const byId = await queryOneAsync(db, "SELECT * FROM reference_approvals WHERE id = ?", [numeric]);
+    if (byId) return byId;
+  }
+  return (await queryOneAsync(db, "SELECT * FROM reference_approvals WHERE approval_ref = ?", [String(ref)])) || null;
+}
+
 export function getApproval(db, ref) {
   const row = getApprovalRow(db, ref);
+  if (!row) throw approvalNotFound(ref);
+  return publicApproval(row);
+}
+
+export async function getApprovalAsync(db, ref) {
+  const row = await getApprovalRowAsync(db, ref);
   if (!row) throw approvalNotFound(ref);
   return publicApproval(row);
 }
@@ -117,6 +162,54 @@ export function submitForApproval(db, itemRefValue, input = {}, actor = null, te
   }
   bumpCacheEpoch(db);
   writeAudit(db, {
+    actor,
+    action: "reference.approval.submit",
+    resourceType: "reference_approval",
+    resourceId: row.id,
+    details: { item_id: item.id, item_ref: item.item_ref },
+    ip,
+  });
+  return publicApproval(row);
+}
+
+export async function submitForApprovalAsync(db, itemRefValue, input = {}, actor = null, tenantId = null, ip = null) {
+  const item = await requireItemAsync(db, itemRefValue);
+  if (["retired", "inactive"].includes(item.status)) throw conflict("The item is not in a submittable state", { status: item.status });
+  const governance = await getActiveGovernancePolicyAsync(db, item.domain_id);
+  const existing = await queryOneAsync(db, "SELECT * FROM reference_approvals WHERE item_id = ? AND status IN ('submitted','under_review')", [item.id]);
+  if (existing) throw conflict("An approval is already open for this item", { approval_ref: existing.approval_ref });
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO reference_approvals
+      (approval_ref, item_id, domain_id, version_id, status, required_approvals, approval_count, submitted_by, submitted_at,
+       workflow_definition_code, metadata_json, tenant_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'submitted', ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      approvalRef(),
+      Number(item.id),
+      Number(item.domain_id),
+      input.version_id ?? null,
+      Math.max(1, Number(input.required_approvals) || 1),
+      actor?.id ?? null,
+      ts,
+      normalizeText(input.workflow_definition_code, governance.workflow_definition_code),
+      JSON.stringify(input.metadata ?? {}),
+      tenantId ?? item.tenant_id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM reference_approvals WHERE id = ?", [Number(result.lastInsertId)]);
+  if (item.status !== "submitted") {
+    try {
+      await setItemStatusAsync(db, item.item_ref, "submitted", actor, ip, { reason: normalizeText(input.reason, "Submitted for approval") });
+    } catch {
+      /* the approval record is the source of truth; lifecycle convergence is best effort */
+    }
+  }
+  await bumpCacheEpochAsync(db);
+  await writeAuditAsync(db, {
     actor,
     action: "reference.approval.submit",
     resourceType: "reference_approval",
@@ -194,6 +287,73 @@ export function decideApproval(db, ref, input = {}, actor = null, ip = null) {
   return publicApproval(queryOne(db, "SELECT * FROM reference_approvals WHERE id = ?", [row.id]));
 }
 
+export async function decideApprovalAsync(db, ref, input = {}, actor = null, ip = null) {
+  const row = await getApprovalRowAsync(db, ref);
+  if (!row) throw approvalNotFound(ref);
+  const decision = String(input.decision || input.status || "").toLowerCase();
+  if (!["approve", "approved", "reject", "rejected", "return", "returned", "cancel", "cancelled", "review", "under_review"].includes(decision)) {
+    throw invalidApprovalTransition(row.status, decision);
+  }
+  const item = await queryOneAsync(db, "SELECT * FROM reference_data_items WHERE id = ?", [row.item_id]);
+  if (!item) throw itemNotFound(row.item_id);
+  const ts = nowIso();
+  const reason = normalizeText(input.reason ?? input.decision_reason);
+  let nextStatus = row.status;
+  let itemStatus = null;
+  if (["approve", "approved"].includes(decision)) {
+    const count = Number(row.approval_count) + 1;
+    const required = Number(row.required_approvals) || 1;
+    if (count >= required) {
+      nextStatus = "approved";
+      itemStatus = "approved";
+    } else {
+      nextStatus = "under_review";
+    }
+    await runAsync(
+      db,
+      "UPDATE reference_approvals SET status = ?, approval_count = ?, decided_by = ?, decided_at = ?, decision_reason = ?, updated_at = ? WHERE id = ?",
+      [nextStatus, count, actor?.id ?? null, ts, reason, ts, row.id]
+    );
+  } else if (["reject", "rejected"].includes(decision)) {
+    nextStatus = "rejected";
+    itemStatus = "rejected";
+  } else if (["return", "returned"].includes(decision)) {
+    nextStatus = "returned";
+    itemStatus = "returned";
+  } else if (["cancel", "cancelled"].includes(decision)) {
+    nextStatus = "cancelled";
+  } else {
+    nextStatus = "under_review";
+  }
+  if (nextStatus !== row.status && !["under_review"].includes(nextStatus)) {
+    await runAsync(
+      db,
+      "UPDATE reference_approvals SET status = ?, decided_by = ?, decided_at = ?, decision_reason = ?, updated_at = ? WHERE id = ?",
+      [nextStatus, actor?.id ?? null, ts, reason, ts, row.id]
+    );
+  } else if (nextStatus === "under_review") {
+    await runAsync(db, "UPDATE reference_approvals SET status = ?, updated_at = ? WHERE id = ?", [nextStatus, ts, row.id]);
+  }
+  if (itemStatus) {
+    try {
+      await setItemStatusAsync(db, item.item_ref, itemStatus, actor, ip, { reason });
+    } catch {
+      /* lifecycle hooks must not fail the approval decision */
+    }
+  }
+  await bumpCacheEpochAsync(db);
+  await writeAuditAsync(db, {
+    actor,
+    action: "reference.approval.decide",
+    resourceType: "reference_approval",
+    resourceId: row.id,
+    details: { item_id: item.id, decision, status: nextStatus, reason },
+    ip,
+  });
+  await emitItemEventAsync(db, itemStatus ? "ReferenceItemApproved" : "ReferenceItemChanged", item, { approval_ref: row.approval_ref, decision, reason }, actor);
+  return publicApproval(await queryOneAsync(db, "SELECT * FROM reference_approvals WHERE id = ?", [row.id]));
+}
+
 // ── Change requests ─────────────────────────────────────────────────────────
 
 export function publicChangeRequest(row) {
@@ -247,6 +407,27 @@ export function listChangeRequests(db, { domainId, itemId, status, page, pageSiz
   return { items: rows.map(publicChangeRequest), total: rows.length, page: pageNum, page_size: limit };
 }
 
+export async function listChangeRequestsAsync(db, { domainId, itemId, status, page, pageSize } = {}) {
+  const clauses = [];
+  const params = [];
+  if (domainId !== undefined && domainId !== null) {
+    clauses.push("domain_id = ?");
+    params.push(Number(domainId));
+  }
+  if (itemId !== undefined && itemId !== null) {
+    clauses.push("item_id = ?");
+    params.push(Number(itemId));
+  }
+  if (status) {
+    clauses.push("status = ?");
+    params.push(String(status));
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const { limit, offset, page: pageNum } = pagination({ page, pageSize }, { defaultPageSize: 50, maxPageSize: 200 });
+  const rows = await queryAllAsync(db, `SELECT * FROM reference_change_requests ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicChangeRequest), total: rows.length, page: pageNum, page_size: limit };
+}
+
 export function createChangeRequest(db, input = {}, actor = null, tenantId = null, ip = null) {
   const title = normalizeText(input.title);
   if (!title) throw invalidItem("title is required");
@@ -275,6 +456,44 @@ export function createChangeRequest(db, input = {}, actor = null, tenantId = nul
   );
   const row = queryOne(db, "SELECT * FROM reference_change_requests WHERE id = ?", [Number(result.lastInsertId)]);
   writeAudit(db, {
+    actor,
+    action: "reference.change_request.create",
+    resourceType: "reference_change_request",
+    resourceId: row.id,
+    details: { change_ref: row.change_ref, change_type: changeType },
+    ip,
+  });
+  return publicChangeRequest(row);
+}
+
+export async function createChangeRequestAsync(db, input = {}, actor = null, tenantId = null, ip = null) {
+  const title = normalizeText(input.title);
+  if (!title) throw invalidItem("title is required");
+  const changeType = CHANGE_TYPES.includes(input.change_type) ? input.change_type : "update";
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO reference_change_requests
+      (change_ref, domain_id, item_id, title, description, change_type, status, requested_by, assigned_to, payload_json, requested_at, tenant_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      changeRef(),
+      input.domain_id ?? null,
+      input.item_id ?? null,
+      title,
+      normalizeText(input.description),
+      changeType,
+      actor?.id ?? null,
+      input.assigned_to ?? null,
+      JSON.stringify(input.payload ?? {}),
+      ts,
+      tenantId ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM reference_change_requests WHERE id = ?", [Number(result.lastInsertId)]);
+  await writeAuditAsync(db, {
     actor,
     action: "reference.change_request.create",
     resourceType: "reference_change_request",
@@ -314,4 +533,35 @@ export function updateChangeRequest(db, ref, patch = {}, actor = null, ip = null
     ip,
   });
   return publicChangeRequest(queryOne(db, "SELECT * FROM reference_change_requests WHERE id = ?", [row.id]));
+}
+
+export async function updateChangeRequestAsync(db, ref, patch = {}, actor = null, ip = null) {
+  const numeric = Number(ref);
+  const row = await queryOneAsync(db, "SELECT * FROM reference_change_requests WHERE id = ? OR change_ref = ?", [Number.isInteger(numeric) ? numeric : 0, String(ref)]);
+  if (!row) throw conflict(`Reference change request not found: ${ref}`, { ref });
+  const clauses = [];
+  const params = [];
+  const set = (column, value) => {
+    clauses.push(`${column} = ?`);
+    params.push(value);
+  };
+  if (patch.title !== undefined) set("title", normalizeText(patch.title, row.title));
+  if (patch.description !== undefined) set("description", normalizeText(patch.description));
+  if (patch.assigned_to !== undefined) set("assigned_to", patch.assigned_to ?? null);
+  if (patch.status !== undefined && APPROVAL_STATUSES.includes(patch.status)) set("status", patch.status);
+  if (["approved", "rejected", "applied", "cancelled"].includes(patch.status)) set("decided_at", nowIso());
+  if (patch.decision_reason !== undefined) set("decision_reason", normalizeText(patch.decision_reason));
+  if (!clauses.length) return publicChangeRequest(row);
+  set("updated_at", nowIso());
+  params.push(row.id);
+  await runAsync(db, `UPDATE reference_change_requests SET ${clauses.join(", ")} WHERE id = ?`, params);
+  await writeAuditAsync(db, {
+    actor,
+    action: "reference.change_request.update",
+    resourceType: "reference_change_request",
+    resourceId: row.id,
+    details: { status: patch.status ?? row.status },
+    ip,
+  });
+  return publicChangeRequest(await queryOneAsync(db, "SELECT * FROM reference_change_requests WHERE id = ?", [row.id]));
 }

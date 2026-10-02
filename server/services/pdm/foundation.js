@@ -5,6 +5,7 @@
 // and default validation rules. It registers into platform seams (IAM, events,
 // jobs, search, reference data) and never duplicates them.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { tenantIds } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
 import { ensurePdmEventTypes } from "./events.js";
@@ -70,5 +71,34 @@ export function pdmHealth(db, tenantId = null) {
       history: scoped("pdm_change_history"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM pdm_items").length,
+  };
+}
+
+// ── Async twin (used by the migrated health route) ───────────────────────────
+
+export async function pdmHealthAsync(db, tenantId = null) {
+  const scoped = (table) =>
+    tenantId
+      ? queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ?`, [Number(tenantId)]).then((row) => Number(row?.c || 0))
+      : queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`).then((row) => Number(row?.c || 0));
+  return {
+    source_module: SOURCE_MODULE,
+    counts: {
+      items: await scoped("pdm_items"),
+      revisions: await scoped("pdm_item_revisions"),
+      datasets: await scoped("pdm_datasets"),
+      representations: await scoped("pdm_representations"),
+      design_data: await scoped("pdm_design_data"),
+      cad_associations: await scoped("pdm_cad_associations"),
+      revision_rules: await scoped("pdm_revision_rules"),
+      configuration_rules: await scoped("pdm_configuration_rules"),
+      baselines: await scoped("pdm_baselines"),
+      relationships: await scoped("pdm_relationships"),
+      references: await scoped("pdm_references"),
+      validation_rules: await scoped("pdm_validation_rules"),
+      validation_results: await scoped("pdm_validation_results"),
+      history: await scoped("pdm_change_history"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM pdm_items")).length,
   };
 }

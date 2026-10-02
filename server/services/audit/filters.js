@@ -1,6 +1,7 @@
 // Reusable saved audit filters. Filters are private to their owner by default
 // and can be shared with the tenant or published as system filters.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { validateSavedFilterInput } from "./validation.js";
 import { capture } from "./events.js";
@@ -54,6 +55,46 @@ export function listSavedFilters(db, { tenantId, ownerId, scope } = {}) {
 
 export function getSavedFilter(db, id, { tenantId = null, ownerId = null } = {}) {
   const row = getSavedFilterRow(db, id);
+  if (!row) throw new HttpError(404, "Saved filter not found");
+  if (row.system !== 1 && row.shared !== 1 && Number(row.owner_id) !== Number(ownerId)) {
+    throw new HttpError(404, "Saved filter not found");
+  }
+  if (tenantId != null && row.tenant_id != null && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Saved filter not found");
+  }
+  return publicSavedFilter(row);
+}
+
+// ── Async read twins ────────────────────────────────────────────────────────
+
+export async function getSavedFilterRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM audit_saved_filters WHERE id = ?", [Number(id)]);
+}
+
+export async function listSavedFiltersAsync(db, { tenantId, ownerId, scope } = {}) {
+  const where = ["(system = 1 OR shared = 1 OR owner_id = ?)"];
+  const params = [ownerId == null ? -1 : Number(ownerId)];
+  if (tenantId != null) {
+    where.push("(tenant_id = ? OR tenant_id IS NULL)");
+    params.push(Number(tenantId));
+  }
+  if (scope) {
+    where.push("scope = ?");
+    params.push(String(scope));
+  }
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM audit_saved_filters WHERE ${where.join(" AND ")}
+        ORDER BY system DESC, shared DESC, name ASC`,
+      params
+    )
+  ).map(publicSavedFilter);
+  return { items, total: items.length };
+}
+
+export async function getSavedFilterAsync(db, id, { tenantId = null, ownerId = null } = {}) {
+  const row = await getSavedFilterRowAsync(db, id);
   if (!row) throw new HttpError(404, "Saved filter not found");
   if (row.system !== 1 && row.shared !== 1 && Number(row.owner_id) !== Number(ownerId)) {
     throw new HttpError(404, "Saved filter not found");

@@ -5,11 +5,12 @@
 // `rule_type`, so adding a check never means editing several call sites. Each run
 // persists a result header plus its issues for auditability and dashboards.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { updateRow } from "./sql.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { updateRow, updateRowAsync } from "./sql.js";
 import { publicValidationRule, publicValidationResult, publicValidationIssue } from "./repository.js";
 import { validationRef, runRef } from "./refs.js";
-import { recordChange } from "./history.js";
-import { publishPdmEvent, pdmEventCode } from "./events.js";
+import { recordChange, recordChangeAsync } from "./history.js";
+import { publishPdmEvent, publishPdmEventAsync, pdmEventCode } from "./events.js";
 import { listRevisions } from "./revisions.js";
 import { assertRuleType, assertRuleSeverity, assertValidationScope, normalizeText, normalizeUpper, paginate, parseObject } from "./validation.js";
 import { ruleNotFound, invalidRule } from "./errors.js";
@@ -462,3 +463,281 @@ function requireDatasetForValidation(db, tenantId, ref) {
 }
 
 export { listRevisions };
+
+// ── Async twins (used by migrated read routes) ───────────────────────────────
+
+export async function getValidationRuleRowAsync(db, tenantId, ref) {
+  const id = Number(ref);
+  if (Number.isInteger(id) && String(id) === String(ref).trim()) {
+    const row = await queryOneAsync(db, "SELECT * FROM pdm_validation_rules WHERE id = ? AND tenant_id = ?", [id, Number(tenantId)]);
+    if (row) return row;
+  }
+  return queryOneAsync(db, "SELECT * FROM pdm_validation_rules WHERE tenant_id = ? AND lower(code) = lower(?)", [Number(tenantId), String(ref)]);
+}
+
+export async function listValidationRulesAsync(db, { tenantId, status = null, ruleType = null, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(status, { max: 20 }));
+  }
+  if (ruleType) {
+    clauses.push("rule_type = ?");
+    params.push(assertRuleType(ruleType));
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 100, maxPageSize: 500 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM pdm_validation_rules ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM pdm_validation_rules ${where} ORDER BY sequence, id LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicValidationRule), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
+export async function listValidationResultsAsync(db, { tenantId, itemId, revisionId, status, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (itemId != null) {
+    clauses.push("item_id = ?");
+    params.push(Number(itemId));
+  }
+  if (revisionId != null) {
+    clauses.push("revision_id = ?");
+    params.push(Number(revisionId));
+  }
+  if (status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(status, { max: 20 }));
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 50, maxPageSize: 500 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM pdm_validation_results ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM pdm_validation_results ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicValidationResult), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
+export async function getValidationResultAsync(db, tenantId, ref) {
+  const row = await queryOneAsync(db, "SELECT * FROM pdm_validation_results WHERE tenant_id = ? AND (id = ? OR result_ref = ?)", [Number(tenantId), Number(ref) || -1, String(ref)]);
+  if (!row) throw ruleNotFound(ref);
+  const issues = (await queryAllAsync(db, "SELECT * FROM pdm_validation_issues WHERE result_id = ? ORDER BY id", [row.id])).map(publicValidationIssue);
+  return { ...publicValidationResult(row), issues };
+}
+
+// ── Async write twins (used by migrated write routes) ────────────────────────
+// Each mirrors the synchronous writer statement-for-statement: identical
+// validation, history, event and persistence semantics.
+
+export async function createValidationRuleAsync(db, tenantId, body = {}, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const code = normalizeText(body.code, { max: 120 });
+  if (!code) throw invalidRule("Validation rule code is required");
+  if (await queryOneAsync(db, "SELECT id FROM pdm_validation_rules WHERE tenant_id = ? AND code = ?", [tenant, code])) throw invalidRule(`Validation rule already exists: ${code}`);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO pdm_validation_rules (rule_ref, tenant_id, code, name, description, rule_type, severity, config_json, status, sequence, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      validationRef(code),
+      tenant,
+      code,
+      normalizeText(body.name ?? code, { max: 300 }),
+      normalizeText(body.description ?? "", { max: 4000 }),
+      assertRuleType(body.rule_type ?? body.ruleType ?? "CUSTOM"),
+      assertRuleSeverity(body.severity ?? "ERROR"),
+      JSON.stringify(parseObject(body.config, {})),
+      normalizeUpper(body.status ?? "ACTIVE", { max: 20 }),
+      Number(body.sequence ?? 100),
+      actor?.id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM pdm_validation_rules WHERE id = ?", [Number(result.lastInsertId)]);
+  await recordChangeAsync(db, { tenantId: tenant, entityType: "VALIDATION_RULE", entityId: row.id, entityRef: row.rule_ref, action: "CREATED", status: row.status, after: publicValidationRule(row), actor, ip });
+  return publicValidationRule(row);
+}
+
+export async function updateValidationRuleAsync(db, tenantId, ref, body = {}, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = await getValidationRuleRowAsync(db, tenant, ref);
+  if (!row) throw ruleNotFound(ref);
+  const before = publicValidationRule(row);
+  await updateRowAsync(
+    db,
+    "pdm_validation_rules",
+    row.id,
+    {
+      name: normalizeText(body.name ?? row.name, { max: 300 }),
+      description: normalizeText(body.description ?? row.description, { max: 4000 }),
+      rule_type: body.rule_type || body.ruleType ? assertRuleType(body.rule_type ?? body.ruleType) : row.rule_type,
+      severity: body.severity ? assertRuleSeverity(body.severity) : row.severity,
+      config_json: body.config !== undefined ? JSON.stringify(parseObject(body.config, {})) : row.config_json,
+      status: body.status ? normalizeUpper(body.status, { max: 20 }) : row.status,
+      sequence: body.sequence !== undefined ? Number(body.sequence) : row.sequence,
+      updated_by: actor?.id ?? null,
+    },
+    { columns: ["name", "description", "rule_type", "severity", "config_json", "status", "sequence", "updated_by"] }
+  );
+  const updated = await queryOneAsync(db, "SELECT * FROM pdm_validation_rules WHERE id = ?", [row.id]);
+  await recordChangeAsync(db, { tenantId: tenant, entityType: "VALIDATION_RULE", entityId: row.id, entityRef: row.rule_ref, action: "UPDATED", status: updated.status, before, after: publicValidationRule(updated), actor, ip });
+  return publicValidationRule(updated);
+}
+
+export async function deleteValidationRuleAsync(db, tenantId, ref, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = await getValidationRuleRowAsync(db, tenant, ref);
+  if (!row) throw ruleNotFound(ref);
+  await runAsync(db, "DELETE FROM pdm_validation_rules WHERE id = ?", [row.id]);
+  await recordChangeAsync(db, { tenantId: tenant, entityType: "VALIDATION_RULE", entityId: row.id, entityRef: row.rule_ref, action: "DELETED", status: row.status, before: publicValidationRule(row), actor, ip });
+  return { deleted: true, id: row.id, rule_ref: row.rule_ref };
+}
+
+async function buildContextAsync(db, tenantId, scope, target) {
+  const base = { scope, target };
+  if (scope === "ITEM") {
+    const item = target;
+    base.item = item;
+    base.revisions = await queryAllAsync(db, "SELECT * FROM pdm_item_revisions WHERE tenant_id = ? AND item_id = ? ORDER BY revision_sequence", [tenantId, item.id]);
+    base.peers = await queryAllAsync(db, "SELECT id, item_number, item_ref FROM pdm_items WHERE tenant_id = ?", [tenantId]);
+    base.cad = await queryAllAsync(db, "SELECT c.* FROM pdm_cad_associations c JOIN pdm_item_revisions r ON r.id = c.source_revision_id WHERE c.tenant_id = ? AND r.item_id = ?", [tenantId, item.id]);
+  } else if (scope === "REVISION") {
+    const revision = target;
+    base.revision = revision;
+    base.revisions = [revision];
+    base.cad = await queryAllAsync(db, "SELECT * FROM pdm_cad_associations WHERE tenant_id = ? AND source_revision_id = ?", [tenantId, revision.id]);
+  } else if (scope === "DATASET") {
+    base.dataset = target;
+  } else {
+    base.items = await queryAllAsync(db, "SELECT id, item_number, item_ref, owner_user_id, owner_object_id FROM pdm_items WHERE tenant_id = ?", [tenantId]);
+    base.revisionRules = await queryAllAsync(db, "SELECT * FROM pdm_revision_rules WHERE tenant_id = ?", [tenantId]);
+    base.configurationRules = await queryAllAsync(db, "SELECT * FROM pdm_configuration_rules WHERE tenant_id = ?", [tenantId]);
+    base.revisions = await queryAllAsync(db, "SELECT * FROM pdm_item_revisions WHERE tenant_id = ?", [tenantId]);
+    base.cad = await queryAllAsync(db, "SELECT * FROM pdm_cad_associations WHERE tenant_id = ?", [tenantId]);
+  }
+  return base;
+}
+
+export async function runRulesForContextAsync(db, tenantId, scope, target, { rules = null } = {}) {
+  const ruleRows = rules || (await queryAllAsync(db, "SELECT * FROM pdm_validation_rules WHERE tenant_id = ? AND status = 'ACTIVE' ORDER BY sequence, id", [Number(tenantId)]));
+  const context = await buildContextAsync(db, Number(tenantId), scope, target);
+  const issues = [];
+  const executed = [];
+  for (const rule of ruleRows) {
+    const handler = RULE_HANDLERS[rule.rule_type] || RULE_HANDLERS.CUSTOM;
+    const produced = handler(context, rule) || [];
+    executed.push(rule.code);
+    for (const issue of produced) {
+      issues.push({
+        rule_code: rule.code,
+        configured_severity: rule.severity,
+        severity: bumpSeverity(issue.severity, rule.severity),
+        message: issue.message,
+        field: issue.field || "",
+        details: issue.details || {},
+        item_id: issue.item_id ?? null,
+        revision_id: issue.revision_id ?? null,
+        dataset_id: issue.dataset_id ?? null,
+        object_ref: issue.object_ref || "",
+      });
+    }
+  }
+  return { issues, executed, context };
+}
+
+async function persistResultAsync(db, tenantId, { scope, target, issues, executed, durationMs, actor, organizationId }) {
+  const summary = summarize(issues);
+  const result = await runAsync(
+    db,
+    `INSERT INTO pdm_validation_results (result_ref, tenant_id, organization_id, item_id, revision_id, dataset_id, scope, status, rule_count, issue_count, error_count, warning_count, duration_ms, actor_user_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      runRef(),
+      Number(tenantId),
+      organizationId ?? null,
+      target?.id ?? null,
+      null,
+      null,
+      scope,
+      summary.status,
+      executed.length,
+      issues.length,
+      summary.error_count,
+      summary.warning_count,
+      Math.max(0, Math.round(durationMs)),
+      actor?.id ?? null,
+      nowIso(),
+    ]
+  );
+  const resultId = Number(result.lastInsertId);
+  for (const issue of issues) {
+    await runAsync(
+      db,
+      `INSERT INTO pdm_validation_issues (tenant_id, result_id, item_id, revision_id, dataset_id, object_ref, rule_code, severity, message, field, details_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [Number(tenantId), resultId, issue.item_id ?? target?.id ?? null, issue.revision_id ?? (scope === "REVISION" ? target?.id ?? null : null), issue.dataset_id ?? (scope === "DATASET" ? target?.id ?? null : null), issue.object_ref || "", issue.rule_code, issue.severity, issue.message, issue.field, JSON.stringify(issue.details || {}), nowIso()]
+    );
+  }
+  return queryOneAsync(db, "SELECT * FROM pdm_validation_results WHERE id = ?", [resultId]);
+}
+
+async function requireItemForValidationAsync(db, tenantId, ref) {
+  const id = Number(ref);
+  const row = Number.isInteger(id) && String(id) === String(ref).trim()
+    ? await queryOneAsync(db, "SELECT * FROM pdm_items WHERE tenant_id = ? AND id = ?", [Number(tenantId), id])
+    : await queryOneAsync(db, "SELECT * FROM pdm_items WHERE tenant_id = ? AND (item_ref = ? OR lower(item_number) = lower(?))", [Number(tenantId), String(ref), String(ref)]);
+  if (!row) throw ruleNotFound(`item ${ref}`);
+  return row;
+}
+
+async function requireRevisionForValidationAsync(db, tenantId, ref, itemId) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (itemId != null) {
+    clauses.push("item_id = ?");
+    params.push(Number(itemId));
+  }
+  clauses.push("(id = ? OR revision_ref = ?)");
+  params.push(Number(ref) || -1, String(ref));
+  const row = await queryOneAsync(db, `SELECT * FROM pdm_item_revisions WHERE ${clauses.join(" AND ")}`, params);
+  if (!row) throw ruleNotFound(`revision ${ref}`);
+  return row;
+}
+
+async function requireDatasetForValidationAsync(db, tenantId, ref) {
+  const row = await queryOneAsync(db, "SELECT * FROM pdm_datasets WHERE tenant_id = ? AND (id = ? OR dataset_ref = ? OR lower(dataset_number) = lower(?))", [Number(tenantId), Number(ref) || -1, String(ref), String(ref)]);
+  if (!row) throw ruleNotFound(`dataset ${ref}`);
+  return row;
+}
+
+export async function validateItemAsync(db, tenantId, ref, { actor = null } = {}) {
+  const item = await requireItemForValidationAsync(db, tenantId, ref);
+  const started = Date.now();
+  const { issues, executed } = await runRulesForContextAsync(db, Number(tenantId), "ITEM", item);
+  const row = await persistResultAsync(db, tenantId, { scope: "ITEM", target: item, issues, executed, durationMs: Date.now() - started, actor, organizationId: item.organization_id });
+  return publicValidationResult(row);
+}
+
+export async function validateRevisionAsync(db, tenantId, ref, { actor = null, itemId = null } = {}) {
+  const revision = await requireRevisionForValidationAsync(db, tenantId, ref, itemId);
+  const started = Date.now();
+  const { issues, executed } = await runRulesForContextAsync(db, Number(tenantId), "REVISION", revision);
+  const row = await persistResultAsync(db, tenantId, { scope: "REVISION", target: revision, issues, executed, durationMs: Date.now() - started, actor, organizationId: null });
+  return publicValidationResult(row);
+}
+
+export async function validateDatasetAsync(db, tenantId, ref, { actor = null } = {}) {
+  const dataset = await requireDatasetForValidationAsync(db, tenantId, ref);
+  const started = Date.now();
+  const { issues, executed } = await runRulesForContextAsync(db, Number(tenantId), "DATASET", dataset);
+  const row = await persistResultAsync(db, tenantId, { scope: "DATASET", target: dataset, issues, executed, durationMs: Date.now() - started, actor, organizationId: null });
+  return publicValidationResult(row);
+}
+
+export async function validateTenantAsync(db, tenantId, { actor = null, scope = "TENANT" } = {}) {
+  const started = Date.now();
+  const { issues, executed } = await runRulesForContextAsync(db, Number(tenantId), scope, null);
+  const row = await persistResultAsync(db, tenantId, { scope, target: null, issues, executed, durationMs: Date.now() - started, actor, organizationId: null });
+  await publishPdmEventAsync(db, { eventType: pdmEventCode("VALIDATION_COMPLETED"), objectType: "pdm_validation_result", objectId: row.id, tenantId: Number(tenantId), payload: { scope, status: row.status, issue_count: row.issue_count } }, actor);
+  return publicValidationResult(row);
+}

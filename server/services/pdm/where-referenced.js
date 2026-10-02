@@ -6,8 +6,8 @@
 // result by category. Reindexing rebuilds the index from the relationship graph.
 import { queryAll } from "../../db.js";
 import { publicReference } from "./repository.js";
-import { listReferences, recordReference } from "./references.js";
-import { publishPdmEvent, pdmEventCode } from "./events.js";
+import { listReferences, recordReference, listReferencesAsync } from "./references.js";
+import { publishPdmEvent, publishPdmEventAsync, pdmEventCode } from "./events.js";
 import { paginate, normalizeText, normalizeUpper } from "./validation.js";
 import { SOURCE_MODULE, REFERENCE_CATEGORIES } from "./constants.js";
 
@@ -90,6 +90,45 @@ function groupByCategory(items) {
 function numericOrNull(value) {
   const n = Number(value);
   return Number.isInteger(n) ? n : null;
+}
+
+// ── Async twins (used by migrated read routes) ───────────────────────────────
+
+export async function whereReferencedAsync(db, tenantId, { targetType = null, targetId = null, target_type = null, target_id = null, category = null, page, pageSize, actor = null } = {}) {
+  const tenant = Number(tenantId);
+  const type = normalizeUpper(targetType ?? target_type ?? "ITEM", { max: 60 });
+  const id = normalizeText(targetId ?? target_id ?? "", { max: 300 });
+  const result = await listReferencesAsync(db, { tenantId: tenant, targetType: type, targetId: id, category, page, pageSize });
+  const grouped = groupByCategory(result.items);
+  const payload = {
+    source_module: SOURCE_MODULE,
+    target: { target_type: type, target_id: id },
+    items: result.items,
+    total: result.total,
+    page: result.page,
+    page_size: result.page_size,
+    groups: grouped,
+    category_count: grouped.length,
+    categories: REFERENCE_CATEGORIES,
+  };
+  await publishPdmEventAsync(db, { eventType: pdmEventCode("WHERE_REFERENCED_RUN"), objectType: `pdm_${type.toLowerCase()}`, objectId: numericOrNull(id), tenantId: tenant, payload: { target_type: type, target_id: id, total: result.total } }, actor);
+  return payload;
+}
+
+export async function whereReferencedGroupsAsync(db, tenantId, { targetType, targetId } = {}) {
+  const result = await whereReferencedAsync(db, tenantId, { targetType, targetId });
+  return { source_module: SOURCE_MODULE, target: result.target, groups: result.groups, total: result.total };
+}
+
+export async function referencesSummaryAsync(db, tenantId, targetType, targetId) {
+  const rows = await listReferencesAsync(db, { tenantId, targetType, targetId, page: 1, pageSize: 500 });
+  const counts = {};
+  for (const row of rows.items) counts[row.category] = (counts[row.category] || 0) + 1;
+  return { source_module: SOURCE_MODULE, target_type: normalizeUpper(targetType, { max: 60 }), target_id: String(targetId), total: rows.total, counts };
+}
+
+export async function listAllReferencesAsync(db, tenantId, { category, sourceType, targetType, page, pageSize } = {}) {
+  return listReferencesAsync(db, { tenantId, category, sourceType, targetType, page, pageSize });
 }
 
 export { paginate, publicReference };

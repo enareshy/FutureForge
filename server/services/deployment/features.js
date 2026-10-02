@@ -9,10 +9,10 @@
 // the operator override (`enabled`) separate. The resolved map is cached per
 // database and invalidated on write (see cache.js).
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { queryAllAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { getCachedCapabilities, setCachedCapabilities, invalidateCapabilities } from "./cache.js";
 import { getProfile, getProfileAsync, publicProfile } from "./profile.js";
-import { recordDeploymentChange } from "./history.js";
+import { recordDeploymentChange, recordDeploymentChangeAsync } from "./history.js";
 import { featureNotFound, invalidFeature } from "./errors.js";
 import { SOURCE_MODULE, CONFIG_BOUNDS, editionRank, findEdition, findMode } from "./constants.js";
 
@@ -25,6 +25,10 @@ export function listFeatures(db) {
 
 export function featureRow(db, code) {
   return queryOne(db, "SELECT * FROM deployment_features WHERE feature_code = ?", [String(code)]);
+}
+
+export async function featureRowAsync(db, code) {
+  return queryOneAsync(db, "SELECT * FROM deployment_features WHERE feature_code = ?", [String(code)]);
 }
 
 export function publicFeature(row) {
@@ -62,12 +66,7 @@ export function evaluateFeature(profile, row) {
   return { effective: reasons.length === 0, reasons };
 }
 
-export function resolveCapabilities(db) {
-  const cached = getCachedCapabilities(db);
-  if (cached) return cached;
-
-  const profile = getProfile(db);
-  const rows = listFeatures(db);
+function buildCapabilities(profile, rows) {
   const features = {};
   const catalog = [];
   const byCategory = {};
@@ -87,7 +86,7 @@ export function resolveCapabilities(db) {
     if (effective) bucket.effective += 1;
   }
 
-  const result = {
+  return {
     source_module: SOURCE_MODULE,
     mode: profile.mode,
     edition: profile.edition,
@@ -101,7 +100,15 @@ export function resolveCapabilities(db) {
     },
     generated_at: nowIso(),
   };
-  return setCachedCapabilities(db, result);
+}
+
+export function resolveCapabilities(db) {
+  const cached = getCachedCapabilities(db);
+  if (cached) return cached;
+
+  const profile = getProfile(db);
+  const rows = listFeatures(db);
+  return setCachedCapabilities(db, buildCapabilities(profile, rows));
 }
 
 // Async twins of the read-side resolvers. The per-database cache is shared with
@@ -120,40 +127,7 @@ export async function resolveCapabilitiesAsync(db) {
 
   const profile = await getProfileAsync(db);
   const rows = await listFeaturesAsync(db);
-  const features = {};
-  const catalog = [];
-  const byCategory = {};
-
-  for (const row of rows) {
-    const { effective, reasons } = evaluateFeature(profile, row);
-    features[row.feature_code] = effective;
-    catalog.push({
-      ...publicFeature(row),
-      effective,
-      reasons,
-      required_edition: findEdition(row.min_edition)?.name || row.min_edition,
-      mode: profile.mode,
-    });
-    const bucket = (byCategory[row.category] ||= { total: 0, effective: 0 });
-    bucket.total += 1;
-    if (effective) bucket.effective += 1;
-  }
-
-  const result = {
-    source_module: SOURCE_MODULE,
-    mode: profile.mode,
-    edition: profile.edition,
-    profile: publicProfile(profile),
-    features,
-    catalog,
-    summary: {
-      total: rows.length,
-      effective: Object.values(features).filter(Boolean).length,
-      by_category: byCategory,
-    },
-    generated_at: nowIso(),
-  };
-  return setCachedCapabilities(db, result);
+  return setCachedCapabilities(db, buildCapabilities(profile, rows));
 }
 
 export function isFeatureEnabled(db, code) {
@@ -162,13 +136,8 @@ export function isFeatureEnabled(db, code) {
   return capabilities.features[code];
 }
 
-export function setFeature(db, code, body = {}, actor, ip) {
-  const row = featureRow(db, code);
-  if (!row) throw featureNotFound(code);
-
+function buildFeaturePatch(body = {}) {
   const patch = {};
-  const before = publicFeature(row);
-
   if (body.enabled !== undefined) {
     if (typeof body.enabled !== "boolean") throw invalidFeature({ field: "enabled", reason: "boolean" });
     patch.enabled = body.enabled ? 1 : 0;
@@ -178,14 +147,23 @@ export function setFeature(db, code, body = {}, actor, ip) {
     if (notes.length > CONFIG_BOUNDS.feature_notes) throw invalidFeature({ field: "notes", reason: "length" });
     patch.notes = notes;
   }
+  return patch;
+}
+
+function featureUpdateSql(columns) {
+  return `UPDATE deployment_features SET ${columns.map((c) => `${c} = ?`).join(", ")}, updated_by = ?, updated_at = ? WHERE feature_code = ?`;
+}
+
+export function setFeature(db, code, body = {}, actor, ip) {
+  const row = featureRow(db, code);
+  if (!row) throw featureNotFound(code);
+
+  const before = publicFeature(row);
+  const patch = buildFeaturePatch(body);
   if (!Object.keys(patch).length) return { ...before, ...evaluateFeature(getProfile(db), row) };
 
   const columns = Object.keys(patch);
-  run(
-    db,
-    `UPDATE deployment_features SET ${columns.map((c) => `${c} = ?`).join(", ")}, updated_by = ?, updated_at = ? WHERE feature_code = ?`,
-    [...columns.map((c) => patch[c]), actor?.id ?? null, nowIso(), row.feature_code]
-  );
+  run(db, featureUpdateSql(columns), [...columns.map((c) => patch[c]), actor?.id ?? null, nowIso(), row.feature_code]);
   invalidateCapabilities(db);
 
   const after = featureRow(db, code);
@@ -205,9 +183,38 @@ export function setFeature(db, code, body = {}, actor, ip) {
   return { ...publicFeature(after), ...evaluation };
 }
 
-export function featureSummary(db) {
-  const profile = getProfile(db);
-  const rows = listFeatures(db);
+export async function setFeatureAsync(db, code, body = {}, actor, ip) {
+  const row = await featureRowAsync(db, code);
+  if (!row) throw featureNotFound(code);
+
+  const before = publicFeature(row);
+  const patch = buildFeaturePatch(body);
+  if (!Object.keys(patch).length) {
+    return { ...before, ...evaluateFeature(await getProfileAsync(db), row) };
+  }
+
+  const columns = Object.keys(patch);
+  await runAsync(db, featureUpdateSql(columns), [...columns.map((c) => patch[c]), actor?.id ?? null, nowIso(), row.feature_code]);
+  invalidateCapabilities(db);
+
+  const after = await featureRowAsync(db, code);
+  const evaluation = evaluateFeature(await getProfileAsync(db), after);
+
+  await recordDeploymentChangeAsync(db, {
+    action: "feature.updated",
+    entityType: "feature",
+    entityRef: code,
+    before,
+    after: publicFeature(after),
+    details: { changed: columns, effective: evaluation.effective, reasons: evaluation.reasons },
+    actor,
+    ip,
+  });
+
+  return { ...publicFeature(after), ...evaluation };
+}
+
+function summarizeFeatures(profile, rows) {
   const byCategory = {};
   let effectiveCount = 0;
   for (const row of rows) {
@@ -232,4 +239,14 @@ export function featureSummary(db) {
     effective: effectiveCount,
     by_category: byCategory,
   };
+}
+
+export function featureSummary(db) {
+  return summarizeFeatures(getProfile(db), listFeatures(db));
+}
+
+export async function featureSummaryAsync(db) {
+  const profile = await getProfileAsync(db);
+  const rows = await listFeaturesAsync(db);
+  return summarizeFeatures(profile, rows);
 }

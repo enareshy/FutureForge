@@ -4,13 +4,14 @@
 // deploy. The engine evaluates one revision at a time, persists a result and its
 // issues, and is safe to run from a job or synchronously over the API.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { updateRow } from "./sql.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { updateRow, updateRowAsync } from "./sql.js";
 import { publicValidationRule, publicValidationResult, publicValidationIssue } from "./repository.js";
 import { ruleRef, validationRef } from "./refs.js";
-import { recordChange } from "./history.js";
-import { publishBomEvent, bomEventCode } from "./events.js";
-import { requireRevisionRow } from "./revisions.js";
-import { linesForRevision, buildAdjacency } from "./structure.js";
+import { recordChange, recordChangeAsync } from "./history.js";
+import { publishBomEvent, publishBomEventAsync, bomEventCode } from "./events.js";
+import { requireRevisionRow, requireRevisionRowAsync } from "./revisions.js";
+import { linesForRevision, linesForRevisionAsync, buildAdjacency } from "./structure.js";
 import { normalizeEffectivity } from "./effectivity.js";
 import { getUnit } from "./units.js";
 import {
@@ -412,4 +413,235 @@ export function listValidationIssues(db, tenantId, resultId, { severity, page, p
   const total = Number(queryOne(db, `SELECT COUNT(*) AS c FROM bom_validation_issues ${where}`, params)?.c || 0);
   const rows = queryAll(db, `SELECT * FROM bom_validation_issues ${where} ORDER BY id ASC LIMIT ? OFFSET ?`, [...params, limit, offset]);
   return { items: rows.map(publicValidationIssue), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
+// ── Async twins (used by migrated read routes) ───────────────────────────────
+
+export async function getRuleRowAsync(db, tenantId, ref) {
+  const id = Number(ref);
+  if (Number.isInteger(id) && String(id) === String(ref).trim()) {
+    const row = await queryOneAsync(db, "SELECT * FROM bom_validation_rules WHERE id = ? AND tenant_id = ?", [id, Number(tenantId)]);
+    if (row) return row;
+  }
+  return queryOneAsync(db, "SELECT * FROM bom_validation_rules WHERE tenant_id = ? AND (rule_ref = ? OR lower(code) = lower(?))", [Number(tenantId), String(ref), String(ref)]);
+}
+
+export async function requireRuleRowAsync(db, tenantId, ref) {
+  const row = await getRuleRowAsync(db, tenantId, ref);
+  if (!row) throw ruleNotFound(ref);
+  return row;
+}
+
+export async function listValidationRulesAsync(db, { tenantId, status, ruleType, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(status));
+  }
+  if (ruleType) {
+    clauses.push("rule_type = ?");
+    params.push(assertRuleType(ruleType));
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 100, maxPageSize: 500 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM bom_validation_rules ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM bom_validation_rules ${where} ORDER BY sequence, id LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicValidationRule), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
+export async function getValidationResultAsync(db, tenantId, ref) {
+  const row = await queryOneAsync(db, "SELECT * FROM bom_validation_results WHERE tenant_id = ? AND (id = ? OR result_ref = ?)", [Number(tenantId), Number(ref) || -1, String(ref)]);
+  if (!row) return null;
+  return publicValidationResult(row);
+}
+
+export async function listValidationResultsAsync(db, { tenantId, revisionId, bomId, status, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (revisionId != null) {
+    clauses.push("revision_id = ?");
+    params.push(Number(revisionId));
+  }
+  if (bomId != null) {
+    clauses.push("bom_id = ?");
+    params.push(Number(bomId));
+  }
+  if (status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(status));
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 50, maxPageSize: 500 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM bom_validation_results ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM bom_validation_results ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicValidationResult), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
+export async function listValidationIssuesAsync(db, tenantId, resultId, { severity, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?", "result_id = ?"];
+  const params = [Number(tenantId), Number(resultId)];
+  if (severity) {
+    clauses.push("severity = ?");
+    params.push(normalizeUpper(severity));
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 200, maxPageSize: 10000 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM bom_validation_issues ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM bom_validation_issues ${where} ORDER BY id ASC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicValidationIssue), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
+// ── Async write twins (used by migrated write routes) ────────────────────────
+
+export async function ensureDefaultValidationRulesAsync(db, tenantId) {
+  const tenant = Number(tenantId);
+  let created = 0;
+  for (const rule of DEFAULT_VALIDATION_RULES) {
+    const existing = await queryOneAsync(db, "SELECT id FROM bom_validation_rules WHERE tenant_id = ? AND code = ?", [tenant, rule.code]);
+    if (existing) continue;
+    await runAsync(
+      db,
+      `INSERT INTO bom_validation_rules (rule_ref, tenant_id, code, name, description, rule_type, severity, config_json, status, sequence, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`,
+      [ruleRef(rule.code), tenant, rule.code, rule.name ?? rule.code, rule.description ?? "", rule.rule_type, rule.severity,
+        JSON.stringify(rule.config_json || {}), toInt(rule.sequence, 0), nowIso(), nowIso()]
+    );
+    created += 1;
+  }
+  return created;
+}
+
+export async function createValidationRuleAsync(db, tenantId, body = {}, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const code = normalizeUpper(body.code ?? body.rule_code ?? "", { max: 120 });
+  if (!code) throw invalidRule("code is required");
+  if (await queryOneAsync(db, "SELECT id FROM bom_validation_rules WHERE tenant_id = ? AND code = ?", [tenant, code])) {
+    throw invalidRule(`Validation rule already exists: ${code}`);
+  }
+  const ruleType = assertRuleType(body.rule_type ?? body.ruleType ?? "CUSTOM");
+  const severity = assertRuleSeverity(body.severity ?? "ERROR");
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO bom_validation_rules (rule_ref, tenant_id, code, name, description, rule_type, severity, config_json, status, sequence, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [ruleRef(code), tenant, code, normalizeText(body.name ?? code, { max: 300 }), normalizeText(body.description ?? "", { max: 2000 }),
+      ruleType, severity, JSON.stringify(parseObject(body.config ?? body.config_json, {})), normalizeUpper(body.status ?? "ACTIVE"),
+      toInt(body.sequence, 100), actor?.id ?? null, actor?.id ?? null, ts, ts]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM bom_validation_rules WHERE id = ?", [Number(result.lastInsertId)]);
+  await recordChangeAsync(db, { tenantId: tenant, entityType: "RULE", entityId: row.id, entityRef: row.rule_ref, action: "CREATED", status: row.status, after: publicValidationRule(row), actor, ip });
+  return publicValidationRule(row);
+}
+
+export async function updateValidationRuleAsync(db, tenantId, ref, body = {}, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = await requireRuleRowAsync(db, tenant, ref);
+  const before = publicValidationRule(row);
+  await updateRowAsync(
+    db,
+    "bom_validation_rules",
+    row.id,
+    {
+      name: normalizeText(body.name ?? row.name, { max: 300 }),
+      description: normalizeText(body.description ?? row.description, { max: 2000 }),
+      rule_type: body.rule_type !== undefined || body.ruleType !== undefined ? assertRuleType(body.rule_type ?? body.ruleType) : row.rule_type,
+      severity: body.severity !== undefined ? assertRuleSeverity(body.severity) : row.severity,
+      config_json: JSON.stringify(parseObject(body.config ?? body.config_json ?? row.config_json, {})),
+      status: body.status !== undefined ? normalizeUpper(body.status) : row.status,
+      sequence: body.sequence !== undefined ? toInt(body.sequence, row.sequence) : row.sequence,
+      updated_by: actor?.id ?? null,
+    },
+    { columns: UPDATE_COLUMNS }
+  );
+  const updated = await queryOneAsync(db, "SELECT * FROM bom_validation_rules WHERE id = ?", [row.id]);
+  await recordChangeAsync(db, { tenantId: tenant, entityType: "RULE", entityId: row.id, entityRef: row.rule_ref, action: "UPDATED", status: updated.status, before, after: publicValidationRule(updated), actor, ip });
+  return publicValidationRule(updated);
+}
+
+export async function deleteValidationRuleAsync(db, tenantId, ref, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = await requireRuleRowAsync(db, tenant, ref);
+  const before = publicValidationRule(row);
+  await runAsync(db, "DELETE FROM bom_validation_rules WHERE id = ?", [row.id]);
+  await recordChangeAsync(db, { tenantId: tenant, entityType: "RULE", entityId: row.id, entityRef: row.rule_ref, action: "DELETED", status: row.status, before, actor, ip });
+  return { deleted: true, id: row.id, code: row.code };
+}
+
+export async function validateRevisionAsync(db, tenantId, revisionId, { scope = "REVISION", ruleCodes = null, includeInactive = true, persist = true, actor = null, ip = null, securityContext = null } = {}) {
+  const tenant = Number(tenantId);
+  const revision = await requireRevisionRowAsync(db, tenant, revisionId);
+  const started = Date.now();
+  const lines = await linesForRevisionAsync(db, revision.id, { includeInactive });
+  const substitutes = await queryAllAsync(db, "SELECT * FROM bom_substitutes WHERE bom_revision_id = ?", [revision.id]);
+
+  let unitLookup = null;
+  try {
+    unitLookup = (code) => Boolean(getUnit(db, code));
+  } catch {
+    unitLookup = null;
+  }
+
+  let rules = await queryAllAsync(db, "SELECT * FROM bom_validation_rules WHERE tenant_id = ? AND status = 'ACTIVE' ORDER BY sequence, id", [tenant]);
+  if (ruleCodes && ruleCodes.length) {
+    const wanted = new Set(ruleCodes.map((code) => normalizeUpper(code)));
+    rules = rules.filter((rule) => wanted.has(normalizeUpper(rule.code)) || wanted.has(normalizeUpper(rule.rule_type)));
+  }
+
+  const context = { lines, substitutes, unitLookup, securityContext };
+  const issues = [];
+  for (const rule of rules) {
+    issues.push(...evaluateRule(rule, context));
+  }
+
+  // Authorization-aware checks run only when a security context is supplied.
+  if (securityContext?.authorizeObject) {
+    for (const line of lines) {
+      if (!line.child_object_id) continue;
+      try {
+        context.securityContext.authorizeObject({ objectType: line.child_object_type, objectId: line.child_object_id, action: "read" });
+      } catch {
+        issues.push(issue({ code: "SECURITY_CHILD_ACCESS", rule_type: "UNAUTHORIZED_CHILD", severity: "ERROR" }, `Line ${line.line_ref} references a child the actor cannot read`, { line, field: "child_object_id" }));
+      }
+    }
+  }
+
+  const errorCount = issues.filter((i) => i.severity === "ERROR").length;
+  const warningCount = issues.filter((i) => i.severity === "WARNING").length;
+  const status = errorCount ? "ERROR" : warningCount ? "WARNING" : "PASS";
+  const duration = Date.now() - started;
+
+  if (!persist) {
+    return { revision_id: revision.id, scope: normalizeUpper(scope), status, rule_count: rules.length, issue_count: issues.length, error_count: errorCount, warning_count: warningCount, duration_ms: duration, issues };
+  }
+
+  const ts = nowIso();
+  const insert = await runAsync(
+    db,
+    `INSERT INTO bom_validation_results
+       (result_ref, tenant_id, organization_id, bom_id, revision_id, scope, status, rule_count, issue_count, error_count, warning_count, duration_ms, actor_user_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [validationRef(), tenant, revision.organization_id, revision.bom_id, revision.id, normalizeUpper(scope), status, rules.length,
+      issues.length, errorCount, warningCount, duration, actor?.id ?? null, ts]
+  );
+  const resultId = Number(insert.lastInsertId);
+  for (const item of issues) {
+    await runAsync(
+      db,
+      `INSERT INTO bom_validation_issues (tenant_id, result_id, revision_id, line_id, line_ref, rule_code, severity, message, field, details_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [tenant, resultId, revision.id, item.line_id, item.line_ref, item.rule_code, item.severity, item.message, item.field, JSON.stringify(item.details || {}), ts]
+    );
+  }
+  const row = await queryOneAsync(db, "SELECT * FROM bom_validation_results WHERE id = ?", [resultId]);
+  await recordChangeAsync(db, { tenantId: tenant, entityType: "VALIDATION", entityId: resultId, entityRef: row.result_ref, action: "VALIDATED", status, after: { status, issue_count: issues.length }, actor, ip, details: { revision_id: revision.id } });
+  await publishBomEventAsync(db, { eventType: bomEventCode("VALIDATION_COMPLETED"), objectType: "bom_validation", objectId: resultId, tenantId: tenant, organizationId: revision.organization_id, payload: { revision_id: revision.id, status, error_count: errorCount, warning_count: warningCount } }, actor);
+  return { ...publicValidationResult(row), issues: issues.map((item) => ({ ...item, result_id: resultId })) };
+}
+
+export async function assertRevisionValidAsync(db, tenantId, revisionId, options = {}) {
+  const result = await validateRevisionAsync(db, tenantId, revisionId, { ...options, persist: false });
+  if (result.status === "ERROR") throw validationFailed({ revision_id: revisionId, error_count: result.error_count, issues: result.issues.filter((i) => i.severity === "ERROR").slice(0, 50) });
+  return result;
 }

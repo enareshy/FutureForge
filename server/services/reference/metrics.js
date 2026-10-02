@@ -1,7 +1,8 @@
 // Observability for Enterprise Reference Data Management: health endpoints,
 // metrics and the stewardship dashboard summary. Pure read-only aggregation.
 import { queryAll, queryOne } from "../../db.js";
-import { getCacheEpoch } from "./cache.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { getCacheEpoch, getCacheEpochAsync } from "./cache.js";
 
 function tenantClause(tenantId, column = "tenant_id") {
   if (tenantId === null || tenantId === undefined) return { clause: "", params: [] };
@@ -96,6 +97,111 @@ export function healthCheck(db, { tenantId = null } = {}) {
   let error = null;
   try {
     metrics = metricsSnapshot(db, { tenantId });
+  } catch (err) {
+    healthy = false;
+    error = err.message;
+  }
+  return {
+    status: healthy ? "ok" : "unhealthy",
+    service: "reference",
+    ready: healthy,
+    live: true,
+    healthy,
+    pending_approvals: metrics?.totals?.pending_approvals ?? 0,
+    error,
+    metrics,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+export async function metricsSnapshotAsync(db, { tenantId = null } = {}) {
+  const tenant = tenantClause(tenantId);
+  const domainsByStatus = await queryAllAsync(
+    db,
+    `SELECT status, COUNT(*) AS count FROM reference_domains WHERE 1 = 1 ${tenant.clause} GROUP BY status`,
+    tenant.params
+  );
+  const itemsByStatus = await queryAllAsync(
+    db,
+    `SELECT status, COUNT(*) AS count FROM reference_data_items WHERE 1 = 1 ${tenant.clause} GROUP BY status`,
+    tenant.params
+  );
+  const totals = {
+    domains: Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM reference_domains WHERE 1 = 1 ${tenant.clause}`, tenant.params))?.c ?? 0),
+    items: Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM reference_data_items WHERE 1 = 1 ${tenant.clause}`, tenant.params))?.c ?? 0),
+    active_items: Number(
+      (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM reference_data_items WHERE status = 'active' ${tenant.clause}`, tenant.params))?.c ?? 0
+    ),
+    codes: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM reference_codes WHERE 1 = 1", []))?.c ?? 0),
+    aliases: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM reference_aliases WHERE 1 = 1", []))?.c ?? 0),
+    translations: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM reference_translations WHERE 1 = 1", []))?.c ?? 0),
+    hierarchy_edges: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM reference_hierarchy WHERE 1 = 1", []))?.c ?? 0),
+    relationships: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM reference_relationships WHERE 1 = 1", []))?.c ?? 0),
+    pending_approvals: Number(
+      (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM reference_approvals WHERE status IN ('submitted','under_review') ${tenant.clause}`, tenant.params))?.c ?? 0
+    ),
+    versions: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM reference_data_versions WHERE 1 = 1", []))?.c ?? 0),
+    global_items: Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM reference_data_items WHERE is_global = 1 ${tenant.clause}`, tenant.params))?.c ?? 0),
+    tenant_items: Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM reference_data_items WHERE is_global = 0 ${tenant.clause}`, tenant.params))?.c ?? 0),
+  };
+  const distinctDomains = Number(
+    (await queryOneAsync(db, `SELECT COUNT(DISTINCT domain_id) AS c FROM reference_data_items WHERE 1 = 1 ${tenant.clause}`, tenant.params))?.c ?? 0
+  );
+  const orphanRetiredCodes = Number(
+    (await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM reference_data_items WHERE status = 'retired' ${tenant.clause}`,
+      tenant.params
+    ))?.c ?? 0
+  );
+  return {
+    tenant_id: tenantId,
+    cache_epoch: await getCacheEpochAsync(db),
+    totals: { ...totals, domains_with_items: distinctDomains, retired_items: orphanRetiredCodes },
+    domains_by_status: Object.fromEntries(domainsByStatus.map((row) => [row.status, row.count])),
+    items_by_status: Object.fromEntries(itemsByStatus.map((row) => [row.status, row.count])),
+    generated_at: new Date().toISOString(),
+  };
+}
+
+export async function dashboardSummaryAsync(db, { tenantId = null } = {}) {
+  const metrics = await metricsSnapshotAsync(db, { tenantId });
+  const tenant = tenantClause(tenantId, "i.tenant_id");
+  const topDomains = await queryAllAsync(
+    db,
+    `SELECT d.id, d.code, d.name, COUNT(i.id) AS item_count
+     FROM reference_domains d
+     LEFT JOIN reference_data_items i ON i.domain_id = d.id
+     WHERE 1 = 1 ${tenant.clause}
+     GROUP BY d.id ORDER BY item_count DESC, d.code LIMIT 10`,
+    tenant.params
+  );
+  const recentItems = await queryAllAsync(
+    db,
+    `SELECT i.id, i.item_ref, i.code, i.name, i.status, i.scope_key, i.updated_at, d.code AS domain_code
+     FROM reference_data_items i LEFT JOIN reference_domains d ON d.id = i.domain_id
+     WHERE 1 = 1 ${tenant.clause}
+     ORDER BY i.updated_at DESC LIMIT 10`,
+    tenant.params
+  );
+  const pendingApprovals = await queryAllAsync(
+    db,
+    `SELECT a.id, a.approval_ref, a.status, a.submitted_at, i.code AS item_code, i.item_ref
+     FROM reference_approvals a LEFT JOIN reference_data_items i ON i.id = a.item_id
+     WHERE a.status IN ('submitted','under_review')
+     ${tenantClause(tenantId, "a.tenant_id").clause}
+     ORDER BY a.submitted_at DESC LIMIT 10`,
+    tenantClause(tenantId, "a.tenant_id").params
+  );
+  return { metrics, top_domains: topDomains, recent_items: recentItems, pending_approvals: pendingApprovals };
+}
+
+export async function healthCheckAsync(db, { tenantId = null } = {}) {
+  let metrics = null;
+  let healthy = true;
+  let error = null;
+  try {
+    metrics = await metricsSnapshotAsync(db, { tenantId });
   } catch (err) {
     healthy = false;
     error = err.message;

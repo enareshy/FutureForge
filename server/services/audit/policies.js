@@ -1,5 +1,5 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { queryOneAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { validatePolicyInput, normalizeVisibility } from "./validation.js";
 
@@ -179,6 +179,52 @@ export function listPolicies(db, { tenantId, objectType, status, includeSystem =
     db,
     `SELECT * FROM audit_policies ${clause} ORDER BY COALESCE(tenant_id, 0) DESC, object_type ASC, id ASC`,
     params
+  ).map(publicPolicy);
+  return { items, total: items.length };
+}
+
+// ── Async read twins ────────────────────────────────────────────────────────
+
+export async function getPolicyAsync(db, id, tenantId) {
+  const row = await queryOneAsync(db, "SELECT * FROM audit_policies WHERE id = ?", [id]);
+  if (!row) throw new HttpError(404, "Audit policy not found");
+  if (tenantId != null && row.tenant_id != null && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Audit policy not found");
+  }
+  return publicPolicy(row);
+}
+
+export async function getPolicyRowAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM audit_policies WHERE id = ?", [id]);
+}
+
+export async function listPoliciesAsync(db, { tenantId, objectType, status, includeSystem = true } = {}) {
+  const where = [];
+  const params = [];
+  if (tenantId) {
+    if (includeSystem) {
+      where.push("(tenant_id = ? OR tenant_id IS NULL)");
+      params.push(Number(tenantId));
+    } else {
+      where.push("tenant_id = ?");
+      params.push(Number(tenantId));
+    }
+  }
+  if (objectType) {
+    where.push("object_type = ?");
+    params.push(objectType);
+  }
+  if (status) {
+    where.push("status = ?");
+    params.push(status);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM audit_policies ${clause} ORDER BY COALESCE(tenant_id, 0) DESC, object_type ASC, id ASC`,
+      params
+    )
   ).map(publicPolicy);
   return { items, total: items.length };
 }

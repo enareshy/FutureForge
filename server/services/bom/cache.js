@@ -63,6 +63,19 @@ export function cached(tenantId, key, ttlSeconds, loader) {
   return value;
 }
 
+// Async twin of `cached` for migrated read paths. Identical epoch capture and
+// invalidation semantics; the loader is awaited instead of called inline.
+export async function cachedAsync(tenantId, key, ttlSeconds, asyncLoader) {
+  const epoch = epochOf(tenantId);
+  const existing = cacheGet(tenantId, key, { epoch });
+  if (existing !== undefined) return existing;
+  const value = await asyncLoader();
+  cacheSet(tenantId, key, value, ttlSeconds);
+  const entry = store.get(keyOf(tenantId, key));
+  if (entry) entry.epoch = epoch;
+  return value;
+}
+
 export function invalidate(tenantId = null) {
   if (tenantId === null || tenantId === undefined) {
     store.clear();

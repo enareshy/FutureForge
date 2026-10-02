@@ -2,7 +2,7 @@
 // and safe on every boot; emission is best-effort through the shared Event &
 // Messaging Framework (transactional outbox), so an event hiccup never fails an
 // allocation.
-import { emitDomainEvent } from "../events/emit.js";
+import { emitDomainEvent, emitDomainEventAsync } from "../events/emit.js";
 import { createEventType, getEventTypeRow } from "../events/registry.js";
 
 export const NUMBERING_EVENT_TYPES = [
@@ -40,182 +40,213 @@ function baseAllocationEvent(input = {}) {
   };
 }
 
+function allocationEventInput(code, allocation) {
+  switch (code) {
+    case "NumberAllocated":
+      return {
+        ...baseAllocationEvent({
+          allocationId: allocation.id,
+          tenantId: allocation.tenant_id,
+          organizationId: allocation.organization_id,
+          correlationId: allocation.correlation_id,
+          idempotencyKey: allocation.idempotency_key,
+        }),
+        event_type_code: "NumberAllocated",
+        payload: {
+          allocation_id: allocation.id,
+          allocation_ref: allocation.allocation_ref,
+          number: allocation.number,
+          object_type: allocation.object_type_code,
+          object_id: allocation.object_id,
+          scheme_id: allocation.scheme_id,
+          scheme_version: allocation.scheme_version,
+          sequence_value: allocation.sequence_value,
+          status: allocation.status,
+          scope_key: allocation.scope_key,
+          is_manual: allocation.is_manual,
+        },
+      };
+    case "NumberReserved":
+      return {
+        ...baseAllocationEvent({
+          allocationId: allocation.id,
+          tenantId: allocation.tenant_id,
+          organizationId: allocation.organization_id,
+          correlationId: allocation.correlation_id,
+        }),
+        event_type_code: "NumberReserved",
+        payload: {
+          allocation_id: allocation.id,
+          allocation_ref: allocation.allocation_ref,
+          number: allocation.number,
+          object_type: allocation.object_type_code,
+          expires_at: allocation.expires_at,
+          scope_key: allocation.scope_key,
+        },
+      };
+    case "NumberConsumed":
+      return {
+        ...baseAllocationEvent({
+          allocationId: allocation.id,
+          tenantId: allocation.tenant_id,
+          organizationId: allocation.organization_id,
+          correlationId: allocation.correlation_id,
+        }),
+        event_type_code: "NumberConsumed",
+        payload: {
+          allocation_id: allocation.id,
+          allocation_ref: allocation.allocation_ref,
+          number: allocation.number,
+          object_type: allocation.object_type_code,
+          object_id: allocation.object_id,
+          object_ref: allocation.object_ref,
+          consumed_by: allocation.consumed_by,
+          scope_key: allocation.scope_key,
+        },
+      };
+    case "NumberReleased":
+      return {
+        ...baseAllocationEvent({
+          allocationId: allocation.id,
+          tenantId: allocation.tenant_id,
+          organizationId: allocation.organization_id,
+          correlationId: allocation.correlation_id,
+        }),
+        event_type_code: "NumberReleased",
+        payload: {
+          allocation_id: allocation.id,
+          allocation_ref: allocation.allocation_ref,
+          number: allocation.number,
+          object_type: allocation.object_type_code,
+          reusable: allocation.reusable,
+          reason: allocation.reason,
+          scope_key: allocation.scope_key,
+        },
+      };
+    case "NumberExpired":
+      return {
+        ...baseAllocationEvent({
+          allocationId: allocation.id,
+          tenantId: allocation.tenant_id,
+          organizationId: allocation.organization_id,
+        }),
+        event_type_code: "NumberExpired",
+        payload: {
+          allocation_id: allocation.id,
+          allocation_ref: allocation.allocation_ref,
+          number: allocation.number,
+          object_type: allocation.object_type_code,
+          reusable: allocation.reusable,
+          scope_key: allocation.scope_key,
+        },
+      };
+    case "NumberCancelled":
+      return {
+        ...baseAllocationEvent({
+          allocationId: allocation.id,
+          tenantId: allocation.tenant_id,
+          organizationId: allocation.organization_id,
+        }),
+        event_type_code: "NumberCancelled",
+        payload: {
+          allocation_id: allocation.id,
+          allocation_ref: allocation.allocation_ref,
+          number: allocation.number,
+          reason: allocation.reason,
+          scope_key: allocation.scope_key,
+        },
+      };
+    default:
+      return null;
+  }
+}
+
+function schemeEventInput(code, scheme) {
+  return {
+    source_module: "numbering",
+    source_object_type: "numbering_scheme",
+    source_object_id: scheme.id,
+    tenant_id: scheme.tenant_id ?? null,
+    event_type_code: code,
+    payload: {
+      scheme_id: scheme.id,
+      code: scheme.code,
+      name: scheme.name,
+      object_type: scheme.object_type_code,
+      status: scheme.status,
+      version: scheme.current_version,
+      pattern: scheme.pattern,
+    },
+  };
+}
+
 export function emitNumberAllocated(db, allocation, actor = null) {
   if (!allocation) return null;
-  return emitDomainEvent(
-    db,
-    {
-      ...baseAllocationEvent({
-        allocationId: allocation.id,
-        tenantId: allocation.tenant_id,
-        organizationId: allocation.organization_id,
-        correlationId: allocation.correlation_id,
-        idempotencyKey: allocation.idempotency_key,
-      }),
-      event_type_code: "NumberAllocated",
-      payload: {
-        allocation_id: allocation.id,
-        allocation_ref: allocation.allocation_ref,
-        number: allocation.number,
-        object_type: allocation.object_type_code,
-        object_id: allocation.object_id,
-        scheme_id: allocation.scheme_id,
-        scheme_version: allocation.scheme_version,
-        sequence_value: allocation.sequence_value,
-        status: allocation.status,
-        scope_key: allocation.scope_key,
-        is_manual: allocation.is_manual,
-      },
-    },
-    actor
-  );
+  return emitDomainEvent(db, allocationEventInput("NumberAllocated", allocation), actor);
+}
+
+export async function emitNumberAllocatedAsync(db, allocation, actor = null) {
+  if (!allocation) return null;
+  return emitDomainEventAsync(db, allocationEventInput("NumberAllocated", allocation), actor);
 }
 
 export function emitNumberReserved(db, allocation, actor = null) {
   if (!allocation) return null;
-  return emitDomainEvent(
-    db,
-    {
-      ...baseAllocationEvent({
-        allocationId: allocation.id,
-        tenantId: allocation.tenant_id,
-        organizationId: allocation.organization_id,
-        correlationId: allocation.correlation_id,
-      }),
-      event_type_code: "NumberReserved",
-      payload: {
-        allocation_id: allocation.id,
-        allocation_ref: allocation.allocation_ref,
-        number: allocation.number,
-        object_type: allocation.object_type_code,
-        expires_at: allocation.expires_at,
-        scope_key: allocation.scope_key,
-      },
-    },
-    actor
-  );
+  return emitDomainEvent(db, allocationEventInput("NumberReserved", allocation), actor);
+}
+
+export async function emitNumberReservedAsync(db, allocation, actor = null) {
+  if (!allocation) return null;
+  return emitDomainEventAsync(db, allocationEventInput("NumberReserved", allocation), actor);
 }
 
 export function emitNumberConsumed(db, allocation, actor = null) {
   if (!allocation) return null;
-  return emitDomainEvent(
-    db,
-    {
-      ...baseAllocationEvent({
-        allocationId: allocation.id,
-        tenantId: allocation.tenant_id,
-        organizationId: allocation.organization_id,
-        correlationId: allocation.correlation_id,
-      }),
-      event_type_code: "NumberConsumed",
-      payload: {
-        allocation_id: allocation.id,
-        allocation_ref: allocation.allocation_ref,
-        number: allocation.number,
-        object_type: allocation.object_type_code,
-        object_id: allocation.object_id,
-        object_ref: allocation.object_ref,
-        consumed_by: allocation.consumed_by,
-        scope_key: allocation.scope_key,
-      },
-    },
-    actor
-  );
+  return emitDomainEvent(db, allocationEventInput("NumberConsumed", allocation), actor);
+}
+
+export async function emitNumberConsumedAsync(db, allocation, actor = null) {
+  if (!allocation) return null;
+  return emitDomainEventAsync(db, allocationEventInput("NumberConsumed", allocation), actor);
 }
 
 export function emitNumberReleased(db, allocation, actor = null) {
   if (!allocation) return null;
-  return emitDomainEvent(
-    db,
-    {
-      ...baseAllocationEvent({
-        allocationId: allocation.id,
-        tenantId: allocation.tenant_id,
-        organizationId: allocation.organization_id,
-        correlationId: allocation.correlation_id,
-      }),
-      event_type_code: "NumberReleased",
-      payload: {
-        allocation_id: allocation.id,
-        allocation_ref: allocation.allocation_ref,
-        number: allocation.number,
-        object_type: allocation.object_type_code,
-        reusable: allocation.reusable,
-        reason: allocation.reason,
-        scope_key: allocation.scope_key,
-      },
-    },
-    actor
-  );
+  return emitDomainEvent(db, allocationEventInput("NumberReleased", allocation), actor);
+}
+
+export async function emitNumberReleasedAsync(db, allocation, actor = null) {
+  if (!allocation) return null;
+  return emitDomainEventAsync(db, allocationEventInput("NumberReleased", allocation), actor);
 }
 
 export function emitNumberExpired(db, allocation, actor = null) {
   if (!allocation) return null;
-  return emitDomainEvent(
-    db,
-    {
-      ...baseAllocationEvent({
-        allocationId: allocation.id,
-        tenantId: allocation.tenant_id,
-        organizationId: allocation.organization_id,
-      }),
-      event_type_code: "NumberExpired",
-      payload: {
-        allocation_id: allocation.id,
-        allocation_ref: allocation.allocation_ref,
-        number: allocation.number,
-        object_type: allocation.object_type_code,
-        reusable: allocation.reusable,
-        scope_key: allocation.scope_key,
-      },
-    },
-    actor
-  );
+  return emitDomainEvent(db, allocationEventInput("NumberExpired", allocation), actor);
+}
+
+export async function emitNumberExpiredAsync(db, allocation, actor = null) {
+  if (!allocation) return null;
+  return emitDomainEventAsync(db, allocationEventInput("NumberExpired", allocation), actor);
 }
 
 export function emitNumberCancelled(db, allocation, actor = null) {
   if (!allocation) return null;
-  return emitDomainEvent(
-    db,
-    {
-      ...baseAllocationEvent({
-        allocationId: allocation.id,
-        tenantId: allocation.tenant_id,
-        organizationId: allocation.organization_id,
-      }),
-      event_type_code: "NumberCancelled",
-      payload: {
-        allocation_id: allocation.id,
-        allocation_ref: allocation.allocation_ref,
-        number: allocation.number,
-        reason: allocation.reason,
-        scope_key: allocation.scope_key,
-      },
-    },
-    actor
-  );
+  return emitDomainEvent(db, allocationEventInput("NumberCancelled", allocation), actor);
+}
+
+export async function emitNumberCancelledAsync(db, allocation, actor = null) {
+  if (!allocation) return null;
+  return emitDomainEventAsync(db, allocationEventInput("NumberCancelled", allocation), actor);
 }
 
 export function emitSchemeEvent(db, code, scheme, actor = null) {
   if (!scheme) return null;
-  return emitDomainEvent(
-    db,
-    {
-      source_module: "numbering",
-      source_object_type: "numbering_scheme",
-      source_object_id: scheme.id,
-      tenant_id: scheme.tenant_id ?? null,
-      event_type_code: code,
-      payload: {
-        scheme_id: scheme.id,
-        code: scheme.code,
-        name: scheme.name,
-        object_type: scheme.object_type_code,
-        status: scheme.status,
-        version: scheme.current_version,
-        pattern: scheme.pattern,
-      },
-    },
-    actor
-  );
+  return emitDomainEvent(db, schemeEventInput(code, scheme), actor);
 }
+
+export async function emitSchemeEventAsync(db, code, scheme, actor = null) {
+  if (!scheme) return null;
+  return emitDomainEventAsync(db, schemeEventInput(code, scheme), actor);
+}
+

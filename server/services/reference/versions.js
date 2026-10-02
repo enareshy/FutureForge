@@ -2,11 +2,12 @@
 // item plus its codes, aliases, translations, hierarchy edges and cross-domain
 // relationships so a governed value can be reconstructed exactly as it was.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { writeAudit } from "../audit.js";
 import { versionNotFound } from "./errors.js";
 import { json, normalizeText, parseObject } from "./validation.js";
 import { versionRef } from "./refs.js";
-import { emitItemEvent } from "./events.js";
+import { emitItemEvent, emitItemEventAsync } from "./events.js";
 
 export function publicVersion(row) {
   if (!row) return null;
@@ -137,6 +138,146 @@ export function getVersion(db, ref) {
 export function compareVersions(db, refA, refB) {
   const a = getVersion(db, refA);
   const b = getVersion(db, refB);
+  const aItem = a.snapshot?.item ?? {};
+  const bItem = b.snapshot?.item ?? {};
+  const fields = ["code", "name", "description", "status", "scope_key", "effective_from", "effective_to", "sequence", "is_default"];
+  const changes = [];
+  for (const field of fields) {
+    if (JSON.stringify(aItem[field] ?? null) !== JSON.stringify(bItem[field] ?? null)) {
+      changes.push({ field, from: aItem[field] ?? null, to: bItem[field] ?? null });
+    }
+  }
+  const collection = (key, idAttr) => {
+    const toMap = (list) => {
+      const map = new Map();
+      for (const row of list || []) {
+        const key2 = row[idAttr] ?? row.language ?? row.alias ?? row.code;
+        map.set(key2, row);
+      }
+      return map;
+    };
+    return { from: toMap(a.snapshot?.[key]), to: toMap(b.snapshot?.[key]) };
+  };
+  const diffs = [];
+  for (const [key, idAttr] of [["codes", "code"], ["aliases", "alias"], ["translations", "language"]]) {
+    const { from, to } = collection(key, idAttr);
+    const keys = new Set([...from.keys(), ...to.keys()]);
+    for (const k of keys) {
+      if (JSON.stringify(from.get(k) ?? null) !== JSON.stringify(to.get(k) ?? null)) {
+        diffs.push({ collection: key, key: k, from: from.get(k) ?? null, to: to.get(k) ?? null });
+      }
+    }
+  }
+  return { from: a.version_number, to: b.version_number, changes, collection_changes: diffs };
+}
+
+export async function itemSnapshotAsync(db, item) {
+  if (!item) return {};
+  return {
+    item: {
+      id: item.id,
+      item_ref: item.item_ref,
+      domain_id: item.domain_id,
+      code: item.code,
+      name: item.name,
+      description: item.description,
+      status: item.status,
+      scope_type: item.scope_type,
+      scope_key: item.scope_key,
+      is_global: Boolean(item.is_global),
+      effective_from: item.effective_from,
+      effective_to: item.effective_to,
+      sequence: item.sequence,
+      is_default: Boolean(item.is_default),
+      attributes: parseObject(item.attributes_json, {}),
+      metadata: parseObject(item.metadata_json, {}),
+    },
+    codes: await queryAllAsync(db, "SELECT code, code_type, code_system, external_system, language, status FROM reference_codes WHERE item_id = ?", [Number(item.id)]),
+    aliases: await queryAllAsync(db, "SELECT alias, alias_type, language, source, status FROM reference_aliases WHERE item_id = ?", [Number(item.id)]),
+    translations: await queryAllAsync(db, "SELECT language, name, description, status FROM reference_translations WHERE item_id = ?", [Number(item.id)]),
+    hierarchy: {
+      parent_id: item.parent_id ?? null,
+      children: await queryAllAsync(db, "SELECT child_id, relationship_type, sequence FROM reference_hierarchy WHERE parent_id = ?", [Number(item.id)]),
+    },
+    relationships: await queryAllAsync(
+      db,
+      "SELECT source_item_id, target_item_id, relationship_type, status FROM reference_relationships WHERE source_item_id = ? OR target_item_id = ?",
+      [Number(item.id), Number(item.id)]
+    ),
+  };
+}
+
+export async function recordVersionAsync(db, item, { changeSummary = "", versionNumber = null, status = null, effectiveFrom, effectiveTo, versioningRevisionId = null, actor = null } = {}) {
+  if (!item) return null;
+  const number = Number(versionNumber ?? item.current_version_number ?? 1);
+  const snapshot = await itemSnapshotAsync(db, item);
+  const existing = await queryOneAsync(db, "SELECT * FROM reference_data_versions WHERE item_id = ? AND version_number = ?", [Number(item.id), number]);
+  const ts = nowIso();
+  if (existing) {
+    await runAsync(db, "UPDATE reference_data_versions SET snapshot_json = ?, change_summary = ?, status = ? WHERE id = ?", [
+      JSON.stringify(snapshot),
+      changeSummary || existing.change_summary,
+      status || existing.status,
+      existing.id,
+    ]);
+    return publicVersion(await queryOneAsync(db, "SELECT * FROM reference_data_versions WHERE id = ?", [existing.id]));
+  }
+  const result = await runAsync(
+    db,
+    `INSERT INTO reference_data_versions
+      (version_ref, item_id, domain_id, version_number, status, change_summary, snapshot_json, effective_from, effective_to, versioning_revision_id, owner_label, steward_label, tenant_id, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      versionRef(item.id, number),
+      Number(item.id),
+      Number(item.domain_id),
+      number,
+      status || item.status || "draft",
+      normalizeText(changeSummary),
+      JSON.stringify(snapshot),
+      effectiveFrom ?? item.effective_from ?? null,
+      effectiveTo ?? item.effective_to ?? null,
+      versioningRevisionId ?? item.versioning_revision_id ?? null,
+      item.owner_label ?? "",
+      item.steward_label ?? "",
+      item.tenant_id ?? null,
+      actor?.id ?? null,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM reference_data_versions WHERE id = ?", [Number(result.lastInsertId)]);
+  await emitItemEventAsync(db, "ReferenceItemVersionCreated", item, { version_number: number, change_summary: normalizeText(changeSummary) }, actor);
+  return publicVersion(row);
+}
+
+export async function listVersionsAsync(db, itemId, { limit = 100 } = {}) {
+  const rows = await queryAllAsync(
+    db,
+    "SELECT * FROM reference_data_versions WHERE item_id = ? ORDER BY version_number DESC LIMIT ?",
+    [Number(itemId), Math.min(500, Number(limit) || 100)]
+  );
+  return { items: rows.map(publicVersion), total: rows.length };
+}
+
+export async function getVersionRowAsync(db, ref) {
+  if (ref === null || ref === undefined || ref === "") return null;
+  const numeric = Number(ref);
+  if (Number.isInteger(numeric) && String(numeric) === String(ref).trim()) {
+    const byId = await queryOneAsync(db, "SELECT * FROM reference_data_versions WHERE id = ?", [numeric]);
+    if (byId) return byId;
+  }
+  return (await queryOneAsync(db, "SELECT * FROM reference_data_versions WHERE version_ref = ?", [String(ref)])) || null;
+}
+
+export async function getVersionAsync(db, ref) {
+  const row = await getVersionRowAsync(db, ref);
+  if (!row) throw versionNotFound(ref);
+  return publicVersion(row);
+}
+
+export async function compareVersionsAsync(db, refA, refB) {
+  const a = await getVersionAsync(db, refA);
+  const b = await getVersionAsync(db, refB);
   const aItem = a.snapshot?.item ?? {};
   const bItem = b.snapshot?.item ?? {};
   const fields = ["code", "name", "description", "status", "scope_key", "effective_from", "effective_to", "sequence", "is_default"];

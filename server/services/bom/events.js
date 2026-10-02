@@ -3,7 +3,7 @@
 // Registration is idempotent and safe on every boot; emission is best-effort
 // through the shared Event & Messaging Framework so an event hiccup never fails
 // a BOM write.
-import { emitDomainEvent } from "../events/emit.js";
+import { emitDomainEvent, emitDomainEventAsync } from "../events/emit.js";
 import { createEventType, getEventTypeRow } from "../events/registry.js";
 import { BOM_EVENT_TYPES, SOURCE_MODULE } from "./constants.js";
 
@@ -39,6 +39,31 @@ export function publishBomEvent(
   const eventTypeCode = eventType || code;
   if (!eventTypeCode) return null;
   return emitDomainEvent(
+    db,
+    {
+      source_module: SOURCE_MODULE,
+      source_object_type: objectType || "bom",
+      source_object_id: objectId != null ? String(objectId) : null,
+      tenant_id: tenantId ?? null,
+      organization_id: organizationId ?? null,
+      event_type_code: eventTypeCode,
+      correlation_id: correlationId || undefined,
+      payload,
+    },
+    actor
+  );
+}
+
+// Async twin of `publishBomEvent` for migrated request paths. Emission stays
+// best-effort through the shared Event & Messaging Framework.
+export async function publishBomEventAsync(
+  db,
+  { eventType, code, payload = {}, objectType = null, objectId = null, tenantId = null, organizationId = null, correlationId = null },
+  actor = null
+) {
+  const eventTypeCode = eventType || code;
+  if (!eventTypeCode) return null;
+  return emitDomainEventAsync(
     db,
     {
       source_module: SOURCE_MODULE,

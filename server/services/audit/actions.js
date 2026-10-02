@@ -2,6 +2,7 @@
 // as a system action type; business modules may register additional action
 // codes at runtime so their events classify correctly without code changes.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import {
   AUDIT_ACTIONS,
@@ -64,6 +65,49 @@ export function listActionTypes(db, { category, active, mandatory, q } = {}) {
 
 export function getActionType(db, code) {
   const row = getActionTypeRow(db, code);
+  if (!row) throw new HttpError(404, "Audit action type not found");
+  return publicActionType(row);
+}
+
+// ── Async read twins ────────────────────────────────────────────────────────
+
+export async function getActionTypeRowAsync(db, code) {
+  return queryOneAsync(db, "SELECT * FROM audit_action_types WHERE lower(code) = lower(?)", [String(code || "")]);
+}
+
+export async function listActionTypesAsync(db, { category, active, mandatory, q } = {}) {
+  const where = [];
+  const params = [];
+  if (category) {
+    where.push("category = ?");
+    params.push(String(category).toLowerCase());
+  }
+  if (active !== undefined && active !== "") {
+    where.push("active = ?");
+    params.push(active === true || active === "true" || active === 1 ? 1 : 0);
+  }
+  if (mandatory !== undefined && mandatory !== "") {
+    where.push("mandatory = ?");
+    params.push(mandatory === true || mandatory === "true" || mandatory === 1 ? 1 : 0);
+  }
+  if (q) {
+    const like = `%${String(q)}%`;
+    where.push("(code ILIKE ? OR label ILIKE ? OR description ILIKE ?)");
+    params.push(like, like, like);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM audit_action_types ${clause} ORDER BY category ASC, code ASC`,
+      params
+    )
+  ).map(publicActionType);
+  return { items, total: items.length };
+}
+
+export async function getActionTypeAsync(db, code) {
+  const row = await getActionTypeRowAsync(db, code);
   if (!row) throw new HttpError(404, "Audit action type not found");
   return publicActionType(row);
 }

@@ -6,8 +6,9 @@
 // catalog. Operator overrides (`enabled`, `notes`) are never overwritten, so a
 // deployment can upgrade the platform without losing its entitlement choices.
 import { queryOne, run, nowIso } from "../../db.js";
-import { ensureProfileRow, getProfile, publicProfile } from "./profile.js";
-import { featureRow, listFeatures, resolveCapabilities } from "./features.js";
+import { queryOneAsync } from "../../db-async.js";
+import { ensureProfileRow, getProfile, getProfileAsync, publicProfile } from "./profile.js";
+import { featureRow, listFeatures, listFeaturesAsync, resolveCapabilities, resolveCapabilitiesAsync } from "./features.js";
 import { invalidateCapabilities } from "./cache.js";
 import { SOURCE_MODULE, FEATURE_CATALOG, findEdition } from "./constants.js";
 
@@ -84,10 +85,7 @@ export function ensureDeploymentFoundation(db) {
   };
 }
 
-export function deploymentHealth(db) {
-  const profile = getProfile(db);
-  const capabilities = resolveCapabilities(db);
-  const rows = listFeatures(db);
+function buildHealth(profile, capabilities, rows, historyEvents) {
   return {
     source_module: SOURCE_MODULE,
     mode: profile.mode,
@@ -100,6 +98,22 @@ export function deploymentHealth(db) {
       effective: capabilities.summary.effective,
       disabled: rows.length - capabilities.summary.effective,
     },
-    history_events: Number(queryOne(db, "SELECT COUNT(*) AS c FROM deployment_history")?.c || 0),
+    history_events: Number(historyEvents || 0),
   };
+}
+
+export function deploymentHealth(db) {
+  const profile = getProfile(db);
+  const capabilities = resolveCapabilities(db);
+  const rows = listFeatures(db);
+  const historyEvents = Number(queryOne(db, "SELECT COUNT(*) AS c FROM deployment_history")?.c || 0);
+  return buildHealth(profile, capabilities, rows, historyEvents);
+}
+
+export async function deploymentHealthAsync(db) {
+  const profile = await getProfileAsync(db);
+  const capabilities = await resolveCapabilitiesAsync(db);
+  const rows = await listFeaturesAsync(db);
+  const historyEvents = Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM deployment_history"))?.c || 0);
+  return buildHealth(profile, capabilities, rows, historyEvents);
 }

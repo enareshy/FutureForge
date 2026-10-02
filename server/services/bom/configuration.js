@@ -2,6 +2,7 @@
 // rollup behaviour, bulk batch size, cache TTL, history retention) is data an
 // administrator can change without a deployment.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { writeAudit } from "../audit.js";
 import { CONFIG_DEFAULTS } from "./constants.js";
 import { assertConfigurationValue } from "./validation.js";
@@ -76,4 +77,25 @@ export function ensureBomConfig(db, tenantId) {
     created += 1;
   }
   return { created };
+}
+
+// ── Async twins (used by migrated read routes) ───────────────────────────────
+
+export async function getConfigRowAsync(db, tenantId, key) {
+  return queryOneAsync(db, "SELECT * FROM bom_configuration WHERE tenant_id = ? AND key = ?", [Number(tenantId), String(key)]);
+}
+
+export async function getConfigAsync(db, tenantId, key) {
+  const value = parseValue(await getConfigRowAsync(db, tenantId, key));
+  return value === undefined || value === null ? CONFIG_DEFAULTS[key] ?? null : value;
+}
+
+export async function listConfigAsync(db, tenantId) {
+  const rows = await queryAllAsync(db, "SELECT * FROM bom_configuration WHERE tenant_id = ? ORDER BY key", [Number(tenantId)]);
+  const config = { ...CONFIG_DEFAULTS };
+  for (const row of rows) {
+    const value = parseValue(row);
+    if (value !== undefined && value !== null) config[row.key] = value;
+  }
+  return config;
 }
