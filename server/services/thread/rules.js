@@ -5,10 +5,11 @@
 // pure configuration: the completeness service evaluates them against a
 // traversal, so adding or tightening a rule never requires code.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { publicTraceabilityRule } from "./repository.js";
 import { ruleRef } from "./identifiers.js";
-import { recordChange } from "./history.js";
+import { recordChange, recordChangeAsync } from "./history.js";
 import { ruleConflict, ruleNotFound, invalidRule } from "./errors.js";
 import { DOMAIN_CODES, SEVERITIES } from "./constants.js";
 import { assertEnum, normalizeStatus, normalizeText, normalizeUpper, normalizeBool } from "./validation.js";
@@ -23,14 +24,31 @@ export function getRuleRow(db, tenantId, ref) {
   return queryOne(db, "SELECT * FROM thread_traceability_rules WHERE tenant_id = ? AND code = ?", [Number(tenantId), text.toUpperCase()]);
 }
 
+export async function getRuleRowAsync(db, tenantId, ref) {
+  const text = String(ref ?? "").trim();
+  if (!text) return null;
+  if (/^\d+$/.test(text)) return await queryOneAsync(db, "SELECT * FROM thread_traceability_rules WHERE tenant_id = ? AND id = ?", [Number(tenantId), Number(text)]);
+  return await queryOneAsync(db, "SELECT * FROM thread_traceability_rules WHERE tenant_id = ? AND code = ?", [Number(tenantId), text.toUpperCase()]);
+}
+
 export function requireRuleRow(db, tenantId, ref) {
   const row = getRuleRow(db, tenantId, ref);
   if (!row) throw ruleNotFound(ref);
   return row;
 }
 
+export async function requireRuleRowAsync(db, tenantId, ref) {
+  const row = await getRuleRowAsync(db, tenantId, ref);
+  if (!row) throw ruleNotFound(ref);
+  return row;
+}
+
 export function getRule(db, tenantId, ref) {
   return publicTraceabilityRule(requireRuleRow(db, tenantId, ref));
+}
+
+export async function getRuleAsync(db, tenantId, ref) {
+  return publicTraceabilityRule(await requireRuleRowAsync(db, tenantId, ref));
 }
 
 export function listRules(db, tenantId, query = {}) {
@@ -57,8 +75,41 @@ export function listRules(db, tenantId, query = {}) {
   return { items: rows.map(publicTraceabilityRule), total: rows.length, source_module: "thread" };
 }
 
+export async function listRulesAsync(db, tenantId, query = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    clauses.push("status = ?");
+    params.push(normalizeStatus(query.status, "ACTIVE"));
+  }
+  if (query.definition_code || query.definitionCode) {
+    clauses.push("(definition_code = '' OR definition_code = ?)");
+    params.push(normalizeUpper(query.definition_code || query.definitionCode, { max: 64 }));
+  }
+  if (query.source_domain || query.sourceDomain) {
+    clauses.push("source_domain = ?");
+    params.push(normalizeUpper(query.source_domain || query.sourceDomain, { max: 60 }));
+  }
+  if (query.target_domain || query.targetDomain) {
+    clauses.push("target_domain = ?");
+    params.push(normalizeUpper(query.target_domain || query.targetDomain, { max: 60 }));
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const rows = await queryAllAsync(db, `SELECT * FROM thread_traceability_rules ${where} ORDER BY display_order, code`, params);
+  return { items: rows.map(publicTraceabilityRule), total: rows.length, source_module: "thread" };
+}
+
 export function activeRules(db, tenantId, definitionCode = "") {
   const rows = queryAll(
+    db,
+    "SELECT * FROM thread_traceability_rules WHERE tenant_id = ? AND status = 'ACTIVE' AND (definition_code = '' OR definition_code = ?) ORDER BY display_order, code",
+    [Number(tenantId), String(definitionCode || "")]
+  );
+  return rows.map(publicTraceabilityRule);
+}
+
+export async function activeRulesAsync(db, tenantId, definitionCode = "") {
+  const rows = await queryAllAsync(
     db,
     "SELECT * FROM thread_traceability_rules WHERE tenant_id = ? AND status = 'ACTIVE' AND (definition_code = '' OR definition_code = ?) ORDER BY display_order, code",
     [Number(tenantId), String(definitionCode || "")]
@@ -134,6 +185,42 @@ export function createRule(db, tenantId, body = {}, actor = null, ip = null) {
   return rule;
 }
 
+export async function createRuleAsync(db, tenantId, body = {}, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const normalized = validateRuleBody(body);
+  if (await getRuleRowAsync(db, tenant, normalized.code)) throw ruleConflict(normalized.code);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO thread_traceability_rules
+       (rule_ref, tenant_id, definition_code, code, name, description, source_domain, target_domain, relationship_type, required, severity, status, display_order, metadata_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      ruleRef(normalized.code),
+      tenant,
+      normalized.definitionCode,
+      normalized.code,
+      normalized.name,
+      normalized.description,
+      normalized.sourceDomain,
+      normalized.targetDomain,
+      normalized.relationshipType,
+      normalized.required ? 1 : 0,
+      normalized.severity,
+      normalized.status,
+      normalized.displayOrder,
+      JSON.stringify(normalized.metadata),
+      ts,
+      ts,
+    ]
+  );
+  bumpEpoch(tenant);
+  await writeAuditAsync(db, { actor, action: "thread.rule.create", resourceType: "thread_traceability_rule", resourceId: result.lastInsertId, details: { code: normalized.code }, ip });
+  const rule = await getRuleAsync(db, tenant, result.lastInsertId);
+  await recordChangeAsync(db, { tenantId: tenant, entityType: "RULE", entityId: rule.id, entityRef: rule.code, action: "CREATED", status: rule.status, after: rule, summary: `Rule ${rule.code} created`, actor, ip });
+  return rule;
+}
+
 export function updateRule(db, tenantId, ref, body = {}, actor = null, ip = null) {
   const tenant = Number(tenantId);
   const row = requireRuleRow(db, tenant, ref);
@@ -180,6 +267,52 @@ export function updateRule(db, tenantId, ref, body = {}, actor = null, ip = null
   return after;
 }
 
+export async function updateRuleAsync(db, tenantId, ref, body = {}, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = await requireRuleRowAsync(db, tenant, ref);
+  const before = publicTraceabilityRule(row);
+  const merged = validateRuleBody({
+    code: row.code,
+    name: body.name ?? row.name,
+    description: body.description ?? row.description,
+    definition_code: body.definition_code ?? body.definitionCode ?? row.definition_code,
+    source_domain: body.source_domain ?? body.sourceDomain ?? row.source_domain,
+    target_domain: body.target_domain ?? body.targetDomain ?? row.target_domain,
+    relationship_type: body.relationship_type ?? body.relationshipType ?? row.relationship_type,
+    required: body.required ?? row.required === 1,
+    severity: body.severity ?? row.severity,
+    status: body.status ?? row.status,
+    display_order: body.display_order ?? body.displayOrder ?? row.display_order,
+    metadata: body.metadata ?? (row.metadata_json ? JSON.parse(row.metadata_json) : {}),
+  });
+  await runAsync(
+    db,
+    `UPDATE thread_traceability_rules SET definition_code = ?, name = ?, description = ?, source_domain = ?, target_domain = ?,
+       relationship_type = ?, required = ?, severity = ?, status = ?, display_order = ?, metadata_json = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      merged.definitionCode,
+      merged.name,
+      merged.description,
+      merged.sourceDomain,
+      merged.targetDomain,
+      merged.relationshipType,
+      merged.required ? 1 : 0,
+      merged.severity,
+      merged.status,
+      merged.displayOrder,
+      JSON.stringify(merged.metadata),
+      nowIso(),
+      row.id,
+    ]
+  );
+  bumpEpoch(tenant);
+  await writeAuditAsync(db, { actor, action: "thread.rule.update", resourceType: "thread_traceability_rule", resourceId: row.id, ip });
+  const after = await getRuleAsync(db, tenant, row.id);
+  await recordChangeAsync(db, { tenantId: tenant, entityType: "RULE", entityId: row.id, entityRef: row.code, action: "UPDATED", status: after.status, before, after, summary: `Rule ${row.code} updated`, actor, ip });
+  return after;
+}
+
 export function setRuleStatus(db, tenantId, ref, status, actor = null, ip = null) {
   const tenant = Number(tenantId);
   const row = requireRuleRow(db, tenant, ref);
@@ -191,6 +324,17 @@ export function setRuleStatus(db, tenantId, ref, status, actor = null, ip = null
   return getRule(db, tenant, row.id);
 }
 
+export async function setRuleStatusAsync(db, tenantId, ref, status, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = await requireRuleRowAsync(db, tenant, ref);
+  const normalized = normalizeStatus(status, row.status);
+  if (!RULE_STATUSES.includes(normalized)) throw invalidRule(`status must be one of: ${RULE_STATUSES.join(", ")}`);
+  await runAsync(db, "UPDATE thread_traceability_rules SET status = ?, updated_at = ? WHERE id = ?", [normalized, nowIso(), row.id]);
+  bumpEpoch(tenant);
+  await writeAuditAsync(db, { actor, action: "thread.rule.status", resourceType: "thread_traceability_rule", resourceId: row.id, details: { status: normalized }, ip });
+  return await getRuleAsync(db, tenant, row.id);
+}
+
 export function deleteRule(db, tenantId, ref, actor = null, ip = null) {
   const tenant = Number(tenantId);
   const row = requireRuleRow(db, tenant, ref);
@@ -200,8 +344,24 @@ export function deleteRule(db, tenantId, ref, actor = null, ip = null) {
   return { deleted: true, id: row.id, code: row.code };
 }
 
+export async function deleteRuleAsync(db, tenantId, ref, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = await requireRuleRowAsync(db, tenant, ref);
+  await runAsync(db, "DELETE FROM thread_traceability_rules WHERE id = ?", [row.id]);
+  bumpEpoch(tenant);
+  await writeAuditAsync(db, { actor, action: "thread.rule.delete", resourceType: "thread_traceability_rule", resourceId: row.id, ip });
+  return { deleted: true, id: row.id, code: row.code };
+}
+
 export function ruleSummary(db, tenantId) {
   const rows = queryAll(db, "SELECT status, severity, COUNT(*) AS c FROM thread_traceability_rules WHERE tenant_id = ? GROUP BY status, severity", [Number(tenantId)]);
+  const byStatus = {};
+  for (const row of rows) byStatus[row.status] = (byStatus[row.status] || 0) + Number(row.c);
+  return { total: Object.values(byStatus).reduce((sum, value) => sum + value, 0), by_status: byStatus };
+}
+
+export async function ruleSummaryAsync(db, tenantId) {
+  const rows = await queryAllAsync(db, "SELECT status, severity, COUNT(*) AS c FROM thread_traceability_rules WHERE tenant_id = ? GROUP BY status, severity", [Number(tenantId)]);
   const byStatus = {};
   for (const row of rows) byStatus[row.status] = (byStatus[row.status] || 0) + Number(row.c);
   return { total: Object.values(byStatus).reduce((sum, value) => sum + value, 0), by_status: byStatus };
@@ -223,6 +383,27 @@ export function ensureDefaultRules(db, tenantId) {
   ];
   for (const entry of defaults) {
     createRule(db, tenant, entry, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
+export async function ensureDefaultRulesAsync(db, tenantId) {
+  const tenant = Number(tenantId);
+  const existing = await queryOneAsync(db, "SELECT COUNT(*) AS c FROM thread_traceability_rules WHERE tenant_id = ?", [tenant]);
+  if (Number(existing?.c || 0) > 0) return { created: 0 };
+  let created = 0;
+  const defaults = [
+    { code: "REQ-TO-SYSTEM", name: "Requirement satisfies system", source_domain: "REQUIREMENT", target_domain: "SYSTEM", relationship_type: "", required: true, severity: "ERROR" },
+    { code: "SYSTEM-TO-DESIGN", name: "System realized by design", source_domain: "SYSTEM", target_domain: "DESIGN", relationship_type: "", required: true, severity: "ERROR" },
+    { code: "DESIGN-TO-PART", name: "Design implemented by part", source_domain: "DESIGN", target_domain: "PART", relationship_type: "", required: true, severity: "ERROR" },
+    { code: "PART-TO-EBOM", name: "Part used in EBOM", source_domain: "PART", target_domain: "EBOM", relationship_type: "", required: false, severity: "WARNING" },
+    { code: "EBOM-TO-MBOM", name: "EBOM transformed to MBOM", source_domain: "EBOM", target_domain: "MBOM", relationship_type: "", required: false, severity: "WARNING" },
+    { code: "MBOM-TO-BOP", name: "MBOM realized as BOP", source_domain: "MBOM", target_domain: "BOP", relationship_type: "", required: false, severity: "WARNING" },
+    { code: "PRODUCT-TO-SERVICE", name: "Product supported by service", source_domain: "PRODUCT", target_domain: "SERVICE", relationship_type: "", required: false, severity: "INFO" },
+  ];
+  for (const entry of defaults) {
+    await createRuleAsync(db, tenant, entry, null, null);
     created += 1;
   }
   return { created };

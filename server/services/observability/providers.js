@@ -10,7 +10,8 @@
 // reference columns validated against a whitelist of platform tables via the
 // information schema. No value is ever interpolated into SQL.
 import { queryAll, queryOne } from "../../db.js";
-import { columnExists, tableExists } from "./repository.js";
+import { queryOneAsync } from "../../db-async.js";
+import { columnExists, columnExistsAsync, tableExists, tableExistsAsync } from "./repository.js";
 import { PROVIDER_CATALOG, providerByCode } from "./constants.js";
 
 const WINDOW_24H = "'-24 hours'";
@@ -32,6 +33,14 @@ function combine(clauses) {
   };
 }
 
+async function tenantClauseAsync(db, table, tenantId, alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  if (tenantId != null && (await tableExistsAsync(db, table)) && (await columnExistsAsync(db, table, "tenant_id"))) {
+    return { sql: `${prefix}tenant_id = ?`, params: [Number(tenantId)] };
+  }
+  return { sql: "", params: [] };
+}
+
 function whereSql(parts) {
   return parts.sql ? `WHERE ${parts.sql}` : "";
 }
@@ -43,16 +52,35 @@ function scalar(db, sql, params = []) {
   return value === null || value === undefined ? null : Number(value);
 }
 
+async function scalarAsync(db, sql, params = []) {
+  const row = await queryOneAsync(db, sql, params);
+  if (!row) return null;
+  const value = row.value !== undefined ? row.value : Object.values(row)[0];
+  return value === null || value === undefined ? null : Number(value);
+}
+
 function count(db, table, tenantId, extra = null) {
   if (!tableExists(db, table)) return 0;
   const parts = combine([tenantClause(db, table, tenantId), extra]);
   return Number(scalar(db, `SELECT COUNT(*) AS value FROM ${table} ${whereSql(parts)}`, parts.params) || 0);
 }
 
+async function countAsync(db, table, tenantId, extra = null) {
+  if (!(await tableExistsAsync(db, table))) return 0;
+  const parts = combine([await tenantClauseAsync(db, table, tenantId), extra]);
+  return Number((await scalarAsync(db, `SELECT COUNT(*) AS value FROM ${table} ${whereSql(parts)}`, parts.params)) || 0);
+}
+
 function countSince(db, table, tenantId, { sinceColumn = "created_at", extra = null } = {}) {
   if (!tableExists(db, table)) return 0;
   const parts = combine([tenantClause(db, table, tenantId), { sql: `${sinceColumn} >= to_char((now() at time zone 'utc') + (${WINDOW_24H})::interval,'YYYY-MM-DD HH24:MI:SS')`, params: [] }, extra]);
   return Number(scalar(db, `SELECT COUNT(*) AS value FROM ${table} ${whereSql(parts)}`, parts.params) || 0);
+}
+
+async function countSinceAsync(db, table, tenantId, { sinceColumn = "created_at", extra = null } = {}) {
+  if (!(await tableExistsAsync(db, table))) return 0;
+  const parts = combine([await tenantClauseAsync(db, table, tenantId), { sql: `${sinceColumn} >= to_char((now() at time zone 'utc') + (${WINDOW_24H})::interval,'YYYY-MM-DD HH24:MI:SS')`, params: [] }, extra]);
+  return Number((await scalarAsync(db, `SELECT COUNT(*) AS value FROM ${table} ${whereSql(parts)}`, parts.params)) || 0);
 }
 
 function countStatuses(db, table, tenantId, column, values, { sinceColumn = null, extra = null } = {}) {
@@ -62,6 +90,15 @@ function countStatuses(db, table, tenantId, column, values, { sinceColumn = null
   const sinceClause = sinceColumn && columnExists(db, table, sinceColumn) ? { sql: `${sinceColumn} >= to_char((now() at time zone 'utc') + (${WINDOW_24H})::interval,'YYYY-MM-DD HH24:MI:SS')`, params: [] } : null;
   const parts = combine([tenantClause(db, table, tenantId), statusClause, sinceClause, extra]);
   return Number(scalar(db, `SELECT COUNT(*) AS value FROM ${table} ${whereSql(parts)}`, parts.params) || 0);
+}
+
+async function countStatusesAsync(db, table, tenantId, column, values, { sinceColumn = null, extra = null } = {}) {
+  if (!(await tableExistsAsync(db, table)) || !(await columnExistsAsync(db, table, column))) return 0;
+  const placeholders = values.map(() => "?").join(", ");
+  const statusClause = { sql: `${column} IN (${placeholders})`, params: values };
+  const sinceClause = sinceColumn && (await columnExistsAsync(db, table, sinceColumn)) ? { sql: `${sinceColumn} >= to_char((now() at time zone 'utc') + (${WINDOW_24H})::interval,'YYYY-MM-DD HH24:MI:SS')`, params: [] } : null;
+  const parts = combine([await tenantClauseAsync(db, table, tenantId), statusClause, sinceClause, extra]);
+  return Number((await scalarAsync(db, `SELECT COUNT(*) AS value FROM ${table} ${whereSql(parts)}`, parts.params)) || 0);
 }
 
 function percent(numerator, denominator) {
@@ -76,6 +113,13 @@ function ageSeconds(db, table, tenantId, column = "updated_at") {
   return value === null || value === undefined || Number.isNaN(value) ? null : Math.max(0, Number(value));
 }
 
+async function ageSecondsAsync(db, table, tenantId, column = "updated_at") {
+  if (!(await tableExistsAsync(db, table)) || !(await columnExistsAsync(db, table, column))) return null;
+  const parts = combine([await tenantClauseAsync(db, table, tenantId)]);
+  const value = await scalarAsync(db, `SELECT EXTRACT(EPOCH FROM (now() at time zone 'utc') - MAX(${column})::timestamp) AS value FROM ${table} ${whereSql(parts)}`, parts.params);
+  return value === null || value === undefined || Number.isNaN(value) ? null : Math.max(0, Number(value));
+}
+
 function mappedFilters(db, table, filters) {
   if (!Array.isArray(filters) || !filters.length) return { sql: "", params: [] };
   const ops = { EQ: "=", NEQ: "!=", GT: ">", GTE: ">=", LT: "<", LTE: "<=", LIKE: "ILIKE", ILIKE: "ILIKE", IN: "IN", NOT_IN: "NOT IN", IS_NULL: "IS NULL", IS_NOT_NULL: "IS NOT NULL" };
@@ -85,6 +129,32 @@ function mappedFilters(db, table, filters) {
     const column = String(filter?.column || "");
     const op = String(filter?.operator || "EQ").toUpperCase();
     if (!columnExists(db, table, column) || !ops[op]) continue;
+    if (op === "IS_NULL" || op === "IS_NOT_NULL") {
+      clauses.push(`${column} ${ops[op]}`);
+      continue;
+    }
+    if (op === "IN" || op === "NOT_IN") {
+      const values = Array.isArray(filter.value) ? filter.value : [filter.value];
+      if (!values.length) continue;
+      clauses.push(`${column} ${ops[op]} (${values.map(() => "?").join(", ")})`);
+      params.push(...values);
+      continue;
+    }
+    clauses.push(`${column} ${ops[op]} ?`);
+    params.push(filter.value);
+  }
+  return { sql: clauses.join(" AND "), params };
+}
+
+async function mappedFiltersAsync(db, table, filters) {
+  if (!Array.isArray(filters) || !filters.length) return { sql: "", params: [] };
+  const ops = { EQ: "=", NEQ: "!=", GT: ">", GTE: ">=", LT: "<", LTE: "<=", LIKE: "ILIKE", ILIKE: "ILIKE", IN: "IN", NOT_IN: "NOT IN", IS_NULL: "IS NULL", IS_NOT_NULL: "IS NOT NULL" };
+  const clauses = [];
+  const params = [];
+  for (const filter of filters) {
+    const column = String(filter?.column || "");
+    const op = String(filter?.operator || "EQ").toUpperCase();
+    if (!(await columnExistsAsync(db, table, column)) || !ops[op]) continue;
     if (op === "IS_NULL" || op === "IS_NOT_NULL") {
       clauses.push(`${column} ${ops[op]}`);
       continue;
@@ -120,7 +190,20 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "OBJECT_VOLUME_TOTAL":
+          return await countAsync(db, "objects", tenantId, { sql: "deleted_at IS NULL", params: [] });
+        case "OBJECT_VOLUME_CREATED_24H":
+          return await countSinceAsync(db, "objects", tenantId);
+        case "OBJECT_FRESHNESS_AGE":
+          return await ageSecondsAsync(db, "objects", tenantId, "updated_at");
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "objects", tenantId, "updated_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "objects", tenantId, "updated_at"),
   },
   PDM: {
     measure(db, tenantId, metric) {
@@ -133,14 +216,30 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "PDM_VOLUME_TOTAL":
+          return await countAsync(db, "pdm_items", tenantId);
+        case "BOM_LINE_VOLUME":
+          return await countAsync(db, "bom_lines", tenantId);
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "pdm_items", tenantId, "updated_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "pdm_items", tenantId, "updated_at"),
   },
   FILE_STORAGE: {
     measure(db, tenantId, metric) {
       if (metric.code === "FILE_STORAGE_VOLUME") return count(db, "files", tenantId, { sql: "deleted_at IS NULL", params: [] });
       return null;
     },
+    async measureAsync(db, tenantId, metric) {
+      if (metric.code === "FILE_STORAGE_VOLUME") return await countAsync(db, "files", tenantId, { sql: "deleted_at IS NULL", params: [] });
+      return null;
+    },
     freshness: (db, tenantId) => ageSeconds(db, "files", tenantId, "updated_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "files", tenantId, "updated_at"),
   },
   DATA_QUALITY: {
     measure(db, tenantId, metric) {
@@ -158,7 +257,23 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "DATA_QUALITY_SCORE": {
+          const parts = combine([await tenantClauseAsync(db, "dg_quality_results", tenantId), { sql: "is_current = 1", params: [] }]);
+          const value = (await tableExistsAsync(db, "dg_quality_results"))
+            ? await scalarAsync(db, `SELECT AVG(overall_score) AS value FROM dg_quality_results ${whereSql(parts)}`, parts.params)
+            : null;
+          return value === null ? null : Number(Number(value).toFixed(4));
+        }
+        case "DATA_QUALITY_VIOLATIONS":
+          return await countAsync(db, "dg_quality_violations", tenantId, { sql: "is_current = 1", params: [] });
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "dg_quality_results", tenantId, "evaluated_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "dg_quality_results", tenantId, "evaluated_at"),
   },
   SEARCH: {
     measure(db, tenantId, metric) {
@@ -181,7 +296,28 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "SEARCH_INDEX_COVERAGE": {
+          if (!(await tableExistsAsync(db, "objects")) || !(await tableExistsAsync(db, "search_index"))) return null;
+          const objectClause = combine([await tenantClauseAsync(db, "objects", tenantId)]);
+          const total = Number((await scalarAsync(db, `SELECT COUNT(*) AS value FROM objects ${whereSql(objectClause)}`, objectClause.params)) || 0);
+          if (!total) return 100;
+          const indexedClause = combine([await tenantClauseAsync(db, "search_index", tenantId)]);
+          const indexed = Number((await scalarAsync(db, `SELECT COUNT(DISTINCT object_id) AS value FROM search_index ${whereSql(indexedClause)}`, indexedClause.params)) || 0);
+          return percent(Math.min(indexed, total), total);
+        }
+        case "SEARCH_ERROR_RATE": {
+          const failed = await countStatusesAsync(db, "search_index_status", tenantId, "status", ["failed", "dead_letter"], { sinceColumn: "created_at" });
+          const total = await countSinceAsync(db, "search_index_status", tenantId, { sinceColumn: "created_at" });
+          return percent(failed, total);
+        }
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "search_index", tenantId, "indexed_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "search_index", tenantId, "indexed_at"),
   },
   EVENTS: {
     measure(db, tenantId, metric) {
@@ -196,7 +332,20 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "EVENT_THROUGHPUT":
+          return await countSinceAsync(db, "event_records", tenantId, { sinceColumn: "created_at" });
+        case "EVENT_DELIVERY_FAILURES":
+          return await countStatusesAsync(db, "event_deliveries", tenantId, "status", ["failed", "dead_letter"], { sinceColumn: "created_at" });
+        case "EVENT_DEAD_LETTERS":
+          return await countAsync(db, "event_dead_letters", tenantId, { sql: "status IS NULL OR status NOT IN ('resolved', 'RESOLVED')", params: [] });
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "event_records", tenantId, "created_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "event_records", tenantId, "created_at"),
   },
   WORKFLOW: {
     measure(db, tenantId, metric) {
@@ -221,7 +370,30 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "WORKFLOW_THROUGHPUT":
+          return await countSinceAsync(db, "workflow_instances", tenantId, { sinceColumn: "started_at" });
+        case "WORKFLOW_FAILURE_RATE": {
+          const failed = await countStatusesAsync(db, "workflow_instances", tenantId, "status", ["failed"], { sinceColumn: "started_at" });
+          const terminal = await countStatusesAsync(db, "workflow_instances", tenantId, "status", ["completed", "cancelled", "failed"], { sinceColumn: "started_at" });
+          return percent(failed, terminal);
+        }
+        case "WORKFLOW_OVERDUE_TASKS": {
+          if (!(await tableExistsAsync(db, "workflow_tasks"))) return 0;
+          const parts = combine([
+            await tenantClauseAsync(db, "workflow_tasks", tenantId),
+            { sql: "status IN ('unassigned', 'assigned', 'in_progress', 'blocked', 'awaiting_approval')", params: [] },
+            { sql: "due_at IS NOT NULL AND due_at < to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS')", params: [] },
+          ]);
+          return Number((await scalarAsync(db, `SELECT COUNT(*) AS value FROM workflow_tasks ${whereSql(parts)}`, parts.params)) || 0);
+        }
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "workflow_instances", tenantId, "updated_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "workflow_instances", tenantId, "updated_at"),
   },
   JOBS: {
     measure(db, tenantId, metric) {
@@ -249,7 +421,33 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "JOB_FAILURE_RATE": {
+          const failed = await countStatusesAsync(db, "jobs", tenantId, "status", ["failed", "timed_out"], {});
+          const done = await countStatusesAsync(db, "jobs", tenantId, "status", ["completed", "failed", "timed_out", "cancelled"], {});
+          return percent(failed, done);
+        }
+        case "JOB_THROUGHPUT":
+          return await countStatusesAsync(db, "jobs", tenantId, "status", ["completed"], { sinceColumn: "completed_at" });
+        case "JOB_DEAD_LETTERS":
+          return await countAsync(db, "job_dead_letters", tenantId, { sql: "status IS NULL OR status NOT IN ('resolved', 'RESOLVED')", params: [] });
+        case "JOB_LATENCY_P95": {
+          if (!(await tableExistsAsync(db, "jobs"))) return null;
+          const parts = combine([
+            await tenantClauseAsync(db, "jobs", tenantId),
+            { sql: "completed_at IS NOT NULL AND started_at IS NOT NULL", params: [] },
+            { sql: "completed_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] },
+          ]);
+          const value = await scalarAsync(db, `SELECT AVG(EXTRACT(EPOCH FROM (completed_at::timestamp - started_at::timestamp))) AS value FROM jobs ${whereSql(parts)}`, parts.params);
+          return value === null ? null : Math.max(0, Number(value.toFixed(2)));
+        }
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "jobs", tenantId, "updated_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "jobs", tenantId, "updated_at"),
   },
   INTEGRATION: {
     measure(db, tenantId, metric) {
@@ -267,7 +465,23 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "INTEGRATION_FAILURE_RATE": {
+          const failed = await countStatusesAsync(db, "integration_executions", tenantId, "status", ["failed", "timed_out"], { sinceColumn: "started_at" });
+          const total = await countSinceAsync(db, "integration_executions", tenantId, { sinceColumn: "started_at" });
+          return percent(failed, total);
+        }
+        case "INTEGRATION_THROUGHPUT":
+          return await countSinceAsync(db, "integration_executions", tenantId, { sinceColumn: "started_at" });
+        case "INTEGRATION_DEAD_LETTERS":
+          return await countAsync(db, "integration_dead_letters", tenantId, { sql: "status IS NULL OR status NOT IN ('resolved', 'RESOLVED')", params: [] });
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "integration_executions", tenantId, "updated_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "integration_executions", tenantId, "updated_at"),
   },
   IMPORT_EXPORT: {
     measure(db, tenantId, metric) {
@@ -293,7 +507,31 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "IMPORT_FAILURE_RATE": {
+          const failed = await countStatusesAsync(db, "ie_import_jobs", tenantId, "status", ["FAILED"], {});
+          const total = await countStatusesAsync(db, "ie_import_jobs", tenantId, "status", ["COMPLETED", "PARTIAL", "FAILED"], {});
+          return percent(failed, total);
+        }
+        case "IMPORT_THROUGHPUT": {
+          if (!(await tableExistsAsync(db, "ie_import_jobs"))) return 0;
+          const parts = combine([await tenantClauseAsync(db, "ie_import_jobs", tenantId), { sql: "created_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] }]);
+          return Number((await scalarAsync(db, `SELECT COALESCE(SUM(success_count), 0) AS value FROM ie_import_jobs ${whereSql(parts)}`, parts.params)) || 0);
+        }
+        case "EXPORT_THROUGHPUT":
+          return await countSinceAsync(db, "ie_export_jobs", tenantId, { sinceColumn: "created_at" });
+        case "EXCHANGE_FAILURE_RATE": {
+          const failed = await countStatusesAsync(db, "exchange_transactions", tenantId, "status", ["FAILED"], { sinceColumn: "created_at" });
+          const total = await countStatusesAsync(db, "exchange_transactions", tenantId, "status", ["COMPLETED", "PARTIAL", "FAILED"], { sinceColumn: "created_at" });
+          return percent(failed, total);
+        }
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "exchange_transactions", tenantId, "updated_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "exchange_transactions", tenantId, "updated_at"),
   },
   AUDIT: {
     // API telemetry is read from the integration API-usage meter, the platform
@@ -322,7 +560,31 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "API_ERROR_RATE":
+          return percent(await apiFailuresAsync(db, tenantId), await apiTotalAsync(db, tenantId));
+        case "API_AVAILABILITY": {
+          const total = await apiTotalAsync(db, tenantId);
+          if (!total) return 100;
+          return Number((100 - percent(await apiFailuresAsync(db, tenantId), total)).toFixed(4));
+        }
+        case "API_LATENCY_P95": {
+          if (!(await tableExistsAsync(db, "integration_api_usage"))) return null;
+          const parts = combine([
+            await tenantClauseAsync(db, "integration_api_usage", tenantId),
+            { sql: "created_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] },
+            { sql: "duration_ms IS NOT NULL", params: [] },
+          ]);
+          const value = await scalarAsync(db, `SELECT AVG(duration_ms) AS value FROM integration_api_usage ${whereSql(parts)}`, parts.params);
+          return value === null ? null : Math.max(0, Number(Number(value).toFixed(2)));
+        }
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "audit_logs", tenantId, "created_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "audit_logs", tenantId, "created_at"),
   },
   DATA_LIFECYCLE: {
     measure(db, tenantId, metric) {
@@ -335,7 +597,18 @@ const IMPLEMENTATIONS = {
           return null;
       }
     },
+    async measureAsync(db, tenantId, metric) {
+      switch (metric.code) {
+        case "ARCHIVE_THROUGHPUT":
+          return await countSinceAsync(db, "lc_archive_records", tenantId, { sinceColumn: "archived_at" });
+        case "PURGE_THROUGHPUT":
+          return await countSinceAsync(db, "lc_purge_records", tenantId, { sinceColumn: "executed_at" });
+        default:
+          return null;
+      }
+    },
     freshness: (db, tenantId) => ageSeconds(db, "lc_archive_records", tenantId, "archived_at"),
+    freshnessAsync: (db, tenantId) => ageSecondsAsync(db, "lc_archive_records", tenantId, "archived_at"),
   },
   PLATFORM: {
     measure(db, tenantId, metric) {
@@ -347,7 +620,17 @@ const IMPLEMENTATIONS = {
       if (!total) return 100;
       return Number((100 - percent(Number(row.errored || 0), total)).toFixed(4));
     },
+    async measureAsync(db, tenantId, metric) {
+      if (metric.code !== "SERVICE_AVAILABILITY") return null;
+      if (!(await tableExistsAsync(db, "observability_observation_runs"))) return 100;
+      const parts = combine([await tenantClauseAsync(db, "observability_observation_runs", tenantId), { sql: "started_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] }]);
+      const row = await queryOneAsync(db, `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN error_count > 0 THEN 1 ELSE 0 END), 0) AS errored FROM observability_observation_runs ${whereSql(parts)}`, parts.params);
+      const total = Number(row?.total || 0);
+      if (!total) return 100;
+      return Number((100 - percent(Number(row.errored || 0), total)).toFixed(4));
+    },
     freshness: () => 0,
+    freshnessAsync: async () => 0,
   },
 };
 
@@ -357,10 +640,22 @@ function apiTotal(db, tenantId) {
   return Number(scalar(db, `SELECT COUNT(*) AS value FROM integration_api_usage ${whereSql(parts)}`, parts.params) || 0);
 }
 
+async function apiTotalAsync(db, tenantId) {
+  if (!(await tableExistsAsync(db, "integration_api_usage"))) return 0;
+  const parts = combine([await tenantClauseAsync(db, "integration_api_usage", tenantId), { sql: "created_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] }]);
+  return Number((await scalarAsync(db, `SELECT COUNT(*) AS value FROM integration_api_usage ${whereSql(parts)}`, parts.params)) || 0);
+}
+
 function apiFailures(db, tenantId) {
   if (!tableExists(db, "integration_api_usage") || !columnExists(db, "integration_api_usage", "status_code")) return 0;
   const parts = combine([tenantClause(db, "integration_api_usage", tenantId), { sql: "status_code >= 500", params: [] }, { sql: "created_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] }]);
   return Number(scalar(db, `SELECT COUNT(*) AS value FROM integration_api_usage ${whereSql(parts)}`, parts.params) || 0);
+}
+
+async function apiFailuresAsync(db, tenantId) {
+  if (!(await tableExistsAsync(db, "integration_api_usage")) || !(await columnExistsAsync(db, "integration_api_usage", "status_code"))) return 0;
+  const parts = combine([await tenantClauseAsync(db, "integration_api_usage", tenantId), { sql: "status_code >= 500", params: [] }, { sql: "created_at >= to_char((now() at time zone 'utc') + interval '-24 hours','YYYY-MM-DD HH24:MI:SS')", params: [] }]);
+  return Number((await scalarAsync(db, `SELECT COUNT(*) AS value FROM integration_api_usage ${whereSql(parts)}`, parts.params)) || 0);
 }
 
 // Generic evaluator for user-defined metrics. Only platform tables that a
@@ -386,11 +681,38 @@ export function measureGeneric(db, tenantId, metric) {
   return value === null ? null : Number(value);
 }
 
+export async function measureGenericAsync(db, tenantId, metric) {
+  const metadata = metric.metadata && typeof metric.metadata === "object" ? metric.metadata : {};
+  const provider = providerByCode(metric.provider_code);
+  const allowed = new Set((provider?.tables || []).concat(["objects", "files", "pdm_items", "bom_lines"]));
+  const table = String(metadata.table || "");
+  if (!allowed.has(table) || !(await tableExistsAsync(db, table))) return null;
+  const aggregation = String(metadata.aggregation || metric.calculation || "COUNT").toUpperCase();
+  const column = metadata.column && (await columnExistsAsync(db, table, metadata.column)) ? String(metadata.column) : null;
+  const filters = await mappedFiltersAsync(db, table, metadata.filters);
+  const parts = combine([await tenantClauseAsync(db, table, tenantId), filters]);
+  let expr;
+  if (aggregation === "COUNT") expr = "COUNT(*)";
+  else if (aggregation === "COUNT_DISTINCT" && column) expr = `COUNT(DISTINCT ${column})`;
+  else if (["SUM", "AVG", "MIN", "MAX"].includes(aggregation) && column) expr = `${aggregation}(${column})`;
+  else expr = "COUNT(*)";
+  const value = await scalarAsync(db, `SELECT ${expr} AS value FROM ${table} ${whereSql(parts)}`, parts.params);
+  return value === null ? null : Number(value);
+}
+
 export function listProviders() {
   return PROVIDER_CATALOG.map((provider) => ({ ...provider }));
 }
 
+export async function listProvidersAsync() {
+  return PROVIDER_CATALOG.map((provider) => ({ ...provider }));
+}
+
 export function getProvider(code) {
+  return providerByCode(code);
+}
+
+export async function getProviderAsync(code) {
   return providerByCode(code);
 }
 
@@ -404,6 +726,25 @@ export function measureMetric(db, tenantId, metric) {
     let value = impl ? impl.measure(db, tenantId, metric) : null;
     if (value === null || value === undefined || Number.isNaN(value)) {
       value = measureGeneric(db, tenantId, metric);
+    }
+    if (value === null || value === undefined || Number.isNaN(value)) {
+      return { value: null, error: `No measurement available for ${metric.code}` };
+    }
+    return { value: Number(value), error: null };
+  } catch (err) {
+    return { value: null, error: err.message };
+  }
+}
+
+export async function measureMetricAsync(db, tenantId, metric) {
+  const provider = providerByCode(metric.provider_code);
+  if (!provider) return { value: null, error: `Unknown provider: ${metric.provider_code}` };
+  if (provider.status !== "AVAILABLE") return { value: null, error: `Provider unavailable: ${provider.code}` };
+  try {
+    const impl = IMPLEMENTATIONS[provider.code];
+    let value = impl ? await impl.measureAsync(db, tenantId, metric) : null;
+    if (value === null || value === undefined || Number.isNaN(value)) {
+      value = await measureGenericAsync(db, tenantId, metric);
     }
     if (value === null || value === undefined || Number.isNaN(value)) {
       return { value: null, error: `No measurement available for ${metric.code}` };
@@ -441,6 +782,32 @@ export function measureFreshness(db, tenantId, definition) {
   }
 }
 
+export async function measureFreshnessAsync(db, tenantId, definition) {
+  const provider = providerByCode(definition.provider_code);
+  if (!provider) return { age_seconds: null, error: `Unknown provider: ${definition.provider_code}` };
+  try {
+    let age = null;
+    const impl = IMPLEMENTATIONS[provider.code];
+    const table = definition.source_table || provider.tables[0] || null;
+    if (table && (await tableExistsAsync(db, table))) {
+      const column = (await columnExistsAsync(db, table, "updated_at"))
+        ? "updated_at"
+        : (await columnExistsAsync(db, table, "created_at"))
+          ? "created_at"
+          : (await columnExistsAsync(db, table, "indexed_at"))
+            ? "indexed_at"
+            : (await columnExistsAsync(db, table, "evaluated_at"))
+              ? "evaluated_at"
+              : null;
+      if (column) age = await ageSecondsAsync(db, table, tenantId, column);
+    }
+    if ((age === null || age === undefined) && impl?.freshnessAsync) age = await impl.freshnessAsync(db, tenantId, definition);
+    return { age_seconds: age, error: age === null ? `No freshness signal for ${definition.code}` : null };
+  } catch (err) {
+    return { age_seconds: null, error: err.message };
+  }
+}
+
 // A synthetic availability/latency probe used by health checks. Real probing
 // is delegated to the platform; here we simply verify the provider's tables
 // are readable so a broken schema degrades health rather than crashing.
@@ -451,6 +818,20 @@ export function probeProvider(db, code) {
   try {
     for (const table of provider.tables.slice(0, 1)) {
       if (tableExists(db, table)) queryOne(db, `SELECT 1 AS ok FROM ${table} LIMIT 1`);
+    }
+    return { available: true, latency_ms: Math.max(0, Date.now() - started), error: null };
+  } catch (err) {
+    return { available: false, latency_ms: null, error: err.message };
+  }
+}
+
+export async function probeProviderAsync(db, code) {
+  const provider = providerByCode(code);
+  if (!provider) return { available: false, latency_ms: null, error: "unknown provider" };
+  const started = Date.now();
+  try {
+    for (const table of provider.tables.slice(0, 1)) {
+      if (await tableExistsAsync(db, table)) await queryOneAsync(db, `SELECT 1 AS ok FROM ${table} LIMIT 1`);
     }
     return { available: true, latency_ms: Math.max(0, Date.now() - started), error: null };
   } catch (err) {

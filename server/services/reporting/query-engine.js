@@ -20,7 +20,7 @@ import {
 } from "./constants.js";
 import { invalidQuery, invalidExpression, unsupportedOperator, unsupportedAggregation, queryTimeout, rowLimitExceeded } from "./errors.js";
 import { getEntity, entityAttributeMap } from "./semantic.js";
-import { resolveDataSourceRows } from "./datasources.js";
+import { resolveDataSourceRows, resolveDataSourceRowsAsync } from "./datasources.js";
 
 // ── Definition validation / normalization ───────────────────────────────────
 
@@ -329,6 +329,78 @@ export function executeQuery(db, tenantId, spec, context = {}) {
   };
 
   const resolved = resolveDataSourceRows(db, query.data_source, {
+    entity: query.entity,
+    tenantId,
+    actor: context.actor,
+    organizationId: context.organizationId ?? null,
+    ip: context.ip ?? null,
+    context: context.securityContext ?? null,
+    limit: Math.max(maxRows, maxGroupRows),
+    options: context.options || {},
+  });
+  checkTime();
+
+  const filtered = filterRecords(resolved.records, query.filters, query.condition);
+  const hasAggregations = query.aggregations.length > 0;
+
+  let columns;
+  let rows;
+  let truncated = false;
+
+  if (hasAggregations) {
+    const grouped = query.group_by.length ? groupRecords(filtered, query.group_by) : [{ key: {}, rows: filtered }];
+    if (grouped.length > maxGroupRows) {
+      truncated = true;
+    }
+    const sliced = grouped.slice(0, maxGroupRows);
+    rows = sliced.map((group) => buildAggregateRow(group, query));
+    columns = buildAggregateColumns(query);
+    sortRows(rows, query.sort, columns);
+  } else {
+    columns = query.columns.length ? query.columns : defaultColumns(query.entity, query.columns);
+    rows = filtered.map((record) => projectRow(record, columns, query.entity));
+    sortRows(rows, query.sort, columns);
+    if (rows.length > maxRows) {
+      rows = rows.slice(0, maxRows);
+      truncated = true;
+    }
+  }
+
+  checkTime();
+  const total = rows.length;
+  const offset = (query.page - 1) * query.page_size;
+  const pageRows = rows.slice(offset, offset + query.page_size);
+
+  return {
+    entity: query.entity,
+    data_source: query.data_source,
+    query_type: hasAggregations ? (query.group_by.length ? "ANALYTICAL" : "SUMMARY") : "TABULAR",
+    columns: columns.map((column) => ({ attribute: column.attribute || column.alias, alias: column.alias || column.attribute, label: column.label || column.alias || column.attribute })),
+    rows: pageRows,
+    total,
+    page: query.page,
+    page_size: query.page_size,
+    groups: hasAggregations ? rows.length : 0,
+    truncated,
+    denied: resolved.denied,
+    scanned: resolved.total_before_security,
+    visualization: query.visualization,
+    took_ms: Date.now() - started,
+  };
+}
+
+export async function executeQueryAsync(db, tenantId, spec, context = {}) {
+  const started = Date.now();
+  const maxExecutionMs = Number(context.maxExecutionMs) || 30000;
+  const maxRows = Number(context.maxRows) || MAX_ROWS;
+  const maxGroupRows = Number(context.maxGroupRows) || MAX_GROUP_ROWS;
+  const query = applyParameters(normalizeQuery(spec), context.parameters || {});
+
+  const checkTime = () => {
+    if (Date.now() - started > maxExecutionMs) throw queryTimeout(maxExecutionMs, { entity: query.entity });
+  };
+
+  const resolved = await resolveDataSourceRowsAsync(db, query.data_source, {
     entity: query.entity,
     tenantId,
     actor: context.actor,

@@ -5,6 +5,7 @@
 // the engine's direction filter works unchanged: a BOM revision contains its
 // child parts, and the owning EBOM/MBOM object owns its revision.
 import { queryAll } from "../../db.js";
+import { queryAllAsync } from "../../db-async.js";
 import { nodeRef } from "./providers.js";
 import { domainForType } from "./domains.js";
 import { PROVIDERS, DOMAIN_CODES } from "./constants.js";
@@ -137,6 +138,49 @@ export const bomProvider = {
   resolve(db, tenantId, ref, context = {}) {
     return this.resolveMany(db, tenantId, [ref], context)[0] || null;
   },
+  async resolveManyAsync(db, tenantId, refs, context = {}) {
+    const includeInactive = context.includeInactive ?? true;
+    const revisionIds = [];
+    const headerIds = [];
+    const headerNumbers = [];
+    for (const ref of refs) {
+      const type = String(ref.objectType || "").toLowerCase();
+      if (type === "bom_revision" && /^\d+$/.test(String(ref.objectId))) revisionIds.push(Number(ref.objectId));
+      else if (type === "bom_header") {
+        if (/^\d+$/.test(String(ref.objectId))) headerIds.push(Number(ref.objectId));
+        else headerNumbers.push(String(ref.objectId));
+      }
+    }
+    const nodes = [];
+    if (headerIds.length) {
+      const marks = headerIds.map(() => "?").join(",");
+      const rows = await queryAllAsync(db, `SELECT * FROM bom_headers WHERE tenant_id = ? AND id IN (${marks})`, [Number(tenantId), ...headerIds]);
+      for (const row of rows) {
+        if (!includeInactive && String(row.status).toUpperCase() === "OBSOLETE") continue;
+        nodes.push(headerNode(row, context.definition));
+      }
+    }
+    for (const number of headerNumbers) {
+      const row = (await queryAllAsync(db, "SELECT * FROM bom_headers WHERE tenant_id = ? AND bom_number = ? LIMIT 1", [Number(tenantId), number]))[0];
+      if (row && (includeInactive || String(row.status).toUpperCase() !== "OBSOLETE")) nodes.push(headerNode(row, context.definition));
+    }
+    if (revisionIds.length) {
+      const marks = revisionIds.map(() => "?").join(",");
+      const rows = await queryAllAsync(
+        db,
+        `SELECT r.*, h.bom_number, h.bom_type FROM bom_revisions r JOIN bom_headers h ON h.id = r.bom_id WHERE r.tenant_id = ? AND r.id IN (${marks})`,
+        [Number(tenantId), ...revisionIds]
+      );
+      for (const row of rows) {
+        if (!includeInactive && String(row.status).toUpperCase() === "OBSOLETE") continue;
+        nodes.push(revisionNode(row, row, context.definition));
+      }
+    }
+    return nodes;
+  },
+  async resolveAsync(db, tenantId, ref, context = {}) {
+    return (await this.resolveManyAsync(db, tenantId, [ref], context))[0] || null;
+  },
   neighbors(db, tenantId, refs, context = {}) {
     const output = [];
     const revisionIds = [];
@@ -227,6 +271,114 @@ export const bomProvider = {
       if (childIds.length) {
         const marks = childIds.map(() => "?").join(",");
         const rows = queryAll(
+          db,
+          `SELECT * FROM bom_lines WHERE tenant_id = ? AND (child_object_id IN (${marks}) OR parent_object_id IN (${marks}))`,
+          [Number(tenantId), ...childIds, ...childIds]
+        );
+        for (const line of rows) {
+          if (line.child_object_id && childIds.includes(String(line.child_object_id))) {
+            output.push(lineEdge(line, "bom_revision", line.bom_revision_id, String(line.child_object_type || "part").toLowerCase(), line.child_object_id, "bom.contains"));
+          }
+          if (line.parent_object_id && childIds.includes(String(line.parent_object_id)) && line.child_object_id) {
+            output.push(
+              lineEdge(line, String(line.parent_object_type || "part").toLowerCase(), line.parent_object_id, String(line.child_object_type || "part").toLowerCase(), line.child_object_id, "bom.contains")
+            );
+          }
+        }
+      }
+    }
+    return output;
+  },
+  async neighborsAsync(db, tenantId, refs, context = {}) {
+    const output = [];
+    const revisionIds = [];
+    const headerIds = [];
+    const bridge = new Map();
+    for (const ref of refs) {
+      const type = String(ref.objectType || "").toLowerCase();
+      if (type === "bom_revision" && /^\d+$/.test(String(ref.objectId))) revisionIds.push(Number(ref.objectId));
+      else if (type === "bom_header" && /^\d+$/.test(String(ref.objectId))) headerIds.push(Number(ref.objectId));
+      else if (BRIDGE_TYPES.includes(type)) bridge.set(`${type}:${ref.objectId}`, ref);
+    }
+
+    if (headerIds.length) {
+      const marks = headerIds.map(() => "?").join(",");
+      const rows = await queryAllAsync(db, `SELECT id, bom_id, revision_number, status, lifecycle_state FROM bom_revisions WHERE tenant_id = ? AND bom_id IN (${marks})`, [Number(tenantId), ...headerIds]);
+      for (const row of rows) {
+        output.push({
+          source_node_ref: nodeRef("bom_header", row.bom_id),
+          target_node_ref: nodeRef("bom_revision", row.id),
+          relationship_type: "bom.revision-of",
+          relationship_id: String(row.id),
+          relationship_direction: "OUT",
+          source_revision: "",
+          target_revision: row.revision_number || "",
+          effectivity: {},
+          configuration: {},
+          lifecycle_context: row.status || "",
+          confidence: null,
+          metadata: { provider: "bom" },
+        });
+      }
+    }
+
+    if (revisionIds.length) {
+      const marks = revisionIds.map(() => "?").join(",");
+      const rows = await queryAllAsync(db, `SELECT * FROM bom_lines WHERE tenant_id = ? AND bom_revision_id IN (${marks})`, [Number(tenantId), ...revisionIds]);
+      for (const line of rows) {
+        if (!line.child_object_id) continue;
+        output.push(lineEdge(line, "bom_revision", line.bom_revision_id, String(line.child_object_type || "part").toLowerCase(), line.child_object_id, "bom.contains"));
+        if (line.parent_object_id && String(line.parent_object_id) !== String(line.child_object_id)) {
+          output.push(
+            lineEdge(line, String(line.parent_object_type || "part").toLowerCase(), line.parent_object_id, String(line.child_object_type || "part").toLowerCase(), line.child_object_id, "bom.contains")
+          );
+        }
+      }
+      const revisions = await queryAllAsync(db, `SELECT id, bom_id, revision_number FROM bom_revisions WHERE tenant_id = ? AND id IN (${marks})`, [Number(tenantId), ...revisionIds]);
+      const bomIds = [...new Set(revisions.map((row) => row.bom_id))];
+      if (bomIds.length) {
+        const bomMarks = bomIds.map(() => "?").join(",");
+        const headers = await queryAllAsync(db, `SELECT id, owner_object_id, bom_number, bom_type FROM bom_headers WHERE tenant_id = ? AND id IN (${bomMarks})`, [Number(tenantId), ...bomIds]);
+        const headerById = new Map(headers.map((row) => [row.id, row]));
+        const ownerIds = [...new Set(headers.map((row) => row.owner_object_id).filter(Boolean))];
+        const ownerTypeById = new Map();
+        if (ownerIds.length) {
+          const ownerMarks = ownerIds.map(() => "?").join(",");
+          for (const row of await queryAllAsync(
+            db,
+            `SELECT o.id, t.code AS type_code FROM objects o JOIN metadata_types t ON t.id = o.object_type_id WHERE o.tenant_id = ? AND o.id IN (${ownerMarks})`,
+            [Number(tenantId), ...ownerIds]
+          )) {
+            ownerTypeById.set(row.id, row.type_code);
+          }
+        }
+        for (const revision of revisions) {
+          const header = headerById.get(revision.bom_id);
+          if (!header?.owner_object_id) continue;
+          const ownerType = ownerTypeById.get(header.owner_object_id) || "ebom";
+          output.push({
+            source_node_ref: nodeRef(ownerType, header.owner_object_id),
+            target_node_ref: nodeRef("bom_revision", revision.id),
+            relationship_type: "bom.owner",
+            relationship_id: String(revision.id),
+            relationship_direction: "OUT",
+            source_revision: "",
+            target_revision: revision.revision_number || "",
+            effectivity: {},
+            configuration: {},
+            lifecycle_context: header.bom_type || "",
+            confidence: null,
+            metadata: { provider: "bom", bom_number: header.bom_number },
+          });
+        }
+      }
+    }
+
+    if (bridge.size) {
+      const childIds = [...bridge.values()].filter((ref) => !String(ref.objectType).toLowerCase().startsWith("bom_")).map((ref) => String(ref.objectId));
+      if (childIds.length) {
+        const marks = childIds.map(() => "?").join(",");
+        const rows = await queryAllAsync(
           db,
           `SELECT * FROM bom_lines WHERE tenant_id = ? AND (child_object_id IN (${marks}) OR parent_object_id IN (${marks}))`,
           [Number(tenantId), ...childIds, ...childIds]

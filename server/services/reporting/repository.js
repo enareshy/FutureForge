@@ -5,6 +5,7 @@
 // queries go through `paged` so pagination, filtering and ordering stay
 // consistent and safe (values are always bound, never interpolated).
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 
 export function parseJson(raw, fallback = null) {
   if (raw === null || raw === undefined || raw === "") return fallback;
@@ -32,6 +33,16 @@ export function paged(db, table, { where = [], params = [], orderBy = "id DESC",
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const total = Number(queryOne(db, `SELECT COUNT(*) AS c FROM ${table} ${clause}`, params)?.c || 0);
   const rows = queryAll(db, `SELECT * FROM ${table} ${clause} ORDER BY ${orderBy} LIMIT ? OFFSET ?`, [...params, safeSize, offset]);
+  return { items: rows.map(map), total, page: safePage, pageSize: safeSize };
+}
+
+export async function pagedAsync(db, table, { where = [], params = [], orderBy = "id DESC", page = 1, pageSize = 50, map = (row) => row } = {}) {
+  const safePage = Math.max(1, Number(page) || 1);
+  const safeSize = Math.min(500, Math.max(1, Number(pageSize) || 50));
+  const offset = (safePage - 1) * safeSize;
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} ${clause}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM ${table} ${clause} ORDER BY ${orderBy} LIMIT ? OFFSET ?`, [...params, safeSize, offset]);
   return { items: rows.map(map), total, page: safePage, pageSize: safeSize };
 }
 

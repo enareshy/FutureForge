@@ -1,7 +1,7 @@
 // Domain events published by the Change Management domain. Registration is
 // idempotent and safe on every boot; emission is best-effort through the
 // shared Event & Messaging Framework so an event hiccup never fails a write.
-import { emitDomainEvent } from "../events/emit.js";
+import { emitDomainEvent, emitDomainEventAsync } from "../events/emit.js";
 import { createEventType, getEventTypeRow } from "../events/registry.js";
 import { CHANGE_EVENT_TYPES, SOURCE_MODULE } from "./constants.js";
 
@@ -36,6 +36,27 @@ export function publishChangeEvent(
 ) {
   if (!eventType) return null;
   return emitDomainEvent(
+    db,
+    {
+      source_module: SOURCE_MODULE,
+      source_object_type: objectType || "change_order",
+      source_object_id: objectId != null ? String(objectId) : null,
+      tenant_id: tenantId ?? null,
+      organization_id: organizationId ?? null,
+      event_type_code: eventType,
+      payload,
+    },
+    actor
+  );
+}
+
+export async function publishChangeEventAsync(
+  db,
+  { eventType, payload = {}, objectType = null, objectId = null, tenantId = null, organizationId = null },
+  actor = null
+) {
+  if (!eventType) return null;
+  return emitDomainEventAsync(
     db,
     {
       source_module: SOURCE_MODULE,

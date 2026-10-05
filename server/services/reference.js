@@ -109,6 +109,7 @@ export const resolveValue = resolution.resolveValue;
 export const resolveValues = resolution.resolveBulk;
 export const lookupValue = resolution.lookupValue;
 export const validateValue = resolution.validateValue;
+export const validateValueAsync = resolution.validateValueAsync;
 export const listValues = resolution.listValues;
 export const searchValues = resolution.searchValues;
 export const getReferenceItem = items.getItem;

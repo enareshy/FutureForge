@@ -2,12 +2,13 @@
 // & Discovery engine as read-only object types; the search machinery (indexing,
 // querying, authorization, saved searches) is entirely reused, not rebuilt.
 import { queryAll, queryOne } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { registerObjectType } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { safeParse } from "../search/repository.js";
-import { tenantIds } from "../search/registry.js";
-import { getObjectType } from "../security/repository.js";
-import { registerObjectType as registerSecurityObjectType } from "../security/repository.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
+import { getObjectType, getObjectTypeAsync } from "../security/repository.js";
+import { registerObjectType as registerSecurityObjectType, registerObjectTypeAsync } from "../security/repository.js";
 
 export const SEARCH_REGISTRATIONS = [
   {
@@ -143,6 +144,28 @@ export function ensureDataGovernanceSearch(db) {
       }
       if (!getObjectType(db, tenantId, def.code)) {
         registerSecurityObjectType(
+          db,
+          { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource },
+          null,
+          tenantId
+        );
+      }
+    }
+  }
+  return { created };
+}
+
+export async function ensureDataGovernanceSearchAsync(db) {
+  let created = 0;
+  for (const tenantId of await tenantIdsAsync(db)) {
+    for (const def of SEARCH_REGISTRATIONS) {
+      const existing = await queryOneAsync(db, "SELECT id FROM search_object_types WHERE code = ? AND tenant_id = ?", [def.code, Number(tenantId)]);
+      if (!existing) {
+        registerObjectType(db, def, null, tenantId, null);
+        created += 1;
+      }
+      if (!(await getObjectTypeAsync(db, tenantId, def.code))) {
+        await registerObjectTypeAsync(
           db,
           { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource },
           null,

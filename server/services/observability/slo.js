@@ -5,13 +5,14 @@
 // rolling window. Evaluation reads the observation stream, so it works with any
 // provider without provider-specific code.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { SLO_KINDS, SLO_COMPARISONS, METRIC_UNITS } from "./constants.js";
 import { sloRef } from "./identifiers.js";
-import { parseJson, stringifyJson, paged, toNumber, tableExists } from "./repository.js";
+import { parseJson, stringifyJson, paged, toNumber, tableExists, pagedAsync, tableExistsAsync } from "./repository.js";
 import { sloNotFound, sloConflict, invalidSlo } from "./errors.js";
-import { recordHistory } from "./history.js";
-import { observabilityEventCode, publishObservabilityEvent } from "./events.js";
+import { recordHistory, recordHistoryAsync } from "./history.js";
+import { observabilityEventCode, publishObservabilityEvent, publishObservabilityEventAsync } from "./events.js";
 
 export function publicSlo(row) {
   if (!row) return null;
@@ -258,6 +259,215 @@ export function evaluateAllSlos(db, tenantId, { actor = null, notify = true } = 
 
 export function sloSummary(db, tenantId) {
   return evaluateAllSlos(db, tenantId, { notify: false });
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+
+export async function getSloRowAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const id = Number(raw);
+  if (Number.isInteger(id) && id > 0) return queryOneAsync(db, "SELECT * FROM observability_slo_definitions WHERE tenant_id = ? AND id = ?", [Number(tenantId), id]);
+  return queryOneAsync(db, "SELECT * FROM observability_slo_definitions WHERE tenant_id = ? AND (slo_ref = ? OR code = ?)", [Number(tenantId), raw, raw]);
+}
+
+export async function getSloAsync(db, tenantId, ref) {
+  const row = await getSloRowAsync(db, tenantId, ref);
+  if (!row) throw sloNotFound(ref);
+  return publicSlo(row);
+}
+
+export async function createSloAsync(db, tenantId, input = {}, actor = null) {
+  const code = String(input.code || "").trim().toUpperCase();
+  if (!code) throw invalidSlo("SLO/SLA code is required");
+  if (!input.metric_code) throw invalidSlo("metric_code is required");
+  const kind = String(input.kind || "SLO").toUpperCase();
+  if (!SLO_KINDS.includes(kind)) throw invalidSlo(`Unsupported kind: ${input.kind}`);
+  const comparison = String(input.comparison || "LTE").toUpperCase();
+  if (!SLO_COMPARISONS.includes(comparison)) throw invalidSlo(`Unsupported comparison: ${input.comparison}`);
+  const target = Number(input.target);
+  if (!Number.isFinite(target)) throw invalidSlo("target must be numeric");
+  const unit = String(input.unit || "PERCENT").toUpperCase();
+  if (!METRIC_UNITS.includes(unit)) throw invalidSlo(`Unsupported unit: ${input.unit}`);
+  if (await queryOneAsync(db, "SELECT id FROM observability_slo_definitions WHERE tenant_id = ? AND code = ? AND kind = ?", [Number(tenantId), code, kind])) throw sloConflict(code, kind);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO observability_slo_definitions (slo_ref, tenant_id, code, name, description, kind, metric_code, entity_code, target, comparison, window_seconds, unit, owner_user_id, status, metadata_json, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.slo_ref || sloRef(code, kind),
+      Number(tenantId),
+      code,
+      String(input.name || code),
+      String(input.description || ""),
+      kind,
+      String(input.metric_code).toUpperCase(),
+      input.entity_code ?? null,
+      target,
+      comparison,
+      Math.max(60, Number(input.window_seconds) || 86400),
+      unit,
+      input.owner_user_id ?? actor?.id ?? null,
+      String(input.status || "ACTIVE").toUpperCase(),
+      stringifyJson(input.metadata || {}),
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM observability_slo_definitions WHERE id = ?", [Number(result.lastInsertId)]);
+  await recordHistoryAsync(db, { tenantId, action: `${kind}_CREATED`, entityType: "slo", entityId: row.id, entityRef: row.slo_ref, actor, summary: `${kind} ${code} created` });
+  await writeAuditAsync(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.slo.create", resource_type: "observability_slo", resource_id: row.slo_ref, details: { code, kind } });
+  return publicSlo(row);
+}
+
+export async function updateSloAsync(db, tenantId, ref, input = {}, actor = null) {
+  const row = await getSloRowAsync(db, tenantId, ref);
+  if (!row) throw sloNotFound(ref);
+  await runAsync(
+    db,
+    `UPDATE observability_slo_definitions SET name = ?, description = ?, metric_code = ?, entity_code = ?, target = ?, comparison = ?, window_seconds = ?, unit = ?, owner_user_id = ?, status = ?, metadata_json = ?, updated_at = ? WHERE id = ?`,
+    [
+      input.name ?? row.name,
+      input.description ?? row.description,
+      input.metric_code ? String(input.metric_code).toUpperCase() : row.metric_code,
+      input.entity_code !== undefined ? input.entity_code : row.entity_code,
+      input.target !== undefined ? Number(input.target) : row.target,
+      input.comparison ? String(input.comparison).toUpperCase() : row.comparison,
+      input.window_seconds !== undefined ? Math.max(60, Number(input.window_seconds)) : row.window_seconds,
+      input.unit ? String(input.unit).toUpperCase() : row.unit,
+      input.owner_user_id !== undefined ? input.owner_user_id : row.owner_user_id,
+      input.status ? String(input.status).toUpperCase() : row.status,
+      input.metadata !== undefined ? stringifyJson(input.metadata) : row.metadata_json,
+      nowIso(),
+      row.id,
+    ]
+  );
+  const updated = await queryOneAsync(db, "SELECT * FROM observability_slo_definitions WHERE id = ?", [row.id]);
+  await recordHistoryAsync(db, { tenantId, action: `${row.kind}_UPDATED`, entityType: "slo", entityId: row.id, entityRef: row.slo_ref, actor, summary: `${row.kind} ${row.code} updated` });
+  return publicSlo(updated);
+}
+
+export async function deleteSloAsync(db, tenantId, ref, actor = null) {
+  const row = await getSloRowAsync(db, tenantId, ref);
+  if (!row) throw sloNotFound(ref);
+  await runAsync(db, "UPDATE observability_slo_definitions SET status = 'ARCHIVED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  await recordHistoryAsync(db, { tenantId, action: `${row.kind}_ARCHIVED`, entityType: "slo", entityId: row.id, entityRef: row.slo_ref, actor, summary: `${row.kind} ${row.code} archived` });
+  return { archived: true, slo_ref: row.slo_ref };
+}
+
+export async function listSlosAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.kind) {
+    where.push("kind = ?");
+    params.push(String(query.kind).toUpperCase());
+  }
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  return pagedAsync(db, "observability_slo_definitions", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicSlo });
+}
+
+async function windowValuesAsync(db, tenantId, metricCode, windowSeconds) {
+  if (!(await tableExistsAsync(db, "observability_metric_observations"))) return [];
+  return (await queryAllAsync(
+    db,
+    "SELECT value FROM observability_metric_observations WHERE tenant_id = ? AND metric_code = ? AND observed_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS') ORDER BY observed_at ASC",
+    [Number(tenantId), String(metricCode), `-${Math.max(60, Number(windowSeconds))} seconds`]
+  )).map((row) => Number(row.value));
+}
+
+async function recentBreachRecordedAsync(db, tenantId, sloRefValue) {
+  return Boolean(
+    await queryOneAsync(
+      db,
+      "SELECT id FROM observability_history WHERE tenant_id = ? AND entity_ref = ? AND action IN ('SLO_BREACHED', 'SLA_BREACHED') AND created_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') LIMIT 1",
+      [Number(tenantId), String(sloRefValue)]
+    )
+  );
+}
+
+export async function evaluateSloAsync(db, tenantId, definition, actor = null) {
+  const publicDef = publicSlo(definition);
+  const values = await windowValuesAsync(db, tenantId, definition.metric_code, definition.window_seconds);
+  if (!values.length) {
+    return { slo_ref: definition.slo_ref, code: definition.code, kind: definition.kind, metric_code: definition.metric_code, target: definition.target, comparison: definition.comparison, actual: null, meets: null, attainment_percent: null, samples: 0, status: "NO_DATA", error_budget_remaining: null };
+  }
+  const sum = values.reduce((total, value) => total + value, 0);
+  const actual = Number((sum / values.length).toFixed(4));
+  const meets = compare(actual, definition.comparison, definition.target);
+  const satisfying = values.filter((value) => compare(value, definition.comparison, definition.target)).length;
+  const attainment = Number(((satisfying / values.length) * 100).toFixed(4));
+  let errorBudget = null;
+  if (definition.unit === "PERCENT") {
+    const budget = Math.abs(100 - Number(definition.target));
+    const consumed = definition.comparison === "GTE" ? Math.max(0, Number(definition.target) - actual) : Math.max(0, actual - Number(definition.target));
+    errorBudget = budget > 0 ? Number(Math.max(0, 100 - (consumed / budget) * 100).toFixed(4)) : null;
+  }
+  const status = meets ? (attainment < 99 && attainment >= 95 ? "AT_RISK" : "COMPLIANT") : "BREACHED";
+  return {
+    slo_ref: definition.slo_ref,
+    code: definition.code,
+    kind: definition.kind,
+    name: definition.name,
+    metric_code: definition.metric_code,
+    target: definition.target,
+    comparison: definition.comparison,
+    unit: definition.unit,
+    window_seconds: definition.window_seconds,
+    actual,
+    meets,
+    attainment_percent: attainment,
+    samples: values.length,
+    status,
+    error_budget_remaining: errorBudget,
+  };
+}
+
+export async function evaluateAllSlosAsync(db, tenantId, { actor = null, notify = true } = {}) {
+  const definitions = await queryAllAsync(db, "SELECT * FROM observability_slo_definitions WHERE tenant_id = ? AND status = 'ACTIVE' ORDER BY kind, code", [Number(tenantId)]);
+  const results = await Promise.all(definitions.map(async (definition) => {
+    const evaluation = await evaluateSloAsync(db, tenantId, definition, actor);
+    if (evaluation.status === "BREACHED" && notify && !(await recentBreachRecordedAsync(db, tenantId, definition.slo_ref))) {
+      await recordHistoryAsync(db, {
+        tenantId,
+        action: definition.kind === "SLA" ? "SLA_BREACHED" : "SLO_BREACHED",
+        entityType: "slo",
+        entityId: definition.id,
+        entityRef: definition.slo_ref,
+        actor,
+        summary: `${definition.kind} ${definition.code} breached (actual ${evaluation.actual} vs target ${definition.target})`,
+        detail: evaluation,
+      });
+      await publishObservabilityEventAsync(
+        db,
+        {
+          eventType: observabilityEventCode(definition.kind === "SLA" ? "SLA_BREACHED" : "SLO_BREACHED"),
+          payload: { slo_ref: definition.slo_ref, code: definition.code, kind: definition.kind, metric_code: definition.metric_code, target: definition.target, actual: evaluation.actual },
+          objectType: "observability_slo",
+          objectId: definition.id,
+          tenantId,
+        },
+        actor
+      );
+    }
+    return evaluation;
+  }));
+  const breached = results.filter((entry) => entry.status === "BREACHED");
+  return {
+    evaluations: results,
+    total: results.length,
+    compliant: results.filter((entry) => entry.status === "COMPLIANT").length,
+    at_risk: results.filter((entry) => entry.status === "AT_RISK").length,
+    breached: breached.length,
+    no_data: results.filter((entry) => entry.status === "NO_DATA").length,
+  };
+}
+
+export async function sloSummaryAsync(db, tenantId) {
+  return evaluateAllSlosAsync(db, tenantId, { notify: false });
 }
 
 export { SLO_KINDS, SLO_COMPARISONS };

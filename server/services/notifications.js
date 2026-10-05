@@ -153,6 +153,7 @@ export {
   publish,
   publishAsync,
   notifyUser,
+  notifyUserAsync,
   notifyGroup,
   notifyRole,
   listEvents,

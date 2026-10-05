@@ -760,6 +760,10 @@ export function recordStateChange(db, options = {}) {
   return capture(db, { ...options, action: options.action || "state.change", category: "lifecycle" });
 }
 
+export function recordStateChangeAsync(db, options = {}) {
+  return captureAsync(db, { ...options, action: options.action || "state.change", category: "lifecycle" });
+}
+
 export function recordRelationshipChange(db, options = {}) {
   const action = options.action || (options.removed ? "relationship.removed" : "relationship.created");
   return capture(db, {

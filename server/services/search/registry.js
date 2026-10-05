@@ -442,6 +442,14 @@ export function tenantIds(db) {
   return rows.map((row) => Number(row.tenant_id));
 }
 
+export async function tenantIdsAsync(db) {
+  const rows = await queryAllAsync(
+    db,
+    "SELECT DISTINCT tenant_id FROM organizations WHERE tenant_id IS NOT NULL ORDER BY tenant_id"
+  );
+  return rows.map((row) => Number(row.tenant_id));
+}
+
 const DEFAULT_REGISTRATIONS = [
   {
     code: "object",

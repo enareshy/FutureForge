@@ -4,6 +4,8 @@ import { MAX_SCAN_BYTES } from "./constants.js";
 import { Errors } from "./errors.js";
 import { publicScan } from "./repository.js";
 import { recordContentEvent, auditContent } from "./events.js";
+import { queryAllAsync, queryOneAsync, runAsync, transactionAsync } from "../../db-async.js";
+import { recordContentEventAsync, auditContentAsync } from "./events.js";
 
 // Provider-independent security scanning hook (spec §19). The core service never
 // mandates a scanning implementation: deployments register a real engine through
@@ -63,6 +65,38 @@ export async function runContentScan(store, {
   };
 }
 
+export async function runContentScanAsync(store, {
+  key,
+  size = 0,
+  mimeType = "",
+  extension = "",
+  scanner = null,
+} = {}) {
+  const engine = resolveContentScanner(scanner);
+  let buffer = null;
+  if (key) {
+    try {
+      buffer = await store.read(key, { maxBytes: MAX_SCAN_BYTES });
+    } catch {
+      buffer = null;
+    }
+  }
+  const outcome = await engine.scan({
+    buffer,
+    size: Number(size) || (buffer ? buffer.length : 0),
+    mimeType,
+    extension,
+  });
+  return {
+    status: outcome?.status || "unknown",
+    engine: outcome?.engine || engine.name || "unknown",
+    engineVersion: outcome?.engineVersion || "",
+    signature: outcome?.signature || "",
+    detail: outcome?.detail || "",
+    scannedBytes: Number(size) || (buffer ? buffer.length : 0),
+  };
+}
+
 function recordScan(db, { content, versionId, outcome, scanType = "upload" }) {
   const ts = nowIso();
   const result = run(
@@ -89,6 +123,34 @@ function recordScan(db, { content, versionId, outcome, scanType = "upload" }) {
     ]
   );
   return queryOne(db, "SELECT * FROM content_security_scans WHERE id = ?", [Number(result.lastInsertId)]);
+}
+
+async function recordScanAsync(db, { content, versionId, outcome, scanType = "upload" }) {
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO content_security_scans
+      (tenant_id, content_id, version_id, scan_type, scanner, engine_version, status, result, signature,
+       details_json, scanned_bytes, started_at, completed_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      content?.tenant_id ?? null,
+      content?.id ?? null,
+      versionId ?? null,
+      scanType,
+      outcome.engine,
+      outcome.engineVersion || "",
+      outcome.status,
+      outcome.detail || "",
+      outcome.signature || "",
+      JSON.stringify({ detail: outcome.detail || "", mimeType: content?.mime_type || "" }),
+      outcome.scannedBytes || 0,
+      ts,
+      ts,
+      ts,
+    ]
+  );
+  return await queryOneAsync(db, "SELECT * FROM content_security_scans WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
 // Applies the scan outcome to an existing content row + version, quarantining on
@@ -144,6 +206,57 @@ export function applyScanOutcome(db, { content, versionId = null, outcome, actor
   return { scan: publicScan(scanRow), content: updated, security_status: securityStatus, quarantined, failed };
 }
 
+export async function applyScanOutcomeAsync(db, { content, versionId = null, outcome, actor = null }) {
+  const scanRow = await recordScanAsync(db, { content, versionId, outcome });
+  const ts = nowIso();
+  const quarantined = outcome.status === "infected";
+  const failed = outcome.status === "failed";
+  const securityStatus = quarantined ? "infected" : failed ? "failed" : outcome.status === "clean" ? "clean" : outcome.status;
+  const nextStatus = quarantined ? "quarantined" : failed ? "failed" : content.status;
+
+  await runAsync(
+    db,
+    "UPDATE content SET security_status = ?, status = ?, quarantine_reason = ?, processing_status = ?, updated_at = ?, revision = revision + 1 WHERE id = ?",
+    [
+      securityStatus,
+      nextStatus,
+      quarantined ? (outcome.signature || outcome.detail || "Malware detected") : "",
+      quarantined || failed ? "failed" : "processing",
+      ts,
+      content.id,
+    ]
+  );
+  if (versionId) {
+    await runAsync(
+      db,
+      "UPDATE content_versions SET security_status = ?, status = ?, updated_at = ? WHERE id = ?",
+      [securityStatus, quarantined ? "quarantined" : failed ? "failed" : "processing", ts, versionId]
+    );
+  }
+  const updated = await queryOneAsync(db, "SELECT * FROM content WHERE id = ?", [content.id]);
+
+  await recordContentEventAsync(db, {
+    eventType: quarantined ? "ContentQuarantined" : "ContentScanCompleted",
+    content: updated,
+    versionId,
+    actor,
+    payload: {
+      result: securityStatus,
+      scanner: outcome.engine,
+      signature: outcome.signature || "",
+      detail: outcome.detail || "",
+    },
+  });
+  await auditContentAsync(db, {
+    actor,
+    tenantId: updated.tenant_id,
+    action: quarantined ? "content.quarantined" : "content.scanned",
+    content: updated,
+    details: { result: securityStatus, scanner: outcome.engine, signature: outcome.signature || "" },
+  });
+  return { scan: publicScan(scanRow), content: updated, security_status: securityStatus, quarantined, failed };
+}
+
 // Exposed for deployments that want to subscribe to scan outcomes.
 export function quarantineContent(db, contentRow, { reason = "Security policy", actor = null, tenantId = null, ip = null } = {}) {
   return transaction(db, () => {
@@ -156,6 +269,21 @@ export function quarantineContent(db, contentRow, { reason = "Security policy", 
     const updated = queryOne(db, "SELECT * FROM content WHERE id = ?", [contentRow.id]);
     auditContent(db, { actor, tenantId: tenantId ?? updated.tenant_id, action: "content.quarantined", content: updated, reason, ip });
     recordContentEvent(db, { eventType: "ContentQuarantined", content: updated, actor, payload: { reason } });
+    return updated;
+  });
+}
+
+export async function quarantineContentAsync(db, contentRow, { reason = "Security policy", actor = null, tenantId = null, ip = null } = {}) {
+  return await transactionAsync(db, async () => {
+    const ts = nowIso();
+    await runAsync(
+      db,
+      "UPDATE content SET status = 'quarantined', security_status = 'infected', quarantine_reason = ?, processing_status = 'failed', updated_at = ?, revision = revision + 1 WHERE id = ?",
+      [reason, ts, contentRow.id]
+    );
+    const updated = await queryOneAsync(db, "SELECT * FROM content WHERE id = ?", [contentRow.id]);
+    await auditContentAsync(db, { actor, tenantId: tenantId ?? updated.tenant_id, action: "content.quarantined", content: updated, reason, ip });
+    await recordContentEventAsync(db, { eventType: "ContentQuarantined", content: updated, actor, payload: { reason } });
     return updated;
   });
 }
@@ -175,6 +303,21 @@ export function releaseQuarantine(db, contentRow, { actor = null, reason = "", t
   });
 }
 
+export async function releaseQuarantineAsync(db, contentRow, { actor = null, reason = "", tenantId = null, ip = null } = {}) {
+  return await transactionAsync(db, async () => {
+    const ts = nowIso();
+    await runAsync(
+      db,
+      "UPDATE content SET status = 'available', security_status = 'clean', quarantine_reason = '', processing_status = 'ready', updated_at = ?, revision = revision + 1 WHERE id = ?",
+      [ts, contentRow.id]
+    );
+    const updated = await queryOneAsync(db, "SELECT * FROM content WHERE id = ?", [contentRow.id]);
+    await auditContentAsync(db, { actor, tenantId: tenantId ?? updated.tenant_id, action: "content.quarantine.released", content: updated, reason, ip });
+    await recordContentEventAsync(db, { eventType: "ContentScanCompleted", content: updated, actor, payload: { released: true, reason } });
+    return updated;
+  });
+}
+
 export function listScans(db, contentId, { tenantId = null, limit = 50 } = {}) {
   let clause = "WHERE content_id = ?";
   const params = [Number(contentId)];
@@ -189,8 +332,29 @@ export function listScans(db, contentId, { tenantId = null, limit = 50 } = {}) {
   return { items: rows.map(publicScan), total: rows.length };
 }
 
+export async function listScansAsync(db, contentId, { tenantId = null, limit = 50 } = {}) {
+  let clause = "WHERE content_id = ?";
+  const params = [Number(contentId)];
+  if (tenantId !== null && tenantId !== undefined) {
+    clause += " AND tenant_id = ?";
+    params.push(Number(tenantId));
+  }
+  const rows = await queryAllAsync(db, `SELECT * FROM content_security_scans ${clause} ORDER BY created_at DESC, id DESC LIMIT ?`, [
+    ...params,
+    Math.min(200, Math.max(1, Number(limit) || 50)),
+  ]);
+  return { items: rows.map(publicScan), total: rows.length };
+}
+
 export function latestScan(db, contentId) {
   const row = queryOne(db, "SELECT * FROM content_security_scans WHERE content_id = ? ORDER BY created_at DESC, id DESC", [
+    Number(contentId),
+  ]);
+  return publicScan(row);
+}
+
+export async function latestScanAsync(db, contentId) {
+  const row = await queryOneAsync(db, "SELECT * FROM content_security_scans WHERE content_id = ? ORDER BY created_at DESC, id DESC", [
     Number(contentId),
   ]);
   return publicScan(row);

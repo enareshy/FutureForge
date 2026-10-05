@@ -56,3 +56,50 @@ export function filterExportableRecords(db, tenantId, objectType, records = []) 
   }
   return { records: kept, excluded };
 }
+
+export async function lifecycleStateOfAsync(db, tenantId, objectType, objectId) {
+  if (!objectType || objectId === null || objectId === undefined || objectId === "") return null;
+  try {
+    const row = await (DataLifecycle.getObjectAsync || DataLifecycle.getObject)(db, tenantId, objectType, objectId);
+    return row?.current_state || null;
+  } catch {
+    // Not every object type is onboarded to lifecycle management.
+    return null;
+  }
+}
+
+export async function stateCapabilitiesForAsync(db, tenantId, state) {
+  if (!state) return null;
+  try {
+    return await (DataLifecycle.stateCapabilitiesAsync || DataLifecycle.stateCapabilities)(db, tenantId, state);
+  } catch {
+    return null;
+  }
+}
+
+export async function assertImportStateAllowedAsync(db, tenantId, { objectType, objectId, permit = false } = {}) {
+  const state = await lifecycleStateOfAsync(db, tenantId, objectType, objectId);
+  if (!state) return { state: null, allowed: true };
+  const capabilities = await stateCapabilitiesForAsync(db, tenantId, state);
+  if (permit || !capabilities || capabilities.update) return { state, allowed: true };
+  throw lifecycleBlocked({ object_type: objectType, object_id: String(objectId), state, action: "IMPORT" });
+}
+
+export async function lifecycleAllowsExportAsync(db, tenantId, { objectType, objectId } = {}) {
+  const state = await lifecycleStateOfAsync(db, tenantId, objectType, objectId);
+  if (!state) return true;
+  const capabilities = await stateCapabilitiesForAsync(db, tenantId, state);
+  return capabilities ? capabilities.export : true;
+}
+
+export async function filterExportableRecordsAsync(db, tenantId, objectType, records = []) {
+  if (!objectType) return { records, excluded: [] };
+  const kept = [];
+  const excluded = [];
+  for (const record of records) {
+    const objectId = record?.id ?? record?.object_id ?? record?.objectId ?? record?.code ?? record?.object_ref;
+    if (await lifecycleAllowsExportAsync(db, tenantId, { objectType, objectId })) kept.push(record);
+    else excluded.push(objectId);
+  }
+  return { records: kept, excluded };
+}

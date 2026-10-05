@@ -1,10 +1,11 @@
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync, transactionAsync } from "../../db-async.js";
 import { buildRenditionStorageKey, resolveContentStorage, signedDownloadPath } from "./storage.js";
 import { signDownload } from "../file-storage/signing.js";
 import { Errors } from "./errors.js";
-import { publicRendition, currentVersionRow, findRenditionRow } from "./repository.js";
+import { publicRendition, currentVersionRow, findRenditionRow, currentVersionRowAsync, findRenditionRowAsync } from "./repository.js";
 import { renditionRef } from "./refs.js";
-import { recordContentEvent } from "./events.js";
+import { recordContentEvent, recordContentEventAsync } from "./events.js";
 
 // Rendition framework (spec §15-§18). Rendition generation is provider-driven:
 // the core entity knows nothing about PDF/JT/CAD tooling, it only orchestrates
@@ -164,6 +165,38 @@ export function requestRendition(db, contentRow, { renditionType, sourceVersionI
   return publicRendition(row);
 }
 
+export async function requestRenditionAsync(db, contentRow, { renditionType, sourceVersionId = null, actor = null, tenantId = null, metadata = {} } = {}) {
+  const type = String(renditionType || "").toUpperCase();
+  if (!type) throw Errors.renditionFailed("rendition_type is required");
+  const existing = await queryOneAsync(
+    db,
+    "SELECT * FROM content_renditions WHERE content_id = ? AND source_version_id IS NOT DISTINCT FROM ? AND rendition_type = ?",
+    [Number(contentRow.id), sourceVersionId ?? null, type]
+  );
+  if (existing) return publicRendition(existing);
+  const result = await runAsync(
+    db,
+    `INSERT INTO content_renditions
+      (rendition_ref, tenant_id, content_id, source_content_id, source_version_id, rendition_type, status, metadata_json, requested_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?)`,
+    [
+      renditionRef(),
+      tenantId ?? contentRow.tenant_id,
+      Number(contentRow.id),
+      Number(contentRow.id),
+      sourceVersionId ?? null,
+      type,
+      JSON.stringify(metadata || {}),
+      actor?.id ?? null,
+      nowIso(),
+      nowIso(),
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM content_renditions WHERE id = ?", [Number(result.lastInsertId)]);
+  await recordContentEventAsync(db, { eventType: "RenditionRequested", content: contentRow, renditionId: row.id, actor, tenantId, payload: { rendition_type: type } });
+  return publicRendition(row);
+}
+
 // Runs a rendition processor and stores its output. Returns the rendition DTO.
 export async function generateRendition(db, contentRow, renditionRow, { store = null, actor = null, buffer = null } = {}) {
   const ready = ensureStarted(db, contentRow, renditionRow);
@@ -221,10 +254,74 @@ export async function generateRendition(db, contentRow, renditionRow, { store = 
   });
 }
 
+export async function generateRenditionAsync(db, contentRow, renditionRow, { store = null, actor = null, buffer = null } = {}) {
+  const ready = await ensureStartedAsync(db, contentRow, renditionRow);
+  const processor = resolveRenditionProcessor(ready.rendition_type);
+  if (!processor) {
+    return await skipRenditionAsync(db, contentRow, ready, "No processor registered for this rendition type", { actor });
+  }
+  const nativeBuffer = buffer || (await readNative(store, contentRow));
+  if (!processor.supports({ mimeType: contentRow.mime_type, extension: contentRow.file_extension, content: contentRow })) {
+    return await skipRenditionAsync(db, contentRow, ready, "Rendition type is not supported for this content", { actor });
+  }
+  let output;
+  try {
+    output = await processor.generate({ buffer: nativeBuffer, content: contentRow, store });
+  } catch (err) {
+    return await failRenditionAsync(db, contentRow, ready, err.message, { actor });
+  }
+  if (!output?.buffer) {
+    return await failRenditionAsync(db, contentRow, ready, "Processor produced no output", { actor });
+  }
+  const storage = store || resolveContentStorage();
+  const key = buildRenditionStorageKey(contentRow.storage_key || `content/${contentRow.id}`, ready.rendition_type);
+  const stored = await storage.upload({ key, buffer: output.buffer, contentType: output.mimeType });
+  return await transactionAsync(db, async () => {
+    await runAsync(
+      db,
+      `UPDATE content_renditions SET status = 'available', file_name = ?, mime_type = ?, file_size = ?, checksum = ?,
+         storage_provider = ?, storage_key = ?, storage_bucket = ?, generator = ?, generator_version = ?,
+         error_message = '', metadata_json = ?, completed_at = ?, updated_at = ? WHERE id = ?`,
+      [
+        output.fileName || contentRow.file_name,
+        output.mimeType || "application/octet-stream",
+        stored.size,
+        stored.checksum,
+        stored.provider,
+        stored.key,
+        stored.bucket,
+        processor.name,
+        processor.version || "1.0.0",
+        JSON.stringify({ ...(ready.metadata ? JSON.parse(ready.metadata_json || "{}") : {}), ...(output.metadata || {}) }),
+        nowIso(),
+        nowIso(),
+        ready.id,
+      ]
+    );
+    const row = await queryOneAsync(db, "SELECT * FROM content_renditions WHERE id = ?", [ready.id]);
+    await recordContentEventAsync(db, {
+      eventType: "RenditionCreated",
+      content: contentRow,
+      renditionId: row.id,
+      actor,
+      payload: { rendition_type: ready.rendition_type, generator: processor.name, size: stored.size },
+    });
+    return publicRendition(row);
+  });
+}
+
 function ensureStarted(db, contentRow, renditionRow) {
   if (renditionRow.status === "requested") {
     run(db, "UPDATE content_renditions SET status = 'processing', updated_at = ? WHERE id = ?", [nowIso(), renditionRow.id]);
     return queryOne(db, "SELECT * FROM content_renditions WHERE id = ?", [renditionRow.id]);
+  }
+  return renditionRow;
+}
+
+async function ensureStartedAsync(db, contentRow, renditionRow) {
+  if (renditionRow.status === "requested") {
+    await runAsync(db, "UPDATE content_renditions SET status = 'processing', updated_at = ? WHERE id = ?", [nowIso(), renditionRow.id]);
+    return queryOneAsync(db, "SELECT * FROM content_renditions WHERE id = ?", [renditionRow.id]);
   }
   return renditionRow;
 }
@@ -248,6 +345,23 @@ function skipRendition(db, contentRow, renditionRow, message, { actor = null } =
   return publicRendition(row);
 }
 
+async function skipRenditionAsync(db, contentRow, renditionRow, message, { actor = null } = {}) {
+  await runAsync(
+    db,
+    "UPDATE content_renditions SET status = 'skipped', error_message = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+    [message || "Rendition skipped", nowIso(), nowIso(), renditionRow.id]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM content_renditions WHERE id = ?", [renditionRow.id]);
+  await recordContentEventAsync(db, {
+    eventType: "RenditionFailed",
+    content: contentRow,
+    renditionId: row.id,
+    actor,
+    payload: { rendition_type: row.rendition_type, skipped: true, reason: message },
+  });
+  return publicRendition(row);
+}
+
 function failRendition(db, contentRow, renditionRow, message, { actor = null } = {}) {
   run(
     db,
@@ -256,6 +370,23 @@ function failRendition(db, contentRow, renditionRow, message, { actor = null } =
   );
   const row = queryOne(db, "SELECT * FROM content_renditions WHERE id = ?", [renditionRow.id]);
   recordContentEvent(db, {
+    eventType: "RenditionFailed",
+    content: contentRow,
+    renditionId: row.id,
+    actor,
+    payload: { rendition_type: row.rendition_type, error: message },
+  });
+  return publicRendition(row);
+}
+
+async function failRenditionAsync(db, contentRow, renditionRow, message, { actor = null } = {}) {
+  await runAsync(
+    db,
+    "UPDATE content_renditions SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ?",
+    [message || "Rendition failed", nowIso(), renditionRow.id]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM content_renditions WHERE id = ?", [renditionRow.id]);
+  await recordContentEventAsync(db, {
     eventType: "RenditionFailed",
     content: contentRow,
     renditionId: row.id,
@@ -294,13 +425,51 @@ export function listRenditions(db, contentRow, { status = null, type = null } = 
   return { items: rows.map(publicRendition), total: rows.length };
 }
 
+export async function listRenditionsAsync(db, contentRow, { status = null, type = null } = {}) {
+  const where = ["content_id = ?"];
+  const params = [Number(contentRow.id)];
+  if (status) {
+    where.push("status = ?");
+    params.push(String(status));
+  }
+  if (type) {
+    where.push("rendition_type = ?");
+    params.push(String(type).toUpperCase());
+  }
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM content_renditions WHERE ${where.join(" AND ")} ORDER BY rendition_type, id`,
+    params
+  );
+  return { items: rows.map(publicRendition), total: rows.length };
+}
+
 export function getRendition(db, contentRow, reference) {
   return publicRendition(findRenditionRow(db, contentRow.id, reference));
+}
+
+export async function getRenditionAsync(db, contentRow, reference) {
+  return publicRendition(await findRenditionRowAsync(db, contentRow.id, reference));
 }
 
 export function renditionAccessUrl(db, contentRow, rendition, { expiresIn = null, disposition = "attachment" } = {}) {
   if (rendition.status !== "available") throw Errors.renditionFailed("Rendition is not available");
   const row = queryOne(db, "SELECT * FROM content_renditions WHERE id = ?", [Number(rendition.id)]);
+  if (!row?.storage_key) throw Errors.renditionFailed("Rendition has no stored content");
+  const token = signDownload({
+    key: row.storage_key,
+    filename: row.file_name,
+    mimeType: row.mime_type,
+    disposition,
+    tenantId: contentRow.tenant_id,
+    expiresIn,
+  });
+  return { url: signedDownloadPath(token), token, expires_in: Number(expiresIn) || 900 };
+}
+
+export async function renditionAccessUrlAsync(db, contentRow, rendition, { expiresIn = null, disposition = "attachment" } = {}) {
+  if (rendition.status !== "available") throw Errors.renditionFailed("Rendition is not available");
+  const row = await queryOneAsync(db, "SELECT * FROM content_renditions WHERE id = ?", [Number(rendition.id)]);
   if (!row?.storage_key) throw Errors.renditionFailed("Rendition has no stored content");
   const token = signDownload({
     key: row.storage_key,
@@ -321,6 +490,18 @@ export function markRenditionsOutdated(db, contentRow) {
   );
 }
 
+export async function markRenditionsOutdatedAsync(db, contentRow) {
+  return runAsync(
+    db,
+    "UPDATE content_renditions SET status = 'outdated', updated_at = ? WHERE content_id = ? AND status = 'available'",
+    [nowIso(), Number(contentRow.id)]
+  );
+}
+
 export function currentSourceVersion(db, contentRow) {
   return currentVersionRow(db, contentRow.id);
+}
+
+export async function currentSourceVersionAsync(db, contentRow) {
+  return currentVersionRowAsync(db, contentRow.id);
 }

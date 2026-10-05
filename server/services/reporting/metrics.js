@@ -5,14 +5,15 @@
 // reference metrics instead of hard-coding calculations in a component. KPI
 // formulas therefore never live in the frontend.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { AGGREGATIONS, METRIC_UNITS, IMMUTABLE_STATUSES } from "./constants.js";
 import { metricNotFound, metricConflict, invalidMetric } from "./errors.js";
 import { metricRef as makeMetricRef } from "./identifiers.js";
-import { publicMetric, parseJson, stringifyJson, paged } from "./repository.js";
+import { publicMetric, parseJson, stringifyJson, paged, pagedAsync } from "./repository.js";
 import { getEntity, requireAttribute, entityAttributeMap } from "./semantic.js";
-import { executeQuery } from "./query-engine.js";
-import { publishReportingEvent } from "./events.js";
+import { executeQuery, executeQueryAsync } from "./query-engine.js";
+import { publishReportingEvent, publishReportingEventAsync } from "./events.js";
 
 const STATUSES = ["DRAFT", "ACTIVE", "DEPRECATED", "ARCHIVED"];
 
@@ -77,8 +78,47 @@ export function createMetric(db, tenantId, input = {}, actor = null, ip = null) 
   return getMetricById(db, Number(tenantId), Number(result.lastInsertId));
 }
 
+export async function createMetricAsync(db, tenantId, input = {}, actor = null, ip = null) {
+  const normalized = validateMetric(db, tenantId, input);
+  if (await queryOneAsync(db, "SELECT id FROM reporting_metrics WHERE tenant_id = ? AND code = ?", [Number(tenantId), normalized.code])) {
+    throw metricConflict(normalized.code);
+  }
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO reporting_metrics (metric_ref, tenant_id, organization_id, code, name, description, entity, aggregation, attribute, filters_json, formula, unit, version, status, metadata_json, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'DRAFT', ?, ?, ?, ?, ?)`,
+    [
+      makeMetricRef(normalized.code),
+      Number(tenantId),
+      normalized.organization_id ?? null,
+      normalized.code,
+      normalized.name,
+      normalized.description,
+      normalized.entity,
+      normalized.aggregation,
+      normalized.attribute,
+      stringifyJson(normalized.filters, "[]"),
+      normalized.formula,
+      normalized.unit,
+      stringifyJson(normalized.metadata, "{}"),
+      actor?.id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  await writeAuditAsync(db, { actor, action: "reporting.metric.create", resourceType: "reporting_metric", resourceId: normalized.code, details: { entity: normalized.entity }, sourceModule: "reporting", ip });
+  await publishReportingEventAsync(db, { eventType: "MetricUpdated", payload: { code: normalized.code, action: "created" }, objectType: "reporting_metric", tenantId, organizationId: normalized.organization_id }, actor);
+  return await getMetricByIdAsync(db, Number(tenantId), Number(result.lastInsertId));
+}
+
 export function getMetricById(db, tenantId, id) {
   return publicMetric(queryOne(db, "SELECT * FROM reporting_metrics WHERE id = ? AND tenant_id = ?", [Number(id), Number(tenantId)]));
+}
+
+export async function getMetricByIdAsync(db, tenantId, id) {
+  return publicMetric(await queryOneAsync(db, "SELECT * FROM reporting_metrics WHERE id = ? AND tenant_id = ?", [Number(id), Number(tenantId)]));
 }
 
 export function getMetric(db, tenantId, ref) {
@@ -86,6 +126,15 @@ export function getMetric(db, tenantId, ref) {
   const row = /^\d+$/.test(raw)
     ? queryOne(db, "SELECT * FROM reporting_metrics WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
     : queryOne(db, "SELECT * FROM reporting_metrics WHERE tenant_id = ? AND (code = ? OR metric_ref = ?)", [Number(tenantId), raw.toUpperCase(), raw]);
+  if (!row) throw metricNotFound(ref);
+  return publicMetric(row);
+}
+
+export async function getMetricAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const row = /^\d+$/.test(raw)
+    ? await queryOneAsync(db, "SELECT * FROM reporting_metrics WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
+    : await queryOneAsync(db, "SELECT * FROM reporting_metrics WHERE tenant_id = ? AND (code = ? OR metric_ref = ?)", [Number(tenantId), raw.toUpperCase(), raw]);
   if (!row) throw metricNotFound(ref);
   return publicMetric(row);
 }
@@ -102,6 +151,20 @@ export function listMetrics(db, tenantId, query = {}) {
     params.push(String(query.entity));
   }
   return paged(db, "reporting_metrics", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicMetric });
+}
+
+export async function listMetricsAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  if (query.entity) {
+    where.push("entity = ?");
+    params.push(String(query.entity));
+  }
+  return await pagedAsync(db, "reporting_metrics", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicMetric });
 }
 
 export function updateMetric(db, tenantId, ref, input = {}, actor = null) {
@@ -133,6 +196,35 @@ export function updateMetric(db, tenantId, ref, input = {}, actor = null) {
   return getMetricById(db, Number(tenantId), existing.id);
 }
 
+export async function updateMetricAsync(db, tenantId, ref, input = {}, actor = null) {
+  const existing = await getMetricAsync(db, tenantId, ref);
+  if (IMMUTABLE_STATUSES.includes(existing.status)) throw invalidMetric(`Metric ${existing.code} is ${existing.status} and cannot be edited; create a new version`);
+  const normalized = validateMetric(db, tenantId, { ...existing, ...input, code: existing.code });
+  await runAsync(
+    db,
+    `UPDATE reporting_metrics SET name = ?, description = ?, entity = ?, aggregation = ?, attribute = ?, filters_json = ?, formula = ?, unit = ?, metadata_json = ?, updated_by = ?, updated_at = ?
+      WHERE id = ? AND tenant_id = ?`,
+    [
+      normalized.name,
+      normalized.description,
+      normalized.entity,
+      normalized.aggregation,
+      normalized.attribute,
+      stringifyJson(normalized.filters, "[]"),
+      normalized.formula,
+      normalized.unit,
+      stringifyJson(normalized.metadata, "{}"),
+      actor?.id ?? null,
+      nowIso(),
+      existing.id,
+      Number(tenantId),
+    ]
+  );
+  await writeAuditAsync(db, { actor, action: "reporting.metric.update", resourceType: "reporting_metric", resourceId: existing.code, details: { entity: normalized.entity }, sourceModule: "reporting" });
+  await publishReportingEventAsync(db, { eventType: "MetricUpdated", payload: { code: existing.code, action: "updated" }, objectType: "reporting_metric", tenantId }, actor);
+  return await getMetricByIdAsync(db, Number(tenantId), existing.id);
+}
+
 export function setMetricStatus(db, tenantId, ref, status, actor = null) {
   const existing = getMetric(db, tenantId, ref);
   const next = String(status || "").toUpperCase();
@@ -142,10 +234,26 @@ export function setMetricStatus(db, tenantId, ref, status, actor = null) {
   return getMetricById(db, Number(tenantId), existing.id);
 }
 
+export async function setMetricStatusAsync(db, tenantId, ref, status, actor = null) {
+  const existing = await getMetricAsync(db, tenantId, ref);
+  const next = String(status || "").toUpperCase();
+  if (!STATUSES.includes(next)) throw invalidMetric(`Unsupported metric status: ${status}`);
+  await runAsync(db, "UPDATE reporting_metrics SET status = ?, updated_by = ?, updated_at = ? WHERE id = ? AND tenant_id = ?", [next, actor?.id ?? null, nowIso(), existing.id, Number(tenantId)]);
+  await writeAuditAsync(db, { actor, action: "reporting.metric.status", resourceType: "reporting_metric", resourceId: existing.code, details: { status: next }, sourceModule: "reporting" });
+  return await getMetricByIdAsync(db, Number(tenantId), existing.id);
+}
+
 export function deleteMetric(db, tenantId, ref) {
   const existing = getMetric(db, tenantId, ref);
   run(db, "DELETE FROM reporting_metric_versions WHERE metric_id = ?", [existing.id]);
   run(db, "DELETE FROM reporting_metrics WHERE id = ? AND tenant_id = ?", [existing.id, Number(tenantId)]);
+  return { deleted: true, code: existing.code };
+}
+
+export async function deleteMetricAsync(db, tenantId, ref) {
+  const existing = await getMetricAsync(db, tenantId, ref);
+  await runAsync(db, "DELETE FROM reporting_metric_versions WHERE metric_id = ?", [existing.id]);
+  await runAsync(db, "DELETE FROM reporting_metrics WHERE id = ? AND tenant_id = ?", [existing.id, Number(tenantId)]);
   return { deleted: true, code: existing.code };
 }
 
@@ -178,8 +286,41 @@ export function computeMetric(db, tenantId, metric, context = {}) {
   };
 }
 
+export async function computeMetricAsync(db, tenantId, metric, context = {}) {
+  const definition = typeof metric === "string" ? await getMetricAsync(db, tenantId, metric) : metric;
+  const extra = definition.metadata?.aggregations || null;
+  const aggregations =
+    Array.isArray(extra) && extra.length
+      ? extra
+      : [{ function: definition.aggregation, attribute: definition.attribute || null, alias: "value", filters: definition.filters || [] }];
+  const calculated_fields = definition.formula ? [{ alias: "value", expression: definition.formula }] : [];
+  const spec = { entity: definition.entity, data_source: context.data_source || "OBJECT_MODEL", aggregations, calculated_fields, filters: [] };
+  const result = await executeQueryAsync(db, tenantId, spec, {
+    ...context,
+    maxRows: context.maxRows,
+    maxGroupRows: 1,
+  });
+  const row = result.rows[0] || {};
+  const value = row.value ?? Object.values(row).find((entry) => typeof entry === "number") ?? null;
+  return {
+    metric: definition.code,
+    entity: definition.entity,
+    value,
+    row,
+    denied: result.denied,
+    scanned: result.scanned,
+    took_ms: result.took_ms,
+  };
+}
+
 export function listMetricVersions(db, tenantId, ref) {
   const metric = getMetric(db, tenantId, ref);
   const rows = queryAll(db, "SELECT * FROM reporting_metric_versions WHERE metric_id = ? ORDER BY version DESC", [metric.id]);
+  return { items: rows.map((row) => ({ version: row.version, status: row.status, change_summary: row.change_summary, snapshot: parseJson(row.snapshot_json, {}), created_at: row.created_at })), total: rows.length };
+}
+
+export async function listMetricVersionsAsync(db, tenantId, ref) {
+  const metric = await getMetricAsync(db, tenantId, ref);
+  const rows = await queryAllAsync(db, "SELECT * FROM reporting_metric_versions WHERE metric_id = ? ORDER BY version DESC", [metric.id]);
   return { items: rows.map((row) => ({ version: row.version, status: row.status, change_summary: row.change_summary, snapshot: parseJson(row.snapshot_json, {}), created_at: row.created_at })), total: rows.length };
 }

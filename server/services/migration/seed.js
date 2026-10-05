@@ -4,13 +4,14 @@
 // administrator can see the capability working immediately. Real organizations
 // connect their own legacy systems.
 import { queryOne } from "../../db.js";
-import { withEventSuppression } from "../events/emit.js";
-import { ensureMigrationFoundation } from "./foundation.js";
-import { createProject, setProjectStatus } from "./projects.js";
-import { createPackage, setPackageStatus } from "./packages.js";
-import { createDefinition, setDefinitionStatus } from "./definitions.js";
-import { createSourceConfiguration } from "./source-configurations.js";
-import { generatePlan } from "./planning.js";
+import { queryOneAsync } from "../../db-async.js";
+import { withEventSuppression, withEventSuppressionAsync } from "../events/emit.js";
+import { ensureMigrationFoundation, ensureMigrationFoundationAsync } from "./foundation.js";
+import { createProject, setProjectStatus, createProjectAsync, setProjectStatusAsync } from "./projects.js";
+import { createPackage, setPackageStatus, createPackageAsync, setPackageStatusAsync } from "./packages.js";
+import { createDefinition, setDefinitionStatus, createDefinitionAsync, setDefinitionStatusAsync } from "./definitions.js";
+import { createSourceConfiguration, createSourceConfigurationAsync } from "./source-configurations.js";
+import { generatePlan, generatePlanAsync } from "./planning.js";
 
 const DEMO_RECORDS = [
   {
@@ -146,10 +147,125 @@ export function seedMigration(db, tenantId) {
   });
 }
 
+export async function seedMigrationAsync(db, tenantId) {
+  return withEventSuppressionAsync(async () => {
+    const tenant = await resolveTenantIdAsync(db, tenantId);
+    const foundation = await ensureMigrationFoundationAsync(db);
+    const created = { source_configurations: 0, projects: 0, packages: 0, definitions: 0, plans: 0 };
+    if (!tenant) return { foundation, created, seeded: false, reason: "no_tenant" };
+
+    if (!(await queryOneAsync(db, "SELECT id FROM mig_source_configurations WHERE tenant_id = ? AND code = 'LEGACY_TC'", [tenant]))) {
+      await createSourceConfigurationAsync(
+        db,
+        tenant,
+        {
+          code: "LEGACY_TC",
+          name: "Legacy Teamcenter extract",
+          description: "Read-only extract of the legacy Teamcenter part master.",
+          adapter_type: "DATABASE",
+          settings: { source_system: "Teamcenter", records: DEMO_RECORDS },
+        },
+        null,
+        null
+      );
+      created.source_configurations += 1;
+    }
+
+    let project = await queryOneAsync(db, "SELECT * FROM mig_projects WHERE tenant_id = ? AND code = 'LEGACY_TC_ONBOARD'", [tenant]);
+    if (!project) {
+      project = await createProjectAsync(
+        db,
+        tenant,
+        {
+          code: "LEGACY_TC_ONBOARD",
+          name: "Legacy Teamcenter onboarding",
+          description: "Migrate the legacy Teamcenter part master into the platform.",
+          source_system: "Teamcenter",
+          source_version: "11.6",
+          scope: { mode: "FULL" },
+        },
+        null,
+        null
+      );
+      created.projects += 1;
+    }
+    const projectRow = await queryOneAsync(db, "SELECT * FROM mig_projects WHERE id = ?", [project.id]);
+
+    let pkg = await queryOneAsync(db, "SELECT * FROM mig_packages WHERE tenant_id = ? AND code = 'PART_MASTER'", [tenant]);
+    if (!pkg) {
+      pkg = await createPackageAsync(
+        db,
+        tenant,
+        {
+          project_id: projectRow.id,
+          code: "PART_MASTER",
+          name: "Part master",
+          description: "Legacy part master records.",
+          source_object_type: "Part",
+          target_object_type: "product",
+          source: { adapter_type: "DATABASE", source_system: "Teamcenter", settings: { records: DEMO_RECORDS } },
+          mappings: PRODUCT_MAPPINGS,
+          duplicate_strategy: "UPSERT",
+          execution_order: 1,
+        },
+        null,
+        null
+      );
+      created.packages += 1;
+    }
+
+    if (!(await queryOneAsync(db, "SELECT id FROM mig_definitions WHERE tenant_id = ? AND code = 'PART_MASTER_DEF'", [tenant]))) {
+      const definition = await createDefinitionAsync(
+        db,
+        tenant,
+        {
+          code: "PART_MASTER_DEF",
+          name: "Part master migration",
+          description: "Map legacy Teamcenter parts to platform products.",
+          source_object_type: "Part",
+          target_object_type: "product",
+          source: { adapter_type: "DATABASE", source_system: "Teamcenter", settings: { records: DEMO_RECORDS } },
+          mappings: PRODUCT_MAPPINGS,
+          validation_rules: PRODUCT_RULES,
+          duplicate_strategy: "UPSERT",
+          status: "DRAFT",
+        },
+        null,
+        null
+      );
+      await setDefinitionStatusAsync(db, tenant, definition.id, "ACTIVE", null, null);
+      created.definitions += 1;
+    }
+
+    try {
+      if (projectRow.status === "DRAFT") {
+        await setProjectStatusAsync(db, tenant, projectRow.id, "READY", null, null);
+      }
+      const packageRow = await queryOneAsync(db, "SELECT * FROM mig_packages WHERE tenant_id = ? AND code = 'PART_MASTER'", [tenant]);
+      if (packageRow && packageRow.status === "DRAFT") {
+        await setPackageStatusAsync(db, tenant, packageRow.id, "READY", null, null);
+      }
+      await generatePlanAsync(db, tenant, projectRow.id, {});
+      created.plans += 1;
+    } catch {
+      // Planning is advisory in the seed; a configuration issue must not fail boot.
+    }
+
+    return { foundation, created, seeded: true };
+  });
+}
+
 function resolveTenantId(db, tenantId) {
   const explicit = Number(tenantId);
   if (Number.isInteger(explicit) && explicit > 0) return explicit;
   const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  return helix?.id ?? null;
+}
+
+async function resolveTenantIdAsync(db, tenantId) {
+  const explicit = Number(tenantId);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const helix = await queryOneAsync(db, "SELECT id FROM organizations WHERE code = 'helix'");
   return helix?.id ?? null;
 }
 
@@ -164,4 +280,17 @@ export function ensureMigrationSeed(db, tenantId) {
   const existing = queryOne(db, "SELECT id FROM mig_projects WHERE tenant_id = ? AND code = 'LEGACY_TC_ONBOARD'", [tenant]);
   if (existing) return { foundation, seeded: false, reason: "already_present" };
   return seedMigration(db, tenant);
+}
+
+export async function ensureMigrationSeedAsync(db, tenantId) {
+  // Ensure the foundation (tables, configuration, job/event/search registrations
+  // and the in-process source-adapter catalogue) before the demo-project check.
+  // This keeps the runtime fully initialised for databases cloned from a seeded
+  // template, where the demo project already exists and seeding short-circuits.
+  const foundation = await ensureMigrationFoundationAsync(db);
+  const tenant = await resolveTenantIdAsync(db, tenantId);
+  if (!tenant) return { foundation, seeded: false, reason: "no_tenant" };
+  const existing = await queryOneAsync(db, "SELECT id FROM mig_projects WHERE tenant_id = ? AND code = 'LEGACY_TC_ONBOARD'", [tenant]);
+  if (existing) return { foundation, seeded: false, reason: "already_present" };
+  return seedMigrationAsync(db, tenant);
 }

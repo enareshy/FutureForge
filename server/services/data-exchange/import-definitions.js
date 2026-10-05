@@ -6,7 +6,8 @@
 // its content is immutable and changes are made by creating a new version. The
 // framework never stores business data or connector secrets here.
 import { queryAll, queryOne, run, transaction, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync, transactionAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { CONNECTOR_TYPES, MAX_MAPPINGS, MAX_FIELDS } from "./constants.js";
 import { importDefinitionRef as makeDefinitionRef } from "./refs.js";
 import {
@@ -40,13 +41,21 @@ import {
   assertValidationLevel,
   assertSeverity,
 } from "./validation.js";
-import { publishExchangeEvent } from "./events.js";
-import { recordHistory } from "./history.js";
+import { publishExchangeEvent, publishExchangeEventAsync } from "./events.js";
+import { recordHistory, recordHistoryAsync } from "./history.js";
 
 const EDITABLE_STATUSES = new Set(["DRAFT"]);
 
 export function getImportDefinitionRow(db, tenantId, ref) {
   return queryOne(
+    db,
+    "SELECT * FROM ie_import_definitions WHERE tenant_id = ? AND (definition_ref = ? OR code = ? OR id = ?)",
+    [Number(tenantId), String(ref), normalizeUpper(ref), Number(ref) || -1]
+  );
+}
+
+export async function getImportDefinitionRowAsync(db, tenantId, ref) {
+  return await queryOneAsync(
     db,
     "SELECT * FROM ie_import_definitions WHERE tenant_id = ? AND (definition_ref = ? OR code = ? OR id = ?)",
     [Number(tenantId), String(ref), normalizeUpper(ref), Number(ref) || -1]
@@ -59,16 +68,34 @@ export function requireImportDefinitionRow(db, tenantId, ref) {
   return row;
 }
 
+export async function requireImportDefinitionRowAsync(db, tenantId, ref) {
+  const row = await getImportDefinitionRowAsync(db, tenantId, ref);
+  if (!row) throw definitionNotFound(ref);
+  return row;
+}
+
 function mappingsOf(db, definitionId) {
   return queryAll(db, "SELECT * FROM ie_import_mappings WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)]).map(publicImportMapping);
+}
+
+async function mappingsOfAsync(db, definitionId) {
+  return (await queryAllAsync(db, "SELECT * FROM ie_import_mappings WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)])).map(publicImportMapping);
 }
 
 function transformationsOf(db, definitionId) {
   return queryAll(db, "SELECT * FROM ie_import_transformations WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)]).map(publicImportTransformation);
 }
 
+async function transformationsOfAsync(db, definitionId) {
+  return (await queryAllAsync(db, "SELECT * FROM ie_import_transformations WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)])).map(publicImportTransformation);
+}
+
 function rulesOf(db, definitionId) {
   return queryAll(db, "SELECT * FROM ie_import_validation_rules WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)]).map(publicImportValidationRule);
+}
+
+async function rulesOfAsync(db, definitionId) {
+  return (await queryAllAsync(db, "SELECT * FROM ie_import_validation_rules WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)])).map(publicImportValidationRule);
 }
 
 export function withImportChildren(db, row) {
@@ -76,8 +103,17 @@ export function withImportChildren(db, row) {
   return { ...publicImportDefinition(row), mappings: mappingsOf(db, row.id), transformations: transformationsOf(db, row.id), validation_rules: rulesOf(db, row.id) };
 }
 
+export async function withImportChildrenAsync(db, row) {
+  if (!row) return null;
+  return { ...publicImportDefinition(row), mappings: await mappingsOfAsync(db, row.id), transformations: await transformationsOfAsync(db, row.id), validation_rules: await rulesOfAsync(db, row.id) };
+}
+
 export function getImportDefinition(db, tenantId, ref) {
   return withImportChildren(db, requireImportDefinitionRow(db, tenantId, ref));
+}
+
+export async function getImportDefinitionAsync(db, tenantId, ref) {
+  return await withImportChildrenAsync(db, await requireImportDefinitionRowAsync(db, tenantId, ref));
 }
 
 // ── Child collections ────────────────────────────────────────────────────────
@@ -164,6 +200,39 @@ function writeMappings(db, tenantId, definitionId, entries) {
   }
 }
 
+async function writeMappingsAsync(db, tenantId, definitionId, entries) {
+  await runAsync(db, "DELETE FROM ie_import_mappings WHERE definition_id = ?", [definitionId]);
+  for (const entry of entries) {
+    await runAsync(
+      db,
+      `INSERT INTO ie_import_mappings (definition_id, tenant_id, sequence, source_field, target_field, mapping_type, data_type, required, default_value, constant_value, expression, lookup_json, condition_json, concat_json, split_json, nested_json, transform_json, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        definitionId,
+        Number(tenantId),
+        entry.sequence,
+        entry.source_field,
+        entry.target_field,
+        entry.mapping_type,
+        entry.data_type,
+        entry.required,
+        entry.default_value === undefined ? null : entry.default_value,
+        entry.constant_value === undefined ? null : entry.constant_value,
+        entry.expression,
+        entry.lookup_json,
+        entry.condition_json,
+        entry.concat_json,
+        entry.split_json,
+        entry.nested_json,
+        entry.transform_json,
+        entry.status,
+        nowIso(),
+        nowIso(),
+      ]
+    );
+  }
+}
+
 function writeTransformations(db, tenantId, definitionId, entries) {
   run(db, "DELETE FROM ie_import_transformations WHERE definition_id = ?", [definitionId]);
   for (const entry of entries) {
@@ -176,10 +245,34 @@ function writeTransformations(db, tenantId, definitionId, entries) {
   }
 }
 
+async function writeTransformationsAsync(db, tenantId, definitionId, entries) {
+  await runAsync(db, "DELETE FROM ie_import_transformations WHERE definition_id = ?", [definitionId]);
+  for (const entry of entries) {
+    await runAsync(
+      db,
+      `INSERT INTO ie_import_transformations (definition_id, tenant_id, sequence, stage, target_field, transformation_type, config_json, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [definitionId, Number(tenantId), entry.sequence, entry.stage, entry.target_field, entry.transformation_type, entry.config_json, entry.status, nowIso(), nowIso()]
+    );
+  }
+}
+
 function writeRules(db, tenantId, definitionId, entries) {
   run(db, "DELETE FROM ie_import_validation_rules WHERE definition_id = ?", [definitionId]);
   for (const entry of entries) {
     run(
+      db,
+      `INSERT INTO ie_import_validation_rules (definition_id, tenant_id, sequence, level, target_field, rule_type, config_json, severity, message, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [definitionId, Number(tenantId), entry.sequence, entry.level, entry.target_field, entry.rule_type, entry.config_json, entry.severity, entry.message, entry.status, nowIso(), nowIso()]
+    );
+  }
+}
+
+async function writeRulesAsync(db, tenantId, definitionId, entries) {
+  await runAsync(db, "DELETE FROM ie_import_validation_rules WHERE definition_id = ?", [definitionId]);
+  for (const entry of entries) {
+    await runAsync(
       db,
       `INSERT INTO ie_import_validation_rules (definition_id, tenant_id, sequence, level, target_field, rule_type, config_json, severity, message, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -221,6 +314,23 @@ function normalizeDefinitionInput(input = {}, existing = null) {
 function snapshotVersion(db, row, actor, changeSummary) {
   const snapshot = withImportChildren(db, row);
   run(
+    db,
+    `INSERT INTO ie_import_definition_versions (definition_id, tenant_id, version, status, snapshot_json, change_summary, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (definition_id, version) DO UPDATE SET
+       tenant_id = EXCLUDED.tenant_id,
+       status = EXCLUDED.status,
+       snapshot_json = EXCLUDED.snapshot_json,
+       change_summary = EXCLUDED.change_summary,
+       created_by = EXCLUDED.created_by,
+       created_at = EXCLUDED.created_at`,
+    [row.id, row.tenant_id, row.version, row.status, JSON.stringify(snapshot), normalizeText(changeSummary, { max: 500 }), actor?.id ?? null, nowIso()]
+  );
+}
+
+async function snapshotVersionAsync(db, row, actor, changeSummary) {
+  const snapshot = await withImportChildrenAsync(db, row);
+  await runAsync(
     db,
     `INSERT INTO ie_import_definition_versions (definition_id, tenant_id, version, status, snapshot_json, change_summary, created_by, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -295,6 +405,66 @@ export function createImportDefinition(db, tenantId, input = {}, actor = null, i
   return withImportChildren(db, row);
 }
 
+export async function createImportDefinitionAsync(db, tenantId, input = {}, actor = null, ip = null) {
+  const code = requireCode(input.code, "Definition code");
+  if (await queryOneAsync(db, "SELECT id FROM ie_import_definitions WHERE tenant_id = ? AND code = ?", [Number(tenantId), code])) throw definitionConflict(code);
+  const normalized = normalizeDefinitionInput(input);
+  const mappings = normalizeMappingCollection(input.mappings);
+  const transformations = normalizeTransformationCollection(input.transformations);
+  const rules = normalizeRuleCollection(input.validation_rules || input.validationRules);
+  const status = assertDefinitionStatus(input.status || "DRAFT");
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO ie_import_definitions
+      (definition_ref, tenant_id, organization_id, code, name, description, target_object_type, target_subtype, source_type, connector_config_id, source_config_json, mapping_json, transformation_json, validation_json,
+       duplicate_strategy, duplicate_key_json, batch_size, error_strategy, reconciliation_strategy, transaction_strategy, mode, template_id, status, version, owner_user_id, catalog_refs_json, schedule_json, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      makeDefinitionRef(code),
+      Number(tenantId),
+      input.organization_id ?? input.organizationId ?? null,
+      code,
+      requireName(input.name, "Definition name"),
+      normalizeText(input.description),
+      normalized.target_object_type,
+      normalized.target_subtype,
+      normalized.source_type,
+      normalized.connector_config_id,
+      JSON.stringify(normalized.source_config),
+      JSON.stringify(normalized.mapping),
+      JSON.stringify(normalized.transformation),
+      JSON.stringify(normalized.validation),
+      normalized.duplicate_strategy,
+      JSON.stringify(normalized.duplicate_key),
+      normalized.batch_size,
+      normalized.error_strategy,
+      normalized.reconciliation_strategy,
+      normalized.transaction_strategy,
+      normalized.mode,
+      normalized.template_id,
+      status,
+      normalized.owner_user_id,
+      JSON.stringify(normalized.catalog_refs),
+      JSON.stringify(normalized.schedule),
+      actor?.id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const id = Number(result.lastInsertId);
+  await writeMappingsAsync(db, tenantId, id, mappings);
+  await writeTransformationsAsync(db, tenantId, id, transformations);
+  await writeRulesAsync(db, tenantId, id, rules);
+  const row = await queryOneAsync(db, "SELECT * FROM ie_import_definitions WHERE id = ?", [id]);
+  await snapshotVersionAsync(db, row, actor, "initial version");
+  await writeAuditAsync(db, { actor, action: "data_exchange.import_definition.create", resourceType: "ie_import_definitions", resourceId: code, details: { target_object_type: normalized.target_object_type }, ip });
+  await recordHistoryAsync(db, { direction: "IMPORT", tenantId, definitionId: id, definitionVersion: 1, action: "DEFINITION_CREATED", status, targetObjectType: normalized.target_object_type, actor, details: { code } });
+  await publishExchangeEventAsync(db, { eventType: "ImportDefinitionCreated", tenantId, objectType: "ie_import_definition", objectId: row.definition_ref, payload: { code } }, actor);
+  return await withImportChildrenAsync(db, row);
+}
+
 export function updateImportDefinition(db, tenantId, ref, patch = {}, actor = null, ip = null) {
   const row = requireImportDefinitionRow(db, tenantId, ref);
   if (!EDITABLE_STATUSES.has(row.status)) throw definitionImmutable(row.definition_ref, row.status);
@@ -350,6 +520,61 @@ export function updateImportDefinition(db, tenantId, ref, patch = {}, actor = nu
   return withImportChildren(db, updated);
 }
 
+export async function updateImportDefinitionAsync(db, tenantId, ref, patch = {}, actor = null, ip = null) {
+  const row = await requireImportDefinitionRowAsync(db, tenantId, ref);
+  if (!EDITABLE_STATUSES.has(row.status)) throw definitionImmutable(row.definition_ref, row.status);
+  if (patch.code !== undefined && normalizeUpper(patch.code) !== row.code) {
+    throw invalidDefinition("A definition code is immutable; create a new definition instead");
+  }
+  const normalized = normalizeDefinitionInput(patch, row);
+  const hasMappings = patch.mappings !== undefined;
+  const hasTransformations = patch.transformations !== undefined;
+  const hasRules = patch.validation_rules !== undefined || patch.validationRules !== undefined;
+  await transactionAsync(db, async () => {
+    await runAsync(
+      db,
+      `UPDATE ie_import_definitions SET name = ?, description = ?, target_object_type = ?, target_subtype = ?, source_type = ?, connector_config_id = ?, source_config_json = ?, mapping_json = ?, transformation_json = ?, validation_json = ?,
+        duplicate_strategy = ?, duplicate_key_json = ?, batch_size = ?, error_strategy = ?, reconciliation_strategy = ?, transaction_strategy = ?, mode = ?, template_id = ?, owner_user_id = ?, catalog_refs_json = ?, schedule_json = ?, updated_by = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        normalizeText(patch.name ?? row.name, { max: 200 }) || row.code,
+        normalizeText(patch.description ?? row.description),
+        normalized.target_object_type,
+        normalized.target_subtype,
+        normalized.source_type,
+        normalized.connector_config_id,
+        JSON.stringify(normalized.source_config),
+        JSON.stringify(normalized.mapping),
+        JSON.stringify(normalized.transformation),
+        JSON.stringify(normalized.validation),
+        normalized.duplicate_strategy,
+        JSON.stringify(normalized.duplicate_key),
+        normalized.batch_size,
+        normalized.error_strategy,
+        normalized.reconciliation_strategy,
+        normalized.transaction_strategy,
+        normalized.mode,
+        normalized.template_id,
+        normalized.owner_user_id,
+        JSON.stringify(normalized.catalog_refs),
+        JSON.stringify(normalized.schedule),
+        actor?.id ?? null,
+        nowIso(),
+        row.id,
+      ]
+    );
+    if (hasMappings) await writeMappingsAsync(db, tenantId, row.id, normalizeMappingCollection(patch.mappings));
+    if (hasTransformations) await writeTransformationsAsync(db, tenantId, row.id, normalizeTransformationCollection(patch.transformations));
+    if (hasRules) await writeRulesAsync(db, tenantId, row.id, normalizeRuleCollection(patch.validation_rules || patch.validationRules));
+  });
+  const updated = await queryOneAsync(db, "SELECT * FROM ie_import_definitions WHERE id = ?", [row.id]);
+  await snapshotVersionAsync(db, updated, actor, patch.change_summary || "definition updated");
+  await writeAuditAsync(db, { actor, action: "data_exchange.import_definition.update", resourceType: "ie_import_definitions", resourceId: row.code, details: {}, ip });
+  await recordHistoryAsync(db, { direction: "IMPORT", tenantId, definitionId: row.id, definitionVersion: updated.version, action: "DEFINITION_UPDATED", status: updated.status, targetObjectType: updated.target_object_type, actor, details: { code: row.code } });
+  await publishExchangeEventAsync(db, { eventType: "ImportDefinitionUpdated", tenantId, objectType: "ie_import_definition", objectId: updated.definition_ref, payload: { code: row.code } }, actor);
+  return await withImportChildrenAsync(db, updated);
+}
+
 export function setImportDefinitionStatus(db, tenantId, ref, status, actor = null, ip = null) {
   const row = requireImportDefinitionRow(db, tenantId, ref);
   const next = assertDefinitionStatus(status);
@@ -364,6 +589,22 @@ export function setImportDefinitionStatus(db, tenantId, ref, status, actor = nul
   snapshotVersion(db, updated, actor, `status ${row.status} -> ${next}`);
   writeAudit(db, { actor, action: "data_exchange.import_definition.status", resourceType: "ie_import_definitions", resourceId: row.code, details: { status: next }, ip });
   return withImportChildren(db, updated);
+}
+
+export async function setImportDefinitionStatusAsync(db, tenantId, ref, status, actor = null, ip = null) {
+  const row = await requireImportDefinitionRowAsync(db, tenantId, ref);
+  const next = assertDefinitionStatus(status);
+  if (next === row.status) return await withImportChildrenAsync(db, row);
+  if (next === "ACTIVE") {
+    const check = await validateImportDefinitionAsync(db, tenantId, ref, { status: row.status });
+    if (!check.valid) throw invalidDefinition("Definition cannot be activated while blocking issues exist", { errors: check.errors });
+  }
+  const ts = nowIso();
+  await runAsync(db, "UPDATE ie_import_definitions SET status = ?, updated_by = ?, updated_at = ? WHERE id = ?", [next, actor?.id ?? null, ts, row.id]);
+  const updated = await queryOneAsync(db, "SELECT * FROM ie_import_definitions WHERE id = ?", [row.id]);
+  await snapshotVersionAsync(db, updated, actor, `status ${row.status} -> ${next}`);
+  await writeAuditAsync(db, { actor, action: "data_exchange.import_definition.status", resourceType: "ie_import_definitions", resourceId: row.code, details: { status: next }, ip });
+  return await withImportChildrenAsync(db, updated);
 }
 
 export function createImportDefinitionVersion(db, tenantId, ref, input = {}, actor = null, ip = null) {
@@ -421,9 +662,70 @@ export function createImportDefinitionVersion(db, tenantId, ref, input = {}, act
   return withImportChildren(db, updated);
 }
 
+export async function createImportDefinitionVersionAsync(db, tenantId, ref, input = {}, actor = null, ip = null) {
+  const row = await requireImportDefinitionRowAsync(db, tenantId, ref);
+  await snapshotVersionAsync(db, row, actor, input.change_summary || `snapshot before version ${Number(row.version) + 1}`);
+  const normalized = normalizeDefinitionInput(input, row);
+  const hasMappings = input.mappings !== undefined;
+  const hasTransformations = input.transformations !== undefined;
+  const hasRules = input.validation_rules !== undefined || input.validationRules !== undefined;
+  const nextVersion = Number(row.version) + 1;
+  await transactionAsync(db, async () => {
+    await runAsync(
+      db,
+      `UPDATE ie_import_definitions SET name = ?, description = ?, target_object_type = ?, target_subtype = ?, source_type = ?, connector_config_id = ?, source_config_json = ?, mapping_json = ?, transformation_json = ?, validation_json = ?,
+        duplicate_strategy = ?, duplicate_key_json = ?, batch_size = ?, error_strategy = ?, reconciliation_strategy = ?, transaction_strategy = ?, mode = ?, template_id = ?, owner_user_id = ?, catalog_refs_json = ?, schedule_json = ?,
+        status = 'DRAFT', version = ?, updated_by = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        normalizeText(input.name ?? row.name, { max: 200 }) || row.code,
+        normalizeText(input.description !== undefined ? input.description : row.description),
+        normalized.target_object_type,
+        normalized.target_subtype,
+        normalized.source_type,
+        normalized.connector_config_id,
+        JSON.stringify(normalized.source_config),
+        JSON.stringify(normalized.mapping),
+        JSON.stringify(normalized.transformation),
+        JSON.stringify(normalized.validation),
+        normalized.duplicate_strategy,
+        JSON.stringify(normalized.duplicate_key),
+        normalized.batch_size,
+        normalized.error_strategy,
+        normalized.reconciliation_strategy,
+        normalized.transaction_strategy,
+        normalized.mode,
+        normalized.template_id,
+        normalized.owner_user_id,
+        JSON.stringify(normalized.catalog_refs),
+        JSON.stringify(normalized.schedule),
+        nextVersion,
+        actor?.id ?? null,
+        nowIso(),
+        row.id,
+      ]
+    );
+    if (hasMappings) await writeMappingsAsync(db, tenantId, row.id, normalizeMappingCollection(input.mappings));
+    if (hasTransformations) await writeTransformationsAsync(db, tenantId, row.id, normalizeTransformationCollection(input.transformations));
+    if (hasRules) await writeRulesAsync(db, tenantId, row.id, normalizeRuleCollection(input.validation_rules || input.validationRules));
+  });
+  const updated = await queryOneAsync(db, "SELECT * FROM ie_import_definitions WHERE id = ?", [row.id]);
+  await snapshotVersionAsync(db, updated, actor, input.change_summary || `version ${nextVersion}`);
+  await writeAuditAsync(db, { actor, action: "data_exchange.import_definition.version", resourceType: "ie_import_definitions", resourceId: row.code, details: { version: nextVersion }, ip });
+  await recordHistoryAsync(db, { direction: "IMPORT", tenantId, definitionId: row.id, definitionVersion: nextVersion, action: "DEFINITION_VERSIONED", status: "DRAFT", targetObjectType: updated.target_object_type, actor, details: { code: row.code } });
+  await publishExchangeEventAsync(db, { eventType: "ImportDefinitionUpdated", tenantId, objectType: "ie_import_definition", objectId: updated.definition_ref, payload: { code: row.code, version: nextVersion } }, actor);
+  return await withImportChildrenAsync(db, updated);
+}
+
 export function listImportDefinitionVersions(db, tenantId, ref) {
   const row = requireImportDefinitionRow(db, tenantId, ref);
   const rows = queryAll(db, "SELECT * FROM ie_import_definition_versions WHERE definition_id = ? ORDER BY version DESC", [row.id]);
+  return { items: rows.map(publicDefinitionVersion), total: rows.length };
+}
+
+export async function listImportDefinitionVersionsAsync(db, tenantId, ref) {
+  const row = await requireImportDefinitionRowAsync(db, tenantId, ref);
+  const rows = await queryAllAsync(db, "SELECT * FROM ie_import_definition_versions WHERE definition_id = ? ORDER BY version DESC", [row.id]);
   return { items: rows.map(publicDefinitionVersion), total: rows.length };
 }
 
@@ -455,11 +757,77 @@ export function listImportDefinitions(db, { tenantId, status, targetObjectType, 
   return { items: rows.map(publicImportDefinition), total, page: currentPage, page_size: limit };
 }
 
+export async function listImportDefinitionsAsync(db, { tenantId, status, targetObjectType, sourceType, q, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (status) {
+    clauses.push("status = ?");
+    params.push(assertDefinitionStatus(status));
+  }
+  if (targetObjectType) {
+    clauses.push("target_object_type = ?");
+    params.push(normalizeText(targetObjectType, { max: 120 }));
+  }
+  if (sourceType) {
+    clauses.push("source_type = ?");
+    params.push(assertConnectorType(sourceType));
+  }
+  const term = normalizeText(q);
+  if (term) {
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
+    const like = `%${term}%`;
+    params.push(like, like, like);
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 100, maxPageSize: 500 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ie_import_definitions ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM ie_import_definitions ${where} ORDER BY code, version DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicImportDefinition), total, page: currentPage, page_size: limit };
+}
+
 // ── Static validation ────────────────────────────────────────────────────────
 
 export function validateImportDefinition(db, tenantId, ref, { sourceFields = null } = {}) {
   const row = requireImportDefinitionRow(db, tenantId, ref);
   const definition = withImportChildren(db, row);
+  const errors = [];
+  const warnings = [];
+  if (!definition.target_object_type) errors.push({ code: "missing_target", message: "A target object type is required" });
+  if (!CONNECTOR_TYPES.includes(definition.source_type)) errors.push({ code: "invalid_source", message: `Unknown source type: ${definition.source_type}` });
+  if (!definition.mappings.length) errors.push({ code: "no_mappings", message: "At least one mapping is required" });
+  const targets = new Map();
+  for (const mapping of definition.mappings) {
+    if (!mapping.target_field) errors.push({ code: "missing_target_field", message: "A mapping requires a target_field" });
+    if (mapping.target_field) {
+      const count = (targets.get(mapping.target_field) || 0) + 1;
+      targets.set(mapping.target_field, count);
+      if (count > 1) errors.push({ code: "duplicate_target", field: mapping.target_field, message: `Multiple mappings write to "${mapping.target_field}"` });
+    }
+    if (mapping.mapping_type === "EXPRESSION" && !mapping.expression) errors.push({ code: "missing_expression", field: mapping.target_field, message: "An EXPRESSION mapping requires an expression" });
+    if (mapping.mapping_type === "LOOKUP" && !mapping.lookup?.map && !mapping.lookup?.source && !mapping.lookup?.lookup_definition) {
+      errors.push({ code: "missing_lookup", field: mapping.target_field, message: "A LOOKUP mapping requires a source or map" });
+    }
+  }
+  if (["UPDATE", "UPSERT", "MERGE", "REJECT", "SKIP"].includes(definition.duplicate_strategy)) {
+    const key = definition.duplicate_key || {};
+    const hasKey = (Array.isArray(key.fields) && key.fields.length) || key.type === "OBJECT_ID" || key.expression;
+    if (!hasKey && !definition.duplicate_key.key_expression) warnings.push({ code: "no_duplicate_key", message: `Duplicate strategy ${definition.duplicate_strategy} works best with a duplicate_key` });
+    else if (key.type) assertDuplicateKeyType(key.type);
+  }
+  const sourceSet = sourceFields ? new Set(sourceFields) : null;
+  if (sourceSet) {
+    for (const mapping of definition.mappings) {
+      if (mapping.source_field && sourceSet.size && !sourceSet.has(mapping.source_field) && ["DIRECT", "RENAME", "DEFAULT", "SPLIT"].includes(mapping.mapping_type)) {
+        warnings.push({ code: "unknown_source", field: mapping.source_field, message: `Source field "${mapping.source_field}" was not found in the discovered schema` });
+      }
+    }
+  }
+  return { valid: errors.length === 0, errors, warnings, definition: { code: definition.code, version: definition.version, fields: MAX_FIELDS } };
+}
+
+export async function validateImportDefinitionAsync(db, tenantId, ref, { sourceFields = null } = {}) {
+  const row = await requireImportDefinitionRowAsync(db, tenantId, ref);
+  const definition = await withImportChildrenAsync(db, row);
   const errors = [];
   const warnings = [];
   if (!definition.target_object_type) errors.push({ code: "missing_target", message: "A target object type is required" });

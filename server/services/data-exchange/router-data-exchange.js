@@ -3,7 +3,8 @@
 // Mounted at /api/data-exchange and /api/v1/data-exchange.
 //
 // Every route is authorized against an IAM permission resource; the client is
-// never trusted to declare its own authorization.
+// never trusted to declare its own authorization. The router runs entirely on
+// the asynchronous PostgreSQL data-access layer.
 import {
   constants,
   Validation,
@@ -24,29 +25,29 @@ import {
 
 const R = constants.EXCHANGE_RESOURCES;
 
-export function createDataExchangeRouter({ express, db, auth, can, wrap }) {
+export function createDataExchangeRouter({ express, db, auth, authAsync, can, canAsync, wrap }) {
   const router = express.Router();
   const tenantOf = (req) => req.tenantId ?? null;
   const idem = (req) => req.get("Idempotency-Key") || req.body?.idempotency_key || req.body?.idempotencyKey || "";
 
-  const canOverview = (a) => can(R.overview, a);
-  const canImports = (a) => can(R.imports, a);
-  const canImportDefs = (a) => can(R.importDefinitions, a);
-  const canExports = (a) => can(R.exports, a);
-  const canExportDefs = (a) => can(R.exportDefinitions, a);
-  const canConnectors = (a) => can(R.connectors, a);
-  const canTemplates = (a) => can(R.templates, a);
-  const canHistory = (a) => can(R.history, a);
-  const canJobs = (a) => can(R.jobs, a);
-  const canMetrics = (a) => can(R.metrics, a);
-  const canAdmin = (a) => can(R.admin, a);
+  const canOverview = (a) => canAsync(R.overview, a);
+  const canImports = (a) => canAsync(R.imports, a);
+  const canImportDefs = (a) => canAsync(R.importDefinitions, a);
+  const canExports = (a) => canAsync(R.exports, a);
+  const canExportDefs = (a) => canAsync(R.exportDefinitions, a);
+  const canConnectors = (a) => canAsync(R.connectors, a);
+  const canTemplates = (a) => canAsync(R.templates, a);
+  const canHistory = (a) => canAsync(R.history, a);
+  const canJobs = (a) => canAsync(R.jobs, a);
+  const canMetrics = (a) => canAsync(R.metrics, a);
+  const canAdmin = (a) => canAsync(R.admin, a);
 
-  const withDefinition = (req) => ImportDefinitions.getImportDefinition(db, tenantOf(req), req.params.ref);
+  const withDefinition = (req) => ImportDefinitions.getImportDefinitionAsync(db, tenantOf(req), req.params.ref);
 
   // ── Meta, health, metrics, connectors ─────────────────────────────────────
   router.get(
     "/meta",
-    auth,
+    authAsync,
     canOverview("read"),
     wrap((_req, res) => {
       res.json({
@@ -75,21 +76,26 @@ export function createDataExchangeRouter({ express, db, auth, can, wrap }) {
 
   router.get(
     "/health",
-    auth,
+    authAsync,
     canMetrics("read"),
-    wrap((req, res) => res.json({ ...Metrics.healthCheck(db, { tenantId: tenantOf(req) }), ...Foundation.exchangeHealth(db, tenantOf(req)) }))
+    wrap(async (req, res) =>
+      res.json({
+        ...(await Metrics.healthCheckAsync(db, { tenantId: tenantOf(req) })),
+        ...(await Foundation.exchangeHealthAsync(db, tenantOf(req))),
+      })
+    )
   );
 
   router.get(
     "/metrics",
-    auth,
+    authAsync,
     canMetrics("read"),
-    wrap((req, res) => res.json(Metrics.metricsSnapshot(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Metrics.metricsSnapshotAsync(db, { tenantId: tenantOf(req) })))
   );
 
   router.get(
     "/connectors",
-    auth,
+    authAsync,
     canConnectors("read"),
     wrap((_req, res) => res.json({ items: Connectors.list(), types: constants.CONNECTOR_TYPES }))
   );
@@ -97,134 +103,134 @@ export function createDataExchangeRouter({ express, db, auth, can, wrap }) {
   // ── Connector configurations ──────────────────────────────────────────────
   router.get(
     "/connector-configurations",
-    auth,
+    authAsync,
     canConnectors("read"),
-    wrap((req, res) => res.json(ConnectorConfigs.listConnectorConfigurations(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await ConnectorConfigs.listConnectorConfigurationsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/connector-configurations",
-    auth,
+    authAsync,
     canConnectors("create"),
-    wrap((req, res) => res.status(201).json(ConnectorConfigs.createConnectorConfiguration(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await ConnectorConfigs.createConnectorConfigurationAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/connector-configurations/test",
-    auth,
+    authAsync,
     canConnectors("read"),
-    wrap(async (req, res) => res.json(await ConnectorConfigs.testConnectorConfiguration(db, tenantOf(req), req.body?.ref || null, req.body || {})))
+    wrap(async (req, res) => res.json(await ConnectorConfigs.testConnectorConfigurationAsync(db, tenantOf(req), req.body?.ref || null, req.body || {})))
   );
   router.get(
     "/connector-configurations/:ref",
-    auth,
+    authAsync,
     canConnectors("read"),
-    wrap((req, res) => res.json(ConnectorConfigs.getConnectorConfiguration(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await ConnectorConfigs.getConnectorConfigurationAsync(db, tenantOf(req), req.params.ref)))
   );
-  const updateConnector = wrap((req, res) => res.json(ConnectorConfigs.updateConnectorConfiguration(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/connector-configurations/:ref", auth, canConnectors("update"), updateConnector);
-  router.patch("/connector-configurations/:ref", auth, canConnectors("update"), updateConnector);
+  const updateConnector = wrap(async (req, res) => res.json(await ConnectorConfigs.updateConnectorConfigurationAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/connector-configurations/:ref", authAsync, canConnectors("update"), updateConnector);
+  router.patch("/connector-configurations/:ref", authAsync, canConnectors("update"), updateConnector);
   router.post(
     "/connector-configurations/:ref/status",
-    auth,
+    authAsync,
     canConnectors("update"),
-    wrap((req, res) => res.json(ConnectorConfigs.setConnectorConfigurationStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await ConnectorConfigs.setConnectorConfigurationStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.post(
     "/connector-configurations/:ref/test",
-    auth,
+    authAsync,
     canConnectors("read"),
-    wrap(async (req, res) => res.json(await ConnectorConfigs.testConnectorConfiguration(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await ConnectorConfigs.testConnectorConfigurationAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/connector-configurations/:ref/discover",
-    auth,
+    authAsync,
     canConnectors("read"),
-    wrap(async (req, res) => res.json(await ConnectorConfigs.discoverConnectorConfigurationSchema(db, tenantOf(req), req.params.ref, req.body || {})))
+    wrap(async (req, res) => res.json(await ConnectorConfigs.discoverConnectorConfigurationSchemaAsync(db, tenantOf(req), req.params.ref, req.body || {})))
   );
 
   // ── Credential references (opaque secret_ref only) ────────────────────────
   router.get(
     "/credential-references",
-    auth,
+    authAsync,
     canConnectors("read"),
-    wrap((req, res) => res.json(ConnectorConfigs.listCredentialReferences(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await ConnectorConfigs.listCredentialReferencesAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/credential-references",
-    auth,
+    authAsync,
     canConnectors("create"),
-    wrap((req, res) => res.status(201).json(ConnectorConfigs.createCredentialReference(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await ConnectorConfigs.createCredentialReferenceAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/credential-references/:ref/status",
-    auth,
+    authAsync,
     canConnectors("update"),
-    wrap((req, res) => res.json(ConnectorConfigs.setCredentialReferenceStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await ConnectorConfigs.setCredentialReferenceStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
   );
 
   // ── Import definitions ────────────────────────────────────────────────────
   router.get(
     "/import-definitions",
-    auth,
+    authAsync,
     canImportDefs("read"),
-    wrap((req, res) => res.json(ImportDefinitions.listImportDefinitions(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await ImportDefinitions.listImportDefinitionsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/import-definitions",
-    auth,
+    authAsync,
     canImportDefs("create"),
-    wrap((req, res) => res.status(201).json(ImportDefinitions.createImportDefinition(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await ImportDefinitions.createImportDefinitionAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/import-definitions/:ref",
-    auth,
+    authAsync,
     canImportDefs("read"),
-    wrap((req, res) => res.json(ImportDefinitions.getImportDefinition(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await ImportDefinitions.getImportDefinitionAsync(db, tenantOf(req), req.params.ref)))
   );
-  const updateImportDef = wrap((req, res) => res.json(ImportDefinitions.updateImportDefinition(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/import-definitions/:ref", auth, canImportDefs("update"), updateImportDef);
-  router.patch("/import-definitions/:ref", auth, canImportDefs("update"), updateImportDef);
+  const updateImportDef = wrap(async (req, res) => res.json(await ImportDefinitions.updateImportDefinitionAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/import-definitions/:ref", authAsync, canImportDefs("update"), updateImportDef);
+  router.patch("/import-definitions/:ref", authAsync, canImportDefs("update"), updateImportDef);
   router.post(
     "/import-definitions/:ref/status",
-    auth,
+    authAsync,
     canImportDefs("update"),
-    wrap((req, res) => res.json(ImportDefinitions.setImportDefinitionStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await ImportDefinitions.setImportDefinitionStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.post(
     "/import-definitions/:ref/versions",
-    auth,
+    authAsync,
     canImportDefs("update"),
-    wrap((req, res) => res.status(201).json(ImportDefinitions.createImportDefinitionVersion(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await ImportDefinitions.createImportDefinitionVersionAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/import-definitions/:ref/versions",
-    auth,
+    authAsync,
     canImportDefs("read"),
-    wrap((req, res) => res.json(ImportDefinitions.listImportDefinitionVersions(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await ImportDefinitions.listImportDefinitionVersionsAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/import-definitions/:ref/validate",
-    auth,
+    authAsync,
     canImports("read"),
-    wrap((req, res) => res.json(ImportDefinitions.validateImportDefinition(db, tenantOf(req), req.params.ref, req.body || {})))
+    wrap(async (req, res) => res.json(await ImportDefinitions.validateImportDefinitionAsync(db, tenantOf(req), req.params.ref, req.body || {})))
   );
   router.get(
     "/import-definitions/:ref/catalog",
-    auth,
+    authAsync,
     canImportDefs("read"),
-    wrap((req, res) => {
-      const definition = ImportDefinitions.getImportDefinition(db, tenantOf(req), req.params.ref);
-      res.json(Catalog.resolveCatalogRefs(db, tenantOf(req), definition.catalog_refs || {}));
+    wrap(async (req, res) => {
+      const definition = await ImportDefinitions.getImportDefinitionAsync(db, tenantOf(req), req.params.ref);
+      res.json(await Catalog.resolveCatalogRefsAsync(db, tenantOf(req), definition.catalog_refs || {}));
     })
   );
   router.post(
     "/import-definitions/:ref/preview",
-    auth,
+    authAsync,
     canImports("read"),
-    wrap(async (req, res) => res.json(await Importer.previewImport(db, tenantOf(req), withDefinition(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Importer.previewImportAsync(db, tenantOf(req), await withDefinition(req), req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/import-definitions/:ref/run",
-    auth,
+    authAsync,
     canImports("execute"),
     wrap(async (req, res) => runImport(req, res))
   );
@@ -232,139 +238,142 @@ export function createDataExchangeRouter({ express, db, auth, can, wrap }) {
   // ── Import jobs ───────────────────────────────────────────────────────────
   router.get(
     "/import-jobs",
-    auth,
+    authAsync,
     canImports("read"),
-    wrap((req, res) => res.json(Importer.listImportJobs(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Importer.listImportJobsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.get(
     "/import-jobs/:ref",
-    auth,
+    authAsync,
     canImports("read"),
-    wrap((req, res) => res.json(Importer.getImportJob(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Importer.getImportJobAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/import-jobs/:ref/run",
-    auth,
+    authAsync,
     canImports("execute"),
     wrap(async (req, res) => {
-      const job = Importer.getImportJob(db, tenantOf(req), req.params.ref);
+      const job = await Importer.getImportJobAsync(db, tenantOf(req), req.params.ref);
       if (req.body?.async) {
-        const submitted = Jobs.submitImportJob(db, { tenantId: tenantOf(req), importJobId: job.id, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) });
+        const submitted = await Jobs.submitImportJobAsync(db, { tenantId: tenantOf(req), importJobId: job.id, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) });
         return res.status(202).json({ job, platform_job: submitted });
       }
-      res.json(await Importer.runImportJob(db, { jobId: job.id, params: req.body?.params || {}, actor: req.actor, ip: req.ip }));
+      res.json(await Importer.runImportJobAsync(db, { jobId: job.id, params: req.body?.params || {}, actor: req.actor, ip: req.ip }));
     })
   );
   router.post(
     "/import-jobs/:ref/reconcile",
-    auth,
+    authAsync,
     canImports("execute"),
-    wrap((req, res) => {
-      const job = Importer.getImportJob(db, tenantOf(req), req.params.ref);
-      res.json({ job_ref: job.job_ref, reconciliation: Jobs.reconcileImportJob(db, { tenantId: tenantOf(req), importJobId: job.id }) });
+    wrap(async (req, res) => {
+      const job = await Importer.getImportJobAsync(db, tenantOf(req), req.params.ref);
+      res.json({ job_ref: job.job_ref, reconciliation: await Jobs.reconcileImportJobAsync(db, { tenantId: tenantOf(req), importJobId: job.id }) });
     })
   );
   router.post(
     "/import-jobs/:ref/retry",
-    auth,
+    authAsync,
     canImports("execute"),
-    wrap(async (req, res) => res.json(await Jobs.retryImportJob(db, { tenantId: tenantOf(req), importJobId: Importer.getImportJob(db, tenantOf(req), req.params.ref).id, actor: req.actor, ip: req.ip })))
+    wrap(async (req, res) => {
+      const job = await Importer.getImportJobAsync(db, tenantOf(req), req.params.ref);
+      res.json(await Jobs.retryImportJobAsync(db, { tenantId: tenantOf(req), importJobId: job.id, actor: req.actor, ip: req.ip }));
+    })
   );
   router.post(
     "/import-jobs/:ref/cancel",
-    auth,
+    authAsync,
     canImports("execute"),
-    wrap((req, res) => res.json(Importer.cancelImportJob(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Importer.cancelImportJobAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
   router.get(
     "/import-jobs/:ref/records",
-    auth,
+    authAsync,
     canImports("read"),
-    wrap((req, res) => {
-      const job = Importer.getImportJob(db, tenantOf(req), req.params.ref);
-      res.json(Importer.listImportRecordResults(db, { tenantId: tenantOf(req), jobId: job.id, ...req.query }));
+    wrap(async (req, res) => {
+      const job = await Importer.getImportJobAsync(db, tenantOf(req), req.params.ref);
+      res.json(await Importer.listImportRecordResultsAsync(db, { tenantId: tenantOf(req), jobId: job.id, ...req.query }));
     })
   );
   router.get(
     "/import-jobs/:ref/errors",
-    auth,
+    authAsync,
     canImports("read"),
-    wrap((req, res) => {
-      const job = Importer.getImportJob(db, tenantOf(req), req.params.ref);
-      res.json(Importer.listImportErrors(db, { tenantId: tenantOf(req), jobId: job.id, ...req.query }));
+    wrap(async (req, res) => {
+      const job = await Importer.getImportJobAsync(db, tenantOf(req), req.params.ref);
+      res.json(await Importer.listImportErrorsAsync(db, { tenantId: tenantOf(req), jobId: job.id, ...req.query }));
     })
   );
   router.get(
     "/import-errors",
-    auth,
+    authAsync,
     canImports("read"),
-    wrap((req, res) => res.json(Importer.listImportErrors(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Importer.listImportErrorsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
 
   // ── Export definitions ────────────────────────────────────────────────────
   router.get(
     "/export-definitions",
-    auth,
+    authAsync,
     canExportDefs("read"),
-    wrap((req, res) => res.json(ExportDefinitions.listExportDefinitions(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await ExportDefinitions.listExportDefinitionsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/export-definitions",
-    auth,
+    authAsync,
     canExportDefs("create"),
-    wrap((req, res) => res.status(201).json(ExportDefinitions.createExportDefinition(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await ExportDefinitions.createExportDefinitionAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/export-definitions/:ref",
-    auth,
+    authAsync,
     canExportDefs("read"),
-    wrap((req, res) => res.json(ExportDefinitions.getExportDefinition(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await ExportDefinitions.getExportDefinitionAsync(db, tenantOf(req), req.params.ref)))
   );
-  const updateExportDef = wrap((req, res) => res.json(ExportDefinitions.updateExportDefinition(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/export-definitions/:ref", auth, canExportDefs("update"), updateExportDef);
-  router.patch("/export-definitions/:ref", auth, canExportDefs("update"), updateExportDef);
+  const updateExportDef = wrap(async (req, res) => res.json(await ExportDefinitions.updateExportDefinitionAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/export-definitions/:ref", authAsync, canExportDefs("update"), updateExportDef);
+  router.patch("/export-definitions/:ref", authAsync, canExportDefs("update"), updateExportDef);
   router.post(
     "/export-definitions/:ref/status",
-    auth,
+    authAsync,
     canExportDefs("update"),
-    wrap((req, res) => res.json(ExportDefinitions.setExportDefinitionStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await ExportDefinitions.setExportDefinitionStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.post(
     "/export-definitions/:ref/versions",
-    auth,
+    authAsync,
     canExportDefs("update"),
-    wrap((req, res) => res.status(201).json(ExportDefinitions.createExportDefinitionVersion(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await ExportDefinitions.createExportDefinitionVersionAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/export-definitions/:ref/versions",
-    auth,
+    authAsync,
     canExportDefs("read"),
-    wrap((req, res) => res.json(ExportDefinitions.listExportDefinitionVersions(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await ExportDefinitions.listExportDefinitionVersionsAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/export-definitions/:ref/validate",
-    auth,
+    authAsync,
     canExports("read"),
-    wrap((req, res) => res.json(ExportDefinitions.validateExportDefinition(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await ExportDefinitions.validateExportDefinitionAsync(db, tenantOf(req), req.params.ref)))
   );
   router.get(
     "/export-definitions/:ref/catalog",
-    auth,
+    authAsync,
     canExportDefs("read"),
-    wrap((req, res) => {
-      const definition = ExportDefinitions.getExportDefinition(db, tenantOf(req), req.params.ref);
-      res.json(Catalog.resolveCatalogRefs(db, tenantOf(req), definition.catalog_refs || {}));
+    wrap(async (req, res) => {
+      const definition = await ExportDefinitions.getExportDefinitionAsync(db, tenantOf(req), req.params.ref);
+      res.json(await Catalog.resolveCatalogRefsAsync(db, tenantOf(req), definition.catalog_refs || {}));
     })
   );
   router.post(
     "/export-definitions/:ref/preview",
-    auth,
+    authAsync,
     canExports("read"),
-    wrap((req, res) => res.json(Exporter.previewExport(db, tenantOf(req), ExportDefinitions.getExportDefinition(db, tenantOf(req), req.params.ref), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Exporter.previewExportAsync(db, tenantOf(req), await ExportDefinitions.getExportDefinitionAsync(db, tenantOf(req), req.params.ref), req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/export-definitions/:ref/run",
-    auth,
+    authAsync,
     canExports("execute"),
     wrap(async (req, res) => runExport(req, res))
   );
@@ -372,56 +381,56 @@ export function createDataExchangeRouter({ express, db, auth, can, wrap }) {
   // ── Export jobs ───────────────────────────────────────────────────────────
   router.get(
     "/export-jobs",
-    auth,
+    authAsync,
     canExports("read"),
-    wrap((req, res) => res.json(Exporter.listExportJobs(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Exporter.listExportJobsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.get(
     "/export-jobs/:ref",
-    auth,
+    authAsync,
     canExports("read"),
-    wrap((req, res) => res.json(Exporter.getExportJob(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Exporter.getExportJobAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/export-jobs/:ref/run",
-    auth,
+    authAsync,
     canExports("execute"),
     wrap(async (req, res) => {
-      const job = Exporter.getExportJob(db, tenantOf(req), req.params.ref);
+      const job = await Exporter.getExportJobAsync(db, tenantOf(req), req.params.ref);
       if (req.body?.async) {
-        const submitted = Jobs.submitExportJob(db, { tenantId: tenantOf(req), exportJobId: job.id, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) });
+        const submitted = await Jobs.submitExportJobAsync(db, { tenantId: tenantOf(req), exportJobId: job.id, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) });
         return res.status(202).json({ job, platform_job: submitted });
       }
-      res.json(await Exporter.runExportJob(db, { jobId: job.id, params: req.body?.params || {}, actor: req.actor, ip: req.ip }));
+      res.json(await Exporter.runExportJobAsync(db, { jobId: job.id, params: req.body?.params || {}, actor: req.actor, ip: req.ip }));
     })
   );
   router.post(
     "/export-jobs/:ref/cancel",
-    auth,
+    authAsync,
     canExports("execute"),
-    wrap((req, res) => res.json(Exporter.cancelExportJob(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Exporter.cancelExportJobAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
   router.get(
     "/export-jobs/:ref/results",
-    auth,
+    authAsync,
     canExports("read"),
-    wrap((req, res) => {
-      const job = Exporter.getExportJob(db, tenantOf(req), req.params.ref);
-      res.json(Exporter.listExportResults(db, { tenantId: tenantOf(req), jobId: job.id, ...req.query }));
+    wrap(async (req, res) => {
+      const job = await Exporter.getExportJobAsync(db, tenantOf(req), req.params.ref);
+      res.json(await Exporter.listExportResultsAsync(db, { tenantId: tenantOf(req), jobId: job.id, ...req.query }));
     })
   );
   router.get(
     "/export-results",
-    auth,
+    authAsync,
     canExports("read"),
-    wrap((req, res) => res.json(Exporter.listExportResults(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Exporter.listExportResultsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.get(
     "/export-results/:ref/download",
-    auth,
+    authAsync,
     canExports("execute"),
-    wrap((req, res) => {
-      const result = Exporter.downloadExportResult(db, tenantOf(req), req.params.ref);
+    wrap(async (req, res) => {
+      const result = await Exporter.downloadExportResultAsync(db, tenantOf(req), req.params.ref);
       res.setHeader("Content-Type", result.content_type || "application/octet-stream");
       res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
       res.send(result.content);
@@ -431,68 +440,68 @@ export function createDataExchangeRouter({ express, db, auth, can, wrap }) {
   // ── Templates ─────────────────────────────────────────────────────────────
   router.get(
     "/templates",
-    auth,
+    authAsync,
     canTemplates("read"),
-    wrap((req, res) => res.json(Templates.listTemplates(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Templates.listTemplatesAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/templates",
-    auth,
+    authAsync,
     canTemplates("create"),
-    wrap((req, res) => res.status(201).json(Templates.createTemplate(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Templates.createTemplateAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/templates/:ref",
-    auth,
+    authAsync,
     canTemplates("read"),
-    wrap((req, res) => res.json(Templates.getTemplate(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Templates.getTemplateAsync(db, tenantOf(req), req.params.ref)))
   );
-  const updateTemplate = wrap((req, res) => res.json(Templates.updateTemplate(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/templates/:ref", auth, canTemplates("update"), updateTemplate);
-  router.patch("/templates/:ref", auth, canTemplates("update"), updateTemplate);
+  const updateTemplate = wrap(async (req, res) => res.json(await Templates.updateTemplateAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/templates/:ref", authAsync, canTemplates("update"), updateTemplate);
+  router.patch("/templates/:ref", authAsync, canTemplates("update"), updateTemplate);
   router.post(
     "/templates/:ref/status",
-    auth,
+    authAsync,
     canTemplates("update"),
-    wrap((req, res) => res.json(Templates.setTemplateStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Templates.setTemplateStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.post(
     "/templates/:ref/versions",
-    auth,
+    authAsync,
     canTemplates("update"),
-    wrap((req, res) => res.status(201).json(Templates.createTemplateVersion(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Templates.createTemplateVersionAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/templates/:ref/validate",
-    auth,
+    authAsync,
     canTemplates("read"),
-    wrap((req, res) => res.json(Templates.validateTemplate(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Templates.validateTemplateAsync(db, tenantOf(req), req.params.ref)))
   );
 
   // ── Jobs, history, configuration ──────────────────────────────────────────
   router.get(
     "/jobs",
-    auth,
+    authAsync,
     canJobs("read"),
-    wrap((req, res) => res.json(Jobs.listExchangeJobs(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Jobs.listExchangeJobsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.get(
     "/history",
-    auth,
+    authAsync,
     canHistory("read"),
-    wrap((req, res) => res.json(History.listHistory(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await History.listHistoryAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.get(
     "/configuration",
-    auth,
+    authAsync,
     canAdmin("read"),
-    wrap((req, res) => res.json(Configuration.listConfig(db, tenantOf(req))))
+    wrap(async (req, res) => res.json(await Configuration.listConfigAsync(db, tenantOf(req))))
   );
   router.put(
     "/configuration/:key",
-    auth,
+    authAsync,
     canAdmin("update"),
-    wrap((req, res) => res.json({ key: req.params.key, value: Configuration.setConfig(db, tenantOf(req), req.params.key, req.body?.value, req.actor, req.ip) }))
+    wrap(async (req, res) => res.json({ key: req.params.key, value: await Configuration.setConfigAsync(db, tenantOf(req), req.params.key, req.body?.value, req.actor, req.ip) }))
   );
 
   // ── Internal run helpers ──────────────────────────────────────────────────
@@ -506,10 +515,10 @@ export function createDataExchangeRouter({ express, db, auth, can, wrap }) {
   }
 
   async function runImport(req, res) {
-    const definition = ImportDefinitions.getImportDefinition(db, tenantOf(req), req.params.ref);
+    const definition = await ImportDefinitions.getImportDefinitionAsync(db, tenantOf(req), req.params.ref);
     const params = inlineRunParams(req.body || {});
     const mode = (req.body?.mode || "IMPORT").toUpperCase();
-    const { job, existing } = Importer.createImportJob(db, {
+    const { job, existing } = await Importer.createImportJobAsync(db, {
       tenantId: tenantOf(req),
       definition,
       mode,
@@ -518,18 +527,18 @@ export function createDataExchangeRouter({ express, db, auth, can, wrap }) {
       ip: req.ip,
       idempotencyKey: idem(req),
     });
-    if (existing) return res.status(200).json(Importer.getImportJob(db, tenantOf(req), job.job_ref));
+    if (existing) return res.status(200).json(await Importer.getImportJobAsync(db, tenantOf(req), job.job_ref));
     if (req.body?.async && mode === "IMPORT") {
-      const submitted = Jobs.submitImportJob(db, { tenantId: tenantOf(req), importJobId: job.id, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) });
+      const submitted = await Jobs.submitImportJobAsync(db, { tenantId: tenantOf(req), importJobId: job.id, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) });
       return res.status(202).json({ job, platform_job: submitted });
     }
-    return res.status(201).json(await Importer.runImportJob(db, { jobId: job.id, params, actor: req.actor, ip: req.ip }));
+    return res.status(201).json(await Importer.runImportJobAsync(db, { jobId: job.id, params, actor: req.actor, ip: req.ip }));
   }
 
   async function runExport(req, res) {
-    const definition = ExportDefinitions.getExportDefinition(db, tenantOf(req), req.params.ref);
+    const definition = await ExportDefinitions.getExportDefinitionAsync(db, tenantOf(req), req.params.ref);
     const params = inlineRunParams(req.body || {});
-    const { job, existing } = Exporter.createExportJob(db, {
+    const { job, existing } = await Exporter.createExportJobAsync(db, {
       tenantId: tenantOf(req),
       definition,
       params,
@@ -537,12 +546,12 @@ export function createDataExchangeRouter({ express, db, auth, can, wrap }) {
       ip: req.ip,
       idempotencyKey: idem(req),
     });
-    if (existing) return res.status(200).json(Exporter.getExportJob(db, tenantOf(req), job.job_ref));
+    if (existing) return res.status(200).json(await Exporter.getExportJobAsync(db, tenantOf(req), job.job_ref));
     if (req.body?.async) {
-      const submitted = Jobs.submitExportJob(db, { tenantId: tenantOf(req), exportJobId: job.id, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) });
+      const submitted = await Jobs.submitExportJobAsync(db, { tenantId: tenantOf(req), exportJobId: job.id, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) });
       return res.status(202).json({ job, platform_job: submitted });
     }
-    return res.status(201).json(await Exporter.runExportJob(db, { jobId: job.id, params, actor: req.actor, ip: req.ip }));
+    return res.status(201).json(await Exporter.runExportJobAsync(db, { jobId: job.id, params, actor: req.actor, ip: req.ip }));
   }
 
   return router;

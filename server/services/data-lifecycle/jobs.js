@@ -5,8 +5,9 @@
 // Each run also writes a lifecycle job ledger row (lc_lifecycle_jobs) for
 // operational monitoring.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
 import { LIFECYCLE_HANDLER_CODES, SOURCE_MODULE } from "./constants.js";
 import { jobRef as makeJobRef } from "./refs.js";
 import { publicLifecycleJob } from "./repository.js";
@@ -74,8 +75,35 @@ export function listLifecycleJobs(db, { tenantId, status, jobType, page, pageSiz
   return { items: rows.map(publicLifecycleJob), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
 }
 
+export async function listLifecycleJobsAsync(db, { tenantId, status, jobType, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (status) {
+    clauses.push("status = ?");
+    params.push(String(status).toUpperCase());
+  }
+  if (jobType) {
+    clauses.push("job_type = ?");
+    params.push(String(jobType).toUpperCase());
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 50, maxPageSize: 500 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM lc_lifecycle_jobs ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM lc_lifecycle_jobs ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicLifecycleJob), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
 export function getLifecycleJob(db, tenantId, ref) {
   const row = queryOne(db, "SELECT * FROM lc_lifecycle_jobs WHERE tenant_id = ? AND (job_ref = ? OR id = ?)", [
+    Number(tenantId),
+    String(ref),
+    Number(ref) || -1,
+  ]);
+  return row ? publicLifecycleJob(row) : null;
+}
+
+export async function getLifecycleJobAsync(db, tenantId, ref) {
+  const row = await queryOneAsync(db, "SELECT * FROM lc_lifecycle_jobs WHERE tenant_id = ? AND (job_ref = ? OR id = ?)", [
     Number(tenantId),
     String(ref),
     Number(ref) || -1,
@@ -100,8 +128,34 @@ function submit(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority 
   );
 }
 
+async function submitAsync(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority = "normal", idempotencyKey = null }) {
+  return await submitJobAsync(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      payload: { tenant_id: Number(tenantId), ...handlerParams },
+      tenant_id: Number(tenantId),
+      priority,
+      queue: "default",
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+}
+
 export function submitEvaluationJob(db, { tenantId, actions = ["ARCHIVE", "PURGE"], limit = null, apply = false, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, {
+    tenantId,
+    jobTypeCode: "LIFECYCLE_EVALUATION",
+    handlerParams: { actions, limit, apply },
+    actor,
+    ip,
+    idempotencyKey,
+  });
+}
+
+export async function submitEvaluationJobAsync(db, { tenantId, actions = ["ARCHIVE", "PURGE"], limit = null, apply = false, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, {
     tenantId,
     jobTypeCode: "LIFECYCLE_EVALUATION",
     handlerParams: { actions, limit, apply },
@@ -115,16 +169,32 @@ export function submitArchiveJob(db, { tenantId, objects = null, limit = null, f
   return submit(db, { tenantId, jobTypeCode: "LIFECYCLE_ARCHIVE", handlerParams: { objects, limit, force }, actor, ip, idempotencyKey });
 }
 
+export async function submitArchiveJobAsync(db, { tenantId, objects = null, limit = null, force = false, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "LIFECYCLE_ARCHIVE", handlerParams: { objects, limit, force }, actor, ip, idempotencyKey });
+}
+
 export function submitColdStorageJob(db, { tenantId, objects = null, limit = null, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "LIFECYCLE_COLD_STORAGE", handlerParams: { objects, limit }, actor, ip, idempotencyKey });
+}
+
+export async function submitColdStorageJobAsync(db, { tenantId, objects = null, limit = null, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "LIFECYCLE_COLD_STORAGE", handlerParams: { objects, limit }, actor, ip, idempotencyKey });
 }
 
 export function submitRestoreJob(db, { tenantId, objects = null, restoreRef = null, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "LIFECYCLE_RESTORE", handlerParams: { objects, restore_ref: restoreRef }, actor, ip, idempotencyKey, priority: "high" });
 }
 
+export async function submitRestoreJobAsync(db, { tenantId, objects = null, restoreRef = null, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "LIFECYCLE_RESTORE", handlerParams: { objects, restore_ref: restoreRef }, actor, ip, idempotencyKey, priority: "high" });
+}
+
 export function submitPurgeJob(db, { tenantId, objects = null, limit = null, force = false, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "LIFECYCLE_PURGE", handlerParams: { objects, limit, force }, actor, ip, idempotencyKey, priority: "high" });
+}
+
+export async function submitPurgeJobAsync(db, { tenantId, objects = null, limit = null, force = false, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "LIFECYCLE_PURGE", handlerParams: { objects, limit, force }, actor, ip, idempotencyKey, priority: "high" });
 }
 
 export function submitRecoveryJob(db, { tenantId, objectType = "", objectId = null, recoveryPointRef = "", scope = "", actor = null, ip = null, idempotencyKey = null } = {}) {
@@ -139,8 +209,24 @@ export function submitRecoveryJob(db, { tenantId, objectType = "", objectId = nu
   });
 }
 
+export async function submitRecoveryJobAsync(db, { tenantId, objectType = "", objectId = null, recoveryPointRef = "", scope = "", actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, {
+    tenantId,
+    jobTypeCode: "LIFECYCLE_RECOVERY",
+    handlerParams: { object_type: objectType, object_id: objectId, recovery_point_ref: recoveryPointRef, scope },
+    actor,
+    ip,
+    idempotencyKey,
+    priority: "high",
+  });
+}
+
 export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "LIFECYCLE_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low" });
+}
+
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "LIFECYCLE_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low" });
 }
 
 // ── Bounded work runners ─────────────────────────────────────────────────────

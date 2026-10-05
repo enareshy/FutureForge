@@ -4,12 +4,13 @@
 // administrator can see the capability working immediately. Real organizations
 // configure their own definitions.
 import { queryOne } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { withEventSuppression } from "../events/emit.js";
-import { ensureExchangeFoundation } from "./foundation.js";
-import { createConnectorConfiguration } from "./connector-configs.js";
-import { createImportDefinition } from "./import-definitions.js";
-import { createExportDefinition } from "./export-definitions.js";
-import { createTemplate } from "./templates.js";
+import { ensureExchangeFoundation, ensureExchangeFoundationAsync } from "./foundation.js";
+import { createConnectorConfiguration, createConnectorConfigurationAsync } from "./connector-configs.js";
+import { createImportDefinition, createImportDefinitionAsync } from "./import-definitions.js";
+import { createExportDefinition, createExportDefinitionAsync } from "./export-definitions.js";
+import { createTemplate, createTemplateAsync } from "./templates.js";
 
 const IMPORT_MAPPINGS = [
   { source_field: "part_number", target_field: "code", mapping_type: "DIRECT", required: true },
@@ -124,10 +125,108 @@ export function seedDataExchange(db, tenantId) {
   });
 }
 
+export async function seedDataExchangeAsync(db, tenantId) {
+  return withEventSuppression(async () => {
+    const tenant = await resolveTenantIdAsync(db, tenantId);
+    const foundation = await ensureExchangeFoundationAsync(db);
+    const created = { connector_configurations: 0, import_definitions: 0, export_definitions: 0, templates: 0 };
+    if (!tenant) return { foundation, created, seeded: false, reason: "no_tenant" };
+
+    if (!(await queryOneAsync(db, "SELECT id FROM ie_connector_configurations WHERE tenant_id = ? AND code = 'PART_CSV'", [tenant]))) {
+      await createConnectorConfigurationAsync(
+        db,
+        tenant,
+        {
+          code: "PART_CSV",
+          name: "Part master CSV files",
+          connector_type: "CSV",
+          direction: "SOURCE",
+          settings: { delimiter: ",", has_header: true },
+        },
+        null,
+        null
+      );
+      created.connector_configurations += 1;
+    }
+
+    if (!(await queryOneAsync(db, "SELECT id FROM ie_import_definitions WHERE tenant_id = ? AND code = 'PART_IMPORT'", [tenant]))) {
+      await createImportDefinitionAsync(
+        db,
+        tenant,
+        {
+          code: "PART_IMPORT",
+          name: "Part master import",
+          description: "Import part master records from a CSV extract.",
+          target_object_type: "product",
+          source_type: "CSV",
+          mappings: IMPORT_MAPPINGS,
+          validation_rules: IMPORT_RULES,
+          duplicate_strategy: "UPSERT",
+          duplicate_key: { type: "BUSINESS_KEY", fields: ["code"] },
+          error_strategy: "CONTINUE",
+          status: "ACTIVE",
+        },
+        null,
+        null
+      );
+      created.import_definitions += 1;
+    }
+
+    if (!(await queryOneAsync(db, "SELECT id FROM ie_export_definitions WHERE tenant_id = ? AND code = 'PART_EXPORT'", [tenant]))) {
+      await createExportDefinitionAsync(
+        db,
+        tenant,
+        {
+          code: "PART_EXPORT",
+          name: "Part master export",
+          description: "Export part master records as a CSV or JSON extract.",
+          object_type: "product",
+          format: "CSV",
+          destination: "DOWNLOAD",
+          field_selections: EXPORT_FIELDS,
+          sort: [{ field: "code", direction: "asc" }],
+          status: "ACTIVE",
+        },
+        null,
+        null
+      );
+      created.export_definitions += 1;
+    }
+
+    if (!(await queryOneAsync(db, "SELECT id FROM ie_templates WHERE tenant_id = ? AND code = 'PART_IMPORT_TEMPLATE'", [tenant]))) {
+      await createTemplateAsync(
+        db,
+        tenant,
+        {
+          code: "PART_IMPORT_TEMPLATE",
+          name: "Part import starter",
+          description: "Starter template for part master imports.",
+          direction: "IMPORT",
+          object_type: "product",
+          status: "ACTIVE",
+          definition: { mappings: IMPORT_MAPPINGS, validation_rules: IMPORT_RULES, duplicate_strategy: "UPSERT" },
+        },
+        null,
+        null
+      );
+      created.templates += 1;
+    }
+
+    return { foundation, created, seeded: true };
+  });
+}
+
 function resolveTenantId(db, tenantId) {
   const explicit = Number(tenantId);
   if (Number.isInteger(explicit) && explicit > 0) return explicit;
   const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  return helix?.id ?? null;
+}
+
+async function resolveTenantIdAsync(db, tenantId) {
+  const explicit = Number(tenantId);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const helix = await queryOneAsync(db, "SELECT id FROM organizations WHERE code = 'helix'");
   return helix?.id ?? null;
 }
 
@@ -138,4 +237,13 @@ export function ensureDataExchangeSeed(db, tenantId) {
   const existing = queryOne(db, "SELECT id FROM ie_import_definitions WHERE tenant_id = ? AND code = 'PART_IMPORT'", [tenant]);
   if (existing) return { seeded: false, reason: "already_present" };
   return seedDataExchange(db, tenant);
+}
+
+export async function ensureDataExchangeSeedAsync(db, tenantId) {
+  await withEventSuppression(() => ensureExchangeFoundationAsync(db));
+  const tenant = await resolveTenantIdAsync(db, tenantId);
+  if (!tenant) return { seeded: false, reason: "no_tenant" };
+  const existing = await queryOneAsync(db, "SELECT id FROM ie_import_definitions WHERE tenant_id = ? AND code = 'PART_IMPORT'", [tenant]);
+  if (existing) return { seeded: false, reason: "already_present" };
+  return await seedDataExchangeAsync(db, tenant);
 }

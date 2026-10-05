@@ -51,6 +51,18 @@ export function emitObjectChanged(db, { objectType = "object", object, operation
   });
 }
 
+// Async twin of `emitObjectChanged` for migrated write routes.
+export async function emitObjectChangedAsync(db, { objectType = "object", object, operation = "upsert", reason = "object", actor } = {}) {
+  if (!object) return null;
+  return emitObjectIndexChangeAsync(db, {
+    tenantId: object.tenant_id ?? actor?.tenant_id,
+    objectType,
+    objectId: object.id,
+    operation,
+    reason,
+  });
+}
+
 export function emitFileChanged(db, { file, operation = "upsert", reason = "file" } = {}) {
   if (!file) return null;
   return emitObjectIndexChange(db, {

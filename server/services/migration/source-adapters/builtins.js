@@ -15,6 +15,7 @@
 // with a real system adapter. Until then they fail closed with a clear,
 // actionable error rather than silently returning nothing.
 import { queryAll } from "../../../db.js";
+import { queryAllAsync } from "../../../db-async.js";
 import { requireConnector } from "../../data-exchange/connectors/registry.js";
 import { adapterFailed, adapterUnsupported } from "../errors.js";
 import { normalizeText, parseArray, parseObject } from "../validation.js";
@@ -66,6 +67,21 @@ async function extractFromContent(settings) {
   return { fields: result.fields || inferFields(result.records || []), records: result.records || [] };
 }
 
+async function extractFromContentAsync(settings) {
+  const format = String(settings.format || settings.content_type || "JSON").toUpperCase();
+  const connectorCode = format === "CSV" || format === "JSON" || format === "XML" || format === "EXCEL" ? format : "JSON";
+  let connector = null;
+  try {
+    connector = requireConnector(connectorCode);
+  } catch {
+    connector = null;
+  }
+  if (!connector) throw adapterUnsupported(connectorCode, "READ");
+  const reader = connector.readAsync ? connector.readAsync : connector.read;
+  const result = await reader({ settings, content: settings.content });
+  return { fields: result.fields || inferFields(result.records || []), records: result.records || [] };
+}
+
 function extractFromDatabase(db, settings) {
   if (!db) throw adapterFailed("The DATABASE source adapter requires a database handle");
   const table = normalizeText(settings.table, { max: 120 });
@@ -77,6 +93,20 @@ function extractFromDatabase(db, settings) {
   const limit = Number(settings.limit || settings.page_size || 0) || 0;
   const sql = `SELECT ${columns} FROM ${table}${orderBy}${limit > 0 ? ` LIMIT ${Math.min(limit, 1000000)}` : ""}`;
   const records = queryAll(db, sql);
+  return { fields: inferFields(records), records };
+}
+
+async function extractFromDatabaseAsync(db, settings) {
+  if (!db) throw adapterFailed("The DATABASE source adapter requires a database handle");
+  const table = normalizeText(settings.table, { max: 120 });
+  if (!table || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
+    throw adapterFailed("The DATABASE source adapter requires settings.table (a plain table name) or inline settings.records", { table });
+  }
+  const columns = Array.isArray(settings.columns) && settings.columns.length ? settings.columns.map((c) => normalizeText(c, { max: 120 })).join(", ") : "*";
+  const orderBy = /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(settings.order_by || "")) ? ` ORDER BY ${settings.order_by}` : "";
+  const limit = Number(settings.limit || settings.page_size || 0) || 0;
+  const sql = `SELECT ${columns} FROM ${table}${orderBy}${limit > 0 ? ` LIMIT ${Math.min(limit, 1000000)}` : ""}`;
+  const records = await queryAllAsync(db, sql);
   return { fields: inferFields(records), records };
 }
 
@@ -130,6 +160,29 @@ async function genericExtract(ctx, { allowNetwork = true } = {}) {
   );
 }
 
+async function genericExtractAsync(ctx, { allowNetwork = true } = {}) {
+  const settings = settingsOf(ctx);
+  const inline = inlineRecords(settings);
+  if (inline) return { fields: inferFields(inline), records: limitRecords(inline, ctx) };
+  if (typeof settings.content === "string" && settings.content.trim()) {
+    const parsed = await extractFromContentAsync(settings);
+    return { fields: parsed.fields, records: limitRecords(parsed.records, ctx) };
+  }
+  if (settings.table) {
+    const parsed = await extractFromDatabaseAsync(ctx.db, settings);
+    return { fields: parsed.fields, records: limitRecords(parsed.records, ctx) };
+  }
+  if (allowNetwork && settings.url) {
+    const parsed = await extractFromRest(settings);
+    return { fields: parsed.fields, records: limitRecords(parsed.records, ctx) };
+  }
+  const hints = parseArray(settings.records_source_tags, []);
+  throw adapterFailed(
+    `Source adapter ${ctx.adapterType || settings.adapter_type || ""} has no extractable source configured. Provide settings.records, settings.content, settings.table or settings.url.`,
+    { record_source_tags: hints }
+  );
+}
+
 function adapter({ adapter_type, name, description, capabilities, settings_schema = {}, allowNetwork = true }) {
   return {
     adapter_type,
@@ -150,6 +203,18 @@ function adapter({ adapter_type, name, description, capabilities, settings_schem
       return { fields: result.fields, sample: result.records.slice(0, 10) };
     },
     extract: (ctx) => genericExtract({ ...ctx, adapterType: adapter_type }, { allowNetwork }),
+    testConnectionAsync: async (ctx) => {
+      const settings = settingsOf(ctx);
+      const hasSource = Boolean(inlineRecords(settings) || settings.content || settings.table || settings.url);
+      return hasSource
+        ? { ok: true, message: `${name} source is configured` }
+        : { ok: false, message: `${name} source is not configured` };
+    },
+    discoverSchemaAsync: async (ctx) => {
+      const result = await genericExtractAsync({ ...ctx, adapterType: adapter_type, limit: ctx?.limit || 10 }, { allowNetwork });
+      return { fields: result.fields, sample: result.records.slice(0, 10) };
+    },
+    extractAsync: (ctx) => genericExtractAsync({ ...ctx, adapterType: adapter_type }, { allowNetwork }),
   };
 }
 

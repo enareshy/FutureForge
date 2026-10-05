@@ -5,17 +5,24 @@
 // can hang an effectivity assignment off any object type without a new
 // linking table.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { publicAffectedItem } from "./repository.js";
 import { normalizeAffectedItemInput } from "./validation.js";
-import { publishChangeEvent } from "./events.js";
+import { publishChangeEvent, publishChangeEventAsync } from "./events.js";
 import { affectedItemNotFound, affectedItemConflict } from "./errors.js";
-import { requireOrderRow } from "./orders.js";
+import { requireOrderRow, requireOrderRowAsync } from "./orders.js";
 import { SOURCE_MODULE } from "./constants.js";
-import { multiLevelWhereUsed } from "../bom/where-used.js";
+import { multiLevelWhereUsed, multiLevelWhereUsedAsync } from "../bom/where-used.js";
 
 export function listAffectedItems(db, tenantId, orderRef) {
   const order = requireOrderRow(db, tenantId, orderRef);
   const rows = queryAll(db, "SELECT * FROM change_affected_items WHERE change_order_id = ? ORDER BY id", [order.id]);
+  return { items: rows.map(publicAffectedItem), total: rows.length, source_module: SOURCE_MODULE, order_id: order.id };
+}
+
+export async function listAffectedItemsAsync(db, tenantId, orderRef) {
+  const order = await requireOrderRowAsync(db, tenantId, orderRef);
+  const rows = await queryAllAsync(db, "SELECT * FROM change_affected_items WHERE change_order_id = ? ORDER BY id", [order.id]);
   return { items: rows.map(publicAffectedItem), total: rows.length, source_module: SOURCE_MODULE, order_id: order.id };
 }
 
@@ -42,6 +49,29 @@ export function addAffectedItem(db, tenantId, orderRef, body = {}, actor = null,
   return publicAffectedItem(row);
 }
 
+export async function addAffectedItemAsync(db, tenantId, orderRef, body = {}, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const order = await requireOrderRowAsync(db, tenant, orderRef);
+  const normalized = normalizeAffectedItemInput(body);
+  const existing = await queryOneAsync(
+    db,
+    "SELECT id FROM change_affected_items WHERE change_order_id = ? AND object_type = ? AND object_id = ?",
+    [order.id, normalized.object_type, normalized.object_id]
+  );
+  if (existing) throw affectedItemConflict({ object_type: normalized.object_type, object_id: normalized.object_id });
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO change_affected_items
+       (tenant_id, change_order_id, object_type, object_id, object_label, disposition, notes, metadata_json, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [tenant, order.id, normalized.object_type, normalized.object_id, normalized.object_label, normalized.disposition, normalized.notes, JSON.stringify(normalized.metadata || {}), actor?.id ?? null, ts, ts]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM change_affected_items WHERE id = ?", [Number(result.lastInsertId)]);
+  await publishChangeEventAsync(db, { eventType: "ChangeAffectedItemAdded", objectType: "change_order", objectId: order.id, tenantId: tenant, organizationId: order.organization_id, payload: { object_type: row.object_type, object_id: row.object_id } }, actor);
+  return publicAffectedItem(row);
+}
+
 export function removeAffectedItem(db, tenantId, orderRef, itemRef, actor = null, ip = null) {
   const tenant = Number(tenantId);
   const order = requireOrderRow(db, tenant, orderRef);
@@ -53,12 +83,37 @@ export function removeAffectedItem(db, tenantId, orderRef, itemRef, actor = null
   return { deleted: true, id: row.id };
 }
 
+export async function removeAffectedItemAsync(db, tenantId, orderRef, itemRef, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const order = await requireOrderRowAsync(db, tenant, orderRef);
+  const id = Number(itemRef);
+  const row = await queryOneAsync(db, "SELECT * FROM change_affected_items WHERE id = ? AND change_order_id = ?", [id, order.id]);
+  if (!row) throw affectedItemNotFound(itemRef);
+  await runAsync(db, "DELETE FROM change_affected_items WHERE id = ?", [row.id]);
+  await publishChangeEventAsync(db, { eventType: "ChangeAffectedItemRemoved", objectType: "change_order", objectId: order.id, tenantId: tenant, organizationId: order.organization_id, payload: { object_type: row.object_type, object_id: row.object_id } }, actor);
+  return { deleted: true, id: row.id };
+}
+
 export function getAffectedItemRows(db, orderId) {
   return queryAll(db, "SELECT * FROM change_affected_items WHERE change_order_id = ?", [Number(orderId)]);
 }
 
+export function getAffectedItemRowsAsync(db, orderId) {
+  return queryAllAsync(db, "SELECT * FROM change_affected_items WHERE change_order_id = ?", [Number(orderId)]);
+}
+
 export function recordAffectedItemResult(db, id, { resultingObjectType = null, resultingObjectId = null, effectivityDefinitionId = null, effectivityAssignmentId = null } = {}) {
   run(
+    db,
+    `UPDATE change_affected_items
+     SET resulting_object_type = ?, resulting_object_id = ?, effectivity_definition_id = ?, effectivity_assignment_id = ?, updated_at = ?
+     WHERE id = ?`,
+    [resultingObjectType, resultingObjectId, effectivityDefinitionId, effectivityAssignmentId, nowIso(), Number(id)]
+  );
+}
+
+export async function recordAffectedItemResultAsync(db, id, { resultingObjectType = null, resultingObjectId = null, effectivityDefinitionId = null, effectivityAssignmentId = null } = {}) {
+  await runAsync(
     db,
     `UPDATE change_affected_items
      SET resulting_object_type = ?, resulting_object_id = ?, effectivity_definition_id = ?, effectivity_assignment_id = ?, updated_at = ?
@@ -74,6 +129,14 @@ export function recordAffectedItemResult(db, id, { resultingObjectType = null, r
 export function listImpact(db, tenantId, { objectType, objectId, maxDepth = 5 } = {}) {
   try {
     return multiLevelWhereUsed(db, Number(tenantId), objectId, { objectType, maxDepth });
+  } catch {
+    return { items: [], total: 0, note: "Impact analysis unavailable for this object type" };
+  }
+}
+
+export async function listImpactAsync(db, tenantId, { objectType, objectId, maxDepth = 5 } = {}) {
+  try {
+    return await multiLevelWhereUsedAsync(db, Number(tenantId), objectId, { objectType, maxDepth });
   } catch {
     return { items: [], total: 0, note: "Impact analysis unavailable for this object type" };
   }

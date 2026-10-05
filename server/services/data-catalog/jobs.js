@@ -3,15 +3,33 @@
 // Scheduling & Execution Engine so a request never blocks.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
 import { CATALOG_HANDLER_CODES } from "./constants.js";
 import { getConfig } from "./configuration.js";
-import { importCatalog, exportCatalog, listImportRuns } from "./importexport.js";
+import { importCatalog, exportCatalog, listImportRuns, listImportRunsAsync } from "./importexport.js";
 import { lineageGraph, removeLineage } from "./lineage.js";
 import { publicImportRun } from "./repository.js";
 
+async function submitAsync(db, input, { actor = null, ip = null } = {}) {
+  return await submitJobAsync(db, input, { actor, ip });
+}
+
 export function submitCatalogImport(db, { tenantId, resourceType, records = [], dryRun = false, actor = null, ip = null, transferRef = "" } = {}) {
   return submitJob(
+    db,
+    {
+      job_type_code: "DATA_CATALOG_IMPORT",
+      payload: { tenant_id: Number(tenantId), resource_type: resourceType, records, dry_run: dryRun, transfer_ref: transferRef },
+      tenant_id: Number(tenantId),
+      priority: "normal",
+      queue: "default",
+    },
+    { actor, ip }
+  );
+}
+
+export async function submitCatalogImportAsync(db, { tenantId, resourceType, records = [], dryRun = false, actor = null, ip = null, transferRef = "" } = {}) {
+  return await submitAsync(
     db,
     {
       job_type_code: "DATA_CATALOG_IMPORT",
@@ -38,6 +56,20 @@ export function submitCatalogExport(db, { tenantId, resourceTypes = null, format
   );
 }
 
+export async function submitCatalogExportAsync(db, { tenantId, resourceTypes = null, format = "json", actor = null, ip = null } = {}) {
+  return await submitAsync(
+    db,
+    {
+      job_type_code: "DATA_CATALOG_EXPORT",
+      payload: { tenant_id: Number(tenantId), resource_types: resourceTypes, format },
+      tenant_id: Number(tenantId),
+      priority: "normal",
+      queue: "default",
+    },
+    { actor, ip }
+  );
+}
+
 export function submitLineageMaintenance(db, { tenantId, actor = null, ip = null } = {}) {
   return submitJob(
     db,
@@ -46,8 +78,24 @@ export function submitLineageMaintenance(db, { tenantId, actor = null, ip = null
   );
 }
 
+export async function submitLineageMaintenanceAsync(db, { tenantId, actor = null, ip = null } = {}) {
+  return await submitAsync(
+    db,
+    { job_type_code: "DATA_CATALOG_LINEAGE_MAINTENANCE", payload: { tenant_id: Number(tenantId) }, tenant_id: Number(tenantId), priority: "low", queue: "default" },
+    { actor, ip }
+  );
+}
+
 export function submitCatalogReindex(db, { tenantId, objectTypes = null, actor = null, ip = null } = {}) {
   return submitJob(
+    db,
+    { job_type_code: "DATA_CATALOG_REINDEX", payload: { tenant_id: Number(tenantId), object_types: objectTypes }, tenant_id: Number(tenantId), priority: "normal", queue: "default" },
+    { actor, ip }
+  );
+}
+
+export async function submitCatalogReindexAsync(db, { tenantId, objectTypes = null, actor = null, ip = null } = {}) {
+  return await submitAsync(
     db,
     { job_type_code: "DATA_CATALOG_REINDEX", payload: { tenant_id: Number(tenantId), object_types: objectTypes }, tenant_id: Number(tenantId), priority: "normal", queue: "default" },
     { actor, ip }
@@ -179,6 +227,10 @@ export function registerCatalogHandlers() {
 
 export function listCatalogJobs(db, { tenantId, limit = 50 } = {}) {
   return listImportRuns(db, { tenantId, limit });
+}
+
+export async function listCatalogJobsAsync(db, { tenantId, limit = 50 } = {}) {
+  return await listImportRunsAsync(db, { tenantId, limit });
 }
 
 export { publicImportRun };

@@ -6,7 +6,8 @@
 // Resolution is explainable: callers receive the winning policy plus the
 // candidates that were considered, so an operator can see why an object matched.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { MAX_POLICY_PRIORITY, POLICY_SCOPE_TYPES, SOURCE_MODULE } from "./constants.js";
 import { policyRef } from "./refs.js";
 import { publicPolicy, publicPolicyVersion } from "./repository.js";
@@ -26,7 +27,7 @@ import {
   parseDate,
   toIso,
 } from "./validation.js";
-import { listConfig } from "./configuration.js";
+import { listConfig, listConfigAsync } from "./configuration.js";
 
 export { publicPolicy, publicPolicyVersion };
 
@@ -41,14 +42,33 @@ export function getPolicyRow(db, tenantId, ref) {
   ]);
 }
 
+export async function getPolicyRowAsync(db, tenantId, ref) {
+  return await queryOneAsync(db, "SELECT * FROM lc_policies WHERE tenant_id = ? AND (policy_ref = ? OR code = ? OR id = ?)", [
+    Number(tenantId),
+    String(ref),
+    normalizeUpper(ref),
+    Number(ref) || -1,
+  ]);
+}
+
 export function requirePolicy(db, tenantId, ref) {
   const row = getPolicyRow(db, tenantId, ref);
   if (!row) throw policyNotFound(ref);
   return row;
 }
 
+export async function requirePolicyAsync(db, tenantId, ref) {
+  const row = await getPolicyRowAsync(db, tenantId, ref);
+  if (!row) throw policyNotFound(ref);
+  return row;
+}
+
 export function getPolicy(db, tenantId, ref) {
   return publicPolicy(requirePolicy(db, tenantId, ref));
+}
+
+export async function getPolicyAsync(db, tenantId, ref) {
+  return publicPolicy(await requirePolicyAsync(db, tenantId, ref));
 }
 
 function normalizePolicyInput(input = {}, existing = null) {
@@ -149,8 +169,75 @@ export function createPolicy(db, tenantId, input = {}, actor = null, ip = null) 
   return publicPolicy(row);
 }
 
+export async function createPolicyAsync(db, tenantId, input = {}, actor = null, ip = null) {
+  const code = normalizeUpper(input.code || input.policy_code);
+  if (!/^[A-Z][A-Z0-9_.-]{1,63}$/.test(code)) throw invalidPolicy("A policy code (2-64 uppercase characters) is required");
+  if (await queryOneAsync(db, "SELECT id FROM lc_policies WHERE tenant_id = ? AND code = ?", [Number(tenantId), code])) throw policyConflict(code);
+  const normalized = normalizePolicyInput(input);
+  const status = assertPolicyStatus(input.status || "draft");
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO lc_policies (policy_ref, tenant_id, code, name, description, scope_type, organization_id, plant_id, object_type, subtype, classification, lifecycle_state, object_id,
+       retention_period_days, retention_basis, archive_action, cold_storage_action, purge_action, archive_after_days, cold_storage_after_days, purge_after_days, data_tier,
+       status, effective_from, effective_to, priority, owner_user_id, version, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+    [
+      policyRef(code),
+      Number(tenantId),
+      code,
+      normalizeText(input.name) || code,
+      normalizeText(input.description),
+      normalized.scope_type,
+      normalized.organization_id,
+      normalized.plant_id,
+      normalized.object_type,
+      normalized.subtype,
+      normalized.classification,
+      normalized.lifecycle_state,
+      normalized.object_id,
+      normalized.retention_period_days,
+      normalized.retention_basis,
+      normalized.archive_action,
+      normalized.cold_storage_action,
+      normalized.purge_action,
+      normalized.archive_after_days,
+      normalized.cold_storage_after_days,
+      normalized.purge_after_days,
+      normalized.data_tier,
+      status,
+      normalized.effective_from,
+      normalized.effective_to,
+      normalized.priority,
+      normalized.owner_user_id,
+      actor?.id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM lc_policies WHERE id = ?", [Number(result.lastInsertId)]);
+  await writeAuditAsync(db, { actor, action: "data_lifecycle.policy.create", resourceType: "lc_policies", resourceId: code, details: { code, scope_type: normalized.scope_type }, ip });
+  return publicPolicy(row);
+}
+
 function snapshotPolicyVersion(db, row, actor, changeSummary) {
   run(
+    db,
+    `INSERT INTO lc_policy_versions (policy_id, tenant_id, version, snapshot_json, change_summary, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (policy_id, version) DO UPDATE SET
+       tenant_id = EXCLUDED.tenant_id,
+       snapshot_json = EXCLUDED.snapshot_json,
+       change_summary = EXCLUDED.change_summary,
+       created_by = EXCLUDED.created_by,
+       created_at = EXCLUDED.created_at`,
+    [row.id, row.tenant_id, row.version, JSON.stringify(publicPolicy(row)), normalizeText(changeSummary), actor?.id ?? null, nowIso()]
+  );
+}
+
+async function snapshotPolicyVersionAsync(db, row, actor, changeSummary) {
+  await runAsync(
     db,
     `INSERT INTO lc_policy_versions (policy_id, tenant_id, version, snapshot_json, change_summary, created_by, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -221,6 +308,63 @@ export function updatePolicy(db, tenantId, ref, patch = {}, actor = null, ip = n
   return publicPolicy(updated);
 }
 
+export async function updatePolicyAsync(db, tenantId, ref, patch = {}, actor = null, ip = null) {
+  const row = await requirePolicyAsync(db, tenantId, ref);
+  if (patch.code !== undefined && normalizeUpper(patch.code) !== row.code) {
+    throw invalidPolicy("A policy code is immutable; retire the policy and create a new one", { code: row.code });
+  }
+  const normalized = normalizePolicyInput(patch, row);
+  await snapshotPolicyVersionAsync(db, row, actor, patch.change_summary || "policy updated");
+  const nextStatus = patch.status !== undefined ? assertPolicyStatus(patch.status) : row.status;
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `UPDATE lc_policies SET name = ?, description = ?, scope_type = ?, organization_id = ?, plant_id = ?, object_type = ?, subtype = ?, classification = ?, lifecycle_state = ?, object_id = ?,
+       retention_period_days = ?, retention_basis = ?, archive_action = ?, cold_storage_action = ?, purge_action = ?, archive_after_days = ?, cold_storage_after_days = ?, purge_after_days = ?, data_tier = ?,
+       status = ?, effective_from = ?, effective_to = ?, priority = ?, owner_user_id = ?, version = version + 1, updated_by = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      normalizeText(patch.name ?? row.name) || row.code,
+      normalizeText(patch.description ?? row.description),
+      normalized.scope_type,
+      normalized.organization_id,
+      normalized.plant_id,
+      normalized.object_type,
+      normalized.subtype,
+      normalized.classification,
+      normalized.lifecycle_state,
+      normalized.object_id,
+      normalized.retention_period_days,
+      normalized.retention_basis,
+      normalized.archive_action,
+      normalized.cold_storage_action,
+      normalized.purge_action,
+      normalized.archive_after_days,
+      normalized.cold_storage_after_days,
+      normalized.purge_after_days,
+      normalized.data_tier,
+      nextStatus,
+      normalized.effective_from,
+      normalized.effective_to,
+      normalized.priority,
+      normalized.owner_user_id,
+      actor?.id ?? null,
+      ts,
+      row.id,
+    ]
+  );
+  const updated = await queryOneAsync(db, "SELECT * FROM lc_policies WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "data_lifecycle.policy.update",
+    resourceType: "lc_policies",
+    resourceId: row.code,
+    details: { code: row.code, version: updated.version },
+    ip,
+  });
+  return publicPolicy(updated);
+}
+
 export function setPolicyStatus(db, tenantId, ref, status, actor = null, ip = null) {
   const row = requirePolicy(db, tenantId, ref);
   const next = assertPolicyStatus(status);
@@ -235,9 +379,29 @@ export function setPolicyStatus(db, tenantId, ref, status, actor = null, ip = nu
   return publicPolicy(queryOne(db, "SELECT * FROM lc_policies WHERE id = ?", [row.id]));
 }
 
+export async function setPolicyStatusAsync(db, tenantId, ref, status, actor = null, ip = null) {
+  const row = await requirePolicyAsync(db, tenantId, ref);
+  const next = assertPolicyStatus(status);
+  await snapshotPolicyVersionAsync(db, row, actor, `status ${row.status} -> ${next}`);
+  await runAsync(db, "UPDATE lc_policies SET status = ?, version = version + 1, updated_by = ?, updated_at = ? WHERE id = ?", [
+    next,
+    actor?.id ?? null,
+    nowIso(),
+    row.id,
+  ]);
+  await writeAuditAsync(db, { actor, action: "data_lifecycle.policy.status", resourceType: "lc_policies", resourceId: row.code, details: { status: next }, ip });
+  return publicPolicy(await queryOneAsync(db, "SELECT * FROM lc_policies WHERE id = ?", [row.id]));
+}
+
 export function listPolicyVersions(db, tenantId, ref) {
   const row = requirePolicy(db, tenantId, ref);
   const rows = queryAll(db, "SELECT * FROM lc_policy_versions WHERE policy_id = ? ORDER BY version DESC", [row.id]);
+  return { items: rows.map(publicPolicyVersion), total: rows.length };
+}
+
+export async function listPolicyVersionsAsync(db, tenantId, ref) {
+  const row = await requirePolicyAsync(db, tenantId, ref);
+  const rows = await queryAllAsync(db, "SELECT * FROM lc_policy_versions WHERE policy_id = ? ORDER BY version DESC", [row.id]);
   return { items: rows.map(publicPolicyVersion), total: rows.length };
 }
 
@@ -270,6 +434,38 @@ export function listPolicies(db, { tenantId, status, scopeType, objectType, life
   const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 100, maxPageSize: 500 });
   const total = Number(queryOne(db, `SELECT COUNT(*) AS c FROM lc_policies ${where}`, params)?.c || 0);
   const rows = queryAll(db, `SELECT * FROM lc_policies ${where} ORDER BY priority, code LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicPolicy), total, page: currentPage, page_size: limit };
+}
+
+export async function listPoliciesAsync(db, { tenantId, status, scopeType, objectType, lifecycleState, q, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (status) {
+    clauses.push("status = ?");
+    params.push(assertPolicyStatus(status));
+  }
+  if (scopeType) {
+    clauses.push("scope_type = ?");
+    params.push(assertPolicyScope(scopeType));
+  }
+  if (objectType) {
+    clauses.push("object_type = ?");
+    params.push(normalizeUpper(objectType));
+  }
+  if (lifecycleState) {
+    clauses.push("lifecycle_state = ?");
+    params.push(normalizeUpper(lifecycleState));
+  }
+  const term = normalizeText(q);
+  if (term) {
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
+    const like = `%${term}%`;
+    params.push(like, like, like);
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 100, maxPageSize: 500 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM lc_policies ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM lc_policies ${where} ORDER BY priority, code LIMIT ? OFFSET ?`, [...params, limit, offset]);
   return { items: rows.map(publicPolicy), total, page: currentPage, page_size: limit };
 }
 
@@ -342,6 +538,41 @@ export function resolvePolicy(db, { tenantId, objectType, objectId = null, organ
   };
 }
 
+export async function resolvePolicyAsync(db, { tenantId, objectType, objectId = null, organizationId = null, plantId = null, subtype = "", classification = "", lifecycleState = "", reference = null } = {}) {
+  const target = { objectType, objectId, organizationId, plantId, subtype, classification, lifecycleState };
+  const rows = await queryAllAsync(db, "SELECT * FROM lc_policies WHERE tenant_id = ? AND status = 'active'", [Number(tenantId)]);
+  const candidates = [];
+  for (const row of rows) {
+    if (!withinWindow(row, reference || nowIso())) continue;
+    if (!policyMatches(row, target)) continue;
+    const { matched, score } = policySpecificity(row, target);
+    candidates.push({ policy: row, matched, score });
+  }
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.matched !== a.matched) return b.matched - a.matched;
+    if (a.policy.priority !== b.policy.priority) return a.policy.priority - b.policy.priority;
+    return b.policy.id - a.policy.id;
+  });
+  const winner = candidates[0]?.policy || null;
+  return {
+    policy: publicPolicy(winner),
+    policy_id: winner?.id ?? null,
+    match_score: candidates[0]?.score ?? 0,
+    matched_dimensions: candidates[0]?.matched ?? 0,
+    candidates: candidates.slice(0, 10).map((c) => ({
+      policy_ref: c.policy.policy_ref,
+      code: c.policy.code,
+      scope_type: c.policy.scope_type,
+      priority: c.policy.priority,
+      match_score: c.score,
+    })),
+    source_module: SOURCE_MODULE,
+    scope_types: POLICY_SCOPE_TYPES,
+    max_priority: MAX_POLICY_PRIORITY,
+  };
+}
+
 // Pure schedule math. `anchor` is the resolved retention anchor (an ISO date).
 export function computeRetentionSchedule(anchor, policy, config = {}) {
   const anchorIso = toIso(parseDate(anchor));
@@ -360,6 +591,15 @@ export function computeRetentionSchedule(anchor, policy, config = {}) {
 
 export function defaultRetentionConfig(db, tenantId) {
   const config = listConfig(db, tenantId);
+  return {
+    default_retention_days: config.default_retention_days,
+    cold_storage_after_days: config.cold_storage_after_days,
+    purge_after_days: config.purge_after_days,
+  };
+}
+
+export async function defaultRetentionConfigAsync(db, tenantId) {
+  const config = await listConfigAsync(db, tenantId);
   return {
     default_retention_days: config.default_retention_days,
     cold_storage_after_days: config.cold_storage_after_days,

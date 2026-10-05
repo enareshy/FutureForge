@@ -4,11 +4,27 @@
 // who may see them from centralized identity and organization data. Reporting
 // duplicates no role management: it reads group/role membership.
 import { queryAll } from "../../db.js";
+import { queryAllAsync } from "../../db-async.js";
 
 export function loadSubjectProfile(db, actor) {
   if (!actor?.id) return { userId: null, organizationId: null, organizationIds: new Set(), groupIds: new Set(), roleIds: new Set() };
   const groupIds = new Set(queryAll(db, "SELECT group_id FROM group_members WHERE user_id = ?", [Number(actor.id)]).map((row) => Number(row.group_id)));
   const roleIds = new Set(queryAll(db, "SELECT role_id FROM user_roles WHERE user_id = ?", [Number(actor.id)]).map((row) => Number(row.role_id)));
+  const organizationIds = new Set();
+  if (actor.organization_id) organizationIds.add(Number(actor.organization_id));
+  return {
+    userId: Number(actor.id),
+    organizationId: actor.organization_id ? Number(actor.organization_id) : null,
+    organizationIds,
+    groupIds,
+    roleIds,
+  };
+}
+
+export async function loadSubjectProfileAsync(db, actor) {
+  if (!actor?.id) return { userId: null, organizationId: null, organizationIds: new Set(), groupIds: new Set(), roleIds: new Set() };
+  const groupIds = new Set((await queryAllAsync(db, "SELECT group_id FROM group_members WHERE user_id = ?", [Number(actor.id)])).map((row) => Number(row.group_id)));
+  const roleIds = new Set((await queryAllAsync(db, "SELECT role_id FROM user_roles WHERE user_id = ?", [Number(actor.id)])).map((row) => Number(row.role_id)));
   const organizationIds = new Set();
   if (actor.organization_id) organizationIds.add(Number(actor.organization_id));
   return {
@@ -48,6 +64,20 @@ export function canAccess(db, actor, { ownerUserId = null, visibility = "PRIVATE
   const scope = String(visibility || "PRIVATE").toUpperCase();
   if (scope === "GLOBAL") return true;
   const profile = loadSubjectProfile(db, actor);
+  if (scope === "PRIVATE") return ownerUserId !== null && profile.userId === ownerUserId;
+  if (scope === "ORGANIZATION") return ownerUserId === profile.userId || (subjectId !== null && profile.organizationIds.has(Number(subjectId)));
+  if (scope === "PLANT" || scope === "SITE" || scope === "GROUP" || scope === "ROLE") {
+    if (ownerUserId !== null && profile.userId === ownerUserId) return true;
+    if (subjectMatches(profile, scope, subjectId)) return true;
+    return (shares || []).some((share) => subjectMatches(profile, share.subject_type, share.subject_id));
+  }
+  return (shares || []).some((share) => subjectMatches(profile, share.subject_type, share.subject_id));
+}
+
+export async function canAccessAsync(db, actor, { ownerUserId = null, visibility = "PRIVATE", subjectType = null, subjectId = null, shares = [] } = {}) {
+  const scope = String(visibility || "PRIVATE").toUpperCase();
+  if (scope === "GLOBAL") return true;
+  const profile = await loadSubjectProfileAsync(db, actor);
   if (scope === "PRIVATE") return ownerUserId !== null && profile.userId === ownerUserId;
   if (scope === "ORGANIZATION") return ownerUserId === profile.userId || (subjectId !== null && profile.organizationIds.has(Number(subjectId)));
   if (scope === "PLANT" || scope === "SITE" || scope === "GROUP" || scope === "ROLE") {

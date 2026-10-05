@@ -6,22 +6,23 @@
 // observability is observable. Collection is idempotent at the definition
 // level and safe to invoke from a job, a schedule or an API call.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { writeAudit } from "../audit.js";
-import { tenantIds } from "../search/registry.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { SIGNAL_CATEGORIES } from "./constants.js";
 import { runRef } from "./identifiers.js";
-import { parseJson, stringifyJson, paged, tableExists } from "./repository.js";
-import { measureMetric } from "./providers.js";
-import { recordObservation, listMetrics, getMetricRow } from "./metrics.js";
-import { classifyMetric } from "./thresholds.js";
-import { applyAlertRules, refreshSuppressions, alertSummary } from "./alerts.js";
-import { evaluateFreshness, freshnessSummary } from "./freshness.js";
-import { evaluateHealth, persistHealthSnapshots, currentHealth } from "./health.js";
-import { evaluateAllSlos } from "./slo.js";
-import { incidentSummary } from "./incidents.js";
-import { getConfig, getNumericConfig } from "./configuration.js";
-import { recordHistory } from "./history.js";
-import { observabilityEventCode, publishObservabilityEvent } from "./events.js";
+import { parseJson, stringifyJson, paged, pagedAsync, tableExists, tableExistsAsync } from "./repository.js";
+import { measureMetric, measureMetricAsync } from "./providers.js";
+import { recordObservation, listMetrics, getMetricRow, recordObservationAsync, listMetricsAsync } from "./metrics.js";
+import { classifyMetric, classifyMetricAsync } from "./thresholds.js";
+import { applyAlertRules, refreshSuppressions, alertSummary, applyAlertRulesAsync, refreshSuppressionsAsync, alertSummaryAsync } from "./alerts.js";
+import { evaluateFreshness, freshnessSummary, freshnessSummaryAsync } from "./freshness.js";
+import { evaluateHealth, persistHealthSnapshots, currentHealth, evaluateHealthAsync, persistHealthSnapshotsAsync, currentHealthAsync } from "./health.js";
+import { evaluateAllSlos, evaluateAllSlosAsync } from "./slo.js";
+import { incidentSummary, incidentSummaryAsync } from "./incidents.js";
+import { getConfig, getNumericConfig, getConfigAsync, getNumericConfigAsync } from "./configuration.js";
+import { recordHistory, recordHistoryAsync } from "./history.js";
+import { observabilityEventCode, publishObservabilityEvent, publishObservabilityEventAsync } from "./events.js";
 
 export function publicRun(row) {
   if (!row) return null;
@@ -70,6 +71,16 @@ function createRun(db, tenantId, { trigger = "MANUAL", actor = null } = {}) {
   return Number(result.lastInsertId);
 }
 
+async function createRunAsync(db, tenantId, { trigger = "MANUAL", actor = null } = {}) {
+  const result = await runAsync(
+    db,
+    `INSERT INTO observability_observation_runs (run_ref, tenant_id, trigger_type, status, started_at, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?)`,
+    [runRef(), Number(tenantId), String(trigger).toUpperCase(), nowIso(), actor?.id ?? null, nowIso(), nowIso()]
+  );
+  return Number(result.lastInsertId);
+}
+
 function recordRunError(db, tenantId, runId, { providerCode, metricCode, message, detail = {} }) {
   run(
     db,
@@ -78,8 +89,36 @@ function recordRunError(db, tenantId, runId, { providerCode, metricCode, message
   );
 }
 
+async function recordRunErrorAsync(db, tenantId, runId, { providerCode, metricCode, message, detail = {} }) {
+  await runAsync(
+    db,
+    "INSERT INTO observability_observation_errors (run_id, tenant_id, provider_code, metric_code, message, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [runId ?? null, Number(tenantId), providerCode ?? null, metricCode ?? null, String(message || ""), stringifyJson(detail), nowIso()]
+  );
+}
+
 function finalizeRun(db, runId, patch = {}) {
   run(
+    db,
+    "UPDATE observability_observation_runs SET status = ?, metric_count = ?, observation_count = ?, error_count = ?, alerts_created = ?, alerts_resolved = ?, slo_breaches = ?, finished_at = ?, detail_json = ?, updated_at = ? WHERE id = ?",
+    [
+      patch.status || "COMPLETED",
+      Number(patch.metric_count || 0),
+      Number(patch.observation_count || 0),
+      Number(patch.error_count || 0),
+      Number(patch.alerts_created || 0),
+      Number(patch.alerts_resolved || 0),
+      Number(patch.slo_breaches || 0),
+      nowIso(),
+      stringifyJson(patch.detail || {}),
+      nowIso(),
+      runId,
+    ]
+  );
+}
+
+async function finalizeRunAsync(db, runId, patch = {}) {
+  await runAsync(
     db,
     "UPDATE observability_observation_runs SET status = ?, metric_count = ?, observation_count = ?, error_count = ?, alerts_created = ?, alerts_resolved = ?, slo_breaches = ?, finished_at = ?, detail_json = ?, updated_at = ? WHERE id = ?",
     [
@@ -158,6 +197,65 @@ export function collectTenant(db, tenantId, { trigger = "MANUAL", actor = null, 
   return { run: publicRun(queryOne(db, "SELECT * FROM observability_observation_runs WHERE id = ?", [id])), counts };
 }
 
+export async function collectTenantAsync(db, tenantId, { trigger = "MANUAL", actor = null, runId = null } = {}) {
+  const scope = Number(tenantId);
+  const id = runId || (await createRunAsync(db, scope, { trigger, actor }));
+  const counts = { metric_count: 0, observation_count: 0, error_count: 0, alerts_created: 0, alerts_resolved: 0, escalated: 0, incidents_created: 0, slo_breaches: 0 };
+  const errors = [];
+  let alertEval = { created: 0, resolved: 0, escalated: 0, incidents_created: 0 };
+  try {
+    const suppressed = await refreshSuppressionsAsync(db, scope);
+    if (suppressed) counts.detail_suppressions_refreshed = suppressed;
+
+    const maxMetrics = await getNumericConfigAsync(db, scope, "max_metrics_per_run");
+    const metrics = (await listMetricsAsync(db, scope, { status: "ACTIVE", page_size: maxMetrics })).items;
+    for (const metric of metrics) {
+      counts.metric_count += 1;
+      const measurement = await measureMetricAsync(db, scope, metric);
+      if (measurement.error) {
+        counts.error_count += 1;
+        errors.push({ providerCode: metric.provider_code, metricCode: metric.code, message: measurement.error });
+        await recordRunErrorAsync(db, scope, id, { providerCode: metric.provider_code, metricCode: metric.code, message: measurement.error });
+        continue;
+      }
+      const observationId = await recordObservationAsync(db, scope, metric, { value: measurement.value, providerCode: metric.provider_code, runId: id });
+      counts.observation_count += 1;
+      const evaluation = await applyAlertRulesAsync(db, scope, metric, { value: measurement.value, observation_id: observationId, observed_at: nowIso() }, { actor, runId: id });
+      alertEval = {
+        created: alertEval.created + evaluation.created,
+        resolved: alertEval.resolved + evaluation.resolved,
+        escalated: alertEval.escalated + evaluation.escalated,
+        incidents_created: alertEval.incidents_created + evaluation.incidents_created,
+      };
+      const band = await classifyMetricAsync(db, scope, metric, measurement.value);
+      await publishObservabilityEventAsync(
+        db,
+        { eventType: observabilityEventCode("METRIC_OBSERVED"), payload: { metric_code: metric.code, value: measurement.value, band: band.band, run_id: id }, objectType: "observability_metric", objectId: metric.id, tenantId: scope },
+        actor
+      );
+    }
+    const healthEvaluation = await evaluateHealthAsync(db, scope, { runId: id });
+    await persistHealthSnapshotsAsync(db, scope, healthEvaluation, { runId: id, actor });
+    const slo = await evaluateAllSlosAsync(db, scope, { actor });
+    counts.slo_breaches = slo.breached;
+    counts.alerts_created = alertEval.created;
+    counts.alerts_resolved = alertEval.resolved;
+    await finalizeRunAsync(db, id, {
+      status: counts.error_count > 0 ? "PARTIAL" : "COMPLETED",
+      ...counts,
+      escalated: alertEval.escalated,
+      incidents_created: alertEval.incidents_created,
+      detail: { errors: errors.length, health: healthEvaluation.overall, slo_breaches: slo.breached },
+    });
+    await recordHistoryAsync(db, { tenantId: scope, action: "COLLECTION_RUN", entityType: "run", entityId: id, entityRef: `run:${id}`, actor, summary: `Collection run collected ${counts.observation_count} observations`, detail: counts });
+  } catch (err) {
+    counts.error_count += 1;
+    await recordRunErrorAsync(db, scope, id, { message: err.message, detail: { fatal: true } });
+    await finalizeRunAsync(db, id, { status: "FAILED", ...counts, detail: { error: err.message } });
+  }
+  return { run: publicRun(await queryOneAsync(db, "SELECT * FROM observability_observation_runs WHERE id = ?", [id])), counts };
+}
+
 export function collectAllTenants(db, { trigger = "SCHEDULED", actor = null } = {}) {
   let tenants = [];
   try {
@@ -169,6 +267,21 @@ export function collectAllTenants(db, { trigger = "SCHEDULED", actor = null } = 
   for (const tenantId of tenants) {
     if (!getConfig(db, tenantId, "enabled")) continue;
     runs.push(collectTenant(db, tenantId, { trigger, actor }));
+  }
+  return { tenants: tenants.length, runs };
+}
+
+export async function collectAllTenantsAsync(db, { trigger = "SCHEDULED", actor = null } = {}) {
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+  const runs = [];
+  for (const tenantId of tenants) {
+    if (!(await getConfigAsync(db, tenantId, "enabled"))) continue;
+    runs.push(await collectTenantAsync(db, tenantId, { trigger, actor }));
   }
   return { tenants: tenants.length, runs };
 }
@@ -187,6 +300,20 @@ export function listRuns(db, tenantId, query = {}) {
   return paged(db, "observability_observation_runs", { where, params, orderBy: "started_at DESC, id DESC", page: query.page, pageSize: query.page_size || query.pageSize, map: publicRun });
 }
 
+export async function listRunsAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  if (query.trigger_type || query.triggerType) {
+    where.push("trigger_type = ?");
+    params.push(String(query.trigger_type || query.triggerType).toUpperCase());
+  }
+  return await pagedAsync(db, "observability_observation_runs", { where, params, orderBy: "started_at DESC, id DESC", page: query.page, pageSize: query.page_size || query.pageSize, map: publicRun });
+}
+
 export function getRun(db, tenantId, ref) {
   const raw = String(ref ?? "");
   const id = Number(raw);
@@ -198,11 +325,30 @@ export function getRun(db, tenantId, ref) {
   return { ...publicRun(row), errors };
 }
 
+export async function getRunAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const id = Number(raw);
+  const row = Number.isInteger(id) && id > 0
+    ? await queryOneAsync(db, "SELECT * FROM observability_observation_runs WHERE tenant_id = ? AND id = ?", [Number(tenantId), id])
+    : await queryOneAsync(db, "SELECT * FROM observability_observation_runs WHERE tenant_id = ? AND run_ref = ?", [Number(tenantId), raw]);
+  if (!row) return null;
+  const errors = (await queryAllAsync(db, "SELECT * FROM observability_observation_errors WHERE run_id = ? ORDER BY id", [row.id])).map(publicRunError);
+  return { ...publicRun(row), errors };
+}
+
 export function pruneRuns(db, tenantId, retainDays) {
   const days = Math.max(1, Number(retainDays) || 30);
   const runIds = queryAll(db, "SELECT id FROM observability_observation_runs WHERE tenant_id = ? AND started_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]).map((row) => row.id);
   for (const id of runIds) run(db, "DELETE FROM observability_observation_errors WHERE run_id = ?", [id]);
   const result = run(db, "DELETE FROM observability_observation_runs WHERE tenant_id = ? AND started_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]);
+  return Number(result.changes || 0);
+}
+
+export async function pruneRunsAsync(db, tenantId, retainDays) {
+  const days = Math.max(1, Number(retainDays) || 30);
+  const runIds = (await queryAllAsync(db, "SELECT id FROM observability_observation_runs WHERE tenant_id = ? AND started_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`])).map((row) => row.id);
+  for (const id of runIds) await runAsync(db, "DELETE FROM observability_observation_errors WHERE run_id = ?", [id]);
+  const result = await runAsync(db, "DELETE FROM observability_observation_runs WHERE tenant_id = ? AND started_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]);
   return Number(result.changes || 0);
 }
 
@@ -251,8 +397,58 @@ export function observabilityOverview(db, tenantId) {
   };
 }
 
+export async function observabilityOverviewAsync(db, tenantId) {
+  const metrics = (await listMetricsAsync(db, tenantId, { status: "ACTIVE", page_size: 500 })).items;
+  const groups = {};
+  for (const category of SIGNAL_CATEGORIES) groups[category] = [];
+  for (const metric of metrics) {
+    const latest = (await tableExistsAsync(db, "observability_metric_observations"))
+      ? await queryOneAsync(db, "SELECT value, observed_at, unit FROM observability_metric_observations WHERE tenant_id = ? AND metric_code = ? ORDER BY observed_at DESC, id DESC LIMIT 1", [Number(tenantId), metric.code])
+      : null;
+    const classified = await classifyMetricAsync(db, tenantId, metric, latest?.value ?? null);
+    const entry = {
+      metric_code: metric.code,
+      name: metric.name,
+      category: metric.category,
+      provider_code: metric.provider_code,
+      unit: metric.unit,
+      value: latest?.value ?? null,
+      observed_at: latest?.observed_at ?? null,
+      band: classified.band,
+      threshold: classified.threshold ?? null,
+    };
+    (groups[metric.category] = groups[metric.category] || []).push(entry);
+  }
+  const health = await currentHealthAsync(db, tenantId);
+  const alerts = await alertSummaryAsync(db, tenantId);
+  const incidents = await incidentSummaryAsync(db, tenantId);
+  const freshness = await freshnessSummaryAsync(db, tenantId);
+  const slo = await evaluateAllSlosAsync(db, tenantId, { notify: false });
+  const lastRun = await queryOneAsync(db, "SELECT * FROM observability_observation_runs WHERE tenant_id = ? ORDER BY started_at DESC, id DESC LIMIT 1", [Number(tenantId)]);
+  const bands = { OK: 0, WARNING: 0, CRITICAL: 0, UNKNOWN: 0 };
+  for (const list of Object.values(groups)) for (const entry of list) bands[entry.band] = (bands[entry.band] || 0) + 1;
+  return {
+    health,
+    alert_summary: alerts,
+    incident_summary: incidents,
+    freshness: { total: freshness.total, buckets: freshness.buckets },
+    slo: { total: slo.total, compliant: slo.compliant, at_risk: slo.at_risk, breached: slo.breached, no_data: slo.no_data },
+    metric_bands: bands,
+    categories: groups,
+    last_run: publicRun(lastRun),
+    generated_at: nowIso(),
+  };
+}
+
 export function categorySummary(db, tenantId, categories) {
   const overview = observabilityOverview(db, tenantId);
+  const selected = {};
+  for (const category of categories) selected[category] = overview.categories[category] || [];
+  return { categories: selected, metric_bands: overview.metric_bands, generated_at: overview.generated_at };
+}
+
+export async function categorySummaryAsync(db, tenantId, categories) {
+  const overview = await observabilityOverviewAsync(db, tenantId);
   const selected = {};
   for (const category of categories) selected[category] = overview.categories[category] || [];
   return { categories: selected, metric_bands: overview.metric_bands, generated_at: overview.generated_at };
@@ -266,8 +462,24 @@ export function failureSummary(db, tenantId) {
   return { items, open_alerts: overview.alert_summary, open_incidents: overview.incident_summary, generated_at: overview.generated_at };
 }
 
+export async function failureSummaryAsync(db, tenantId) {
+  const overview = await observabilityOverviewAsync(db, tenantId);
+  const codes = ["ERROR_RATE", "JOB", "INTEGRATION", "IMPORT", "EXPORT", "EVENT"];
+  const items = [];
+  for (const category of codes) for (const entry of overview.categories[category] || []) items.push(entry);
+  return { items, open_alerts: overview.alert_summary, open_incidents: overview.incident_summary, generated_at: overview.generated_at };
+}
+
 export function throughputSummary(db, tenantId) {
   const overview = observabilityOverview(db, tenantId);
+  const codes = ["THROUGHPUT", "LATENCY", "WORKFLOW", "DATA_VOLUME"];
+  const items = [];
+  for (const category of codes) for (const entry of overview.categories[category] || []) items.push(entry);
+  return { items, generated_at: overview.generated_at };
+}
+
+export async function throughputSummaryAsync(db, tenantId) {
+  const overview = await observabilityOverviewAsync(db, tenantId);
   const codes = ["THROUGHPUT", "LATENCY", "WORKFLOW", "DATA_VOLUME"];
   const items = [];
   for (const category of codes) for (const entry of overview.categories[category] || []) items.push(entry);

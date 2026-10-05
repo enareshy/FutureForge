@@ -1,4 +1,5 @@
 import { queryOne } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { CONTENT_STATUS_LABELS, DOWNLOADABLE_STATUSES } from "./constants.js";
 import { Errors } from "./errors.js";
 
@@ -382,8 +383,32 @@ export function findContentRow(db, reference, tenantId = null) {
   return row;
 }
 
+export async function findContentRowAsync(db, reference, tenantId = null) {
+  const numeric = Number(reference);
+  const row = await queryOneAsync(
+    db,
+    `SELECT * FROM content
+     WHERE content_id = ? OR content_key = ? OR id = ?`,
+    [String(reference || ""), String(reference || ""), Number.isInteger(numeric) ? numeric : -1]
+  );
+  if (!row) throw Errors.notFound();
+  if (tenantId !== null && tenantId !== undefined && Number(row.tenant_id) !== Number(tenantId)) {
+    throw Errors.notFound();
+  }
+  return row;
+}
+
 export function findContentById(db, id, tenantId = null) {
   const row = queryOne(db, "SELECT * FROM content WHERE id = ?", [Number(id) || -1]);
+  if (!row) throw Errors.notFound();
+  if (tenantId !== null && tenantId !== undefined && Number(row.tenant_id) !== Number(tenantId)) {
+    throw Errors.notFound();
+  }
+  return row;
+}
+
+export async function findContentByIdAsync(db, id, tenantId = null) {
+  const row = await queryOneAsync(db, "SELECT * FROM content WHERE id = ?", [Number(id) || -1]);
   if (!row) throw Errors.notFound();
   if (tenantId !== null && tenantId !== undefined && Number(row.tenant_id) !== Number(tenantId)) {
     throw Errors.notFound();
@@ -402,12 +427,38 @@ export function findVersionRow(db, contentId, reference) {
   return row;
 }
 
+export async function findVersionRowAsync(db, contentId, reference) {
+  const row = await queryOneAsync(
+    db,
+    `SELECT * FROM content_versions
+     WHERE content_id = ? AND (id = ? OR version_number = ? OR version_label = ?)`,
+    [Number(contentId), Number(reference) || -1, Number(reference) || -1, String(reference || "")]
+  );
+  if (!row) throw Errors.notFound("Content version not found");
+  return row;
+}
+
 export function currentVersionRow(db, contentId) {
   return queryOne(db, "SELECT * FROM content_versions WHERE content_id = ? AND is_current = 1", [Number(contentId)]);
 }
 
+export async function currentVersionRowAsync(db, contentId) {
+  return queryOneAsync(db, "SELECT * FROM content_versions WHERE content_id = ? AND is_current = 1", [Number(contentId)]);
+}
+
 export function findRenditionRow(db, contentId, reference) {
   const row = queryOne(
+    db,
+    `SELECT * FROM content_renditions
+     WHERE content_id = ? AND (id = ? OR rendition_ref = ? OR rendition_type = ?)`,
+    [Number(contentId), Number(reference) || -1, String(reference || ""), String(reference || "").toUpperCase()]
+  );
+  if (!row) throw Errors.notFound("Rendition not found");
+  return row;
+}
+
+export async function findRenditionRowAsync(db, contentId, reference) {
+  const row = await queryOneAsync(
     db,
     `SELECT * FROM content_renditions
      WHERE content_id = ? AND (id = ? OR rendition_ref = ? OR rendition_type = ?)`,
@@ -429,10 +480,30 @@ export function findUploadRow(db, upload, tenantId = null) {
   return row;
 }
 
+export async function findUploadRowAsync(db, upload, tenantId = null) {
+  const row = await queryOneAsync(db, "SELECT * FROM content_upload_sessions WHERE upload_id = ? OR id = ?", [
+    String(upload || ""),
+    Number(upload) || -1,
+  ]);
+  if (!row) throw Errors.sessionNotFound();
+  if (tenantId !== null && tenantId !== undefined && Number(row.tenant_id) !== Number(tenantId)) {
+    throw Errors.sessionNotFound();
+  }
+  return row;
+}
+
 export function activeLockRow(db, contentId) {
   return queryOne(db, "SELECT * FROM content_locks WHERE content_id = ? AND released_at IS NULL", [Number(contentId)]);
 }
 
+export async function activeLockRowAsync(db, contentId) {
+  return queryOneAsync(db, "SELECT * FROM content_locks WHERE content_id = ? AND released_at IS NULL", [Number(contentId)]);
+}
+
 export function activeLegalHoldRow(db, contentId) {
   return queryOne(db, "SELECT * FROM content_legal_holds WHERE content_id = ? AND status = 'active'", [Number(contentId)]);
+}
+
+export async function activeLegalHoldRowAsync(db, contentId) {
+  return queryOneAsync(db, "SELECT * FROM content_legal_holds WHERE content_id = ? AND status = 'active'", [Number(contentId)]);
 }

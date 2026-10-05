@@ -6,12 +6,13 @@
 // view or hold business logic. Dashboard definitions can be mirrored into the
 // shared Reporting & Analytics engine (see reporting-bridge.js) for BI reuse.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { DASHBOARD_CATALOG, DEFAULT_DASHBOARD_CODE } from "./constants.js";
 import { dashboardRef, widgetRef } from "./identifiers.js";
-import { parseJson, stringifyJson, paged } from "./repository.js";
+import { parseJson, stringifyJson, paged, pagedAsync } from "./repository.js";
 import { dashboardNotFound, dashboardConflict, invalidDashboard, widgetNotFound } from "./errors.js";
-import { recordHistory } from "./history.js";
+import { recordHistory, recordHistoryAsync } from "./history.js";
 import { latestObservationFor, metricHistory, getMetricRow } from "./metrics.js";
 import { currentHealth } from "./health.js";
 import { alertSummary, listAlerts } from "./alerts.js";
@@ -70,10 +71,24 @@ export function getDashboardRow(db, tenantId, ref) {
   return queryOne(db, "SELECT * FROM observability_dashboards WHERE tenant_id = ? AND (dashboard_ref = ? OR code = ?)", [Number(tenantId), raw, raw]);
 }
 
+export async function getDashboardRowAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const id = Number(raw);
+  if (Number.isInteger(id) && id > 0) return await queryOneAsync(db, "SELECT * FROM observability_dashboards WHERE tenant_id = ? AND id = ?", [Number(tenantId), id]);
+  return await queryOneAsync(db, "SELECT * FROM observability_dashboards WHERE tenant_id = ? AND (dashboard_ref = ? OR code = ?)", [Number(tenantId), raw, raw]);
+}
+
 export function getDashboard(db, tenantId, ref) {
   const row = getDashboardRow(db, tenantId, ref);
   if (!row) throw dashboardNotFound(ref);
   const widgets = queryAll(db, "SELECT * FROM observability_dashboard_widgets WHERE dashboard_id = ? ORDER BY sequence, id", [row.id]).map(publicWidget);
+  return { ...publicDashboard(row), widgets };
+}
+
+export async function getDashboardAsync(db, tenantId, ref) {
+  const row = await getDashboardRowAsync(db, tenantId, ref);
+  if (!row) throw dashboardNotFound(ref);
+  const widgets = (await queryAllAsync(db, "SELECT * FROM observability_dashboard_widgets WHERE dashboard_id = ? ORDER BY sequence, id", [row.id])).map(publicWidget);
   return { ...publicDashboard(row), widgets };
 }
 
@@ -133,6 +148,62 @@ export function createDashboard(db, tenantId, input = {}, actor = null) {
   return getDashboard(db, tenantId, row.dashboard_ref);
 }
 
+export async function createDashboardAsync(db, tenantId, input = {}, actor = null) {
+  const code = String(input.code || "").trim().toUpperCase();
+  if (!code) throw invalidDashboard("Dashboard code is required");
+  if (await queryOneAsync(db, "SELECT id FROM observability_dashboards WHERE tenant_id = ? AND code = ?", [Number(tenantId), code])) throw dashboardConflict(code);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO observability_dashboards (dashboard_ref, tenant_id, organization_id, code, name, description, scope, is_default, reporting_dashboard_ref, config_json, version, status, owner_user_id, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+    [
+      input.dashboard_ref || dashboardRef(code),
+      Number(tenantId),
+      input.organization_id ?? null,
+      code,
+      String(input.name || code),
+      String(input.description || ""),
+      String(input.scope || "PLATFORM").toUpperCase(),
+      input.is_default ? 1 : 0,
+      input.reporting_dashboard_ref ?? null,
+      stringifyJson(input.config || {}),
+      String(input.status || "ACTIVE").toUpperCase(),
+      input.owner_user_id ?? actor?.id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM observability_dashboards WHERE id = ?", [Number(result.lastInsertId)]);
+  for (const [index, widget] of (Array.isArray(input.widgets) ? input.widgets : []).entries()) {
+    await runAsync(
+      db,
+      `INSERT INTO observability_dashboard_widgets (widget_ref, dashboard_id, tenant_id, widget_type, title, description, metric_code, provider_code, visualization, config_json, layout_json, sequence, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
+      [
+        widgetRef(),
+        row.id,
+        Number(tenantId),
+        String(widget.widget_type || widget.type || "METRIC_CARD").toUpperCase(),
+        String(widget.title || ""),
+        String(widget.description || ""),
+        widget.metric_code || widget.metric || null,
+        widget.provider_code || null,
+        String(widget.visualization || "LINE").toUpperCase(),
+        stringifyJson(widget.config || {}),
+        stringifyJson(widget.layout || {}),
+        index,
+        ts,
+        ts,
+      ]
+    );
+  }
+  await recordHistoryAsync(db, { tenantId, action: "DASHBOARD_CREATED", entityType: "dashboard", entityId: row.id, entityRef: row.dashboard_ref, actor, summary: `Dashboard ${code} created` });
+  await writeAuditAsync(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.dashboard.create", resource_type: "observability_dashboard", resource_id: row.dashboard_ref, details: { code } });
+  return await getDashboardAsync(db, tenantId, row.dashboard_ref);
+}
+
 export function updateDashboard(db, tenantId, ref, input = {}, actor = null) {
   const row = getDashboardRow(db, tenantId, ref);
   if (!row) throw dashboardNotFound(ref);
@@ -155,11 +226,41 @@ export function updateDashboard(db, tenantId, ref, input = {}, actor = null) {
   return getDashboard(db, tenantId, row.dashboard_ref);
 }
 
+export async function updateDashboardAsync(db, tenantId, ref, input = {}, actor = null) {
+  const row = await getDashboardRowAsync(db, tenantId, ref);
+  if (!row) throw dashboardNotFound(ref);
+  await runAsync(
+    db,
+    "UPDATE observability_dashboards SET name = ?, description = ?, scope = ?, is_default = ?, config_json = ?, status = ?, owner_user_id = ?, version = version + 1, updated_at = ? WHERE id = ?",
+    [
+      input.name ?? row.name,
+      input.description ?? row.description,
+      input.scope ? String(input.scope).toUpperCase() : row.scope,
+      input.is_default !== undefined ? (input.is_default ? 1 : 0) : row.is_default,
+      input.config !== undefined ? stringifyJson(input.config) : row.config_json,
+      input.status ? String(input.status).toUpperCase() : row.status,
+      input.owner_user_id !== undefined ? input.owner_user_id : row.owner_user_id,
+      nowIso(),
+      row.id,
+    ]
+  );
+  await recordHistoryAsync(db, { tenantId, action: "DASHBOARD_UPDATED", entityType: "dashboard", entityId: row.id, entityRef: row.dashboard_ref, actor, summary: `Dashboard ${row.code} updated` });
+  return await getDashboardAsync(db, tenantId, row.dashboard_ref);
+}
+
 export function deleteDashboard(db, tenantId, ref, actor = null) {
   const row = getDashboardRow(db, tenantId, ref);
   if (!row) throw dashboardNotFound(ref);
   run(db, "UPDATE observability_dashboards SET status = 'ARCHIVED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
   recordHistory(db, { tenantId, action: "DASHBOARD_ARCHIVED", entityType: "dashboard", entityId: row.id, entityRef: row.dashboard_ref, actor, summary: `Dashboard ${row.code} archived` });
+  return { archived: true, dashboard_ref: row.dashboard_ref };
+}
+
+export async function deleteDashboardAsync(db, tenantId, ref, actor = null) {
+  const row = await getDashboardRowAsync(db, tenantId, ref);
+  if (!row) throw dashboardNotFound(ref);
+  await runAsync(db, "UPDATE observability_dashboards SET status = 'ARCHIVED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  await recordHistoryAsync(db, { tenantId, action: "DASHBOARD_ARCHIVED", entityType: "dashboard", entityId: row.id, entityRef: row.dashboard_ref, actor, summary: `Dashboard ${row.code} archived` });
   return { archived: true, dashboard_ref: row.dashboard_ref };
 }
 
@@ -179,11 +280,39 @@ export function listDashboards(db, tenantId, query = {}) {
   return result;
 }
 
+export async function listDashboardsAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  if (query.scope) {
+    where.push("scope = ?");
+    params.push(String(query.scope).toUpperCase());
+  }
+  const result = await pagedAsync(db, "observability_dashboards", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicDashboard });
+  const items = [];
+  for (const dashboard of result.items) {
+    const widgetCount = Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM observability_dashboard_widgets WHERE dashboard_id = ?", [dashboard.id]))?.c || 0);
+    items.push({ ...dashboard, widget_count: widgetCount });
+  }
+  result.items = items;
+  return result;
+}
+
 export function getWidgetRow(db, tenantId, ref) {
   const raw = String(ref ?? "");
   const id = Number(raw);
   if (Number.isInteger(id) && id > 0) return queryOne(db, "SELECT * FROM observability_dashboard_widgets WHERE tenant_id = ? AND id = ?", [Number(tenantId), id]);
   return queryOne(db, "SELECT * FROM observability_dashboard_widgets WHERE tenant_id = ? AND widget_ref = ?", [Number(tenantId), raw]);
+}
+
+export async function getWidgetRowAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const id = Number(raw);
+  if (Number.isInteger(id) && id > 0) return await queryOneAsync(db, "SELECT * FROM observability_dashboard_widgets WHERE tenant_id = ? AND id = ?", [Number(tenantId), id]);
+  return await queryOneAsync(db, "SELECT * FROM observability_dashboard_widgets WHERE tenant_id = ? AND widget_ref = ?", [Number(tenantId), raw]);
 }
 
 export function addWidget(db, tenantId, dashboardRef, input = {}, actor = null) {
@@ -216,6 +345,36 @@ export function addWidget(db, tenantId, dashboardRef, input = {}, actor = null) 
   return publicWidget(queryOne(db, "SELECT * FROM observability_dashboard_widgets WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
+export async function addWidgetAsync(db, tenantId, dashboardRef, input = {}, actor = null) {
+  const dashboard = await getDashboardRowAsync(db, tenantId, dashboardRef);
+  if (!dashboard) throw dashboardNotFound(dashboardRef);
+  const ts = nowIso();
+  const maxSeq = Number((await queryOneAsync(db, "SELECT COALESCE(MAX(sequence), -1) AS s FROM observability_dashboard_widgets WHERE dashboard_id = ?", [dashboard.id]))?.s ?? -1);
+  const result = await runAsync(
+    db,
+    `INSERT INTO observability_dashboard_widgets (widget_ref, dashboard_id, tenant_id, widget_type, title, description, metric_code, provider_code, visualization, config_json, layout_json, sequence, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
+    [
+      widgetRef(),
+      dashboard.id,
+      Number(tenantId),
+      String(input.widget_type || input.type || "METRIC_CARD").toUpperCase(),
+      String(input.title || ""),
+      String(input.description || ""),
+      input.metric_code || input.metric || null,
+      input.provider_code || null,
+      String(input.visualization || "LINE").toUpperCase(),
+      stringifyJson(input.config || {}),
+      stringifyJson(input.layout || {}),
+      maxSeq + 1,
+      ts,
+      ts,
+    ]
+  );
+  await recordHistoryAsync(db, { tenantId, action: "WIDGET_ADDED", entityType: "dashboard", entityId: dashboard.id, entityRef: dashboard.dashboard_ref, actor, summary: `Widget added to ${dashboard.code}` });
+  return publicWidget(await queryOneAsync(db, "SELECT * FROM observability_dashboard_widgets WHERE id = ?", [Number(result.lastInsertId)]));
+}
+
 export function updateWidget(db, tenantId, ref, input = {}, actor = null) {
   const row = getWidgetRow(db, tenantId, ref);
   if (!row) throw widgetNotFound(ref);
@@ -240,11 +399,43 @@ export function updateWidget(db, tenantId, ref, input = {}, actor = null) {
   return publicWidget(queryOne(db, "SELECT * FROM observability_dashboard_widgets WHERE id = ?", [row.id]));
 }
 
+export async function updateWidgetAsync(db, tenantId, ref, input = {}, actor = null) {
+  const row = await getWidgetRowAsync(db, tenantId, ref);
+  if (!row) throw widgetNotFound(ref);
+  await runAsync(
+    db,
+    "UPDATE observability_dashboard_widgets SET widget_type = ?, title = ?, description = ?, metric_code = ?, provider_code = ?, visualization = ?, config_json = ?, layout_json = ?, sequence = ?, status = ?, updated_at = ? WHERE id = ?",
+    [
+      input.widget_type ? String(input.widget_type).toUpperCase() : row.widget_type,
+      input.title ?? row.title,
+      input.description ?? row.description,
+      input.metric_code !== undefined ? input.metric_code : row.metric_code,
+      input.provider_code !== undefined ? input.provider_code : row.provider_code,
+      input.visualization ? String(input.visualization).toUpperCase() : row.visualization,
+      input.config !== undefined ? stringifyJson(input.config) : row.config_json,
+      input.layout !== undefined ? stringifyJson(input.layout) : row.layout_json,
+      input.sequence !== undefined ? Number(input.sequence) : row.sequence,
+      input.status ? String(input.status).toUpperCase() : row.status,
+      nowIso(),
+      row.id,
+    ]
+  );
+  return publicWidget(await queryOneAsync(db, "SELECT * FROM observability_dashboard_widgets WHERE id = ?", [row.id]));
+}
+
 export function removeWidget(db, tenantId, ref, actor = null) {
   const row = getWidgetRow(db, tenantId, ref);
   if (!row) throw widgetNotFound(ref);
   run(db, "UPDATE observability_dashboard_widgets SET status = 'ARCHIVED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
   recordHistory(db, { tenantId, action: "WIDGET_REMOVED", entityType: "dashboard", entityId: row.dashboard_id, entityRef: `widget:${row.widget_ref}`, actor, summary: `Widget ${row.widget_ref} archived` });
+  return { archived: true, widget_ref: row.widget_ref };
+}
+
+export async function removeWidgetAsync(db, tenantId, ref, actor = null) {
+  const row = await getWidgetRowAsync(db, tenantId, ref);
+  if (!row) throw widgetNotFound(ref);
+  await runAsync(db, "UPDATE observability_dashboard_widgets SET status = 'ARCHIVED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  await recordHistoryAsync(db, { tenantId, action: "WIDGET_REMOVED", entityType: "dashboard", entityId: row.dashboard_id, entityRef: `widget:${row.widget_ref}`, actor, summary: `Widget ${row.widget_ref} archived` });
   return { archived: true, widget_ref: row.widget_ref };
 }
 
@@ -295,11 +486,24 @@ export function renderDashboard(db, tenantId, ref) {
   return { dashboard: { ...dashboard, widgets: undefined }, widgets, generated_at: nowIso() };
 }
 
+export async function renderDashboardAsync(db, tenantId, ref) {
+  const dashboard = await getDashboardAsync(db, tenantId, ref);
+  const widgets = dashboard.widgets.map((widget) => ({ ...renderWidget(db, tenantId, widget), layout: widget.layout, sequence: widget.sequence }));
+  return { dashboard: { ...dashboard, widgets: undefined }, widgets, generated_at: nowIso() };
+}
+
 export function defaultDashboard(db, tenantId) {
   const row =
     queryOne(db, "SELECT * FROM observability_dashboards WHERE tenant_id = ? AND is_default = 1 AND status = 'ACTIVE' ORDER BY id LIMIT 1", [Number(tenantId)]) ||
     getDashboardRow(db, tenantId, DEFAULT_DASHBOARD_CODE);
   return row ? renderDashboard(db, tenantId, row.dashboard_ref) : null;
+}
+
+export async function defaultDashboardAsync(db, tenantId) {
+  const row =
+    (await queryOneAsync(db, "SELECT * FROM observability_dashboards WHERE tenant_id = ? AND is_default = 1 AND status = 'ACTIVE' ORDER BY id LIMIT 1", [Number(tenantId)])) ||
+    (await getDashboardRowAsync(db, tenantId, DEFAULT_DASHBOARD_CODE));
+  return row ? await renderDashboardAsync(db, tenantId, row.dashboard_ref) : null;
 }
 
 // Idempotent creation of the curated dashboards.
@@ -314,6 +518,34 @@ export function ensureDefaultDashboards(db, tenantId, actor = null) {
       continue;
     }
     createDashboard(
+      db,
+      tenantId,
+      {
+        code: catalog.code,
+        name: catalog.name,
+        description: catalog.description,
+        scope: catalog.scope,
+        is_default: catalog.is_default,
+        widgets: catalog.widgets.map((widget) => ({ ...widget, metric_code: widget.metric || null })),
+      },
+      actor
+    );
+    created += 1;
+  }
+  return { created };
+}
+
+export async function ensureDefaultDashboardsAsync(db, tenantId, actor = null) {
+  let created = 0;
+  for (const catalog of DASHBOARD_CATALOG) {
+    const existing = await getDashboardRowAsync(db, tenantId, catalog.code);
+    if (existing) {
+      if (catalog.is_default && !existing.is_default) {
+        await runAsync(db, "UPDATE observability_dashboards SET is_default = 1, updated_at = ? WHERE id = ?", [nowIso(), existing.id]);
+      }
+      continue;
+    }
+    await createDashboardAsync(
       db,
       tenantId,
       {

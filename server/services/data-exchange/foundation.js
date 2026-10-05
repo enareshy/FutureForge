@@ -5,12 +5,13 @@
 // configuration, and exposes a health summary. It never duplicates platform
 // seams (IAM, events, jobs, storage) — it registers into them.
 import { queryAll, queryOne } from "../../db.js";
-import { tenantIds } from "../search/registry.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { ensureConnectors } from "./connectors/index.js";
 import { registerExchangeHandlers } from "./jobs.js";
-import { ensureExchangeEventTypes } from "./events.js";
-import { ensureExchangeConfig } from "./configuration.js";
-import { ensureDataExchangeSearch, registerDataExchangeSources } from "./search.js";
+import { ensureExchangeEventTypes, ensureExchangeEventTypesAsync } from "./events.js";
+import { ensureExchangeConfig, ensureExchangeConfigAsync } from "./configuration.js";
+import { ensureDataExchangeSearch, registerDataExchangeSources, ensureDataExchangeSearchAsync } from "./search.js";
 import { SOURCE_MODULE } from "./constants.js";
 
 export function ensureExchangeFoundation(db) {
@@ -42,6 +43,35 @@ export function ensureExchangeFoundation(db) {
   };
 }
 
+export async function ensureExchangeFoundationAsync(db) {
+  const connectors = ensureConnectors();
+  const handlers = registerExchangeHandlers();
+  const eventTypes = await ensureExchangeEventTypesAsync(db);
+  registerDataExchangeSources();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+  let configuration = 0;
+  const search = (await ensureDataExchangeSearchAsync(db)).created || 0;
+  for (const tenantId of tenants) {
+    configuration += (await ensureExchangeConfigAsync(db, tenantId)).created || 0;
+  }
+
+  return {
+    source_module: SOURCE_MODULE,
+    connectors,
+    handlers,
+    event_types: eventTypes,
+    configuration,
+    search,
+    tenants: tenants.length,
+  };
+}
+
 export function exchangeHealth(db, tenantId = null) {
   const scoped = (table, column = "tenant_id") =>
     tenantId
@@ -59,5 +89,25 @@ export function exchangeHealth(db, tenantId = null) {
       history: scoped("ie_import_history") + scoped("ie_export_history"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM ie_connector_configurations").length,
+  };
+}
+
+export async function exchangeHealthAsync(db, tenantId = null) {
+  const scoped = async (table, column = "tenant_id") =>
+    tenantId
+      ? Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE ${column} = ?`, [Number(tenantId)]))?.c || 0)
+      : Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0);
+  return {
+    source_module: SOURCE_MODULE,
+    counts: {
+      import_definitions: await scoped("ie_import_definitions"),
+      export_definitions: await scoped("ie_export_definitions"),
+      import_jobs: await scoped("ie_import_jobs"),
+      export_jobs: await scoped("ie_export_jobs"),
+      connector_configurations: await scoped("ie_connector_configurations"),
+      templates: await scoped("ie_templates"),
+      history: (await scoped("ie_import_history")) + (await scoped("ie_export_history")),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM ie_connector_configurations")).length,
   };
 }

@@ -10,6 +10,7 @@
 // Change Order approval/release still work correctly through the domain's
 // own status field, so this never blocks boot and never blocks the feature.
 import { queryOne } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { tenantIds } from "../search/registry.js";
 import { createObjectType } from "../numbering/foundation.js";
 import { createScheme, setSchemeStatus } from "../numbering/schemes.js";
@@ -173,6 +174,24 @@ export function changeHealth(db, tenantId = null) {
       affected_items: scoped("change_affected_items"),
       relationships: scoped("change_relationships"),
       history: scoped("change_history"),
+    },
+  };
+}
+
+export async function changeHealthAsync(db, tenantId = null) {
+  const scoped = async (table) =>
+    tenantId
+      ? Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ?`, [Number(tenantId)]))?.c || 0)
+      : Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0);
+  return {
+    source_module: SOURCE_MODULE,
+    counts: {
+      requests: await scoped("change_requests"),
+      orders: await scoped("change_orders"),
+      notices: await scoped("change_notices"),
+      affected_items: await scoped("change_affected_items"),
+      relationships: await scoped("change_relationships"),
+      history: await scoped("change_history"),
     },
   };
 }

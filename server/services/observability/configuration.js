@@ -4,7 +4,8 @@
 // incident creation policy, retention, notification) is data an administrator
 // can change without a deployment.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { CONFIG_DEFAULTS, CONFIG_BOUNDS, DEFAULT_RETENTION_POLICIES } from "./constants.js";
 import { invalidConfig } from "./errors.js";
 import { stringifyJson } from "./repository.js";
@@ -13,6 +14,10 @@ const BOOLEAN_KEYS = new Set(["enabled", "auto_collect_on_seed", "auto_create_in
 
 export function getConfigRow(db, tenantId, key) {
   return queryOne(db, "SELECT * FROM observability_configuration WHERE tenant_id = ? AND key = ?", [Number(tenantId), String(key)]);
+}
+
+export async function getConfigRowAsync(db, tenantId, key) {
+  return await queryOneAsync(db, "SELECT * FROM observability_configuration WHERE tenant_id = ? AND key = ?", [Number(tenantId), String(key)]);
 }
 
 function parseValue(row) {
@@ -48,13 +53,33 @@ export function getConfig(db, tenantId, key) {
   return value === undefined ? CONFIG_DEFAULTS[key] ?? null : value;
 }
 
+export async function getConfigAsync(db, tenantId, key) {
+  const value = parseValue(await getConfigRowAsync(db, tenantId, key));
+  return value === undefined ? CONFIG_DEFAULTS[key] ?? null : value;
+}
+
 export function getNumericConfig(db, tenantId, key) {
   const value = Number(getConfig(db, tenantId, key));
   return Number.isFinite(value) ? value : Number(CONFIG_DEFAULTS[key]);
 }
 
+export async function getNumericConfigAsync(db, tenantId, key) {
+  const value = Number(await getConfigAsync(db, tenantId, key));
+  return Number.isFinite(value) ? value : Number(CONFIG_DEFAULTS[key]);
+}
+
 export function listConfig(db, tenantId) {
   const rows = queryAll(db, "SELECT * FROM observability_configuration WHERE tenant_id = ? ORDER BY key", [Number(tenantId)]);
+  const config = { ...CONFIG_DEFAULTS };
+  for (const row of rows) {
+    const value = parseValue(row);
+    if (value !== undefined) config[row.key] = value;
+  }
+  return config;
+}
+
+export async function listConfigAsync(db, tenantId) {
+  const rows = await queryAllAsync(db, "SELECT * FROM observability_configuration WHERE tenant_id = ? ORDER BY key", [Number(tenantId)]);
   const config = { ...CONFIG_DEFAULTS };
   for (const row of rows) {
     const value = parseValue(row);
@@ -89,6 +114,34 @@ export function setConfig(db, tenantId, key, value, actor = null, ip = null) {
     ip: ip || null,
   });
   return getConfig(db, tenantId, key);
+}
+
+export async function setConfigAsync(db, tenantId, key, value, actor = null, ip = null) {
+  const normalized = validateConfigValue(key, value);
+  const ts = nowIso();
+  const existing = await getConfigRowAsync(db, tenantId, key);
+  if (existing) {
+    await runAsync(db, "UPDATE observability_configuration SET value_json = ?, updated_by = ?, updated_at = ? WHERE id = ?", [stringifyJson(normalized), actor?.id ?? null, ts, existing.id]);
+  } else {
+    await runAsync(db, "INSERT INTO observability_configuration (tenant_id, key, value_json, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", [
+      Number(tenantId),
+      key,
+      stringifyJson(normalized),
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]);
+  }
+  await writeAuditAsync(db, {
+    actor_id: actor?.id ?? null,
+    actor_username: actor?.username ?? null,
+    action: "observability.config.update",
+    resource_type: "observability_configuration",
+    resource_id: key,
+    details: { key, value: normalized },
+    ip: ip || null,
+  });
+  return await getConfigAsync(db, tenantId, key);
 }
 
 export function ensureObservabilityConfig(db, tenantId) {
@@ -131,6 +184,16 @@ export function listRetentionPolicies(db, tenantId) {
   }));
 }
 
+export async function listRetentionPoliciesAsync(db, tenantId) {
+  return (await queryAllAsync(db, "SELECT * FROM observability_retention_policies WHERE tenant_id = ? ORDER BY tier", [Number(tenantId)])).map((row) => ({
+    id: row.id,
+    tier: row.tier,
+    retain_days: row.retain_days,
+    status: row.status,
+    updated_at: row.updated_at,
+  }));
+}
+
 export function setRetentionPolicy(db, tenantId, tier, retainDays, actor = null) {
   const days = Math.max(1, Math.min(3650, Number(retainDays) || 30));
   const existing = queryOne(db, "SELECT id FROM observability_retention_policies WHERE tenant_id = ? AND tier = ?", [Number(tenantId), String(tier)]);
@@ -138,6 +201,24 @@ export function setRetentionPolicy(db, tenantId, tier, retainDays, actor = null)
     run(db, "UPDATE observability_retention_policies SET retain_days = ?, updated_by = ?, updated_at = ? WHERE id = ?", [days, actor?.id ?? null, nowIso(), existing.id]);
   } else {
     run(db, "INSERT INTO observability_retention_policies (tenant_id, tier, retain_days, status, updated_by, created_at, updated_at) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?)", [
+      Number(tenantId),
+      String(tier),
+      days,
+      actor?.id ?? null,
+      nowIso(),
+      nowIso(),
+    ]);
+  }
+  return { tier: String(tier), retain_days: days };
+}
+
+export async function setRetentionPolicyAsync(db, tenantId, tier, retainDays, actor = null) {
+  const days = Math.max(1, Math.min(3650, Number(retainDays) || 30));
+  const existing = await queryOneAsync(db, "SELECT id FROM observability_retention_policies WHERE tenant_id = ? AND tier = ?", [Number(tenantId), String(tier)]);
+  if (existing) {
+    await runAsync(db, "UPDATE observability_retention_policies SET retain_days = ?, updated_by = ?, updated_at = ? WHERE id = ?", [days, actor?.id ?? null, nowIso(), existing.id]);
+  } else {
+    await runAsync(db, "INSERT INTO observability_retention_policies (tenant_id, tier, retain_days, status, updated_by, created_at, updated_at) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?)", [
       Number(tenantId),
       String(tier),
       days,

@@ -6,8 +6,9 @@
 // escalation so operators are not paged repeatedly for the same condition. All
 // policy (severity, cooldown, incident auto-creation, notification) is data.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
-import { notifyUser } from "../notifications.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { notifyUser, notifyUserAsync } from "../notifications.js";
 import {
   ALERT_STATUSES,
   ALERT_OPEN_STATUSES,
@@ -18,14 +19,14 @@ import {
   THRESHOLD_OPERATORS,
 } from "./constants.js";
 import { alertRuleRef, alertRef } from "./identifiers.js";
-import { parseJson, stringifyJson, paged, tableExists } from "./repository.js";
+import { parseJson, stringifyJson, paged, tableExists, pagedAsync, tableExistsAsync } from "./repository.js";
 import { alertRuleNotFound, alertRuleConflict, invalidAlertRule, alertNotFound, invalidAlert } from "./errors.js";
-import { recordHistory } from "./history.js";
-import { classifyMetric } from "./thresholds.js";
+import { recordHistory, recordHistoryAsync } from "./history.js";
+import { classifyMetric, classifyMetricAsync } from "./thresholds.js";
 import { getMetricRow } from "./metrics.js";
-import { getConfig, getNumericConfig } from "./configuration.js";
-import { createIncident } from "./incidents.js";
-import { observabilityEventCode, publishObservabilityEvent } from "./events.js";
+import { getConfig, getNumericConfig, getConfigAsync } from "./configuration.js";
+import { createIncident, createIncidentAsync } from "./incidents.js";
+import { observabilityEventCode, publishObservabilityEvent, publishObservabilityEventAsync } from "./events.js";
 
 // ── Rule DTO / CRUD ─────────────────────────────────────────────────────────
 export function publicAlertRule(row) {
@@ -608,6 +609,471 @@ export function refreshSuppressions(db, tenantId) {
 export function alertTrend(db, tenantId, query = {}) {
   const hours = Math.max(1, Math.min(720, Number(query.hours) || 24));
   const rows = queryAll(
+    db,
+    "SELECT to_char(created_at::timestamp, 'YYYY-MM-DD\"T\"HH24:00:00\"Z\"') AS bucket, severity, COUNT(*) AS c FROM observability_alerts WHERE tenant_id = ? AND created_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS') GROUP BY bucket, severity ORDER BY bucket ASC",
+    [Number(tenantId), `-${hours} hours`]
+  );
+  const buckets = {};
+  for (const row of rows) {
+    buckets[row.bucket] = buckets[row.bucket] || { bucket: row.bucket, INFO: 0, WARNING: 0, HIGH: 0, CRITICAL: 0, total: 0 };
+    buckets[row.bucket][row.severity] = Number(row.c);
+    buckets[row.bucket].total += Number(row.c);
+  }
+  return { hours, points: Object.values(buckets) };
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+
+export async function getAlertRuleRowAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const id = Number(raw);
+  if (Number.isInteger(id) && id > 0) return queryOneAsync(db, "SELECT * FROM observability_alert_rules WHERE tenant_id = ? AND id = ?", [Number(tenantId), id]);
+  return queryOneAsync(db, "SELECT * FROM observability_alert_rules WHERE tenant_id = ? AND (rule_ref = ? OR code = ?)", [Number(tenantId), raw, raw]);
+}
+
+export async function getAlertRuleAsync(db, tenantId, ref) {
+  const row = await getAlertRuleRowAsync(db, tenantId, ref);
+  if (!row) throw alertRuleNotFound(ref);
+  return publicAlertRule(row);
+}
+
+async function snapshotRuleVersionAsync(db, row, actor) {
+  await runAsync(
+    db,
+    "INSERT INTO observability_alert_rule_versions (rule_id, tenant_id, version, snapshot_json, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    [row.id, row.tenant_id, row.version, stringifyJson(publicAlertRule(row)), actor?.id ?? null, nowIso()]
+  );
+}
+
+export async function createAlertRuleAsync(db, tenantId, input = {}, actor = null) {
+  const code = String(input.code || "").trim().toUpperCase();
+  if (!code) throw invalidAlertRule("Alert rule code is required");
+  if (!input.metric_code) throw invalidAlertRule("metric_code is required");
+  if (await queryOneAsync(db, "SELECT id FROM observability_alert_rules WHERE tenant_id = ? AND code = ?", [Number(tenantId), code])) throw alertRuleConflict(code);
+  const severity = String(input.severity || "WARNING").toUpperCase();
+  if (!SEVERITIES.includes(severity)) throw invalidAlertRule(`Unsupported severity: ${input.severity}`);
+  const condition = normalizeCondition(input.condition || { operator: input.operator, value: input.value });
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO observability_alert_rules (rule_ref, tenant_id, code, name, description, metric_code, condition_json, severity, scope_json, for_seconds, cooldown_seconds, dedup_key_template, auto_resolve, notification_json, service_code, incident_severity, version, status, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+    [
+      input.rule_ref || alertRuleRef(code),
+      Number(tenantId),
+      code,
+      String(input.name || code),
+      String(input.description || ""),
+      String(input.metric_code).toUpperCase(),
+      stringifyJson(condition),
+      severity,
+      stringifyJson(input.scope || {}),
+      Math.max(0, Number(input.for_seconds) || 0),
+      Math.max(0, Number(input.cooldown_seconds ?? 300)),
+      String(input.dedup_key_template || ""),
+      input.auto_resolve === false ? 0 : 1,
+      stringifyJson(input.notification || {}),
+      input.service_code ?? null,
+      input.incident_severity ? String(input.incident_severity).toUpperCase() : null,
+      String(input.status || "ACTIVE").toUpperCase(),
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM observability_alert_rules WHERE id = ?", [Number(result.lastInsertId)]);
+  await recordHistoryAsync(db, { tenantId, action: "ALERT_RULE_CREATED", entityType: "alert_rule", entityId: row.id, entityRef: row.rule_ref, actor, summary: `Alert rule ${code} created` });
+  await writeAuditAsync(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.alert_rule.create", resource_type: "observability_alert_rule", resource_id: row.rule_ref, details: { code } });
+  return publicAlertRule(row);
+}
+
+export async function updateAlertRuleAsync(db, tenantId, ref, input = {}, actor = null) {
+  const row = await getAlertRuleRowAsync(db, tenantId, ref);
+  if (!row) throw alertRuleNotFound(ref);
+  await snapshotRuleVersionAsync(db, row, actor);
+  const condition = input.condition || input.operator !== undefined || input.value !== undefined
+    ? normalizeCondition(input.condition || { operator: input.operator ?? parseJson(row.condition_json, {}).operator, value: input.value ?? parseJson(row.condition_json, {}).value })
+    : parseJson(row.condition_json, {});
+  const severity = input.severity ? String(input.severity).toUpperCase() : row.severity;
+  if (!SEVERITIES.includes(severity)) throw invalidAlertRule(`Unsupported severity: ${input.severity}`);
+  await runAsync(
+    db,
+    `UPDATE observability_alert_rules SET name = ?, description = ?, metric_code = ?, condition_json = ?, severity = ?, scope_json = ?, for_seconds = ?, cooldown_seconds = ?, dedup_key_template = ?, auto_resolve = ?, notification_json = ?, service_code = ?, incident_severity = ?, status = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+    [
+      input.name ?? row.name,
+      input.description ?? row.description,
+      input.metric_code ? String(input.metric_code).toUpperCase() : row.metric_code,
+      stringifyJson(condition),
+      severity,
+      input.scope !== undefined ? stringifyJson(input.scope) : row.scope_json,
+      input.for_seconds !== undefined ? Math.max(0, Number(input.for_seconds)) : row.for_seconds,
+      input.cooldown_seconds !== undefined ? Math.max(0, Number(input.cooldown_seconds)) : row.cooldown_seconds,
+      input.dedup_key_template !== undefined ? String(input.dedup_key_template) : row.dedup_key_template,
+      input.auto_resolve !== undefined ? (input.auto_resolve ? 1 : 0) : row.auto_resolve,
+      input.notification !== undefined ? stringifyJson(input.notification) : row.notification_json,
+      input.service_code !== undefined ? input.service_code : row.service_code,
+      input.incident_severity !== undefined ? (input.incident_severity ? String(input.incident_severity).toUpperCase() : null) : row.incident_severity,
+      input.status ? String(input.status).toUpperCase() : row.status,
+      nowIso(),
+      row.id,
+    ]
+  );
+  const updated = await queryOneAsync(db, "SELECT * FROM observability_alert_rules WHERE id = ?", [row.id]);
+  await recordHistoryAsync(db, { tenantId, action: "ALERT_RULE_UPDATED", entityType: "alert_rule", entityId: row.id, entityRef: row.rule_ref, actor, summary: `Alert rule ${row.code} updated` });
+  return publicAlertRule(updated);
+}
+
+export async function deleteAlertRuleAsync(db, tenantId, ref, actor = null) {
+  const row = await getAlertRuleRowAsync(db, tenantId, ref);
+  if (!row) throw alertRuleNotFound(ref);
+  await runAsync(db, "UPDATE observability_alert_rules SET status = 'ARCHIVED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  await recordHistoryAsync(db, { tenantId, action: "ALERT_RULE_ARCHIVED", entityType: "alert_rule", entityId: row.id, entityRef: row.rule_ref, actor, summary: `Alert rule ${row.code} archived` });
+  return { archived: true, rule_ref: row.rule_ref };
+}
+
+export async function listAlertRulesAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  if (query.metric_code || query.metricCode) {
+    where.push("metric_code = ?");
+    params.push(String(query.metric_code || query.metricCode).toUpperCase());
+  }
+  return pagedAsync(db, "observability_alert_rules", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicAlertRule });
+}
+
+export async function listAlertRuleVersionsAsync(db, tenantId, ref) {
+  const row = await getAlertRuleRowAsync(db, tenantId, ref);
+  if (!row) throw alertRuleNotFound(ref);
+  return (await queryAllAsync(db, "SELECT * FROM observability_alert_rule_versions WHERE rule_id = ? ORDER BY version DESC", [row.id])).map((version) => ({
+    id: version.id,
+    rule_id: version.rule_id,
+    version: version.version,
+    snapshot: parseJson(version.snapshot_json, {}),
+    created_by: version.created_by,
+    created_at: version.created_at,
+  }));
+}
+
+export async function getAlertRowAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const id = Number(raw);
+  if (Number.isInteger(id) && id > 0) return queryOneAsync(db, "SELECT * FROM observability_alerts WHERE tenant_id = ? AND id = ?", [Number(tenantId), id]);
+  return queryOneAsync(db, "SELECT * FROM observability_alerts WHERE tenant_id = ? AND alert_ref = ?", [Number(tenantId), raw]);
+}
+
+export async function getAlertAsync(db, tenantId, ref) {
+  const row = await getAlertRowAsync(db, tenantId, ref);
+  if (!row) throw alertNotFound(ref);
+  return publicAlert(row);
+}
+
+export async function listAlertsAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    const status = String(query.status).toUpperCase();
+    where.push("status = ?");
+    params.push(status);
+  } else if (query.open === "true" || query.open === true) {
+    where.push(`status IN (${ALERT_OPEN_STATUSES.map(() => "?").join(", ")})`);
+    params.push(...ALERT_OPEN_STATUSES);
+  }
+  if (query.severity) {
+    where.push("severity = ?");
+    params.push(String(query.severity).toUpperCase());
+  }
+  if (query.metric_code || query.metricCode) {
+    where.push("metric_code = ?");
+    params.push(String(query.metric_code || query.metricCode).toUpperCase());
+  }
+  if (query.service_code || query.serviceCode) {
+    where.push("service_code = ?");
+    params.push(String(query.service_code || query.serviceCode));
+  }
+  if (query.rule_code || query.ruleCode) {
+    where.push("rule_code = ?");
+    params.push(String(query.rule_code || query.ruleCode).toUpperCase());
+  }
+  return pagedAsync(db, "observability_alerts", { where, params, orderBy: "last_seen_at DESC, id DESC", page: query.page, pageSize: query.page_size || query.pageSize, map: publicAlert });
+}
+
+export async function listAlertEventsAsync(db, tenantId, ref) {
+  const row = await getAlertRowAsync(db, tenantId, ref);
+  if (!row) throw alertNotFound(ref);
+  return (await queryAllAsync(db, "SELECT * FROM observability_alert_events WHERE alert_id = ? ORDER BY created_at ASC, id ASC", [row.id])).map(publicAlertEvent);
+}
+
+export async function alertSummaryAsync(db, tenantId) {
+  if (!(await tableExistsAsync(db, "observability_alerts"))) return { total: 0, open: 0, by_severity: {}, by_status: {} };
+  const rows = await queryAllAsync(db, "SELECT status, severity, COUNT(*) AS c FROM observability_alerts WHERE tenant_id = ? GROUP BY status, severity", [Number(tenantId)]);
+  const summary = { total: 0, open: 0, by_severity: { INFO: 0, WARNING: 0, HIGH: 0, CRITICAL: 0 }, by_status: {} };
+  for (const row of rows) {
+    const count = Number(row.c);
+    summary.total += count;
+    summary.by_severity[row.severity] = (summary.by_severity[row.severity] || 0) + count;
+    summary.by_status[row.status] = (summary.by_status[row.status] || 0) + count;
+    if (ALERT_OPEN_STATUSES.includes(row.status)) summary.open += count;
+  }
+  return summary;
+}
+
+async function recordAlertEventAsync(db, alert, eventType, { value = null, actor = null, message = "", detail = {} } = {}) {
+  await runAsync(
+    db,
+    "INSERT INTO observability_alert_events (alert_id, tenant_id, event_type, value, actor_id, message, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [alert.id, alert.tenant_id, String(eventType), value, actor?.id ?? null, String(message || ""), stringifyJson(detail), nowIso()]
+  );
+}
+
+async function reloadAsync(db, id) {
+  return queryOneAsync(db, "SELECT * FROM observability_alerts WHERE id = ?", [id]);
+}
+
+export async function acknowledgeAlertAsync(db, tenantId, ref, actor = null, { message = "" } = {}) {
+  const row = await getAlertRowAsync(db, tenantId, ref);
+  if (!row) throw alertNotFound(ref);
+  if (ALERT_TERMINAL_STATUSES.includes(row.status)) throw invalidAlert(`Alert ${row.alert_ref} is already ${row.status}`);
+  await runAsync(db, "UPDATE observability_alerts SET status = 'ACKNOWLEDGED', acknowledged_at = ?, acknowledged_by = ?, updated_at = ? WHERE id = ?", [nowIso(), actor?.id ?? null, nowIso(), row.id]);
+  const updated = await reloadAsync(db, row.id);
+  await recordAlertEventAsync(db, updated, "ACKNOWLEDGED", { actor, message: message || `Acknowledged by ${actor?.username || "system"}` });
+  await recordHistoryAsync(db, { tenantId, action: "ALERT_ACKNOWLEDGED", entityType: "alert", entityId: row.id, entityRef: row.alert_ref, actor, summary: `Alert ${row.alert_ref} acknowledged` });
+  await writeAuditAsync(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.alert.acknowledge", resource_type: "observability_alert", resource_id: row.alert_ref });
+  await publishObservabilityEventAsync(db, { eventType: observabilityEventCode("ALERT_ACKNOWLEDGED"), payload: { alert_ref: row.alert_ref, severity: row.severity }, objectType: "observability_alert", objectId: row.id, tenantId }, actor);
+  return publicAlert(updated);
+}
+
+export async function suppressAlertAsync(db, tenantId, ref, { until = null, seconds = null, reason = "" } = {}, actor = null) {
+  const row = await getAlertRowAsync(db, tenantId, ref);
+  if (!row) throw alertNotFound(ref);
+  const suppressedUntil = until || new Date(Date.now() + Math.max(60, Number(seconds) || 3600) * 1000).toISOString();
+  await runAsync(db, "UPDATE observability_alerts SET status = 'SUPPRESSED', suppressed_until = ?, updated_at = ? WHERE id = ?", [suppressedUntil, nowIso(), row.id]);
+  const updated = await reloadAsync(db, row.id);
+  await recordAlertEventAsync(db, updated, "SUPPRESSED", { actor, message: reason || `Suppressed until ${suppressedUntil}`, detail: { until: suppressedUntil } });
+  await recordHistoryAsync(db, { tenantId, action: "ALERT_SUPPRESSED", entityType: "alert", entityId: row.id, entityRef: row.alert_ref, actor, summary: `Alert ${row.alert_ref} suppressed` });
+  return publicAlert(updated);
+}
+
+export async function unsuppressAlertAsync(db, tenantId, ref, actor = null) {
+  const row = await getAlertRowAsync(db, tenantId, ref);
+  if (!row) throw alertNotFound(ref);
+  await runAsync(db, "UPDATE observability_alerts SET status = CASE WHEN acknowledged_at IS NOT NULL THEN 'ACKNOWLEDGED' ELSE 'OPEN' END, suppressed_until = NULL, updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  const updated = await reloadAsync(db, row.id);
+  await recordAlertEventAsync(db, updated, "UNSUPPRESSED", { actor });
+  return publicAlert(updated);
+}
+
+export async function resolveAlertAsync(db, tenantId, ref, actor = null, { resolution = "Resolved", auto = false } = {}) {
+  const row = await getAlertRowAsync(db, tenantId, ref);
+  if (!row) throw alertNotFound(ref);
+  if (row.status === "RESOLVED" || row.status === "CLOSED") return publicAlert(row);
+  await runAsync(db, "UPDATE observability_alerts SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?, resolution = ?, updated_at = ? WHERE id = ?", [nowIso(), actor?.id ?? null, String(resolution), nowIso(), row.id]);
+  const updated = await reloadAsync(db, row.id);
+  await recordAlertEventAsync(db, updated, "RESOLVED", { actor, message: resolution, detail: { auto } });
+  await recordHistoryAsync(db, { tenantId, action: "ALERT_RESOLVED", entityType: "alert", entityId: row.id, entityRef: row.alert_ref, actor, summary: `Alert ${row.alert_ref} resolved`, detail: { auto } });
+  await writeAuditAsync(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.alert.resolve", resource_type: "observability_alert", resource_id: row.alert_ref, details: { auto } });
+  await publishObservabilityEventAsync(db, { eventType: observabilityEventCode("ALERT_RESOLVED"), payload: { alert_ref: row.alert_ref, severity: row.severity, auto }, objectType: "observability_alert", objectId: row.id, tenantId }, actor);
+  return publicAlert(updated);
+}
+
+export async function closeAlertAsync(db, tenantId, ref, actor = null, { resolution = "" } = {}) {
+  const row = await getAlertRowAsync(db, tenantId, ref);
+  if (!row) throw alertNotFound(ref);
+  await runAsync(db, "UPDATE observability_alerts SET status = 'CLOSED', closed_at = ?, resolution = CASE WHEN ? <> '' THEN ? ELSE resolution END, updated_at = ? WHERE id = ?", [nowIso(), String(resolution), String(resolution), nowIso(), row.id]);
+  const updated = await reloadAsync(db, row.id);
+  await recordAlertEventAsync(db, updated, "CLOSED", { actor, message: resolution });
+  return publicAlert(updated);
+}
+
+export async function commentAlertAsync(db, tenantId, ref, { message = "" } = {}, actor = null) {
+  const row = await getAlertRowAsync(db, tenantId, ref);
+  if (!row) throw alertNotFound(ref);
+  if (!String(message).trim()) throw invalidAlert("Comment message is required");
+  await recordAlertEventAsync(db, row, "COMMENTED", { actor, message: String(message) });
+  return listAlertEventsAsync(db, tenantId, ref);
+}
+
+export async function pruneAlertsAsync(db, tenantId, retainDays) {
+  const days = Math.max(1, Number(retainDays) || 365);
+  const result = await runAsync(db, "DELETE FROM observability_alerts WHERE tenant_id = ? AND status IN ('RESOLVED', 'CLOSED') AND updated_at < to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS')", [Number(tenantId), `-${days} days`]);
+  return Number(result.changes || 0);
+}
+
+async function findOpenByDedupAsync(db, tenantId, key) {
+  const placeholders = ALERT_OPEN_STATUSES.map(() => "?").join(", ");
+  return queryOneAsync(db, `SELECT * FROM observability_alerts WHERE tenant_id = ? AND dedup_key = ? AND status IN (${placeholders}) ORDER BY id DESC LIMIT 1`, [Number(tenantId), key, ...ALERT_OPEN_STATUSES]);
+}
+
+async function recentTerminalByDedupAsync(db, tenantId, key, cooldownSeconds) {
+  return queryOneAsync(
+    db,
+    `SELECT * FROM observability_alerts WHERE tenant_id = ? AND dedup_key = ? AND status IN ('RESOLVED', 'CLOSED') AND updated_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS') ORDER BY id DESC LIMIT 1`,
+    [Number(tenantId), key, `-${Math.max(0, Number(cooldownSeconds) || 0)} seconds`]
+  );
+}
+
+async function notifyRuleAsync(db, rule, alert, metric) {
+  const config = await getConfigAsync(db, alert.tenant_id, "notify_on_alerts");
+  if (!config) return;
+  const recipients = new Set();
+  const notification = rule.notification || {};
+  for (const userId of Array.isArray(notification.user_ids) ? notification.user_ids : []) recipients.add(Number(userId));
+  if (metric?.owner_user_id) recipients.add(Number(metric.owner_user_id));
+  if (!recipients.size && rule.created_by) recipients.add(Number(rule.created_by));
+  for (const userId of recipients) {
+    if (!Number.isInteger(userId) || userId <= 0) continue;
+    try {
+      await notifyUserAsync(
+        db,
+        userId,
+        {
+          event_type: "observability.alert",
+          source_module: "observability",
+          object_type: "observability_alert",
+          object_id: String(alert.id),
+          object_name: alert.alert_ref,
+          payload: { alert_ref: alert.alert_ref, severity: alert.severity, metric_code: alert.metric_code, value: alert.value, message: alert.message },
+        },
+        { tenantId: alert.tenant_id }
+      );
+    } catch {
+      /* notification is best-effort and must never fail alert evaluation */
+    }
+  }
+}
+
+export async function applyAlertRulesAsync(db, tenantId, metric, observation, { actor = null, runId = null } = {}) {
+  const summary = { evaluated: 0, created: 0, updated: 0, resolved: 0, escalated: 0, incidents_created: 0, alerts: [] };
+  if (!metric) return summary;
+  const rules = await queryAllAsync(db, "SELECT * FROM observability_alert_rules WHERE tenant_id = ? AND metric_code = ? AND status = 'ACTIVE'", [Number(tenantId), metric.code]);
+  const value = observation?.value;
+  const config = {
+    autoIncidents: await getConfigAsync(db, tenantId, "auto_create_incidents"),
+    incidentMinSeverity: String((await getConfigAsync(db, tenantId, "incident_min_severity")) || "HIGH").toUpperCase(),
+  };
+  const classified = await classifyMetricAsync(db, tenantId, metric, value);
+  for (const rawRule of rules) {
+    const rule = publicAlertRule(rawRule);
+    summary.evaluated += 1;
+    const condition = rule.condition || {};
+    const isBreach = breach(condition, value);
+    const key = dedupKey(rule, metric, observation);
+    const open = await findOpenByDedupAsync(db, tenantId, key);
+    if (isBreach) {
+      if (open) {
+        const occurrence = Number(open.occurrence_count || 1) + 1;
+        await runAsync(db, "UPDATE observability_alerts SET value = ?, threshold = ?, occurrence_count = ?, last_seen_at = ?, status = CASE WHEN status = 'SUPPRESSED' AND suppressed_until IS NOT NULL AND suppressed_until <= ? THEN 'OPEN' ELSE status END, suppressed_until = CASE WHEN suppressed_until IS NOT NULL AND suppressed_until <= ? THEN NULL ELSE suppressed_until END, updated_at = ? WHERE id = ?", [
+          Number(value ?? open.value),
+          Number(condition.value ?? open.threshold),
+          occurrence,
+          nowIso(),
+          nowIso(),
+          nowIso(),
+          nowIso(),
+          open.id,
+        ]);
+        const updated = await reloadAsync(db, open.id);
+        await recordAlertEventAsync(db, updated, "UPDATED", { value: Number(value), message: `Observed ${value} (occurrence ${occurrence})`, detail: { threshold: condition.value } });
+        summary.updated += 1;
+        summary.alerts.push(publicAlert(updated));
+        const bandSeverity = classified.band === "CRITICAL" ? "CRITICAL" : classified.band === "WARNING" ? "WARNING" : null;
+        if (bandSeverity && SEVERITY_RANK[bandSeverity] > SEVERITY_RANK[updated.severity]) {
+          await runAsync(db, "UPDATE observability_alerts SET severity = ?, updated_at = ? WHERE id = ?", [bandSeverity, nowIso(), updated.id]);
+          const escalated = await reloadAsync(db, updated.id);
+          await recordAlertEventAsync(db, escalated, "ESCALATED", { value: Number(value), message: `Severity escalated to ${bandSeverity}`, detail: { previous: updated.severity, band: classified.band } });
+          summary.escalated += 1;
+          await publishObservabilityEventAsync(db, { eventType: observabilityEventCode("THRESHOLD_BREACHED"), payload: { alert_ref: escalated.alert_ref, metric_code: metric.code, severity: bandSeverity, value, threshold: condition.value, band: classified.band }, objectType: "observability_alert", objectId: escalated.id, tenantId }, actor);
+        }
+      } else {
+        const cooldown = await recentTerminalByDedupAsync(db, tenantId, key, rule.cooldown_seconds);
+        if (cooldown) {
+          continue;
+        }
+        const ts = nowIso();
+        const severity = rule.severity;
+        const insert = await runAsync(
+          db,
+          `INSERT INTO observability_alerts (alert_ref, tenant_id, rule_id, rule_code, metric_code, service_code, severity, status, value, threshold, comparison, scope_json, dedup_key, message, occurrence_count, first_seen_at, last_seen_at, metadata_json, created_by, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+          [
+            alertRef(),
+            Number(tenantId),
+            rule.id,
+            rule.code,
+            metric.code,
+            rule.service_code ?? metric.metadata?.service_code ?? null,
+            severity,
+            Number(value),
+            Number(condition.value),
+            condition.operator,
+            stringifyJson(rule.scope || {}),
+            key,
+            `${rule.name}: ${metric.name} = ${value} (${condition.operator} ${condition.value})`,
+            ts,
+            ts,
+            stringifyJson({ band: classified.band, run_id: runId }),
+            rule.created_by ?? actor?.id ?? null,
+            ts,
+            ts,
+          ]
+        );
+        let alert = await reloadAsync(db, Number(insert.lastInsertId));
+        await recordAlertEventAsync(db, alert, "CREATED", { value: Number(value), message: alert.message, detail: { band: classified.band, threshold: condition.value } });
+        summary.created += 1;
+        await publishObservabilityEventAsync(db, { eventType: observabilityEventCode("THRESHOLD_BREACHED"), payload: { alert_ref: alert.alert_ref, metric_code: metric.code, severity, value, threshold: condition.value, band: classified.band }, objectType: "observability_alert", objectId: alert.id, tenantId }, actor);
+        await publishObservabilityEventAsync(db, { eventType: observabilityEventCode("ALERT_CREATED"), payload: { alert_ref: alert.alert_ref, metric_code: metric.code, severity, value }, objectType: "observability_alert", objectId: alert.id, tenantId }, actor);
+        await recordHistoryAsync(db, { tenantId, action: "ALERT_CREATED", entityType: "alert", entityId: alert.id, entityRef: alert.alert_ref, actor, summary: `Alert ${alert.alert_ref} raised (${metric.code})` });
+        if (config.autoIncidents && SEVERITY_RANK[severity] >= SEVERITY_RANK[config.incidentMinSeverity]) {
+          try {
+            const incident = await createIncidentAsync(
+              db,
+              tenantId,
+              {
+                title: rule.incident_severity ? `${rule.name}` : `[${severity}] ${rule.name}`,
+                description: alert.message,
+                severity: rule.incident_severity || severity,
+                service_code: rule.service_code,
+                module_code: metric.provider_code,
+                metric_code: metric.code,
+                alert_id: alert.id,
+              },
+              actor
+            );
+            await runAsync(db, "UPDATE observability_alerts SET incident_id = ?, updated_at = ? WHERE id = ?", [incident.id, nowIso(), alert.id]);
+            await recordAlertEventAsync(db, alert, "INCIDENT_LINKED", { actor, message: `Linked incident ${incident.incident_ref}`, detail: { incident_ref: incident.incident_ref } });
+            summary.incidents_created += 1;
+            alert = await reloadAsync(db, alert.id);
+          } catch {
+            /* incident creation is best-effort */
+          }
+        }
+        await notifyRuleAsync(db, rule, alert, metric);
+        summary.alerts.push(publicAlert(alert));
+      }
+    } else if (open && rule.auto_resolve) {
+      const resolved = await resolveAlertAsync(db, tenantId, open.alert_ref, actor, { resolution: `Auto-resolved: ${metric.code} back within threshold`, auto: true });
+      summary.resolved += 1;
+      summary.alerts.push(resolved);
+    }
+  }
+  return summary;
+}
+
+export async function refreshSuppressionsAsync(db, tenantId) {
+  const result = await runAsync(
+    db,
+    "UPDATE observability_alerts SET status = CASE WHEN acknowledged_at IS NOT NULL THEN 'ACKNOWLEDGED' ELSE 'OPEN' END, suppressed_until = NULL, updated_at = ? WHERE tenant_id = ? AND status = 'SUPPRESSED' AND suppressed_until IS NOT NULL AND suppressed_until <= ?",
+    [nowIso(), Number(tenantId), nowIso()]
+  );
+  return Number(result.changes || 0);
+}
+
+export async function alertTrendAsync(db, tenantId, query = {}) {
+  const hours = Math.max(1, Math.min(720, Number(query.hours) || 24));
+  const rows = await queryAllAsync(
     db,
     "SELECT to_char(created_at::timestamp, 'YYYY-MM-DD\"T\"HH24:00:00\"Z\"') AS bucket, severity, COUNT(*) AS c FROM observability_alerts WHERE tenant_id = ? AND created_at >= to_char((now() at time zone 'utc') + (?::interval),'YYYY-MM-DD HH24:MI:SS') GROUP BY bucket, severity ORDER BY bucket ASC",
     [Number(tenantId), `-${hours} hours`]

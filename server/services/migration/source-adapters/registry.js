@@ -45,6 +45,16 @@ export function registerSourceAdapter(adapter, { replace = true } = {}) {
     testConnection: adapter.testConnection || (() => ({ ok: true, message: "No connection test implemented" })),
     discoverSchema: adapter.discoverSchema || ((ctx) => extractSchemaFallback(adapter, ctx)),
     extract: adapter.extract,
+    testConnectionAsync: adapter.testConnectionAsync || (async (ctx) => (adapter.testConnection || (() => ({ ok: true, message: "No connection test implemented" })))(ctx)),
+    discoverSchemaAsync: adapter.discoverSchemaAsync || (async (ctx) => {
+      if (adapter.discoverSchema) return await adapter.discoverSchema(ctx);
+      const pageSize = Number(ctx?.pageSize) || 10;
+      const result = await (adapter.extractAsync ? adapter.extractAsync({ ...ctx, limit: Math.min(Number(ctx?.limit) || pageSize, 100) }) : adapter.extract({ ...ctx, limit: Math.min(Number(ctx?.limit) || pageSize, 100) }));
+      const records = Array.isArray(result?.records) ? result.records : [];
+      const names = result?.fields && result.fields.length ? result.fields.map((field) => (typeof field === "string" ? field : field.name)) : Object.keys(records[0] || {});
+      return { fields: names.map((name) => ({ name, data_type: "string" })), sample: records.slice(0, 10) };
+    }),
+    extractAsync: adapter.extractAsync || (async (ctx) => adapter.extract(ctx)),
   };
   registry.set(code, entry);
   return entry;

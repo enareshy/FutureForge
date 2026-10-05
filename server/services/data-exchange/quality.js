@@ -30,6 +30,20 @@ export function summarizeQuality(results = []) {
   return { evaluated: results.length, score, failed, results };
 }
 
+export async function evaluateImportedObjectsAsync(db, tenantId, { objectType, objectIds = [], actor = null, ip = null } = {}) {
+  const unique = [...new Set((objectIds || []).filter((id) => id !== null && id !== undefined && id !== ""))];
+  const results = [];
+  for (const objectId of unique) {
+    try {
+      const evaluate = DataQuality.evaluateAsync || DataQuality.evaluate;
+      results.push(await evaluate(db, { tenantId, objectType, objectId, actor, trigger: "import", ip }));
+    } catch {
+      // The object type may not be onboarded to data quality; that is not fatal.
+    }
+  }
+  return summarizeQuality(results);
+}
+
 export function assertQualityGate(summary, config) {
   if (!qualityGateEnabled(config) || summary?.score === null || summary?.score === undefined) return summary;
   const minimum = Number(config?.quality_min_score ?? 0);

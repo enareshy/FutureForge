@@ -2,8 +2,9 @@
 // large object sets, duplicate sweeps and overdue-exception escalation run on
 // the platform Job Scheduling & Execution Engine so a request never blocks.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
 import { evaluateType, evaluateObject } from "./engine.js";
 import { detectDuplicates } from "./duplicates.js";
 import { escalateOverdueExceptions } from "./exceptions.js";
@@ -14,6 +15,16 @@ import { publicQualityJob } from "./repository.js";
 
 function trackJob(db, { tenantId, mode, scope, submittedBy, jobRef }) {
   const result = run(
+    db,
+    `INSERT INTO dg_quality_jobs (tenant_id, mode, scope_json, status, job_ref, submitted_by, started_at, created_at, updated_at)
+     VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)`,
+    [Number(tenantId), String(mode).toUpperCase(), JSON.stringify(scope || {}), jobRef || "", submittedBy ?? null, nowIso(), nowIso(), nowIso()]
+  );
+  return Number(result.lastInsertId);
+}
+
+async function trackJobAsync(db, { tenantId, mode, scope, submittedBy, jobRef }) {
+  const result = await runAsync(
     db,
     `INSERT INTO dg_quality_jobs (tenant_id, mode, scope_json, status, job_ref, submitted_by, started_at, created_at, updated_at)
      VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)`,
@@ -47,6 +58,22 @@ export function listQualityJobs(db, { tenantId, status, limit = 50 } = {}) {
   ).map(publicQualityJob);
 }
 
+export async function listQualityJobsAsync(db, { tenantId, status, limit = 50 } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (status) {
+    clauses.push("status = ?");
+    params.push(String(status));
+  }
+  return (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM dg_quality_jobs WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT ?`,
+      [...params, Number(limit) || 50]
+    )
+  ).map(publicQualityJob);
+}
+
 // Submits an asynchronous evaluation. This is how a large dataset is evaluated:
 // the request returns immediately with a job reference.
 export function submitBatchEvaluation(db, { tenantId, objectTypes = [], objectIds = null, actor = null, ip = null } = {}) {
@@ -66,6 +93,23 @@ export function submitBatchEvaluation(db, { tenantId, objectTypes = [], objectId
   return { job, tracking_id: tracking, quality_job: publicQualityJob(queryOne(db, "SELECT * FROM dg_quality_jobs WHERE id = ?", [tracking])) };
 }
 
+export async function submitBatchEvaluationAsync(db, { tenantId, objectTypes = [], objectIds = null, actor = null, ip = null } = {}) {
+  const scope = { object_types: objectTypes, object_ids: objectIds };
+  const job = await submitJobAsync(
+    db,
+    {
+      job_type_code: "DATA_QUALITY_BATCH",
+      payload: scope,
+      tenant_id: Number(tenantId),
+      priority: "normal",
+      queue: "default",
+    },
+    { actor, ip }
+  );
+  const tracking = await trackJobAsync(db, { tenantId, mode: "BATCH", scope, submittedBy: actor?.id ?? null, jobRef: job?.job_ref });
+  return { job, tracking_id: tracking, quality_job: publicQualityJob(await queryOneAsync(db, "SELECT * FROM dg_quality_jobs WHERE id = ?", [tracking])) };
+}
+
 export function submitDuplicateScan(db, { tenantId, objectType, actor = null, ip = null } = {}) {
   const scope = { object_type: objectType };
   const job = submitJob(
@@ -74,6 +118,17 @@ export function submitDuplicateScan(db, { tenantId, objectType, actor = null, ip
     { actor, ip }
   );
   const tracking = trackJob(db, { tenantId, mode: "DUPLICATES", scope, submittedBy: actor?.id ?? null, jobRef: job?.job_ref });
+  return { job, tracking_id: tracking };
+}
+
+export async function submitDuplicateScanAsync(db, { tenantId, objectType, actor = null, ip = null } = {}) {
+  const scope = { object_type: objectType };
+  const job = await submitJobAsync(
+    db,
+    { job_type_code: "DATA_QUALITY_DUPLICATES", payload: scope, tenant_id: Number(tenantId), priority: "normal", queue: "default" },
+    { actor, ip }
+  );
+  const tracking = await trackJobAsync(db, { tenantId, mode: "DUPLICATES", scope, submittedBy: actor?.id ?? null, jobRef: job?.job_ref });
   return { job, tracking_id: tracking };
 }
 

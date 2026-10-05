@@ -7,11 +7,12 @@
 // demo objects themselves come from the platform object seed; the thread seed
 // only derives from them and never duplicates business data.
 import { queryOne } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { withEventSuppression } from "../events/emit.js";
-import { ensureThreadFoundation } from "./foundation.js";
-import { createSnapshot } from "./snapshots.js";
-import { createBaseline, releaseBaseline } from "./baselines.js";
-import { resolveDefinition } from "./definitions.js";
+import { ensureThreadFoundation, ensureThreadFoundationAsync } from "./foundation.js";
+import { createSnapshot, createSnapshotAsync } from "./snapshots.js";
+import { createBaseline, createBaselineAsync, releaseBaseline, releaseBaselineAsync } from "./baselines.js";
+import { resolveDefinition, resolveDefinitionAsync } from "./definitions.js";
 
 const DEMO_SNAPSHOT = "Demonstration product thread snapshot";
 const DEMO_BASELINE = "Demonstration product thread baseline A";
@@ -69,12 +70,70 @@ export function seedThread(db, tenantId) {
   });
 }
 
+export async function seedThreadAsync(db, tenantId) {
+  return withEventSuppression(async () => {
+    const tenant = await resolveTenantIdAsync(db, tenantId);
+    const foundation = await ensureThreadFoundationAsync(db);
+    const created = { snapshots: 0, baselines: 0 };
+    if (!tenant) return { foundation, created, seeded: false, reason: "no_tenant" };
+
+    const root = await queryOneAsync(
+      db,
+      `SELECT o.id, t.code AS type_code
+         FROM objects o JOIN metadata_types t ON t.id = o.object_type_id
+        WHERE o.tenant_id = ? AND o.code = ? AND t.code = ?
+        LIMIT 1`,
+      [tenant, DEMO_ROOT_CODE, DEMO_ROOT_TYPE]
+    );
+    if (!root) return { foundation, created, seeded: false, reason: "no_demo_root" };
+
+    const definition = await resolveDefinitionAsync(db, tenant, {});
+    const rootRef = `${root.type_code}:${root.id}`;
+    const actor = await resolveSeedActorAsync(db);
+
+    let snapshot = await queryOneAsync(db, "SELECT id FROM thread_snapshots WHERE tenant_id = ? AND name = ?", [tenant, DEMO_SNAPSHOT]);
+    if (!snapshot) {
+      snapshot = await createSnapshotAsync(db, tenant, {
+        root: rootRef,
+        direction: "DOWNSTREAM",
+        max_depth: 10,
+        includeInactive: true,
+        name: DEMO_SNAPSHOT,
+        description: "Snapshot of the seeded product, its revisions and bill of materials.",
+        definition_code: definition?.code,
+      }, actor, null);
+      created.snapshots += 1;
+    }
+
+    let baseline = await queryOneAsync(db, "SELECT id FROM thread_baselines WHERE tenant_id = ? AND name = ?", [tenant, DEMO_BASELINE]);
+    if (!baseline) {
+      baseline = await createBaselineAsync(db, tenant, {
+        name: DEMO_BASELINE,
+        description: "Released baseline derived from the demonstration product thread.",
+        snapshot_id: snapshot.id,
+        definition_code: definition?.code,
+      }, actor, null);
+      created.baselines += 1;
+      await releaseBaselineAsync(db, tenant, baseline.id, actor, null);
+    }
+
+    return { foundation, created, seeded: true, snapshot_id: snapshot.id, baseline_id: baseline.id };
+  });
+}
+
 // Seeding runs without an HTTP actor. The thread engine is deny-by-default, so
 // we resolve a real administrator to authorize the derived snapshot/baseline.
 function resolveSeedActor(db) {
   const admin = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin' LIMIT 1");
   if (admin) return { id: admin.id, username: admin.username };
   const any = queryOne(db, "SELECT id, username FROM users ORDER BY id LIMIT 1");
+  return any ? { id: any.id, username: any.username } : null;
+}
+
+async function resolveSeedActorAsync(db) {
+  const admin = await queryOneAsync(db, "SELECT id, username FROM users WHERE username = 'admin' LIMIT 1");
+  if (admin) return { id: admin.id, username: admin.username };
+  const any = await queryOneAsync(db, "SELECT id, username FROM users ORDER BY id LIMIT 1");
   return any ? { id: any.id, username: any.username } : null;
 }
 
@@ -85,6 +144,13 @@ function resolveTenantId(db, tenantId) {
   return helix?.id ?? null;
 }
 
+async function resolveTenantIdAsync(db, tenantId) {
+  const explicit = Number(tenantId);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const helix = await queryOneAsync(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  return helix?.id ?? null;
+}
+
 export function ensureThreadSeed(db, tenantId) {
   withEventSuppression(() => ensureThreadFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
@@ -92,4 +158,13 @@ export function ensureThreadSeed(db, tenantId) {
   const existing = queryOne(db, "SELECT id FROM thread_baselines WHERE tenant_id = ? AND name = ?", [tenant, DEMO_BASELINE]);
   if (existing) return { seeded: false, reason: "already_present" };
   return seedThread(db, tenant);
+}
+
+export async function ensureThreadSeedAsync(db, tenantId) {
+  await withEventSuppression(() => ensureThreadFoundationAsync(db));
+  const tenant = await resolveTenantIdAsync(db, tenantId);
+  if (!tenant) return { seeded: false, reason: "no_tenant" };
+  const existing = await queryOneAsync(db, "SELECT id FROM thread_baselines WHERE tenant_id = ? AND name = ?", [tenant, DEMO_BASELINE]);
+  if (existing) return { seeded: false, reason: "already_present" };
+  return await seedThreadAsync(db, tenant);
 }

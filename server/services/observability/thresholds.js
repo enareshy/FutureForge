@@ -5,12 +5,13 @@
 // rules so a single metric can be watched by several rules over different
 // scopes without duplicating the numeric configuration.
 import { queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { THRESHOLD_OPERATORS, THRESHOLD_DIRECTIONS } from "./constants.js";
 import { thresholdRef } from "./identifiers.js";
-import { parseJson, stringifyJson, paged, toNumber } from "./repository.js";
+import { parseJson, stringifyJson, paged, pagedAsync, toNumber } from "./repository.js";
 import { thresholdNotFound, thresholdConflict, invalidThreshold } from "./errors.js";
-import { recordHistory } from "./history.js";
+import { recordHistory, recordHistoryAsync } from "./history.js";
 
 export const THRESHOLD_BANDS = Object.freeze(["OK", "WARNING", "CRITICAL", "UNKNOWN"]);
 
@@ -41,8 +42,21 @@ export function getThresholdRow(db, tenantId, ref) {
   return queryOne(db, "SELECT * FROM observability_thresholds WHERE tenant_id = ? AND threshold_ref = ?", [Number(tenantId), raw]);
 }
 
+export async function getThresholdRowAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const id = Number(raw);
+  if (Number.isInteger(id) && id > 0) return await queryOneAsync(db, "SELECT * FROM observability_thresholds WHERE tenant_id = ? AND id = ?", [Number(tenantId), id]);
+  return await queryOneAsync(db, "SELECT * FROM observability_thresholds WHERE tenant_id = ? AND threshold_ref = ?", [Number(tenantId), raw]);
+}
+
 export function getThreshold(db, tenantId, ref) {
   const row = getThresholdRow(db, tenantId, ref);
+  if (!row) throw thresholdNotFound(ref);
+  return publicThreshold(row);
+}
+
+export async function getThresholdAsync(db, tenantId, ref) {
+  const row = await getThresholdRowAsync(db, tenantId, ref);
   if (!row) throw thresholdNotFound(ref);
   return publicThreshold(row);
 }
@@ -102,6 +116,42 @@ export function createThreshold(db, tenantId, input = {}, actor = null) {
   return publicThreshold(row);
 }
 
+export async function createThresholdAsync(db, tenantId, input = {}, actor = null) {
+  if (!input.metric_code) throw invalidThreshold("metric_code is required");
+  const operator = String(input.operator || "GT").toUpperCase();
+  if (!THRESHOLD_OPERATORS.includes(operator)) throw invalidThreshold(`Unsupported operator: ${input.operator}`);
+  const direction = String(input.direction || "INCREASING").toUpperCase();
+  if (!THRESHOLD_DIRECTIONS.includes(direction)) throw invalidThreshold(`Unsupported direction: ${input.direction}`);
+  const code = `${String(input.metric_code).toUpperCase()}-${operator}`;
+  if (await queryOneAsync(db, "SELECT id FROM observability_thresholds WHERE tenant_id = ? AND metric_code = ? AND operator = ?", [Number(tenantId), String(input.metric_code).toUpperCase(), operator])) {
+    throw thresholdConflict(code);
+  }
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO observability_thresholds (threshold_ref, tenant_id, metric_code, scope_json, operator, warning_value, critical_value, direction, version, status, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+    [
+      input.threshold_ref || thresholdRef(code),
+      Number(tenantId),
+      String(input.metric_code).toUpperCase(),
+      stringifyJson(input.scope || {}),
+      operator,
+      toNumber(input.warning_value),
+      toNumber(input.critical_value),
+      direction,
+      String(input.status || "ACTIVE").toUpperCase(),
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM observability_thresholds WHERE id = ?", [Number(result.lastInsertId)]);
+  await recordHistoryAsync(db, { tenantId, action: "THRESHOLD_CREATED", entityType: "threshold", entityId: row.id, entityRef: row.threshold_ref, actor, summary: `Threshold ${code} created` });
+  await writeAuditAsync(db, { actor_id: actor?.id ?? null, actor_username: actor?.username ?? null, action: "observability.threshold.create", resource_type: "observability_threshold", resource_id: row.threshold_ref, details: { metric_code: row.metric_code } });
+  return publicThreshold(row);
+}
+
 export function updateThreshold(db, tenantId, ref, input = {}, actor = null) {
   const row = getThresholdRow(db, tenantId, ref);
   if (!row) throw thresholdNotFound(ref);
@@ -126,11 +176,43 @@ export function updateThreshold(db, tenantId, ref, input = {}, actor = null) {
   return publicThreshold(updated);
 }
 
+export async function updateThresholdAsync(db, tenantId, ref, input = {}, actor = null) {
+  const row = await getThresholdRowAsync(db, tenantId, ref);
+  if (!row) throw thresholdNotFound(ref);
+  const operator = input.operator ? String(input.operator).toUpperCase() : row.operator;
+  if (!THRESHOLD_OPERATORS.includes(operator)) throw invalidThreshold(`Unsupported operator: ${input.operator}`);
+  await runAsync(
+    db,
+    `UPDATE observability_thresholds SET scope_json = ?, operator = ?, warning_value = ?, critical_value = ?, direction = ?, status = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+    [
+      input.scope !== undefined ? stringifyJson(input.scope) : row.scope_json,
+      operator,
+      input.warning_value !== undefined ? toNumber(input.warning_value) : row.warning_value,
+      input.critical_value !== undefined ? toNumber(input.critical_value) : row.critical_value,
+      input.direction ? String(input.direction).toUpperCase() : row.direction,
+      input.status ? String(input.status).toUpperCase() : row.status,
+      nowIso(),
+      row.id,
+    ]
+  );
+  const updated = await queryOneAsync(db, "SELECT * FROM observability_thresholds WHERE id = ?", [row.id]);
+  await recordHistoryAsync(db, { tenantId, action: "THRESHOLD_UPDATED", entityType: "threshold", entityId: row.id, entityRef: row.threshold_ref, actor, summary: `Threshold ${row.threshold_ref} updated` });
+  return publicThreshold(updated);
+}
+
 export function deleteThreshold(db, tenantId, ref, actor = null) {
   const row = getThresholdRow(db, tenantId, ref);
   if (!row) throw thresholdNotFound(ref);
   run(db, "UPDATE observability_thresholds SET status = 'ARCHIVED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
   recordHistory(db, { tenantId, action: "THRESHOLD_ARCHIVED", entityType: "threshold", entityId: row.id, entityRef: row.threshold_ref, actor, summary: `Threshold ${row.threshold_ref} archived` });
+  return { archived: true, threshold_ref: row.threshold_ref };
+}
+
+export async function deleteThresholdAsync(db, tenantId, ref, actor = null) {
+  const row = await getThresholdRowAsync(db, tenantId, ref);
+  if (!row) throw thresholdNotFound(ref);
+  await runAsync(db, "UPDATE observability_thresholds SET status = 'ARCHIVED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  await recordHistoryAsync(db, { tenantId, action: "THRESHOLD_ARCHIVED", entityType: "threshold", entityId: row.id, entityRef: row.threshold_ref, actor, summary: `Threshold ${row.threshold_ref} archived` });
   return { archived: true, threshold_ref: row.threshold_ref };
 }
 
@@ -148,10 +230,43 @@ export function listThresholds(db, tenantId, query = {}) {
   return paged(db, "observability_thresholds", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicThreshold });
 }
 
+export async function listThresholdsAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.metric_code || query.metricCode) {
+    where.push("metric_code = ?");
+    params.push(String(query.metric_code || query.metricCode).toUpperCase());
+  }
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  return await pagedAsync(db, "observability_thresholds", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicThreshold });
+}
+
 // Resolves a metric's effective thresholds: explicit threshold definitions win,
 // otherwise the metric definition's own warning/critical values are used.
 export function effectiveThresholds(db, tenantId, metric) {
   const explicit = listThresholds(db, tenantId, { metric_code: metric.code, status: "ACTIVE", page_size: 20 }).items;
+  if (explicit.length) return explicit;
+  if (metric.warning_threshold === null && metric.critical_threshold === null) return [];
+  return [
+    {
+      threshold_ref: `${metric.metric_ref}:default`,
+      metric_code: metric.code,
+      operator: metric.direction === "LOWER_IS_WORSE" ? "LT" : "GT",
+      warning_value: metric.warning_threshold,
+      critical_value: metric.critical_threshold,
+      direction: metric.direction === "LOWER_IS_WORSE" ? "DECREASING" : "INCREASING",
+      status: "ACTIVE",
+      scope: {},
+      implicit: true,
+    },
+  ];
+}
+
+export async function effectiveThresholdsAsync(db, tenantId, metric) {
+  const explicit = (await listThresholdsAsync(db, tenantId, { metric_code: metric.code, status: "ACTIVE", page_size: 20 })).items;
   if (explicit.length) return explicit;
   if (metric.warning_threshold === null && metric.critical_threshold === null) return [];
   return [
@@ -183,6 +298,18 @@ export function classify(value, threshold) {
 // returns the highest band, matching the alert rule comparison used to breach.
 export function classifyMetric(db, tenantId, metric, value) {
   const thresholds = effectiveThresholds(db, tenantId, metric);
+  if (!thresholds.length) return { band: "UNKNOWN", threshold: null, operator: null };
+  let worst = { band: "OK", threshold: null, operator: null };
+  const rank = { UNKNOWN: 0, OK: 1, WARNING: 2, CRITICAL: 3 };
+  for (const threshold of thresholds) {
+    const result = classify(value, threshold);
+    if (rank[result.band] > rank[worst.band]) worst = { ...result, threshold_ref: threshold.threshold_ref };
+  }
+  return worst;
+}
+
+export async function classifyMetricAsync(db, tenantId, metric, value) {
+  const thresholds = await effectiveThresholdsAsync(db, tenantId, metric);
   if (!thresholds.length) return { band: "UNKNOWN", threshold: null, operator: null };
   let worst = { band: "OK", threshold: null, operator: null };
   const rank = { UNKNOWN: 0, OK: 1, WARNING: 2, CRITICAL: 3 };

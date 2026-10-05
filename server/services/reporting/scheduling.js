@@ -5,17 +5,18 @@
 // scheduled result is authorized, cached and audited identically. The platform
 // worker drives due schedules; this service only computes cadence and executes.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { SCHEDULE_FREQUENCIES, SCHEDULE_STATUSES, EXPORT_FORMATS, NATIVE_EXPORT_FORMATS } from "./constants.js";
 import { scheduleNotFound, invalidSchedule } from "./errors.js";
 import { scheduleRef as makeScheduleRef } from "./identifiers.js";
-import { publicSchedule, stringifyJson, paged } from "./repository.js";
-import { getReport, executeReport, runReport } from "./reports.js";
-import { getDashboard, refreshDashboard } from "./dashboards.js";
-import { getKpi, getKpiValue } from "./kpis.js";
-import { executeExport } from "./exports.js";
-import { publishReportingEvent } from "./events.js";
-import { recordHistory } from "./history.js";
+import { publicSchedule, stringifyJson, paged, pagedAsync } from "./repository.js";
+import { getReport, executeReport, runReport, getReportAsync, executeReportAsync } from "./reports.js";
+import { getDashboard, refreshDashboard, getDashboardAsync, refreshDashboardAsync } from "./dashboards.js";
+import { getKpi, getKpiValue, getKpiAsync, getKpiValueAsync } from "./kpis.js";
+import { executeExport, executeExportAsync } from "./exports.js";
+import { publishReportingEvent, publishReportingEventAsync } from "./events.js";
+import { recordHistory, recordHistoryAsync } from "./history.js";
 
 function parseRecipients(input) {
   if (!input) return [];
@@ -101,8 +102,61 @@ export function createSchedule(db, tenantId, input = {}, actor = null, ip = null
   return getScheduleById(db, Number(tenantId), Number(result.lastInsertId));
 }
 
+export async function createScheduleAsync(db, tenantId, input = {}, actor = null, ip = null) {
+  const normalized = validateSchedule(db, tenantId, input);
+  if (normalized.target_type === "REPORT") {
+    const report = await getReportAsync(db, tenantId, normalized.report_id || normalized.report_code);
+    normalized.report_id = report.id;
+    normalized.report_code = report.code;
+  }
+  if (normalized.target_type === "DASHBOARD") {
+    const dashboard = await getDashboardAsync(db, tenantId, normalized.dashboard_id || input.dashboard_code);
+    normalized.dashboard_id = dashboard.id;
+  }
+  if (normalized.target_type === "KPI") {
+    const kpi = await getKpiAsync(db, tenantId, normalized.kpi_id || input.kpi_code);
+    normalized.kpi_id = kpi.id;
+  }
+  if (!SCHEDULE_STATUSES.includes(normalized.status)) throw invalidSchedule(`Unsupported schedule status: ${normalized.status}`);
+  const ts = nowIso();
+  const nextRun = normalized.frequency === "ONCE" ? input.run_at || ts : computeNextRun(normalized);
+  const result = await runAsync(
+    db,
+    `INSERT INTO reporting_schedules (schedule_ref, tenant_id, name, target_type, report_id, dashboard_id, kpi_id, frequency, cron, timezone, format, recipients_json, parameters_json, distribution_json, status, next_run_at, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      makeScheduleRef(),
+      Number(tenantId),
+      normalized.name,
+      normalized.target_type,
+      normalized.report_id,
+      normalized.dashboard_id,
+      normalized.kpi_id,
+      normalized.frequency,
+      normalized.cron,
+      normalized.timezone,
+      normalized.format,
+      stringifyJson(normalized.recipients, "[]"),
+      stringifyJson(normalized.parameters),
+      stringifyJson(normalized.distribution),
+      normalized.status,
+      nextRun,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  await writeAuditAsync(db, { actor, action: "reporting.schedule.create", resourceType: "reporting_schedule", resourceId: String(result.lastInsertId), details: { target_type: normalized.target_type, frequency: normalized.frequency }, sourceModule: "reporting", ip });
+  await publishReportingEventAsync(db, { eventType: "ReportUpdated", payload: { action: "schedule_created", target_type: normalized.target_type }, objectType: "reporting_schedule", tenantId }, actor);
+  return await getScheduleByIdAsync(db, Number(tenantId), Number(result.lastInsertId));
+}
+
 export function getScheduleById(db, tenantId, id) {
   return publicSchedule(queryOne(db, "SELECT * FROM reporting_schedules WHERE id = ? AND tenant_id = ?", [Number(id), Number(tenantId)]));
+}
+
+export async function getScheduleByIdAsync(db, tenantId, id) {
+  return publicSchedule(await queryOneAsync(db, "SELECT * FROM reporting_schedules WHERE id = ? AND tenant_id = ?", [Number(id), Number(tenantId)]));
 }
 
 export function getSchedule(db, tenantId, ref) {
@@ -110,6 +164,15 @@ export function getSchedule(db, tenantId, ref) {
   const row = /^\d+$/.test(raw)
     ? queryOne(db, "SELECT * FROM reporting_schedules WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
     : queryOne(db, "SELECT * FROM reporting_schedules WHERE tenant_id = ? AND schedule_ref = ?", [Number(tenantId), raw]);
+  if (!row) throw scheduleNotFound(ref);
+  return publicSchedule(row);
+}
+
+export async function getScheduleAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const row = /^\d+$/.test(raw)
+    ? await queryOneAsync(db, "SELECT * FROM reporting_schedules WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
+    : await queryOneAsync(db, "SELECT * FROM reporting_schedules WHERE tenant_id = ? AND schedule_ref = ?", [Number(tenantId), raw]);
   if (!row) throw scheduleNotFound(ref);
   return publicSchedule(row);
 }
@@ -126,6 +189,20 @@ export function listSchedules(db, tenantId, query = {}) {
     params.push(String(query.target_type || query.targetType).toUpperCase());
   }
   return paged(db, "reporting_schedules", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicSchedule });
+}
+
+export async function listSchedulesAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  if (query.target_type || query.targetType) {
+    where.push("target_type = ?");
+    params.push(String(query.target_type || query.targetType).toUpperCase());
+  }
+  return await pagedAsync(db, "reporting_schedules", { where, params, page: query.page, pageSize: query.page_size || query.pageSize, map: publicSchedule });
 }
 
 export function updateSchedule(db, tenantId, ref, input = {}, actor = null) {
@@ -155,6 +232,33 @@ export function updateSchedule(db, tenantId, ref, input = {}, actor = null) {
   return getScheduleById(db, Number(tenantId), existing.id);
 }
 
+export async function updateScheduleAsync(db, tenantId, ref, input = {}, actor = null) {
+  const existing = await getScheduleAsync(db, tenantId, ref);
+  const normalized = validateSchedule(db, tenantId, { ...existing, ...input, report_id: existing.report_id, dashboard_id: existing.dashboard_id, kpi_id: existing.kpi_id });
+  await runAsync(
+    db,
+    `UPDATE reporting_schedules SET name = ?, frequency = ?, cron = ?, timezone = ?, format = ?, recipients_json = ?, parameters_json = ?, distribution_json = ?, status = ?, next_run_at = ?, updated_at = ?
+      WHERE id = ? AND tenant_id = ?`,
+    [
+      normalized.name,
+      normalized.frequency,
+      normalized.cron,
+      normalized.timezone,
+      normalized.format,
+      stringifyJson(normalized.recipients, "[]"),
+      stringifyJson(normalized.parameters),
+      stringifyJson(normalized.distribution),
+      normalized.status,
+      computeNextRun({ ...normalized, status: normalized.status }),
+      nowIso(),
+      existing.id,
+      Number(tenantId),
+    ]
+  );
+  await writeAuditAsync(db, { actor, action: "reporting.schedule.update", resourceType: "reporting_schedule", resourceId: existing.schedule_ref, sourceModule: "reporting" });
+  return await getScheduleByIdAsync(db, Number(tenantId), existing.id);
+}
+
 export function setScheduleStatus(db, tenantId, ref, status, actor = null) {
   const existing = getSchedule(db, tenantId, ref);
   const next = String(status || "").toUpperCase();
@@ -165,14 +269,34 @@ export function setScheduleStatus(db, tenantId, ref, status, actor = null) {
   return getScheduleById(db, Number(tenantId), existing.id);
 }
 
+export async function setScheduleStatusAsync(db, tenantId, ref, status, actor = null) {
+  const existing = await getScheduleAsync(db, tenantId, ref);
+  const next = String(status || "").toUpperCase();
+  if (!SCHEDULE_STATUSES.includes(next)) throw invalidSchedule(`Unsupported schedule status: ${status}`);
+  const nextRun = next === "ACTIVE" ? computeNextRun({ ...existing, status: existing.status }) : existing.next_run_at;
+  await runAsync(db, "UPDATE reporting_schedules SET status = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ?", [next, nextRun, nowIso(), existing.id, Number(tenantId)]);
+  await writeAuditAsync(db, { actor, action: "reporting.schedule.status", resourceType: "reporting_schedule", resourceId: existing.schedule_ref, details: { status: next }, sourceModule: "reporting" });
+  return await getScheduleByIdAsync(db, Number(tenantId), existing.id);
+}
+
 export function deleteSchedule(db, tenantId, ref) {
   const existing = getSchedule(db, tenantId, ref);
   run(db, "DELETE FROM reporting_schedules WHERE id = ? AND tenant_id = ?", [existing.id, Number(tenantId)]);
   return { deleted: true, schedule_ref: existing.schedule_ref };
 }
 
+export async function deleteScheduleAsync(db, tenantId, ref) {
+  const existing = await getScheduleAsync(db, tenantId, ref);
+  await runAsync(db, "DELETE FROM reporting_schedules WHERE id = ? AND tenant_id = ?", [existing.id, Number(tenantId)]);
+  return { deleted: true, schedule_ref: existing.schedule_ref };
+}
+
 export function dueSchedules(db, tenantId, asOf = nowIso()) {
   return queryAll(db, "SELECT * FROM reporting_schedules WHERE tenant_id = ? AND status = 'ACTIVE' AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC", [Number(tenantId), asOf]).map(publicSchedule);
+}
+
+export async function dueSchedulesAsync(db, tenantId, asOf = nowIso()) {
+  return (await queryAllAsync(db, "SELECT * FROM reporting_schedules WHERE tenant_id = ? AND status = 'ACTIVE' AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC", [Number(tenantId), asOf])).map(publicSchedule);
 }
 
 // Executes a schedule once: runs its target and records the run. Distribution
@@ -209,9 +333,52 @@ export function runSchedule(db, tenantId, ref, actor = null, ip = null) {
   return { schedule_ref: schedule.schedule_ref, ...outcome, delivered, next_run_at: nextRun };
 }
 
+export async function runScheduleAsync(db, tenantId, ref, actor = null, ip = null) {
+  const schedule = await getScheduleAsync(db, tenantId, ref);
+  const context = { parameters: schedule.parameters, mode: "SCHEDULED", enableCache: false };
+  let outcome;
+  if (schedule.target_type === "REPORT") {
+    const report = await getReportAsync(db, tenantId, schedule.report_id);
+    const result = await executeReportAsync(db, tenantId, report.code, context, actor, ip);
+    outcome = { target_type: "REPORT", report: report.code, rows: result.total, execution_ref: result.execution_ref };
+    if (schedule.format && NATIVE_EXPORT_FORMATS.includes(schedule.format)) {
+      outcome.export = await executeExportAsync(db, tenantId, (await ensureExportRowAsync(db, tenantId, report, schedule, actor)).export_ref, { parameters: schedule.parameters }, actor, ip);
+    }
+  } else if (schedule.target_type === "DASHBOARD") {
+    const dashboard = await refreshDashboardAsync(db, tenantId, schedule.dashboard_id, context, actor, ip);
+    outcome = { target_type: "DASHBOARD", dashboard: dashboard.code, widgets: dashboard.widgets.length };
+  } else {
+    const kpi = await getKpiValueAsync(db, tenantId, schedule.kpi_id, context);
+    outcome = { target_type: "KPI", kpi: kpi.kpi, value: kpi.value, status: kpi.status };
+  }
+  const delivered = schedule.recipients.length;
+  const nextRun = computeNextRun(schedule);
+  await runAsync(db, "UPDATE reporting_schedules SET last_run_at = ?, next_run_at = ?, status = CASE WHEN frequency = 'ONCE' THEN 'COMPLETED' ELSE status END, updated_at = ? WHERE id = ? AND tenant_id = ?", [
+    nowIso(),
+    schedule.frequency === "ONCE" ? null : nextRun,
+    nowIso(),
+    schedule.id,
+    Number(tenantId),
+  ]);
+  await publishReportingEventAsync(db, { eventType: "ReportExecuted", payload: { schedule: schedule.schedule_ref, target_type: schedule.target_type, delivered }, objectType: "reporting_schedule", tenantId }, actor);
+  await recordHistoryAsync(db, { tenantId, action: "SCHEDULE_RUN", entity_type: "schedule", entity_id: schedule.id, entity_ref: schedule.schedule_ref, actor_id: actor?.id, summary: `Ran schedule ${schedule.schedule_ref}`, detail: { ...outcome, delivered } });
+  return { schedule_ref: schedule.schedule_ref, ...outcome, delivered, next_run_at: nextRun };
+}
+
 function ensureExportRow(db, tenantId, report, schedule, actor) {
   const ts = nowIso();
   const result = run(
+    db,
+    `INSERT INTO reporting_exports (export_ref, tenant_id, report_id, format, status, parameters_json, created_by, created_at)
+     VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, ?)`,
+    [`EXP-${schedule.schedule_ref}`, Number(tenantId), report.id, schedule.format, stringifyJson(schedule.parameters), actor?.id ?? null, ts]
+  );
+  return { id: Number(result.lastInsertId), export_ref: `EXP-${schedule.schedule_ref}` };
+}
+
+async function ensureExportRowAsync(db, tenantId, report, schedule, actor) {
+  const ts = nowIso();
+  const result = await runAsync(
     db,
     `INSERT INTO reporting_exports (export_ref, tenant_id, report_id, format, status, parameters_json, created_by, created_at)
      VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, ?)`,

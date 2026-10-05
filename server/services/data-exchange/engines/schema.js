@@ -3,7 +3,7 @@
 // Source schemas come from the connector (so a REST feed and a CSV file are
 // handled the same way). Target schemas come from the platform metadata service,
 // so imports validate against the real object definition rather than a copy.
-import { getType, effectiveAttributes } from "../../metadata.js";
+import { getType, effectiveAttributes, getTypeAsync, effectiveAttributesAsync } from "../../metadata.js";
 import { schemaDiscoveryFailed } from "../errors.js";
 import { normalizeText } from "../validation.js";
 import { inferFields, inferDataType } from "../connectors/codecs.js";
@@ -52,6 +52,36 @@ export function targetSchema(db, tenantId, objectType) {
   };
 }
 
+export async function targetSchemaAsync(db, tenantId, objectType) {
+  const code = normalizeText(objectType, { max: 120 });
+  if (!code) throw schemaDiscoveryFailed("A target object type is required");
+  let type;
+  try {
+    type = await getTypeAsync(db, code, tenantId, { withAttributes: true });
+  } catch {
+    throw schemaDiscoveryFailed(`Unknown target object type: ${code}`, { object_type: code });
+  }
+  if (!type || !type.id) throw schemaDiscoveryFailed(`Unknown target object type: ${code}`, { object_type: code });
+  const attributes = (await effectiveAttributesAsync(db, type.id, tenantId)).map((attribute) => ({
+    name: attribute.code,
+    label: attribute.name || attribute.code,
+    data_type: attribute.data_type || "string",
+    required: Boolean(attribute.required),
+    multi_value: Boolean(attribute.multi_value),
+    system: false,
+    validation: attribute.validation || {},
+  }));
+  const fields = [...OBJECT_BUILTIN_FIELDS, ...attributes];
+  return {
+    object_type: type.code,
+    type_id: type.id,
+    name: type.name,
+    fields,
+    field_names: fields.map((field) => field.name),
+    required_fields: fields.filter((field) => field.required).map((field) => field.name),
+  };
+}
+
 // Discovers the shape of a source without importing it.
 export async function discoverSourceSchema(connector, ctx = {}) {
   if (!connector) throw schemaDiscoveryFailed("A connector is required for schema discovery");
@@ -62,6 +92,24 @@ export async function discoverSourceSchema(connector, ctx = {}) {
   }
   try {
     const result = await connector.discoverSchema(ctx);
+    return { fields: normalizeSchemaFields(result.fields), sample: (result.sample || []).slice(0, 10), discovered_via: "connector" };
+  } catch (error) {
+    if (error.code) throw error;
+    throw schemaDiscoveryFailed(`Schema discovery failed: ${error.message}`, { connector: connector.code });
+  }
+}
+
+export async function discoverSourceSchemaAsync(connector, ctx = {}) {
+  if (!connector) throw schemaDiscoveryFailed("A connector is required for schema discovery");
+  if (!connector.capabilities.includes("SCHEMA_DISCOVERY")) {
+    // Fall back to a bounded read when the connector cannot describe itself.
+    const read = connector.readAsync || connector.read;
+    const result = typeof read === "function" ? await read.call(connector, { ...ctx, limit: 10 }) : { fields: [], records: [] };
+    return { fields: inferFields(result.records || []), sample: (result.records || []).slice(0, 10), discovered_via: "read" };
+  }
+  try {
+    const discover = connector.discoverSchemaAsync || connector.discoverSchema;
+    const result = await discover.call(connector, ctx);
     return { fields: normalizeSchemaFields(result.fields), sample: (result.sample || []).slice(0, 10), discovered_via: "connector" };
   } catch (error) {
     if (error.code) throw error;

@@ -471,6 +471,29 @@ export function notifyUser(db, userId, data = {}, { actor = null, tenantId = nul
   return publish(db, event, { actor, ip });
 }
 
+export async function notifyUserAsync(db, userId, data = {}, { actor = null, tenantId = null, ip = null } = {}) {
+  const user = await queryOneAsync(
+    db,
+    "SELECT id, username, display_name, email, organization_id, tenant_id FROM users WHERE id = ?",
+    [Number(userId)]
+  );
+  if (!user) return { notified: false, reason: "user_not_found" };
+  const resolvedTenant = tenantId ?? user.tenant_id ?? (await homeTenantIdAsync(db, actor));
+  const event = {
+    event_type: data.event_type || data.eventType || "notification.direct",
+    source_module: data.source_module || data.sourceModule || "platform",
+    tenant_id: resolvedTenant,
+    object_type: data.object_type || data.objectType || "",
+    object_id: data.object_id || data.objectId || "",
+    object_name: data.object_name || data.objectName || "",
+    payload: data.payload || {},
+    related: data.related || {},
+    correlation_id: data.correlation_id || data.correlationId || "",
+    initiator: { id: actor?.id, username: actor?.username },
+  };
+  return publishAsync(db, event, { actor, ip });
+}
+
 export function notifyGroup(db, groupId, data = {}, options = {}) {
   return publish(
     db,

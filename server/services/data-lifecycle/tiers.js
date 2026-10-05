@@ -5,10 +5,11 @@
 // apart lets an object be logically ARCHIVED while storage still serves reads
 // from a warm provider.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { DEFAULT_STATE_TIER_MAP, DATA_TIERS } from "./constants.js";
 import { assertDataTier, normalizeText, normalizeUpper } from "./validation.js";
-import { requireState } from "./states.js";
+import { requireState, requireStateAsync } from "./states.js";
 
 function publicTierPolicy(row) {
   if (!row) return null;
@@ -29,8 +30,17 @@ export function getTierPolicyRow(db, tenantId, stateCode) {
   return queryOne(db, "SELECT * FROM lc_tier_policies WHERE tenant_id = ? AND state_code = ?", [Number(tenantId), normalizeUpper(stateCode)]);
 }
 
+export async function getTierPolicyRowAsync(db, tenantId, stateCode) {
+  return await queryOneAsync(db, "SELECT * FROM lc_tier_policies WHERE tenant_id = ? AND state_code = ?", [Number(tenantId), normalizeUpper(stateCode)]);
+}
+
 export function listTierPolicies(db, { tenantId } = {}) {
   const rows = queryAll(db, "SELECT * FROM lc_tier_policies WHERE tenant_id = ? ORDER BY state_code", [Number(tenantId)]);
+  return { items: rows.map(publicTierPolicy), total: rows.length, tiers: DATA_TIERS };
+}
+
+export async function listTierPoliciesAsync(db, { tenantId } = {}) {
+  const rows = await queryAllAsync(db, "SELECT * FROM lc_tier_policies WHERE tenant_id = ? ORDER BY state_code", [Number(tenantId)]);
   return { items: rows.map(publicTierPolicy), total: rows.length, tiers: DATA_TIERS };
 }
 
@@ -59,10 +69,42 @@ export function setTierPolicy(db, tenantId, stateCode, dataTier, { description =
   return publicTierPolicy(queryOne(db, "SELECT * FROM lc_tier_policies WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
+export async function setTierPolicyAsync(db, tenantId, stateCode, dataTier, { description = "", actor = null, ip = null } = {}) {
+  const code = normalizeUpper(stateCode);
+  await requireStateAsync(db, tenantId, code);
+  const tier = assertDataTier(dataTier);
+  const existing = await getTierPolicyRowAsync(db, tenantId, code);
+  const ts = nowIso();
+  if (existing) {
+    await runAsync(db, "UPDATE lc_tier_policies SET data_tier = ?, description = ?, updated_at = ? WHERE id = ?", [
+      tier,
+      normalizeText(description) || existing.description,
+      ts,
+      existing.id,
+    ]);
+    await writeAuditAsync(db, { actor, action: "data_lifecycle.tier.update", resourceType: "lc_tier_policies", resourceId: code, details: { data_tier: tier }, ip });
+    return publicTierPolicy(await queryOneAsync(db, "SELECT * FROM lc_tier_policies WHERE id = ?", [existing.id]));
+  }
+  const result = await runAsync(
+    db,
+    "INSERT INTO lc_tier_policies (tenant_id, state_code, data_tier, description, system, status, created_at, updated_at) VALUES (?, ?, ?, ?, 0, 'active', ?, ?)",
+    [Number(tenantId), code, tier, normalizeText(description), ts, ts]
+  );
+  await writeAuditAsync(db, { actor, action: "data_lifecycle.tier.create", resourceType: "lc_tier_policies", resourceId: code, details: { data_tier: tier }, ip });
+  return publicTierPolicy(await queryOneAsync(db, "SELECT * FROM lc_tier_policies WHERE id = ?", [Number(result.lastInsertId)]));
+}
+
 // Resolution order: explicit tenant mapping, then the platform default map.
 export function resolveTier(db, tenantId, stateCode) {
   const code = normalizeUpper(stateCode);
   const row = getTierPolicyRow(db, tenantId, code);
+  if (row && row.status === "active") return row.data_tier;
+  return DEFAULT_STATE_TIER_MAP[code] || "HOT";
+}
+
+export async function resolveTierAsync(db, tenantId, stateCode) {
+  const code = normalizeUpper(stateCode);
+  const row = await getTierPolicyRowAsync(db, tenantId, code);
   if (row && row.status === "active") return row.data_tier;
   return DEFAULT_STATE_TIER_MAP[code] || "HOT";
 }

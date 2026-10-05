@@ -3,9 +3,10 @@
 // describe field mappings, defaults, conditionals, conversions, lookups and
 // validation. Custom functions are referenced by name through an extension
 // registry so the framework stays provider- and business-independent.
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { publicTransformation } from "./repository.js";
 import {
   ERROR_HANDLING,
@@ -100,13 +101,53 @@ export function listTransformations(db, { tenantId, status, q, page, pageSize, o
   return { items: rows.map((r) => publicTransformation(r)), total, page: page || 1, page_size: limit };
 }
 
+export async function listTransformationsAsync(db, { tenantId, status, q, page, pageSize, offset } = {}) {
+  const clauses = [];
+  const params = [];
+  if (tenantId !== undefined && tenantId !== null) {
+    clauses.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (status) {
+    clauses.push("status = ?");
+    params.push(status);
+  }
+  if (q) {
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
+    params.push(`%${String(q).toLowerCase()}%`, `%${String(q).toLowerCase()}%`);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM transformation_definitions ${where}`, params)).c;
+  const limit = pageSize || 50;
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM transformation_definitions ${where} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,
+    [...params, limit, offset || 0]
+  );
+  return { items: rows.map((r) => publicTransformation(r)), total, page: page || 1, page_size: limit };
+}
+
 export function getTransformationRow(db, ref) {
   const id = Number(ref);
   return queryOne(db, "SELECT * FROM transformation_definitions WHERE id = ? OR code = ?", [Number.isFinite(id) ? id : -1, String(ref)]);
 }
 
+export async function getTransformationRowAsync(db, ref) {
+  const id = Number(ref);
+  return queryOneAsync(db, "SELECT * FROM transformation_definitions WHERE id = ? OR code = ?", [Number.isFinite(id) ? id : -1, String(ref)]);
+}
+
 export function getTransformation(db, ref, scope = {}) {
   const row = getTransformationRow(db, ref);
+  if (!row) throw new HttpError(404, "Transformation definition not found");
+  if (scope.tenantId !== undefined && scope.tenantId !== null && row.tenant_id && Number(row.tenant_id) !== Number(scope.tenantId)) {
+    throw new HttpError(404, "Transformation definition not found");
+  }
+  return publicTransformation(row);
+}
+
+export async function getTransformationAsync(db, ref, scope = {}) {
+  const row = await getTransformationRowAsync(db, ref);
   if (!row) throw new HttpError(404, "Transformation definition not found");
   if (scope.tenantId !== undefined && scope.tenantId !== null && row.tenant_id && Number(row.tenant_id) !== Number(scope.tenantId)) {
     throw new HttpError(404, "Transformation definition not found");
@@ -160,6 +201,52 @@ export function createTransformation(db, input = {}, actor = null, tenantId = nu
   return publicTransformation(row);
 }
 
+export async function createTransformationAsync(db, input = {}, actor = null, tenantId = null) {
+  assertDefinitionInput(input);
+  if (!input.code) throw new HttpError(400, "code is required");
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO transformation_definitions
+      (code, name, description, version, status, source_format, target_format, source_schema_json, target_schema_json,
+       mappings_json, constants_json, conditionals_json, conversions_json, lookups_json, validation_json,
+       error_handling, sample_input_json, tenant_id, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      String(input.code).toLowerCase(),
+      input.name || input.code,
+      input.description || "",
+      Number(input.version) || 1,
+      input.status || "draft",
+      input.source_format || "json",
+      input.target_format || "json",
+      toJson(input.source_schema, {}),
+      toJson(input.target_schema, {}),
+      toJson(normalizeMappings(input.mappings), []),
+      toJson(input.constants, {}),
+      toJson(input.conditionals, []),
+      toJson(input.conversions, []),
+      toJson(input.lookups, []),
+      toJson(input.validation, []),
+      input.error_handling || "fail",
+      toJson(input.sample_input, {}),
+      tenantId ?? input.tenant_id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM transformation_definitions WHERE id = ?", [Number(result.lastInsertId)]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "integration.transformation.create",
+    resourceType: "transformation_definition",
+    resourceId: row.id,
+    details: { code: row.code, version: row.version },
+  });
+  return publicTransformation(row);
+}
+
 export function updateTransformation(db, ref, input = {}, actor = null) {
   const row = getTransformationRow(db, ref);
   if (!row) throw new HttpError(404, "Transformation definition not found");
@@ -199,11 +286,58 @@ export function updateTransformation(db, ref, input = {}, actor = null) {
   return publicTransformation(queryOne(db, "SELECT * FROM transformation_definitions WHERE id = ?", [row.id]));
 }
 
+export async function updateTransformationAsync(db, ref, input = {}, actor = null) {
+  const row = await getTransformationRowAsync(db, ref);
+  if (!row) throw new HttpError(404, "Transformation definition not found");
+  assertDefinitionInput(input, { partial: true });
+  const fields = {
+    name: input.name ?? row.name,
+    description: input.description ?? row.description,
+    status: input.status ?? row.status,
+    source_format: input.source_format ?? row.source_format,
+    target_format: input.target_format ?? row.target_format,
+    source_schema_json: input.source_schema !== undefined ? toJson(input.source_schema, {}) : row.source_schema_json,
+    target_schema_json: input.target_schema !== undefined ? toJson(input.target_schema, {}) : row.target_schema_json,
+    mappings_json: input.mappings !== undefined ? toJson(normalizeMappings(input.mappings), []) : row.mappings_json,
+    constants_json: input.constants !== undefined ? toJson(input.constants, {}) : row.constants_json,
+    conditionals_json: input.conditionals !== undefined ? toJson(input.conditionals, []) : row.conditionals_json,
+    conversions_json: input.conversions !== undefined ? toJson(input.conversions, []) : row.conversions_json,
+    lookups_json: input.lookups !== undefined ? toJson(input.lookups, []) : row.lookups_json,
+    validation_json: input.validation !== undefined ? toJson(input.validation, []) : row.validation_json,
+    error_handling: input.error_handling ?? row.error_handling,
+    sample_input_json: input.sample_input !== undefined ? toJson(input.sample_input, {}) : row.sample_input_json,
+    version: input.bump_version ? Number(row.version) + 1 : Number(input.version) || row.version,
+  };
+  await runAsync(
+    db,
+    `UPDATE transformation_definitions SET name=?, description=?, status=?, source_format=?, target_format=?,
+     source_schema_json=?, target_schema_json=?, mappings_json=?, constants_json=?, conditionals_json=?,
+     conversions_json=?, lookups_json=?, validation_json=?, error_handling=?, sample_input_json=?, version=?, updated_at=?
+     WHERE id=?`,
+    [
+      fields.name, fields.description, fields.status, fields.source_format, fields.target_format,
+      fields.source_schema_json, fields.target_schema_json, fields.mappings_json, fields.constants_json,
+      fields.conditionals_json, fields.conversions_json, fields.lookups_json, fields.validation_json,
+      fields.error_handling, fields.sample_input_json, fields.version, nowIso(), row.id,
+    ]
+  );
+  await writeAuditAsync(db, { actor, action: "integration.transformation.update", resourceType: "transformation_definition", resourceId: row.id, details: { code: row.code } });
+  return publicTransformation(await queryOneAsync(db, "SELECT * FROM transformation_definitions WHERE id = ?", [row.id]));
+}
+
 export function deleteTransformation(db, ref, actor = null) {
   const row = getTransformationRow(db, ref);
   if (!row) throw new HttpError(404, "Transformation definition not found");
   run(db, "DELETE FROM transformation_definitions WHERE id = ?", [row.id]);
   writeAudit(db, { actor, action: "integration.transformation.delete", resourceType: "transformation_definition", resourceId: row.id, details: { code: row.code } });
+  return { deleted: true, id: row.id };
+}
+
+export async function deleteTransformationAsync(db, ref, actor = null) {
+  const row = await getTransformationRowAsync(db, ref);
+  if (!row) throw new HttpError(404, "Transformation definition not found");
+  await runAsync(db, "DELETE FROM transformation_definitions WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, { actor, action: "integration.transformation.delete", resourceType: "transformation_definition", resourceId: row.id, details: { code: row.code } });
   return { deleted: true, id: row.id };
 }
 
@@ -560,6 +694,46 @@ export function testTransformation(db, ref, { input = {}, source_sample = null }
     result = { output: null, errors: [error], warnings: [], applied: [] };
   }
   writeAudit(db, {
+    actor,
+    action: "integration.transformation.test",
+    resourceType: "transformation_definition",
+    resourceId: row.id,
+    details: { code: row.code, ok: !error, errors: result.errors.length },
+    status: error ? "failure" : "success",
+    errorMessage: error?.message || null,
+  });
+  return {
+    transformation_code: def.code,
+    source_format: def.source_format,
+    target_format: def.target_format,
+    input: maskPayload(sample),
+    output: result.output,
+    errors: result.errors,
+    warnings: result.warnings,
+    applied: result.applied,
+    duration_ms: Date.now() - started,
+    ok: !error && result.errors.length === 0,
+  };
+}
+
+export async function testTransformationAsync(db, ref, { input = {}, source_sample = null } = {}, actor = null) {
+  const row = await getTransformationRowAsync(db, ref);
+  if (!row) throw new HttpError(404, "Transformation definition not found");
+  const def = publicTransformation(row);
+  let sample = input;
+  if ((!input || !Object.keys(input).length) && source_sample) {
+    sample = typeof source_sample === "string" ? parseInputByFormat(source_sample, def.source_format) : source_sample;
+  }
+  const started = Date.now();
+  let result;
+  let error = null;
+  try {
+    result = applyTransformation(def, sample);
+  } catch (err) {
+    error = classifyError(err);
+    result = { output: null, errors: [error], warnings: [], applied: [] };
+  }
+  await writeAuditAsync(db, {
     actor,
     action: "integration.transformation.test",
     resourceType: "transformation_definition",

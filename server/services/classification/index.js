@@ -170,6 +170,7 @@ export const Classification = {
 
 export const ensureClassificationFoundation = Foundation.ensureClassificationFoundation;
 export const classificationHealth = Foundation.classificationHealth;
+export const classificationHealthAsync = Foundation.classificationHealthAsync;
 export const registerClassificationHandlers = Jobs.registerClassificationHandlers;
 export const ensureClassificationJobTypes = Jobs.ensureClassificationJobTypes;
 export const runClassificationMaintenance = Jobs.runMaintenance;

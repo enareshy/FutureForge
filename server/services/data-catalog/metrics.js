@@ -1,12 +1,18 @@
 // Operational metrics for the catalog and glossary estate. Every figure is
 // tenant scoped so dashboards and searches can never leak across tenants.
 import { queryAll, queryOne } from "../../db.js";
-import { entryTypeCounts } from "./entries.js";
-import { ownershipGaps } from "./ownership.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { entryTypeCounts, entryTypeCountsAsync } from "./entries.js";
+import { ownershipGaps, ownershipGapsAsync } from "./ownership.js";
 
 function count(db, table, tenantId, extraWhere = "", params = []) {
   const where = [`tenant_id = ?`, ...(extraWhere ? [extraWhere] : [])].join(" AND ");
   return Number(queryOne(db, `SELECT COUNT(*) AS c FROM ${table} WHERE ${where}`, [Number(tenantId), ...params])?.c || 0);
+}
+
+async function countAsync(db, table, tenantId, extraWhere = "", params = []) {
+  const where = [`tenant_id = ?`, ...(extraWhere ? [extraWhere] : [])].join(" AND ");
+  return Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE ${where}`, [Number(tenantId), ...params]))?.c || 0);
 }
 
 export function metricsSnapshot(db, { tenantId } = {}) {
@@ -74,6 +80,73 @@ function classificationBreakdown(db, tenantId) {
   ).map((row) => ({ classification: row.classification, count: Number(row.c) }));
 }
 
+export async function metricsSnapshotAsync(db, { tenantId } = {}) {
+  const counters = {
+    entries: await countAsync(db, "dc_entries", tenantId),
+    entries_active: await countAsync(db, "dc_entries", tenantId, "status = 'active'"),
+    domains: await countAsync(db, "dg_domains", tenantId),
+    objects: await countAsync(db, "dc_catalog_objects", tenantId),
+    attributes: await countAsync(db, "dc_catalog_attributes", tenantId),
+    terms: await countAsync(db, "dc_business_terms", tenantId),
+    terms_approved: await countAsync(db, "dc_business_terms", tenantId, "approval_status = 'approved'"),
+    terms_in_review: await countAsync(db, "dc_business_terms", tenantId, "status = 'in_review'"),
+    definitions: await countAsync(db, "dc_term_definitions", tenantId),
+    synonyms: await countAsync(db, "dc_term_synonyms", tenantId, "status = 'active'"),
+    term_relations: await countAsync(db, "dc_term_relations", tenantId, "status = 'active'"),
+    term_mappings: await countAsync(db, "dc_term_mappings", tenantId),
+    sources: await countAsync(db, "dc_sources", tenantId),
+    source_mappings: await countAsync(db, "dc_source_mappings", tenantId),
+    consumers: await countAsync(db, "dc_consumers", tenantId),
+    consumer_mappings: await countAsync(db, "dc_consumer_mappings", tenantId, "status = 'active'"),
+    lineage: await countAsync(db, "dc_lineage", tenantId, "status = 'active'"),
+    classifications: await countAsync(db, "dc_classifications", tenantId),
+    classification_assignments: await countAsync(db, "dc_classification_assignments", tenantId),
+    ownership: await countAsync(db, "dc_ownership", tenantId, "relationship = 'owner' AND status = 'active'"),
+    stewardship: await countAsync(db, "dc_ownership", tenantId, "relationship = 'steward' AND status = 'active'"),
+    relationships: await countAsync(db, "dc_relationships", tenantId, "status = 'active'"),
+    imports: await countAsync(db, "dc_import_runs", tenantId),
+  };
+
+  const termsWithoutDefinition = Number(
+    (await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM dc_business_terms t
+        WHERE t.tenant_id = ? AND COALESCE(t.definition, '') = ''
+          AND NOT EXISTS (SELECT 1 FROM dc_term_definitions d WHERE d.term_id = t.id)`,
+      [Number(tenantId)]
+    ))?.c || 0
+  );
+  const staleTerms = Number(
+    (await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM dc_business_terms WHERE tenant_id = ? AND status = 'deprecated'`,
+      [Number(tenantId)]
+    ))?.c || 0
+  );
+
+  return {
+    counters,
+    by_type: await entryTypeCountsAsync(db, tenantId),
+    classification: await classificationBreakdownAsync(db, tenantId),
+    governance: {
+      terms_without_definition: termsWithoutDefinition,
+      deprecated_terms: staleTerms,
+      entries_without_owner: (await ownershipGapsAsync(db, tenantId, { limit: 500 })).length,
+    },
+    generated_at: new Date().toISOString(),
+  };
+}
+
+async function classificationBreakdownAsync(db, tenantId) {
+  return (
+    await queryAllAsync(
+      db,
+      "SELECT classification, COUNT(*) AS c FROM dc_entries WHERE tenant_id = ? AND status <> 'retired' GROUP BY classification ORDER BY c DESC",
+      [Number(tenantId)]
+    )
+  ).map((row) => ({ classification: row.classification, count: Number(row.c) }));
+}
+
 export function healthCheck(db, { tenantId } = {}) {
   const checks = [];
   const add = (name, ok, detail = null) => checks.push({ name, status: ok ? "ok" : "degraded", detail });
@@ -106,6 +179,47 @@ export function healthCheck(db, { tenantId } = {}) {
          )`,
         [Number(tenantId)]
       )?.c || 0
+    );
+    add("sources", credentialsLeak === 0, { sources, connection_strings: credentialsLeak });
+    return { status: checks.every((check) => check.status === "ok") ? "healthy" : "degraded", checks };
+  } catch (error) {
+    checks.push({ name: "database", status: "unhealthy", detail: error.message });
+    return { status: "unhealthy", checks };
+  }
+}
+
+export async function healthCheckAsync(db, { tenantId } = {}) {
+  const checks = [];
+  const add = (name, ok, detail = null) => checks.push({ name, status: ok ? "ok" : "degraded", detail });
+  try {
+    const terms = await countAsync(db, "dc_business_terms", tenantId);
+    const definitions = await countAsync(db, "dc_term_definitions", tenantId);
+    add("glossary", terms === 0 || definitions > 0, { terms, definitions });
+    const objects = await countAsync(db, "dc_catalog_objects", tenantId);
+    const orphanEntries = Number(
+      (await queryOneAsync(
+        db,
+        `SELECT COUNT(*) AS c FROM dc_entries e WHERE e.tenant_id = ?
+           AND e.subject_id IS NOT NULL AND NOT (
+             (e.entry_type = 'OBJECT' AND EXISTS (SELECT 1 FROM dc_catalog_objects o WHERE o.id = e.subject_id)) OR
+             (e.entry_type = 'ATTRIBUTE' AND EXISTS (SELECT 1 FROM dc_catalog_attributes a WHERE a.id = e.subject_id)) OR
+             (e.entry_type = 'BUSINESS_TERM' AND EXISTS (SELECT 1 FROM dc_business_terms t WHERE t.id = e.subject_id)) OR
+             (e.entry_type = 'SOURCE' AND EXISTS (SELECT 1 FROM dc_sources s WHERE s.id = e.subject_id)) OR
+             (e.entry_type = 'CONSUMER' AND EXISTS (SELECT 1 FROM dc_consumers c WHERE c.id = e.subject_id))
+           )`,
+        [Number(tenantId)]
+      ))?.c || 0
+    );
+    add("catalog", orphanEntries === 0, { objects, orphan_entries: orphanEntries });
+    const sources = await countAsync(db, "dc_sources", tenantId);
+    const credentialsLeak = Number(
+      (await queryOneAsync(
+        db,
+        `SELECT COUNT(*) AS c FROM dc_sources WHERE tenant_id = ? AND (
+           LOWER(connection_reference) ILIKE '%://%' OR LOWER(connection_reference) ILIKE '%password=%'
+         )`,
+        [Number(tenantId)]
+      ))?.c || 0
     );
     add("sources", credentialsLeak === 0, { sources, connection_strings: credentialsLeak });
     return { status: checks.every((check) => check.status === "ok") ? "healthy" : "degraded", checks };

@@ -50,6 +50,7 @@ export {
   recordObjectChange,
   recordObjectChangeAsync,
   recordStateChange,
+  recordStateChangeAsync,
   recordRelationshipChange,
   recordWorkflowAction,
   recordSecurityEvent,

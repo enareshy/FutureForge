@@ -4,7 +4,8 @@
 // selected fields, filters, transformations, output format and destination.
 // Like imports, definitions are versioned and immutable once ACTIVE.
 import { queryAll, queryOne, run, transaction, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync, transactionAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { MAX_FIELDS, MAX_FILTERS } from "./constants.js";
 import { exportDefinitionRef as makeDefinitionRef } from "./refs.js";
 import {
@@ -30,8 +31,8 @@ import {
   assertFilterOperator,
   assertTransformationType,
 } from "./validation.js";
-import { publishExchangeEvent } from "./events.js";
-import { recordHistory } from "./history.js";
+import { publishExchangeEvent, publishExchangeEventAsync } from "./events.js";
+import { recordHistory, recordHistoryAsync } from "./history.js";
 
 const EDITABLE_STATUSES = new Set(["DRAFT"]);
 
@@ -43,8 +44,22 @@ export function getExportDefinitionRow(db, tenantId, ref) {
   );
 }
 
+export async function getExportDefinitionRowAsync(db, tenantId, ref) {
+  return await queryOneAsync(
+    db,
+    "SELECT * FROM ie_export_definitions WHERE tenant_id = ? AND (definition_ref = ? OR code = ? OR id = ?)",
+    [Number(tenantId), String(ref), normalizeUpper(ref), Number(ref) || -1]
+  );
+}
+
 export function requireExportDefinitionRow(db, tenantId, ref) {
   const row = getExportDefinitionRow(db, tenantId, ref);
+  if (!row) throw definitionNotFound(ref);
+  return row;
+}
+
+export async function requireExportDefinitionRowAsync(db, tenantId, ref) {
+  const row = await getExportDefinitionRowAsync(db, tenantId, ref);
   if (!row) throw definitionNotFound(ref);
   return row;
 }
@@ -59,13 +74,32 @@ function transformationsOf(db, definitionId) {
   return queryAll(db, "SELECT * FROM ie_export_transformations WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)]).map(publicExportTransformation);
 }
 
+async function fieldsOfAsync(db, definitionId) {
+  return (await queryAllAsync(db, "SELECT * FROM ie_export_field_selections WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)])).map(publicExportFieldSelection);
+}
+async function filtersOfAsync(db, definitionId) {
+  return (await queryAllAsync(db, "SELECT * FROM ie_export_filters WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)])).map(publicExportFilter);
+}
+async function transformationsOfAsync(db, definitionId) {
+  return (await queryAllAsync(db, "SELECT * FROM ie_export_transformations WHERE definition_id = ? ORDER BY sequence, id", [Number(definitionId)])).map(publicExportTransformation);
+}
+
 export function withExportChildren(db, row) {
   if (!row) return null;
   return { ...publicExportDefinition(row), field_selections: fieldsOf(db, row.id), export_filters: filtersOf(db, row.id), export_transformations: transformationsOf(db, row.id) };
 }
 
+export async function withExportChildrenAsync(db, row) {
+  if (!row) return null;
+  return { ...publicExportDefinition(row), field_selections: await fieldsOfAsync(db, row.id), export_filters: await filtersOfAsync(db, row.id), export_transformations: await transformationsOfAsync(db, row.id) };
+}
+
 export function getExportDefinition(db, tenantId, ref) {
   return withExportChildren(db, requireExportDefinitionRow(db, tenantId, ref));
+}
+
+export async function getExportDefinitionAsync(db, tenantId, ref) {
+  return await withExportChildrenAsync(db, await requireExportDefinitionRowAsync(db, tenantId, ref));
 }
 
 function normalizeFieldSelections(fields) {
@@ -119,6 +153,18 @@ function writeFieldSelections(db, tenantId, definitionId, entries) {
   }
 }
 
+async function writeFieldSelectionsAsync(db, tenantId, definitionId, entries) {
+  await runAsync(db, "DELETE FROM ie_export_field_selections WHERE definition_id = ?", [definitionId]);
+  for (const entry of entries) {
+    await runAsync(
+      db,
+      `INSERT INTO ie_export_field_selections (definition_id, tenant_id, sequence, field_path, display_name, data_type, transformation_json, nested, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [definitionId, Number(tenantId), entry.sequence, entry.field_path, entry.display_name, entry.data_type, entry.transformation_json, entry.nested, entry.status, nowIso()]
+    );
+  }
+}
+
 function writeFilters(db, tenantId, definitionId, entries) {
   run(db, "DELETE FROM ie_export_filters WHERE definition_id = ?", [definitionId]);
   for (const entry of entries) {
@@ -131,10 +177,34 @@ function writeFilters(db, tenantId, definitionId, entries) {
   }
 }
 
+async function writeFiltersAsync(db, tenantId, definitionId, entries) {
+  await runAsync(db, "DELETE FROM ie_export_filters WHERE definition_id = ?", [definitionId]);
+  for (const entry of entries) {
+    await runAsync(
+      db,
+      `INSERT INTO ie_export_filters (definition_id, tenant_id, sequence, filter_type, field, operator, value_json, conjunction, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [definitionId, Number(tenantId), entry.sequence, entry.filter_type, entry.field, entry.operator, entry.value_json, entry.conjunction, entry.status, nowIso()]
+    );
+  }
+}
+
 function writeTransformations(db, tenantId, definitionId, entries) {
   run(db, "DELETE FROM ie_export_transformations WHERE definition_id = ?", [definitionId]);
   for (const entry of entries) {
     run(
+      db,
+      `INSERT INTO ie_export_transformations (definition_id, tenant_id, sequence, field_path, transformation_type, config_json, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [definitionId, Number(tenantId), entry.sequence, entry.field_path, entry.transformation_type, entry.config_json, entry.status, nowIso()]
+    );
+  }
+}
+
+async function writeTransformationsAsync(db, tenantId, definitionId, entries) {
+  await runAsync(db, "DELETE FROM ie_export_transformations WHERE definition_id = ?", [definitionId]);
+  for (const entry of entries) {
+    await runAsync(
       db,
       `INSERT INTO ie_export_transformations (definition_id, tenant_id, sequence, field_path, transformation_type, config_json, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -174,6 +244,22 @@ function snapshotVersion(db, row, actor, changeSummary) {
        created_by = EXCLUDED.created_by,
        created_at = EXCLUDED.created_at`,
     [row.id, row.tenant_id, row.version, row.status, JSON.stringify(withExportChildren(db, row)), normalizeText(changeSummary, { max: 500 }), actor?.id ?? null, nowIso()]
+  );
+}
+
+async function snapshotVersionAsync(db, row, actor, changeSummary) {
+  await runAsync(
+    db,
+    `INSERT INTO ie_export_definition_versions (definition_id, tenant_id, version, status, snapshot_json, change_summary, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (definition_id, version) DO UPDATE SET
+       tenant_id = EXCLUDED.tenant_id,
+       status = EXCLUDED.status,
+       snapshot_json = EXCLUDED.snapshot_json,
+       change_summary = EXCLUDED.change_summary,
+       created_by = EXCLUDED.created_by,
+       created_at = EXCLUDED.created_at`,
+    [row.id, row.tenant_id, row.version, row.status, JSON.stringify(await withExportChildrenAsync(db, row)), normalizeText(changeSummary, { max: 500 }), actor?.id ?? null, nowIso()]
   );
 }
 
@@ -229,6 +315,58 @@ export function createExportDefinition(db, tenantId, input = {}, actor = null, i
   return withExportChildren(db, row);
 }
 
+export async function createExportDefinitionAsync(db, tenantId, input = {}, actor = null, ip = null) {
+  const code = requireCode(input.code, "Definition code");
+  if (await queryOneAsync(db, "SELECT id FROM ie_export_definitions WHERE tenant_id = ? AND code = ?", [Number(tenantId), code])) throw definitionConflict(code);
+  const normalized = normalizeDefinitionInput(input);
+  const fields = normalizeFieldSelections(input.field_selections || input.fields);
+  const filters = normalizeFilters(input.export_filters || input.filters);
+  const transformations = normalizeTransformations(input.export_transformations || input.transformations);
+  const status = assertDefinitionStatus(input.status || "DRAFT");
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO ie_export_definitions (definition_ref, tenant_id, organization_id, code, name, description, object_type, fields_json, filters_json, sort_json, transformation_json, format, destination, destination_json, schedule_json, security_json, catalog_refs_json, max_records, status, version, owner_user_id, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+    [
+      makeDefinitionRef(code),
+      Number(tenantId),
+      input.organization_id ?? input.organizationId ?? null,
+      code,
+      requireName(input.name, "Definition name"),
+      normalizeText(input.description),
+      normalized.object_type,
+      JSON.stringify(fields.map((field) => field.field_path)),
+      JSON.stringify(filters.map((filter) => ({ filter_type: filter.filter_type, field: filter.field, operator: filter.operator }))),
+      JSON.stringify(normalized.sort),
+      JSON.stringify(normalized.transformation),
+      normalized.format,
+      normalized.destination,
+      JSON.stringify(normalized.destination_config),
+      JSON.stringify(normalized.schedule),
+      JSON.stringify(normalized.security),
+      JSON.stringify(normalized.catalog_refs),
+      normalized.max_records,
+      status,
+      normalized.owner_user_id,
+      actor?.id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const id = Number(result.lastInsertId);
+  await writeFieldSelectionsAsync(db, tenantId, id, fields);
+  await writeFiltersAsync(db, tenantId, id, filters);
+  await writeTransformationsAsync(db, tenantId, id, transformations);
+  const row = await queryOneAsync(db, "SELECT * FROM ie_export_definitions WHERE id = ?", [id]);
+  await snapshotVersionAsync(db, row, actor, "initial version");
+  await writeAuditAsync(db, { actor, action: "data_exchange.export_definition.create", resourceType: "ie_export_definitions", resourceId: code, details: { object_type: normalized.object_type }, ip });
+  await recordHistoryAsync(db, { direction: "EXPORT", tenantId, definitionId: id, definitionVersion: 1, action: "DEFINITION_CREATED", status, objectType: normalized.object_type, format: normalized.format, actor, details: { code } });
+  await publishExchangeEventAsync(db, { eventType: "ExportDefinitionCreated", tenantId, objectType: "ie_export_definition", objectId: row.definition_ref, payload: { code } }, actor);
+  return await withExportChildrenAsync(db, row);
+}
+
 export function updateExportDefinition(db, tenantId, ref, patch = {}, actor = null, ip = null) {
   const row = requireExportDefinitionRow(db, tenantId, ref);
   if (!EDITABLE_STATUSES.has(row.status)) throw definitionImmutable(row.definition_ref, row.status);
@@ -271,6 +409,50 @@ export function updateExportDefinition(db, tenantId, ref, patch = {}, actor = nu
   recordHistory(db, { direction: "EXPORT", tenantId, definitionId: row.id, definitionVersion: updated.version, action: "DEFINITION_UPDATED", status: updated.status, objectType: updated.object_type, format: updated.format, actor, details: { code: row.code } });
   publishExchangeEvent(db, { eventType: "ExportDefinitionUpdated", tenantId, objectType: "ie_export_definition", objectId: updated.definition_ref, payload: { code: row.code } }, actor);
   return withExportChildren(db, updated);
+}
+
+export async function updateExportDefinitionAsync(db, tenantId, ref, patch = {}, actor = null, ip = null) {
+  const row = await requireExportDefinitionRowAsync(db, tenantId, ref);
+  if (!EDITABLE_STATUSES.has(row.status)) throw definitionImmutable(row.definition_ref, row.status);
+  const normalized = normalizeDefinitionInput(patch, row);
+  const hasFields = patch.field_selections !== undefined || patch.fields !== undefined;
+  const hasFilters = patch.export_filters !== undefined || patch.filters !== undefined;
+  const hasTransformations = patch.export_transformations !== undefined || patch.transformations !== undefined;
+  await transactionAsync(db, async () => {
+    await runAsync(
+      db,
+      `UPDATE ie_export_definitions SET name = ?, description = ?, object_type = ?, fields_json = ?, filters_json = ?, sort_json = ?, transformation_json = ?, format = ?, destination = ?, destination_json = ?, schedule_json = ?, security_json = ?, catalog_refs_json = ?, max_records = ?, owner_user_id = ?, updated_by = ?, updated_at = ? WHERE id = ?`,
+      [
+        normalizeText(patch.name ?? row.name, { max: 200 }) || row.code,
+        normalizeText(patch.description ?? row.description),
+        normalized.object_type,
+        hasFields ? JSON.stringify(normalizeFieldSelections(patch.field_selections || patch.fields).map((field) => field.field_path)) : row.fields_json,
+        hasFilters ? JSON.stringify(normalizeFilters(patch.export_filters || patch.filters).map((filter) => ({ filter_type: filter.filter_type, field: filter.field, operator: filter.operator }))) : row.filters_json,
+        JSON.stringify(normalized.sort),
+        JSON.stringify(normalized.transformation),
+        normalized.format,
+        normalized.destination,
+        JSON.stringify(normalized.destination_config),
+        JSON.stringify(normalized.schedule),
+        JSON.stringify(normalized.security),
+        JSON.stringify(normalized.catalog_refs),
+        normalized.max_records,
+        normalized.owner_user_id,
+        actor?.id ?? null,
+        nowIso(),
+        row.id,
+      ]
+    );
+    if (hasFields) await writeFieldSelectionsAsync(db, tenantId, row.id, normalizeFieldSelections(patch.field_selections || patch.fields));
+    if (hasFilters) await writeFiltersAsync(db, tenantId, row.id, normalizeFilters(patch.export_filters || patch.filters));
+    if (hasTransformations) await writeTransformationsAsync(db, tenantId, row.id, normalizeTransformations(patch.export_transformations || patch.transformations));
+  });
+  const updated = await queryOneAsync(db, "SELECT * FROM ie_export_definitions WHERE id = ?", [row.id]);
+  await snapshotVersionAsync(db, updated, actor, patch.change_summary || "definition updated");
+  await writeAuditAsync(db, { actor, action: "data_exchange.export_definition.update", resourceType: "ie_export_definitions", resourceId: row.code, details: {}, ip });
+  await recordHistoryAsync(db, { direction: "EXPORT", tenantId, definitionId: row.id, definitionVersion: updated.version, action: "DEFINITION_UPDATED", status: updated.status, objectType: updated.object_type, format: updated.format, actor, details: { code: row.code } });
+  await publishExchangeEventAsync(db, { eventType: "ExportDefinitionUpdated", tenantId, objectType: "ie_export_definition", objectId: updated.definition_ref, payload: { code: row.code } }, actor);
+  return await withExportChildrenAsync(db, updated);
 }
 
 export function createExportDefinitionVersion(db, tenantId, ref, input = {}, actor = null, ip = null) {
@@ -317,6 +499,50 @@ export function createExportDefinitionVersion(db, tenantId, ref, input = {}, act
   return withExportChildren(db, updated);
 }
 
+export async function createExportDefinitionVersionAsync(db, tenantId, ref, input = {}, actor = null, ip = null) {
+  const row = await requireExportDefinitionRowAsync(db, tenantId, ref);
+  await snapshotVersionAsync(db, row, actor, input.change_summary || `snapshot before version ${Number(row.version) + 1}`);
+  const normalized = normalizeDefinitionInput(input, row);
+  const hasFields = input.field_selections !== undefined || input.fields !== undefined;
+  const hasFilters = input.export_filters !== undefined || input.filters !== undefined;
+  const hasTransformations = input.export_transformations !== undefined || input.transformations !== undefined;
+  const nextVersion = Number(row.version) + 1;
+  await transactionAsync(db, async () => {
+    await runAsync(
+      db,
+      `UPDATE ie_export_definitions SET name = ?, description = ?, object_type = ?, fields_json = ?, filters_json = ?, sort_json = ?, transformation_json = ?, format = ?, destination = ?, destination_json = ?, schedule_json = ?, security_json = ?, catalog_refs_json = ?, max_records = ?, owner_user_id = ?, status = 'DRAFT', version = ?, updated_by = ?, updated_at = ? WHERE id = ?`,
+      [
+        normalizeText(input.name ?? row.name, { max: 200 }) || row.code,
+        normalizeText(input.description !== undefined ? input.description : row.description),
+        normalized.object_type,
+        hasFields ? JSON.stringify(normalizeFieldSelections(input.field_selections || input.fields).map((field) => field.field_path)) : row.fields_json,
+        hasFilters ? JSON.stringify(normalizeFilters(input.export_filters || input.filters).map((filter) => ({ filter_type: filter.filter_type, field: filter.field, operator: filter.operator }))) : row.filters_json,
+        JSON.stringify(normalized.sort),
+        JSON.stringify(normalized.transformation),
+        normalized.format,
+        normalized.destination,
+        JSON.stringify(normalized.destination_config),
+        JSON.stringify(normalized.schedule),
+        JSON.stringify(normalized.security),
+        JSON.stringify(normalized.catalog_refs),
+        normalized.max_records,
+        normalized.owner_user_id,
+        nextVersion,
+        actor?.id ?? null,
+        nowIso(),
+        row.id,
+      ]
+    );
+    if (hasFields) await writeFieldSelectionsAsync(db, tenantId, row.id, normalizeFieldSelections(input.field_selections || input.fields));
+    if (hasFilters) await writeFiltersAsync(db, tenantId, row.id, normalizeFilters(input.export_filters || input.filters));
+    if (hasTransformations) await writeTransformationsAsync(db, tenantId, row.id, normalizeTransformations(input.export_transformations || input.transformations));
+  });
+  const updated = await queryOneAsync(db, "SELECT * FROM ie_export_definitions WHERE id = ?", [row.id]);
+  await snapshotVersionAsync(db, updated, actor, input.change_summary || `version ${nextVersion}`);
+  await writeAuditAsync(db, { actor, action: "data_exchange.export_definition.version", resourceType: "ie_export_definitions", resourceId: row.code, details: { version: nextVersion }, ip });
+  return await withExportChildrenAsync(db, updated);
+}
+
 export function setExportDefinitionStatus(db, tenantId, ref, status, actor = null, ip = null) {
   const row = requireExportDefinitionRow(db, tenantId, ref);
   const next = assertDefinitionStatus(status);
@@ -332,9 +558,30 @@ export function setExportDefinitionStatus(db, tenantId, ref, status, actor = nul
   return withExportChildren(db, updated);
 }
 
+export async function setExportDefinitionStatusAsync(db, tenantId, ref, status, actor = null, ip = null) {
+  const row = await requireExportDefinitionRowAsync(db, tenantId, ref);
+  const next = assertDefinitionStatus(status);
+  if (next === row.status) return await withExportChildrenAsync(db, row);
+  if (next === "ACTIVE") {
+    const check = await validateExportDefinitionAsync(db, tenantId, ref);
+    if (!check.valid) throw invalidDefinition("Definition cannot be activated while blocking issues exist", { errors: check.errors });
+  }
+  await runAsync(db, "UPDATE ie_export_definitions SET status = ?, updated_by = ?, updated_at = ? WHERE id = ?", [next, actor?.id ?? null, nowIso(), row.id]);
+  const updated = await queryOneAsync(db, "SELECT * FROM ie_export_definitions WHERE id = ?", [row.id]);
+  await snapshotVersionAsync(db, updated, actor, `status ${row.status} -> ${next}`);
+  await writeAuditAsync(db, { actor, action: "data_exchange.export_definition.status", resourceType: "ie_export_definitions", resourceId: row.code, details: { status: next }, ip });
+  return await withExportChildrenAsync(db, updated);
+}
+
 export function listExportDefinitionVersions(db, tenantId, ref) {
   const row = requireExportDefinitionRow(db, tenantId, ref);
   const rows = queryAll(db, "SELECT * FROM ie_export_definition_versions WHERE definition_id = ? ORDER BY version DESC", [row.id]);
+  return { items: rows.map(publicDefinitionVersion), total: rows.length };
+}
+
+export async function listExportDefinitionVersionsAsync(db, tenantId, ref) {
+  const row = await requireExportDefinitionRowAsync(db, tenantId, ref);
+  const rows = await queryAllAsync(db, "SELECT * FROM ie_export_definition_versions WHERE definition_id = ? ORDER BY version DESC", [row.id]);
   return { items: rows.map(publicDefinitionVersion), total: rows.length };
 }
 
@@ -366,8 +613,46 @@ export function listExportDefinitions(db, { tenantId, status, objectType, format
   return { items: rows.map(publicExportDefinition), total, page: currentPage, page_size: limit };
 }
 
+export async function listExportDefinitionsAsync(db, { tenantId, status, objectType, format, q, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (status) {
+    clauses.push("status = ?");
+    params.push(assertDefinitionStatus(status));
+  }
+  if (objectType) {
+    clauses.push("object_type = ?");
+    params.push(normalizeText(objectType, { max: 120 }));
+  }
+  if (format) {
+    clauses.push("format = ?");
+    params.push(assertExportFormat(format));
+  }
+  const term = normalizeText(q);
+  if (term) {
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
+    const like = `%${term}%`;
+    params.push(like, like, like);
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 100, maxPageSize: 500 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ie_export_definitions ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM ie_export_definitions ${where} ORDER BY code, version DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map(publicExportDefinition), total, page: currentPage, page_size: limit };
+}
+
 export function validateExportDefinition(db, tenantId, ref) {
   const definition = getExportDefinition(db, tenantId, ref);
+  const errors = [];
+  const warnings = [];
+  if (!definition.object_type) errors.push({ code: "missing_object_type", message: "An object_type is required" });
+  if (!definition.field_selections.length) warnings.push({ code: "no_fields", message: "No fields selected; all fields will be exported" });
+  if (definition.max_records <= 0) errors.push({ code: "invalid_max_records", message: "max_records must be positive" });
+  return { valid: errors.length === 0, errors, warnings };
+}
+
+export async function validateExportDefinitionAsync(db, tenantId, ref) {
+  const definition = await getExportDefinitionAsync(db, tenantId, ref);
   const errors = [];
   const warnings = [];
   if (!definition.object_type) errors.push({ code: "missing_object_type", message: "An object_type is required" });

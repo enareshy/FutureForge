@@ -7,6 +7,7 @@
 // stale entries.
 import { createHash } from "node:crypto";
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { parseJson, stringifyJson } from "./repository.js";
 
 export function fingerprint(parts) {
@@ -26,6 +27,16 @@ export function getCached(db, cacheKey) {
   if (!row) return null;
   if (row.expires_at && row.expires_at <= nowIso()) {
     run(db, "DELETE FROM reporting_cache WHERE cache_key = ?", [cacheKey]);
+    return null;
+  }
+  return parseJson(row.payload_json, null);
+}
+
+export async function getCachedAsync(db, cacheKey) {
+  const row = await queryOneAsync(db, "SELECT * FROM reporting_cache WHERE cache_key = ?", [cacheKey]);
+  if (!row) return null;
+  if (row.expires_at && row.expires_at <= nowIso()) {
+    await runAsync(db, "DELETE FROM reporting_cache WHERE cache_key = ?", [cacheKey]);
     return null;
   }
   return parseJson(row.payload_json, null);
@@ -58,17 +69,57 @@ export function setCached(db, { tenantId, scope, cacheKey, payload, ttlSeconds =
   return { cache_key: cacheKey, expires_at: expiresAt };
 }
 
+export async function setCachedAsync(db, { tenantId, scope, cacheKey, payload, ttlSeconds = 300, securityHash = "" }) {
+  if (!cacheKey) return null;
+  const ttl = Math.max(0, Number(ttlSeconds) || 0);
+  if (ttl === 0) return null;
+  const ts = nowIso();
+  const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
+  const existing = await queryOneAsync(db, "SELECT id FROM reporting_cache WHERE cache_key = ?", [cacheKey]);
+  if (existing) {
+    await runAsync(db, "UPDATE reporting_cache SET payload_json = ?, expires_at = ?, security_hash = ?, tenant_id = ?, scope = ?, updated_at = ? WHERE id = ?", [
+      stringifyJson(payload, "{}"),
+      expiresAt,
+      securityHash,
+      Number(tenantId) || null,
+      scope,
+      ts,
+      existing.id,
+    ]);
+  } else {
+    await runAsync(
+      db,
+      "INSERT INTO reporting_cache (cache_key, tenant_id, scope, security_hash, payload_json, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [cacheKey, Number(tenantId) || null, scope, securityHash, stringifyJson(payload, "{}"), expiresAt, ts, ts]
+    );
+  }
+  return { cache_key: cacheKey, expires_at: expiresAt };
+}
+
 export function invalidateScope(db, tenantId, scope = null) {
   if (scope) return run(db, "DELETE FROM reporting_cache WHERE tenant_id = ? AND scope = ?", [Number(tenantId), scope]).changes || 0;
   return run(db, "DELETE FROM reporting_cache WHERE tenant_id = ?", [Number(tenantId)]).changes || 0;
+}
+
+export async function invalidateScopeAsync(db, tenantId, scope = null) {
+  if (scope) return (await runAsync(db, "DELETE FROM reporting_cache WHERE tenant_id = ? AND scope = ?", [Number(tenantId), scope])).changes || 0;
+  return (await runAsync(db, "DELETE FROM reporting_cache WHERE tenant_id = ?", [Number(tenantId)])).changes || 0;
 }
 
 export function invalidateAll(db) {
   return run(db, "DELETE FROM reporting_cache", []).changes || 0;
 }
 
+export async function invalidateAllAsync(db) {
+  return (await runAsync(db, "DELETE FROM reporting_cache", [])).changes || 0;
+}
+
 export function pruneExpired(db) {
   return run(db, "DELETE FROM reporting_cache WHERE expires_at IS NOT NULL AND expires_at <= ?", [nowIso()]).changes || 0;
+}
+
+export async function pruneExpiredAsync(db) {
+  return (await runAsync(db, "DELETE FROM reporting_cache WHERE expires_at IS NOT NULL AND expires_at <= ?", [nowIso()])).changes || 0;
 }
 
 export function cacheStats(db, tenantId = null) {
@@ -76,6 +127,18 @@ export function cacheStats(db, tenantId = null) {
   const params = tenantId ? [Number(tenantId)] : [];
   const total = Number(queryOne(db, `SELECT COUNT(*) AS c FROM reporting_cache ${clause}`, params)?.c || 0);
   const byScope = queryAll(db, `SELECT scope, COUNT(*) AS c FROM reporting_cache ${clause} GROUP BY scope`, params);
+  return {
+    total,
+    by_scope: Object.fromEntries(byScope.map((row) => [row.scope, Number(row.c)])),
+    source_module: "reporting",
+  };
+}
+
+export async function cacheStatsAsync(db, tenantId = null) {
+  const clause = tenantId ? "WHERE tenant_id = ?" : "";
+  const params = tenantId ? [Number(tenantId)] : [];
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM reporting_cache ${clause}`, params))?.c || 0);
+  const byScope = await queryAllAsync(db, `SELECT scope, COUNT(*) AS c FROM reporting_cache ${clause} GROUP BY scope`, params);
   return {
     total,
     by_scope: Object.fromEntries(byScope.map((row) => [row.scope, Number(row.c)])),

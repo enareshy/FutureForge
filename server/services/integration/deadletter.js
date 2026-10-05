@@ -2,11 +2,12 @@
 // inspection (payload masked unless explicitly permitted), manual retry,
 // bulk retry, reprocess after correction, and close/ignore with a reason.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { publicDeadLetter } from "./repository.js";
 import { maskPayload, safeParse, toJson } from "./validation.js";
-import { requeueMessage, getMessageRow } from "./messages.js";
-import { auditIntegration } from "./hooks.js";
+import { requeueMessage, requeueMessageAsync, getMessageRow, getMessageRowAsync } from "./messages.js";
+import { auditIntegration, auditIntegrationAsync } from "./hooks.js";
 
 function whereFrom({ tenantId, status, integrationId, errorCategory, q } = {}) {
   const clauses = [];
@@ -71,6 +72,42 @@ export function createDeadLetter(db, input = {}) {
   return publicDeadLetter(queryOne(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
+export async function createDeadLetterAsync(db, input = {}) {
+  const message = input.message || null;
+  const execution = input.execution || null;
+  const error = input.error || {};
+  const ts = nowIso();
+  // Avoid piling up duplicate entries for the same message.
+  if (message?.id) {
+    const existing = await queryOneAsync(db, "SELECT * FROM integration_dead_letters WHERE message_id = ? AND status IN ('open', 'retrying')", [message.id]);
+    if (existing) return publicDeadLetter(existing);
+  }
+  const result = await runAsync(
+    db,
+    `INSERT INTO integration_dead_letters
+      (message_id, execution_id, integration_id, correlation_id, reason, error_category, error_code,
+       attempt_history_json, stack_ref, payload_ref, payload_json, status, tenant_id, dead_lettered_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+    [
+      message?.id ?? null,
+      execution?.id ?? null,
+      execution?.definition_id ?? message?.integration_id ?? null,
+      execution?.correlation_id ?? message?.correlation_id ?? null,
+      error.message || "Integration failed",
+      error.category || "technical",
+      error.code || "internal_error",
+      toJson(input.attempt_history || (message ? [{ attempt: message.attempts, error: error.message }] : []), []),
+      input.stack_ref || "",
+      message?.payload_ref || "",
+      message?.payload_json ?? (input.payload ? toJson(input.payload, null) : null),
+      message?.tenant_id ?? execution?.tenant_id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  return publicDeadLetter(await queryOneAsync(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [Number(result.lastInsertId)]));
+}
+
 export function listDeadLetters(db, options = {}) {
   const { page = 1, pageSize = 50 } = options;
   const { where, params } = whereFrom(options);
@@ -83,9 +120,26 @@ export function listDeadLetters(db, options = {}) {
   return { items: rows.map((r) => publicDeadLetter(r)), total, page: Number(page), page_size: Number(pageSize) };
 }
 
+export async function listDeadLettersAsync(db, options = {}) {
+  const { page = 1, pageSize = 50 } = options;
+  const { where, params } = whereFrom(options);
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) FROM integration_dead_letters ${where}`, params)).c;
+  const rows = await queryAllAsync(db, `SELECT * FROM integration_dead_letters ${where} ORDER BY dead_lettered_at DESC, id DESC LIMIT ? OFFSET ?`, [
+    ...params,
+    Number(pageSize),
+    (Number(page) - 1) * Number(pageSize),
+  ]);
+  return { items: rows.map((r) => publicDeadLetter(r)), total, page: Number(page), page_size: Number(pageSize) };
+}
+
 export function getDeadLetterRow(db, ref) {
   const id = Number(ref);
   return queryOne(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [Number.isFinite(id) ? id : -1]);
+}
+
+export async function getDeadLetterRowAsync(db, ref) {
+  const id = Number(ref);
+  return queryOneAsync(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [Number.isFinite(id) ? id : -1]);
 }
 
 export function getDeadLetter(db, ref, { includePayload = false } = {}) {
@@ -94,10 +148,23 @@ export function getDeadLetter(db, ref, { includePayload = false } = {}) {
   return publicDeadLetter(row, { includePayload });
 }
 
+export async function getDeadLetterAsync(db, ref, { includePayload = false } = {}) {
+  const row = await getDeadLetterRowAsync(db, ref);
+  if (!row) throw new HttpError(404, "Dead-letter entry not found");
+  return publicDeadLetter(row, { includePayload });
+}
+
 export function inspectDeadLetterPayload(db, ref, actor = null) {
   const row = getDeadLetterRow(db, ref);
   if (!row) throw new HttpError(404, "Dead-letter entry not found");
   auditIntegration(db, { actor, action: "integration.dead_letter.inspect", resourceType: "integration_dead_letter", resourceId: row.id, details: { correlation_id: row.correlation_id } });
+  return { id: row.id, payload: safeParse(row.payload_json, null), payload_ref: row.payload_ref || "" };
+}
+
+export async function inspectDeadLetterPayloadAsync(db, ref, actor = null) {
+  const row = await getDeadLetterRowAsync(db, ref);
+  if (!row) throw new HttpError(404, "Dead-letter entry not found");
+  await auditIntegrationAsync(db, { actor, action: "integration.dead_letter.inspect", resourceType: "integration_dead_letter", resourceId: row.id, details: { correlation_id: row.correlation_id } });
   return { id: row.id, payload: safeParse(row.payload_json, null), payload_ref: row.payload_ref || "" };
 }
 
@@ -113,6 +180,18 @@ export function retryDeadLetter(db, ref, actor = null, { resetAttempts = true } 
   return { retried: true, dead_letter: publicDeadLetter(queryOne(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [row.id])), message };
 }
 
+export async function retryDeadLetterAsync(db, ref, actor = null, { resetAttempts = true } = {}) {
+  const row = await getDeadLetterRowAsync(db, ref);
+  if (!row) throw new HttpError(404, "Dead-letter entry not found");
+  let message = null;
+  if (row.message_id) {
+    message = await requeueMessageAsync(db, row.message_id, { resetAttempts, actor });
+  }
+  await runAsync(db, "UPDATE integration_dead_letters SET status = 'retrying', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  await auditIntegrationAsync(db, { actor, action: "integration.dead_letter.retry", resourceType: "integration_dead_letter", resourceId: row.id, details: { message_ref: message?.message_ref || null } });
+  return { retried: true, dead_letter: publicDeadLetter(await queryOneAsync(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [row.id])), message };
+}
+
 export function bulkRetryDeadLetters(db, ids = [], actor = null) {
   const results = [];
   for (const id of ids) {
@@ -123,6 +202,19 @@ export function bulkRetryDeadLetters(db, ids = [], actor = null) {
     }
   }
   auditIntegration(db, { actor, action: "integration.dead_letter.bulk_retry", resourceType: "integration_dead_letter", resourceId: null, details: { count: results.length } });
+  return { retried: results.filter((r) => r.retried).length, results };
+}
+
+export async function bulkRetryDeadLettersAsync(db, ids = [], actor = null) {
+  const results = [];
+  for (const id of ids) {
+    try {
+      results.push({ id, ...(await retryDeadLetterAsync(db, id, actor)) });
+    } catch (error) {
+      results.push({ id, error: error.message });
+    }
+  }
+  await auditIntegrationAsync(db, { actor, action: "integration.dead_letter.bulk_retry", resourceType: "integration_dead_letter", resourceId: null, details: { count: results.length } });
   return { retried: results.filter((r) => r.retried).length, results };
 }
 
@@ -142,6 +234,22 @@ export function resolveDeadLetter(db, ref, { status = "closed", resolution = "",
   return publicDeadLetter(queryOne(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [row.id]));
 }
 
+export async function resolveDeadLetterAsync(db, ref, { status = "closed", resolution = "", actor = null } = {}) {
+  const row = await getDeadLetterRowAsync(db, ref);
+  if (!row) throw new HttpError(404, "Dead-letter entry not found");
+  if (!["ignored", "closed", "reprocessed"].includes(status)) throw new HttpError(400, "status must be ignored, closed or reprocessed");
+  await runAsync(db, "UPDATE integration_dead_letters SET status = ?, resolution = ?, resolved_by = ?, resolved_at = ?, updated_at = ? WHERE id = ?", [
+    status,
+    resolution,
+    actor?.id ?? null,
+    nowIso(),
+    nowIso(),
+    row.id,
+  ]);
+  await auditIntegrationAsync(db, { actor, action: "integration.dead_letter.resolve", resourceType: "integration_dead_letter", resourceId: row.id, details: { status, resolution } });
+  return publicDeadLetter(await queryOneAsync(db, "SELECT * FROM integration_dead_letters WHERE id = ?", [row.id]));
+}
+
 export function deadLetterStats(db, { tenantId } = {}) {
   const clauses = [];
   const params = [];
@@ -156,6 +264,24 @@ export function deadLetterStats(db, { tenantId } = {}) {
   return { total, open, by_category: byCategory };
 }
 
+export async function deadLetterStatsAsync(db, { tenantId } = {}) {
+  const clauses = [];
+  const params = [];
+  if (tenantId !== undefined && tenantId !== null) {
+    clauses.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM integration_dead_letters ${where}`, params)).c;
+  const open = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM integration_dead_letters ${where ? `${where} AND` : "WHERE"} status = 'open'`, params)).c;
+  const byCategory = await queryAllAsync(db, `SELECT error_category, COUNT(*) AS count FROM integration_dead_letters ${where} GROUP BY error_category`, params);
+  return { total, open, by_category: byCategory };
+}
+
 export function deadLetterMessageFor(db, row) {
   return row?.message_id ? getMessageRow(db, row.message_id) : null;
+}
+
+export async function deadLetterMessageForAsync(db, row) {
+  return row?.message_id ? await getMessageRowAsync(db, row.message_id) : null;
 }

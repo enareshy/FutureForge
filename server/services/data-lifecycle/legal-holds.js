@@ -6,7 +6,8 @@
 // millions of ids are never materialised. Holds always override purge
 // eligibility.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { SOURCE_MODULE } from "./constants.js";
 import { legalHoldRef } from "./refs.js";
 import { publicLegalHold } from "./repository.js";
@@ -20,14 +21,23 @@ import {
   paginate,
   parseDate,
 } from "./validation.js";
-import { recordHistory } from "./history.js";
-import { publishLifecycleEvent } from "./events.js";
-import { notifyLegalHold } from "./notifications.js";
+import { recordHistory, recordHistoryAsync } from "./history.js";
+import { publishLifecycleEvent, publishLifecycleEventAsync } from "./events.js";
+import { notifyLegalHold, notifyLegalHoldAsync } from "./notifications.js";
 
 export { publicLegalHold };
 
 export function getLegalHoldRow(db, tenantId, ref) {
   return queryOne(db, "SELECT * FROM lc_legal_holds WHERE tenant_id = ? AND (hold_ref = ? OR code = ? OR id = ?)", [
+    Number(tenantId),
+    String(ref),
+    normalizeUpper(ref),
+    Number(ref) || -1,
+  ]);
+}
+
+export async function getLegalHoldRowAsync(db, tenantId, ref) {
+  return await queryOneAsync(db, "SELECT * FROM lc_legal_holds WHERE tenant_id = ? AND (hold_ref = ? OR code = ? OR id = ?)", [
     Number(tenantId),
     String(ref),
     normalizeUpper(ref),
@@ -41,11 +51,25 @@ export function requireLegalHold(db, tenantId, ref) {
   return row;
 }
 
+export async function requireLegalHoldAsync(db, tenantId, ref) {
+  const row = await getLegalHoldRowAsync(db, tenantId, ref);
+  if (!row) throw legalHoldNotFound(ref);
+  return row;
+}
+
 export function getLegalHold(db, tenantId, ref) {
   const row = requireLegalHold(db, tenantId, ref);
   return publicLegalHold(row, {
     objectIds: listHoldObjects(db, row.id),
     scopes: listHoldScopes(db, row.id),
+  });
+}
+
+export async function getLegalHoldAsync(db, tenantId, ref) {
+  const row = await requireLegalHoldAsync(db, tenantId, ref);
+  return publicLegalHold(row, {
+    objectIds: await listHoldObjectsAsync(db, row.id),
+    scopes: await listHoldScopesAsync(db, row.id),
   });
 }
 
@@ -56,8 +80,22 @@ export function listHoldObjects(db, holdId) {
   }));
 }
 
+export async function listHoldObjectsAsync(db, holdId) {
+  return (await queryAllAsync(db, "SELECT object_type, object_id FROM lc_legal_hold_objects WHERE hold_id = ? ORDER BY id", [Number(holdId)])).map((row) => ({
+    object_type: row.object_type,
+    object_id: String(row.object_id),
+  }));
+}
+
 export function listHoldScopes(db, holdId) {
   return queryAll(db, "SELECT scope_type, scope_value FROM lc_legal_hold_scopes WHERE hold_id = ? ORDER BY id", [Number(holdId)]).map((row) => ({
+    scope_type: row.scope_type,
+    scope_value: row.scope_value,
+  }));
+}
+
+export async function listHoldScopesAsync(db, holdId) {
+  return (await queryAllAsync(db, "SELECT scope_type, scope_value FROM lc_legal_hold_scopes WHERE hold_id = ? ORDER BY id", [Number(holdId)])).map((row) => ({
     scope_type: row.scope_type,
     scope_value: row.scope_value,
   }));
@@ -92,6 +130,38 @@ export function listLegalHolds(db, { tenantId, status, scopeType, objectType, or
   const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 100, maxPageSize: 500 });
   const total = Number(queryOne(db, `SELECT COUNT(*) AS c FROM lc_legal_holds ${where}`, params)?.c || 0);
   const rows = queryAll(db, `SELECT * FROM lc_legal_holds ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  return { items: rows.map((row) => publicLegalHold(row)), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
+export async function listLegalHoldsAsync(db, { tenantId, status, scopeType, objectType, organizationId, q, page, pageSize } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(status));
+  }
+  if (scopeType) {
+    clauses.push("scope_type = ?");
+    params.push(assertLegalHoldScope(scopeType));
+  }
+  if (objectType) {
+    clauses.push("object_type = ?");
+    params.push(normalizeText(objectType, { max: 120 }));
+  }
+  if (organizationId) {
+    clauses.push("organization_id = ?");
+    params.push(Number(organizationId));
+  }
+  const term = normalizeText(q, { max: 200 });
+  if (term) {
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR reason ILIKE ?)");
+    const like = `%${term}%`;
+    params.push(like, like, like);
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 100, maxPageSize: 500 });
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM lc_legal_holds ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM lc_legal_holds ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
   return { items: rows.map((row) => publicLegalHold(row)), total, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
 }
 
@@ -187,6 +257,98 @@ export function createLegalHold(db, tenantId, input = {}, actor = null, ip = nul
   return publicLegalHold(row, { objectIds: listHoldObjects(db, holdId), scopes: listHoldScopes(db, holdId) });
 }
 
+export async function createLegalHoldAsync(db, tenantId, input = {}, actor = null, ip = null) {
+  const tid = assertTenantId(tenantId);
+  const code = normalizeUpper(input.code || input.hold_code);
+  if (!/^[A-Z][A-Z0-9_.-]{1,63}$/.test(code)) throw invalidLegalHold("A legal-hold code (2-64 uppercase characters) is required");
+  if (await queryOneAsync(db, "SELECT id FROM lc_legal_holds WHERE tenant_id = ? AND code = ?", [Number(tid), code])) throw legalHoldConflict(code);
+  const scopeType = assertLegalHoldScope(input.scope_type || input.scopeType || "OBJECT");
+  const objectType = normalizeText(input.object_type || input.objectType, { max: 120 });
+  const startDate = input.start_date || input.startDate || null;
+  const endDate = input.end_date || input.endDate || null;
+  if (startDate && endDate && parseDate(startDate) && parseDate(endDate) && parseDate(endDate).getTime() < parseDate(startDate).getTime()) {
+    throw invalidLegalHold("end_date cannot precede start_date");
+  }
+  const objectIds = Array.isArray(input.object_ids || input.objectIds) ? input.object_ids || input.objectIds : [];
+  const scopes = Array.isArray(input.scopes) ? input.scopes : [];
+  if (scopeType === "OBJECT" && !objectIds.length && !scopes.length && input.object_id === undefined) {
+    throw invalidLegalHold("An OBJECT legal hold requires at least one object");
+  }
+
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO lc_legal_holds (hold_ref, tenant_id, code, name, reason, description, scope_type, object_type, organization_id, plant_id, classification, business_domain, status, start_date, end_date, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?)`,
+    [
+      legalHoldRef(code),
+      tid,
+      code,
+      normalizeText(input.name) || code,
+      normalizeText(input.reason),
+      normalizeText(input.description),
+      scopeType,
+      objectType,
+      input.organization_id ?? input.organizationId ?? null,
+      input.plant_id ?? input.plantId ?? null,
+      normalizeText(input.classification, { max: 120 }).toUpperCase(),
+      normalizeText(input.business_domain || input.businessDomain, { max: 120 }).toUpperCase(),
+      startDate,
+      endDate,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const holdId = Number(result.lastInsertId);
+
+  const targets = [...objectIds];
+  if (input.object_id !== undefined && input.object_id !== null && String(input.object_id) !== "") {
+    targets.push({ object_type: objectType || input.object_type, object_id: input.object_id });
+  }
+  for (const target of targets) {
+    const holderType = normalizeText(target.object_type || objectType || input.object_type, { max: 120 });
+    const holderId = target.object_id ?? target.objectId ?? target;
+    if (!holderType || holderId === undefined || holderId === null) continue;
+    await runAsync(
+      db,
+      "INSERT INTO lc_legal_hold_objects (hold_id, tenant_id, object_type, object_id, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+      [holdId, tid, holderType, String(holderId), ts]
+    );
+    await syncObjectHoldStatusAsync(db, tid, holderType, holderId);
+  }
+  for (const scope of scopes) {
+    const scopeValue = normalizeText(scope.scope_value ?? scope.scopeValue ?? scope.value, { max: 200 });
+    await runAsync(
+      db,
+      "INSERT INTO lc_legal_hold_scopes (hold_id, tenant_id, scope_type, scope_value, created_at) VALUES (?, ?, ?, ?, ?)",
+      [holdId, tid, assertLegalHoldScope(scope.scope_type || scope.scopeType), scopeValue, ts]
+    );
+  }
+
+  const row = await queryOneAsync(db, "SELECT * FROM lc_legal_holds WHERE id = ?", [holdId]);
+  await writeAuditAsync(db, {
+    actor,
+    action: "data_lifecycle.legal_hold.create",
+    resourceType: "lc_legal_holds",
+    resourceId: row.hold_ref,
+    details: { code, scope_type: scopeType, object_type: objectType, objects: targets.length },
+    ip,
+  });
+  await recordHistoryAsync(db, {
+    tenantId: tid,
+    objectType: objectType || "LEGAL_HOLD",
+    objectId: row.hold_ref,
+    action: "LEGAL_HOLD_CREATED",
+    reason: row.reason,
+    details: { code, scope_type: scopeType },
+    actor,
+  });
+  await publishLifecycleEventAsync(db, { eventType: "LegalHoldCreated", tenantId: tid, objectType: "legal_hold", objectId: row.hold_ref, payload: { code, scope_type: scopeType } }, actor);
+  await notifyLegalHoldAsync(db, row, { actor });
+  return publicLegalHold(row, { objectIds: await listHoldObjectsAsync(db, holdId), scopes: await listHoldScopesAsync(db, holdId) });
+}
+
 function release(db, tid, ref, status, reason, actor, ip) {
   const row = requireLegalHold(db, tid, ref);
   if (row.status !== "ACTIVE") {
@@ -221,12 +383,54 @@ function release(db, tid, ref, status, reason, actor, ip) {
   return publicLegalHold(updated, { objectIds: listHoldObjects(db, row.id), scopes: listHoldScopes(db, row.id) });
 }
 
+async function releaseAsync(db, tid, ref, status, reason, actor, ip) {
+  const row = await requireLegalHoldAsync(db, tid, ref);
+  if (row.status !== "ACTIVE") {
+    return publicLegalHold(row, { objectIds: await listHoldObjectsAsync(db, row.id), scopes: await listHoldScopesAsync(db, row.id) });
+  }
+  const ts = nowIso();
+  await runAsync(db, "UPDATE lc_legal_holds SET status = ?, released_by = ?, released_at = ?, release_reason = ?, updated_at = ? WHERE id = ?", [
+    status,
+    actor?.id ?? null,
+    ts,
+    normalizeText(reason),
+    ts,
+    row.id,
+  ]);
+  const affected = await listHoldObjectsAsync(db, row.id);
+  for (const target of affected) {
+    await syncObjectHoldStatusAsync(db, tid, target.object_type, target.object_id);
+  }
+  const updated = await queryOneAsync(db, "SELECT * FROM lc_legal_holds WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, { actor, action: "data_lifecycle.legal_hold.release", resourceType: "lc_legal_holds", resourceId: row.hold_ref, details: { status, reason }, ip });
+  await recordHistoryAsync(db, {
+    tenantId: tid,
+    objectType: row.object_type || "LEGAL_HOLD",
+    objectId: row.hold_ref,
+    action: "LEGAL_HOLD_RELEASED",
+    reason,
+    details: { status },
+    actor,
+  });
+  await publishLifecycleEventAsync(db, { eventType: "LegalHoldReleased", tenantId: tid, objectType: "legal_hold", objectId: row.hold_ref, payload: { code: row.code, status } }, actor);
+  await notifyLegalHoldAsync(db, updated, { released: true, actor });
+  return publicLegalHold(updated, { objectIds: await listHoldObjectsAsync(db, row.id), scopes: await listHoldScopesAsync(db, row.id) });
+}
+
 export function releaseLegalHold(db, tenantId, ref, { reason = "", actor = null, ip = null } = {}) {
   return release(db, assertTenantId(tenantId), ref, "RELEASED", reason, actor, ip);
 }
 
+export async function releaseLegalHoldAsync(db, tenantId, ref, { reason = "", actor = null, ip = null } = {}) {
+  return await releaseAsync(db, assertTenantId(tenantId), ref, "RELEASED", reason, actor, ip);
+}
+
 export function cancelLegalHold(db, tenantId, ref, { reason = "", actor = null, ip = null } = {}) {
   return release(db, assertTenantId(tenantId), ref, "CANCELLED", reason, actor, ip);
+}
+
+export async function cancelLegalHoldAsync(db, tenantId, ref, { reason = "", actor = null, ip = null } = {}) {
+  return await releaseAsync(db, assertTenantId(tenantId), ref, "CANCELLED", reason, actor, ip);
 }
 
 // Refresh the cached hold flag on the ledger row so list filters stay cheap.
@@ -239,6 +443,22 @@ export function syncObjectHoldStatus(db, tenantId, objectType, objectId) {
   ]);
   if (!ledger) return null;
   run(db, "UPDATE lc_object_lifecycle SET legal_hold_status = ?, updated_at = ? WHERE id = ?", [
+    holds.length ? "ACTIVE" : "NONE",
+    nowIso(),
+    ledger.id,
+  ]);
+  return holds.length ? "ACTIVE" : "NONE";
+}
+
+export async function syncObjectHoldStatusAsync(db, tenantId, objectType, objectId) {
+  const holds = await activeHoldsForObjectAsync(db, { tenantId, objectType, objectId });
+  const ledger = await queryOneAsync(db, "SELECT id FROM lc_object_lifecycle WHERE tenant_id = ? AND object_type = ? AND object_id = ?", [
+    Number(tenantId),
+    normalizeText(objectType, { max: 120 }),
+    String(objectId),
+  ]);
+  if (!ledger) return null;
+  await runAsync(db, "UPDATE lc_object_lifecycle SET legal_hold_status = ?, updated_at = ? WHERE id = ?", [
     holds.length ? "ACTIVE" : "NONE",
     nowIso(),
     ledger.id,
@@ -311,6 +531,33 @@ export function activeHoldsForObject(db, { tenantId, objectType, objectId = null
   return active;
 }
 
+export async function activeHoldsForObjectAsync(db, { tenantId, objectType, objectId = null, organizationId = null, plantId = null, classification = "", businessDomain = "" } = {}) {
+  const tid = Number(tenantId);
+  const holds = await queryAllAsync(db, "SELECT * FROM lc_legal_holds WHERE tenant_id = ? AND status = 'ACTIVE'", [tid]);
+  if (!holds.length) return [];
+  const heldObjectIds = new Set();
+  if (objectType && objectId !== null && objectId !== undefined) {
+    for (const row of await queryAllAsync(db, "SELECT hold_id FROM lc_legal_hold_objects WHERE tenant_id = ? AND object_type = ? AND object_id = ?", [
+      tid,
+      normalizeText(objectType, { max: 120 }),
+      String(objectId),
+    ])) {
+      heldObjectIds.add(Number(row.hold_id));
+    }
+  }
+  const scopes = await queryAllAsync(db, "SELECT * FROM lc_legal_hold_scopes WHERE tenant_id = ?", [tid]);
+  const now = nowIso();
+  const target = { objectType, organizationId, plantId, classification, businessDomain };
+  const active = [];
+  for (const hold of holds) {
+    if (hold.start_date && parseDate(hold.start_date) && parseDate(hold.start_date).getTime() > parseDate(now).getTime()) continue;
+    if (hold.end_date && parseDate(hold.end_date) && parseDate(hold.end_date).getTime() < parseDate(now).getTime()) continue;
+    const match = holdMatches(hold, target, heldObjectIds, scopes);
+    if (match) active.push({ ...publicLegalHold(hold), match_reason: match.reason });
+  }
+  return active;
+}
+
 // Maintenance: expire holds whose end_date has passed when auto-expiry is on.
 export function expireLegalHolds(db, { tenantId = null, limit = 500 } = {}) {
   const today = dateOnly(nowIso());
@@ -326,6 +573,26 @@ export function expireLegalHolds(db, { tenantId = null, limit = 500 } = {}) {
     run(db, "UPDATE lc_legal_holds SET status = 'EXPIRED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
     for (const target of listHoldObjects(db, row.id)) {
       syncObjectHoldStatus(db, row.tenant_id, target.object_type, target.object_id);
+    }
+    expired += 1;
+  }
+  return { expired };
+}
+
+export async function expireLegalHoldsAsync(db, { tenantId = null, limit = 500 } = {}) {
+  const today = dateOnly(nowIso());
+  const clauses = ["status = 'ACTIVE'", "end_date IS NOT NULL", "end_date <> ''", "end_date < ?"];
+  const params = [today];
+  if (tenantId) {
+    clauses.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  const rows = await queryAllAsync(db, `SELECT * FROM lc_legal_holds WHERE ${clauses.join(" AND ")} LIMIT ?`, [...params, Number(limit) || 500]);
+  let expired = 0;
+  for (const row of rows) {
+    await runAsync(db, "UPDATE lc_legal_holds SET status = 'EXPIRED', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+    for (const target of await listHoldObjectsAsync(db, row.id)) {
+      await syncObjectHoldStatusAsync(db, row.tenant_id, target.object_type, target.object_id);
     }
     expired += 1;
   }

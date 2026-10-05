@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { buildObjectKey, getStorageProvider, putObject, deleteObject, checksumObject } from "../file-storage.js";
 import { providerNotFound } from "./errors.js";
 import { normalizeText } from "./validation.js";
@@ -68,16 +69,52 @@ const databaseProvider = {
     );
     return { storage_uri: storageUri, checksum, size_bytes: Buffer.byteLength(content), provider: "database" };
   },
+  async storeAsync(db, { tenantId, key, payload }) {
+    const content = typeof payload === "string" ? payload : JSON.stringify(payload);
+    const checksum = sha256(content);
+    const storageUri = `lc-archive://${Number(tenantId)}/${key}`;
+    await runAsync(
+      db,
+      `INSERT INTO lc_archive_blobs (tenant_id, storage_uri, checksum, size_bytes, content, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (storage_uri) DO UPDATE SET
+         tenant_id = EXCLUDED.tenant_id,
+         checksum = EXCLUDED.checksum,
+         size_bytes = EXCLUDED.size_bytes,
+         content = EXCLUDED.content,
+         created_at = EXCLUDED.created_at`,
+      [
+        Number(tenantId),
+        storageUri,
+        checksum,
+        Buffer.byteLength(content),
+        content,
+        nowIso(),
+      ]
+    );
+    return { storage_uri: storageUri, checksum, size_bytes: Buffer.byteLength(content), provider: "database" };
+  },
   async retrieve(db, { storageUri }) {
     const row = queryOne(db, "SELECT content FROM lc_archive_blobs WHERE storage_uri = ?", [String(storageUri)]);
+    return row ? row.content : null;
+  },
+  async retrieveAsync(db, { storageUri }) {
+    const row = await queryOneAsync(db, "SELECT content FROM lc_archive_blobs WHERE storage_uri = ?", [String(storageUri)]);
     return row ? row.content : null;
   },
   async remove(db, { storageUri }) {
     run(db, "DELETE FROM lc_archive_blobs WHERE storage_uri = ?", [String(storageUri)]);
     return { deleted: true };
   },
+  async removeAsync(db, { storageUri }) {
+    await runAsync(db, "DELETE FROM lc_archive_blobs WHERE storage_uri = ?", [String(storageUri)]);
+    return { deleted: true };
+  },
   async exists(db, { storageUri }) {
     return Boolean(queryOne(db, "SELECT 1 AS x FROM lc_archive_blobs WHERE storage_uri = ?", [String(storageUri)]));
+  },
+  async existsAsync(db, { storageUri }) {
+    return Boolean(await queryOneAsync(db, "SELECT 1 AS x FROM lc_archive_blobs WHERE storage_uri = ?", [String(storageUri)]));
   },
 };
 
@@ -124,6 +161,17 @@ registerArchiveProvider("file-storage", fileStorageProvider);
 // administrator can switch without a deployment; defaults to the database.
 export function resolveProviderCode(db, tenantId) {
   const row = queryOne(db, "SELECT value_json FROM lc_configuration WHERE tenant_id = ? AND key = 'archive_provider'", [Number(tenantId)]);
+  if (!row) return "database";
+  try {
+    const value = JSON.parse(row.value_json);
+    return normalizeText(value) || "database";
+  } catch {
+    return "database";
+  }
+}
+
+export async function resolveProviderCodeAsync(db, tenantId) {
+  const row = await queryOneAsync(db, "SELECT value_json FROM lc_configuration WHERE tenant_id = ? AND key = 'archive_provider'", [Number(tenantId)]);
   if (!row) return "database";
   try {
     const value = JSON.parse(row.value_json);

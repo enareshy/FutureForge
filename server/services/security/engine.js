@@ -6,10 +6,11 @@
 //   explicit DENY  > explicit ALLOW  > inherited/RBAC ALLOW  > default DENY
 // An explicit ALLOW with a strictly higher priority than every matching DENY
 // overrides the deny.
-import { checkPermission } from "../authorization.js";
+import { checkPermission, checkPermissionAsync } from "../authorization.js";
 import {
   ancestorOrganizationIds,
   descendantOrganizationIds,
+  descendantOrganizationIdsAsync,
   getOrganization,
 } from "../orgs.js";
 import {
@@ -26,14 +27,19 @@ import {
   getObjectType,
   getObjectTypeAsync,
   listClassificationRules,
+  listClassificationRulesAsync,
   listEntitlements,
+  listEntitlementsAsync,
   listFieldRules,
   listFieldRulesAsync,
   listMaskingRules,
   listMaskingRulesAsync,
   listOrganizationRules,
+  listOrganizationRulesAsync,
   listPlantRules,
+  listPlantRulesAsync,
   listPolicies,
+  listPoliciesAsync,
 } from "./repository.js";
 
 const IAM_ACTION_MAP = {
@@ -139,6 +145,23 @@ function organizationCovers(db, rule, resourceOrgId) {
   return false;
 }
 
+async function organizationCoversAsync(db, rule, resourceOrgId) {
+  if (!resourceOrgId) return false;
+  const target = Number(resourceOrgId);
+  const base = Number(rule.organization_id);
+  if (rule.scope_mode === "cross" || rule.scope_mode === "specific") {
+    return target === base;
+  }
+  if (rule.scope_mode === "own") {
+    return target === base;
+  }
+  if (target === base) return true;
+  if (rule.include_descendants || rule.scope_mode === "self_and_descendants" || rule.scope_mode === "include_descendants") {
+    return (await descendantOrganizationIdsAsync(db, base)).map(Number).includes(target);
+  }
+  return false;
+}
+
 function plantCovers(db, rule, resourcePlantId) {
   if (!resourcePlantId) return false;
   const target = Number(resourcePlantId);
@@ -146,6 +169,17 @@ function plantCovers(db, rule, resourcePlantId) {
   if (target === base) return true;
   if (rule.include_descendants) {
     return descendantOrganizationIds(db, base).map(Number).includes(target);
+  }
+  return false;
+}
+
+async function plantCoversAsync(db, rule, resourcePlantId) {
+  if (!resourcePlantId) return false;
+  const target = Number(resourcePlantId);
+  const base = Number(rule.plant_id);
+  if (target === base) return true;
+  if (rule.include_descendants) {
+    return (await descendantOrganizationIdsAsync(db, base)).map(Number).includes(target);
   }
   return false;
 }
@@ -314,6 +348,27 @@ function rbacDecision(db, context, resourceType, action, resource, options) {
   }
 }
 
+async function rbacDecisionAsync(db, context, resourceType, action, resource, options) {
+  if (!context || context.anonymous) return { allowed: false, reason: DECISION_REASONS.RBAC_DENIED };
+  const iamAction = IAM_ACTION_MAP[action] || "read";
+  const registration = options.permissionResource
+    ? { permission_resource: options.permissionResource }
+    : await getObjectTypeAsync(db, Number(context.tenantId ?? 0), resourceType);
+  const resourceCode = registration?.permission_resource || resourceType;
+  if (!resourceCode) return { allowed: false, reason: DECISION_REASONS.RBAC_DENIED };
+  try {
+    const result = await checkPermissionAsync(db, { id: context.userId }, resourceCode, iamAction, {
+      organizationId: resource.organizationId ?? resource.organization_id ?? context.attributes?.primary_organization_id ?? 0,
+    });
+    return {
+      allowed: Boolean(result?.allowed),
+      reason: result?.allowed ? DECISION_REASONS.RBAC_ALLOWED : DECISION_REASONS.RBAC_DENIED,
+      detail: result?.reason || null,
+    };
+  } catch {
+    return { allowed: false, reason: DECISION_REASONS.RBAC_DENIED };
+  }
+}
 export function authorize(db, context, { action = "read", resource = {}, options = {} } = {}) {
   const started = Date.now();
   const tenantId = Number(context?.tenantId ?? 0);
@@ -453,6 +508,192 @@ export function authorize(db, context, { action = "read", resource = {}, options
   }));
 
   const fieldResult = evaluateFields(db, context, resourceType, normalizedAction, resource, options);
+  const deniedFields = fieldResult.fields.filter((field) => field.effect === "deny" || field.effect === "hide");
+  const maskedFields = fieldResult.fields.filter((field) => field.effect === "mask");
+  decision.fields = fieldResult.fields.map((field) => ({
+    field: field.field,
+    effect: field.effect,
+    strategy: field.strategy || null,
+  }));
+  steps.push(step("field", true, deniedFields.length ? DECISION_REASONS.FIELD_DENIED : null, {
+    denied: deniedFields.map((field) => field.field),
+    masked: maskedFields.map((field) => field.field),
+  }));
+
+  const maxDeny = denies.reduce((max, entry) => Math.max(max, entry.priority), -Infinity);
+  const maxAllow = allows.reduce((max, entry) => Math.max(max, entry.priority), -Infinity);
+
+  let outcome;
+  if (denies.length && maxDeny >= maxAllow) {
+    const strongest = denies.find((entry) => entry.priority === maxDeny) || denies[0];
+    outcome = { allowed: false, decision: "deny", reason: strongest.reason, matched: strongest };
+  } else if (allows.length) {
+    const strongest = allows.find((entry) => entry.priority === maxAllow) || allows[0];
+    outcome = { allowed: true, decision: "allow", reason: strongest.reason, matched: strongest };
+  } else if (rbac.allowed) {
+    outcome = { allowed: true, decision: "allow", reason: DECISION_REASONS.RBAC_ALLOWED, matched: { source: "rbac" } };
+  } else {
+    outcome = { allowed: false, decision: "deny", reason: DECISION_REASONS.DEFAULT_DENY, matched: null };
+  }
+
+  decision.allowed = outcome.allowed;
+  decision.decision = outcome.decision;
+  decision.reason = outcome.reason;
+  decision.message = DECISION_REASON_MESSAGES[outcome.reason] || outcome.reason;
+  decision.matched = outcome.matched;
+  decision.enforcement = enforcement;
+  decision.fieldDecisions = fieldResult.fields;
+  decision.fieldMap = fieldResult.fieldMap;
+  decision.durationMs = Date.now() - started;
+  return decision;
+}
+
+export async function authorizeAsync(db, context, { action = "read", resource = {}, options = {} } = {}) {
+  const started = Date.now();
+  const tenantId = Number(context?.tenantId ?? 0);
+  const normalizedAction = String(action).toLowerCase();
+  const resourceType = String(resource.type ?? resource.resource_type ?? "");
+  const evalContext = buildEvaluationContext(context, resource, normalizedAction, options);
+  const steps = [];
+
+  const decision = {
+    allowed: false,
+    decision: "deny",
+    reason: DECISION_REASONS.DEFAULT_DENY,
+    message: DECISION_REASON_MESSAGES[DECISION_REASONS.DEFAULT_DENY],
+    subject: { id: context?.userId ?? null, username: context?.username ?? null, anonymous: Boolean(context?.anonymous) },
+    resource: { type: resourceType, id: resource.id ?? null },
+    action: normalizedAction,
+    fields: [],
+    steps,
+    cached: false,
+    durationMs: 0,
+  };
+
+  // 1. Tenant isolation always wins.
+  const resourceTenant = Number(resource.tenantId ?? resource.tenant_id ?? tenantId);
+  if (resourceTenant && tenantId && resourceTenant !== tenantId) {
+    steps.push(step("tenant", false, DECISION_REASONS.TENANT_DENIED, { resourceTenant, subjectTenant: tenantId }));
+    return finish(decision, DECISION_REASONS.TENANT_DENIED, started);
+  }
+  steps.push(step("tenant", true, null, { tenantId }));
+
+  const enforcement = options.enforcement || await effectiveEnforcementAsync(db, tenantId, resourceType);
+  const candidatePolicies = (await listPoliciesAsync(db, tenantId, { status: "active" })).filter((policy) => {
+    if (!withinValidity(policy)) return false;
+    if (!resourceTypeMatches(policy.resource_type, resourceType)) return false;
+    if (!actionMatches(policy.action, normalizedAction)) return false;
+    if (!subjectMatches(context, policy.subject_type, policy.subject_id)) return false;
+    return conditionPasses(policy, evalContext);
+  });
+  const candidateEntitlements = (await listEntitlementsAsync(db, tenantId, { status: "active" })).filter((entitlement) => {
+    if (!resourceTypeMatches(entitlement.resource_type, resourceType)) return false;
+    if (!actionMatches(entitlement.action, normalizedAction)) return false;
+    if (!subjectMatches(context, entitlement.subject_type, entitlement.subject_id)) return false;
+    if (entitlement.classification && entitlement.classification !== resource.classification) return false;
+    if (entitlement.scope === "object" && String(entitlement.resource_id) !== String(resource.id ?? "")) return false;
+    return conditionPasses(entitlement, evalContext);
+  });
+  const candidateClassificationRules = (await listClassificationRulesAsync(db, tenantId)).filter((rule) => {
+    if (!withinValidity(rule)) return false;
+    if (rule.classification !== resource.classification) return false;
+    if (!resourceTypeMatches(rule.resource_type, resourceType)) return false;
+    if (!actionMatches(rule.action, normalizedAction)) return false;
+    if (!subjectMatches(context, rule.subject_type, rule.subject_id)) return false;
+    return conditionPasses(rule, evalContext);
+  });
+  const candidateOrgRules = (await listOrganizationRulesAsync(db, tenantId)).filter((rule) => {
+    if (!withinValidity(rule)) return false;
+    if (!resourceTypeMatches(rule.resource_type, resourceType)) return false;
+    if (!actionMatches(rule.action, normalizedAction)) return false;
+    if (!subjectMatches(context, rule.subject_type, rule.subject_id)) return false;
+    return conditionPasses(rule, evalContext);
+  });
+  const candidatePlantRules = (await listPlantRulesAsync(db, tenantId)).filter((rule) => {
+    if (!withinValidity(rule)) return false;
+    if (!resourceTypeMatches(rule.resource_type, resourceType)) return false;
+    if (!actionMatches(rule.action, normalizedAction)) return false;
+    if (!subjectMatches(context, rule.subject_type, rule.subject_id)) return false;
+    return conditionPasses(rule, evalContext);
+  });
+
+  const allows = [];
+  const denies = [];
+  const addMatch = (bucket, effect, source, rule) => {
+    const entry = {
+      source,
+      effect,
+      reason: effect === "deny"
+        ? reasonForSourceDeny(source)
+        : reasonForSourceAllow(source),
+      priority: rulePriority(rule),
+      ruleCode: rule.code || rule.uuid || rule.id || null,
+      ruleId: rule.id ?? null,
+    };
+    bucket.push(entry);
+    return entry;
+  };
+
+  for (const policy of candidatePolicies) {
+    addMatch(policy.effect === "deny" ? denies : allows, policy.effect, "policy", policy);
+  }
+  for (const entitlement of candidateEntitlements) {
+    addMatch(entitlement.effect === "deny" ? denies : allows, entitlement.effect, "entitlement", entitlement);
+  }
+  for (const rule of candidateClassificationRules) {
+    addMatch(rule.effect === "deny" ? denies : allows, rule.effect, "classification", rule);
+  }
+
+  const resourceOrgId = resource.organizationId ?? resource.organization_id ?? null;
+  const applicableOrgRules = candidateOrgRules.filter((rule) => rule.resource_type === resourceType || !rule.resource_type);
+  const matchedOrgRules = [];
+  for (const rule of candidateOrgRules) {
+    if ((await organizationCoversAsync(db, rule, resourceOrgId)) || (!resourceOrgId && rule.effect === "allow")) matchedOrgRules.push(rule);
+  }
+  for (const rule of matchedOrgRules) {
+    addMatch(rule.effect === "deny" ? denies : allows, rule.effect, "organization", rule);
+  }
+  if (applicableOrgRules.length && !matchedOrgRules.length) {
+    denies.push({ source: "organization", effect: "deny", reason: DECISION_REASONS.ORGANIZATION_DENIED, priority: 1000 });
+  }
+
+  const resourcePlantId = resource.plantId ?? resource.plant_id ?? null;
+  const applicablePlantRules = candidatePlantRules.filter((rule) => rule.resource_type === resourceType || !rule.resource_type);
+  const matchedPlantRules = [];
+  for (const rule of candidatePlantRules) {
+    if (await plantCoversAsync(db, rule, resourcePlantId)) matchedPlantRules.push(rule);
+  }
+  for (const rule of matchedPlantRules) {
+    addMatch(rule.effect === "deny" ? denies : allows, rule.effect, "plant", rule);
+  }
+  if (applicablePlantRules.length && !matchedPlantRules.length && resourcePlantId) {
+    denies.push({ source: "plant", effect: "deny", reason: DECISION_REASONS.PLANT_DENIED, priority: 1000 });
+  }
+
+  const rbac = await rbacDecisionAsync(db, context, resourceType, normalizedAction, resource, options);
+
+  // Record one step per dimension for the debugger.
+  steps.push(step("rbac", rbac.allowed, rbac.reason, rbac.detail));
+
+  steps.push(step("policy", !denies.some((d) => d.source === "policy"), denies.some((d) => d.source === "policy") ? DECISION_REASONS.POLICY_DENIED : DECISION_REASONS.POLICY_ALLOWED, {
+    matched: candidatePolicies.length,
+  }));
+  steps.push(step("object", !denies.some((d) => d.source === "entitlement"), denies.some((d) => d.source === "entitlement") ? DECISION_REASONS.ENTITLEMENT_DENIED : DECISION_REASONS.ENTITLEMENT_ALLOWED, {
+    matched: candidateEntitlements.length,
+  }));
+  steps.push(step("organization", !denies.some((d) => d.source === "organization"), denies.some((d) => d.source === "organization") ? DECISION_REASONS.ORGANIZATION_DENIED : null, {
+    matched: matchedOrgRules.length,
+    applicable: applicableOrgRules.length,
+  }));
+  steps.push(step("plant", !denies.some((d) => d.source === "plant"), denies.some((d) => d.source === "plant") ? DECISION_REASONS.PLANT_DENIED : null, {
+    matched: matchedPlantRules.length,
+    applicable: applicablePlantRules.length,
+  }));
+  steps.push(step("classification", !denies.some((d) => d.source === "classification"), denies.some((d) => d.source === "classification") ? DECISION_REASONS.CLASSIFICATION_DENIED : null, {
+    matched: candidateClassificationRules.length,
+  }));
+
+  const fieldResult = await evaluateFieldsAsync(db, context, resourceType, normalizedAction, resource, options);
   const deniedFields = fieldResult.fields.filter((field) => field.effect === "deny" || field.effect === "hide");
   const maskedFields = fieldResult.fields.filter((field) => field.effect === "mask");
   decision.fields = fieldResult.fields.map((field) => ({

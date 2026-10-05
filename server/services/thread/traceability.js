@@ -3,7 +3,7 @@
 // A traceability view is a traversal plus an aggregated domain-to-domain matrix
 // and link inventory. It is the read model behind the traceability workspace
 // and reporting; it never persists anything.
-import { executeTraversal, publicGraph } from "./engine.js";
+import { executeTraversal, executeTraversalAsync, publicGraph } from "./engine.js";
 
 function domainOf(nodeByRef, ref) {
   const node = nodeByRef.get(ref);
@@ -38,6 +38,29 @@ export function buildMatrix(result) {
 
 export function traceabilityMatrix(db, tenantId, options = {}, actor = null) {
   const { result, definition } = executeTraversal(db, tenantId, { ...options, direction: options.direction || "DOWNSTREAM" }, actor, { action: "TRACEABILITY" });
+  const matrix = buildMatrix(result);
+  return {
+    root: result.root,
+    definition: { code: definition.code, name: definition.name },
+    direction: result.direction,
+    node_count: result.node_count,
+    edge_count: result.edge_count,
+    domains: result.domains,
+    matrix: matrix.cells,
+    relationship_inventory: matrix.relationship_inventory,
+    truncated: result.truncated,
+    duration_ms: result.duration_ms,
+    source_module: "thread",
+  };
+}
+
+export async function traceabilityGraphAsync(db, tenantId, options = {}, actor = null) {
+  const { result, definition } = await executeTraversalAsync(db, tenantId, { ...options, direction: options.direction || "DOWNSTREAM" }, actor, { action: "TRACEABILITY" });
+  return publicGraph(result, definition);
+}
+
+export async function traceabilityMatrixAsync(db, tenantId, options = {}, actor = null) {
+  const { result, definition } = await executeTraversalAsync(db, tenantId, { ...options, direction: options.direction || "DOWNSTREAM" }, actor, { action: "TRACEABILITY" });
   const matrix = buildMatrix(result);
   return {
     root: result.root,

@@ -6,18 +6,19 @@
 // Handlers reconstruct the initiating subject so authorization is never
 // silently dropped for an asynchronous run.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
-import { getJobTypeRow, createJobType } from "../jobs/types.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
+import { getJobTypeRow, createJobType, getJobTypeRowAsync, createJobTypeAsync } from "../jobs/types.js";
 import { REPORTING_HANDLER_CODES, REPORTING_JOB_TYPES } from "./constants.js";
 import { jobRef as makeJobRef } from "./identifiers.js";
 import { parseJson, stringifyJson } from "./repository.js";
 import { executeReport } from "./reports.js";
-import { executeExport, pruneExports } from "./exports.js";
-import { runSchedule, dueSchedules } from "./scheduling.js";
+import { executeExport, pruneExports, pruneExportsAsync } from "./exports.js";
+import { runSchedule, dueSchedules, dueSchedulesAsync } from "./scheduling.js";
 import { getKpiValue } from "./kpis.js";
 import { refreshReadModel } from "./readmodel.js";
-import { pruneHistory } from "./history.js";
+import { pruneHistory, pruneHistoryAsync } from "./history.js";
 import { invalidReport } from "./errors.js";
 
 const REPORTING_QUEUE = "reporting";
@@ -57,9 +58,30 @@ export function ensureReportingJobTypes(db) {
   return { created };
 }
 
+export async function ensureReportingJobTypesAsync(db) {
+  let created = 0;
+  for (const def of REPORTING_JOB_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    await createJobTypeAsync(db, { ...def }, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
 function recordJob(db, { tenantId, handlerCode, jobTypeCode, entityType = null, entityRef = null, platformJob, actor = null }) {
   const ts = nowIso();
   const result = run(
+    db,
+    `INSERT INTO reporting_jobs (job_ref, tenant_id, handler_code, job_type_code, entity_type, entity_ref, platform_job_id, status, attempts, max_attempts, progress_json, created_by, queued_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'QUEUED', 0, 1, '{}', ?, ?, ?, ?)`,
+    [makeJobRef(), Number(tenantId), handlerCode, jobTypeCode, entityType, entityRef, platformJob?.id ?? null, actor?.id ?? null, ts, ts, ts]
+  );
+  return Number(result.lastInsertId);
+}
+
+async function recordJobAsync(db, { tenantId, handlerCode, jobTypeCode, entityType = null, entityRef = null, platformJob, actor = null }) {
+  const ts = nowIso();
+  const result = await runAsync(
     db,
     `INSERT INTO reporting_jobs (job_ref, tenant_id, handler_code, job_type_code, entity_type, entity_ref, platform_job_id, status, attempts, max_attempts, progress_json, created_by, queued_at, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'QUEUED', 0, 1, '{}', ?, ?, ?, ?)`,
@@ -85,28 +107,69 @@ function submit(db, { tenantId, jobTypeCode, handlerCode, handlerInput, entityTy
   return { ...platformJob, reporting_job: publicReportingJob(queryOne(db, "SELECT * FROM reporting_jobs WHERE id = ?", [jobId])) };
 }
 
+async function submitAsync(db, { tenantId, jobTypeCode, handlerCode, handlerInput, entityType = null, entityRef = null, actor = null, ip = null, priority = "normal", queue = REPORTING_QUEUE, idempotencyKey = null }) {
+  const platformJob = await submitJobAsync(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      input: { tenant_id: Number(tenantId), actor_id: actor?.id ?? null, ...handlerInput },
+      tenant_id: Number(tenantId),
+      priority,
+      queue,
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+  const jobId = await recordJobAsync(db, { tenantId, handlerCode, jobTypeCode, entityType, entityRef, platformJob, actor });
+  return { ...platformJob, reporting_job: publicReportingJob(await queryOneAsync(db, "SELECT * FROM reporting_jobs WHERE id = ?", [jobId])) };
+}
+
 export function submitExecuteJob(db, { tenantId, reportRef, parameters = {}, actor = null, ip = null, idempotencyKey = null, entityRef = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "REPORTING_EXECUTE", handlerCode: REPORTING_HANDLER_CODES.EXECUTE, handlerInput: { report_ref: reportRef, parameters }, entityType: "report", entityRef: entityRef || reportRef, actor, ip, idempotencyKey });
+}
+
+export async function submitExecuteJobAsync(db, { tenantId, reportRef, parameters = {}, actor = null, ip = null, idempotencyKey = null, entityRef = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "REPORTING_EXECUTE", handlerCode: REPORTING_HANDLER_CODES.EXECUTE, handlerInput: { report_ref: reportRef, parameters }, entityType: "report", entityRef: entityRef || reportRef, actor, ip, idempotencyKey });
 }
 
 export function submitExportJob(db, { tenantId, exportRef, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "REPORTING_EXPORT", handlerCode: REPORTING_HANDLER_CODES.EXPORT, handlerInput: { export_ref: exportRef }, entityType: "export", entityRef: exportRef, actor, ip, idempotencyKey });
 }
 
+export async function submitExportJobAsync(db, { tenantId, exportRef, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "REPORTING_EXPORT", handlerCode: REPORTING_HANDLER_CODES.EXPORT, handlerInput: { export_ref: exportRef }, entityType: "export", entityRef: exportRef, actor, ip, idempotencyKey });
+}
+
 export function submitScheduleRunJob(db, { tenantId, scheduleRef, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "REPORTING_SCHEDULE_RUN", handlerCode: REPORTING_HANDLER_CODES.SCHEDULE, handlerInput: { schedule_ref: scheduleRef }, entityType: "schedule", entityRef: scheduleRef, actor, ip, idempotencyKey });
+}
+
+export async function submitScheduleRunJobAsync(db, { tenantId, scheduleRef, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "REPORTING_SCHEDULE_RUN", handlerCode: REPORTING_HANDLER_CODES.SCHEDULE, handlerInput: { schedule_ref: scheduleRef }, entityType: "schedule", entityRef: scheduleRef, actor, ip, idempotencyKey });
 }
 
 export function submitKpiJob(db, { tenantId, kpiRef, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "REPORTING_KPI_CALCULATE", handlerCode: REPORTING_HANDLER_CODES.KPI, handlerInput: { kpi_ref: kpiRef }, entityType: "kpi", entityRef: kpiRef, actor, ip, priority: "low", idempotencyKey });
 }
 
+export async function submitKpiJobAsync(db, { tenantId, kpiRef, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "REPORTING_KPI_CALCULATE", handlerCode: REPORTING_HANDLER_CODES.KPI, handlerInput: { kpi_ref: kpiRef }, entityType: "kpi", entityRef: kpiRef, actor, ip, priority: "low", idempotencyKey });
+}
+
 export function submitRefreshJob(db, { tenantId, entities = null, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "REPORTING_READMODEL_REFRESH", handlerCode: REPORTING_HANDLER_CODES.REFRESH, handlerInput: { entities }, entityType: "read_model", entityRef: "read_model", actor, ip, priority: "low", queue: "default", idempotencyKey });
 }
 
+export async function submitRefreshJobAsync(db, { tenantId, entities = null, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "REPORTING_READMODEL_REFRESH", handlerCode: REPORTING_HANDLER_CODES.REFRESH, handlerInput: { entities }, entityType: "read_model", entityRef: "read_model", actor, ip, priority: "low", queue: "default", idempotencyKey });
+}
+
 export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "REPORTING_MAINTENANCE", handlerCode: REPORTING_HANDLER_CODES.MAINTENANCE, handlerInput: {}, entityType: "maintenance", entityRef: "maintenance", actor, ip, priority: "low", queue: "default", idempotencyKey });
+}
+
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "REPORTING_MAINTENANCE", handlerCode: REPORTING_HANDLER_CODES.MAINTENANCE, handlerInput: {}, entityType: "maintenance", entityRef: "maintenance", actor, ip, priority: "low", queue: "default", idempotencyKey });
 }
 
 export function listReportingJobs(db, tenantId, query = {}) {
@@ -128,11 +191,38 @@ export function listReportingJobs(db, tenantId, query = {}) {
   return { items: rows.map(publicReportingJob), total, page, pageSize };
 }
 
+export async function listReportingJobsAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  if (query.handler_code || query.handlerCode) {
+    where.push("handler_code = ?");
+    params.push(String(query.handler_code || query.handlerCode));
+  }
+  const page = Math.max(1, Number(query.page) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number(query.page_size || query.pageSize) || 50));
+  const clause = where.join(" AND ");
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM reporting_jobs WHERE ${clause}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM reporting_jobs WHERE ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+  return { items: rows.map(publicReportingJob), total, page, pageSize };
+}
+
 export function getReportingJob(db, tenantId, ref) {
   const raw = String(ref ?? "");
   const row = /^\d+$/.test(raw)
     ? queryOne(db, "SELECT * FROM reporting_jobs WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
     : queryOne(db, "SELECT * FROM reporting_jobs WHERE tenant_id = ? AND job_ref = ?", [Number(tenantId), raw]);
+  return publicReportingJob(row);
+}
+
+export async function getReportingJobAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const row = /^\d+$/.test(raw)
+    ? await queryOneAsync(db, "SELECT * FROM reporting_jobs WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
+    : await queryOneAsync(db, "SELECT * FROM reporting_jobs WHERE tenant_id = ? AND job_ref = ?", [Number(tenantId), raw]);
   return publicReportingJob(row);
 }
 
@@ -163,6 +253,22 @@ export function runReportingMaintenance(db, { tenantId = null } = {}) {
     summary.history_pruned += pruned.history;
     summary.executions_pruned += pruned.executions;
     summary.exports_pruned += pruneExports(db, tenant, 30).deleted;
+  }
+  return summary;
+}
+
+export async function runReportingMaintenanceAsync(db, { tenantId = null } = {}) {
+  const tenants = tenantId
+    ? [{ id: Number(tenantId) }]
+    : await queryAllAsync(db, "SELECT id FROM organizations WHERE id IN (SELECT DISTINCT tenant_id FROM reporting_reports)");
+  const summary = { tenants: tenants.length, history_pruned: 0, executions_pruned: 0, exports_pruned: 0, ran_at: nowIso() };
+  for (const row of tenants) {
+    const tenant = Number(row.id);
+    const retention = 180;
+    const pruned = await pruneHistoryAsync(db, tenant, retention);
+    summary.history_pruned += pruned.history;
+    summary.executions_pruned += pruned.executions;
+    summary.exports_pruned += (await pruneExportsAsync(db, tenant, 30)).deleted;
   }
   return summary;
 }
@@ -256,4 +362,8 @@ export function registerReportingHandlers() {
 
 export function listDueSchedules(db, tenantId) {
   return dueSchedules(db, tenantId);
+}
+
+export async function listDueSchedulesAsync(db, tenantId) {
+  return await dueSchedulesAsync(db, tenantId);
 }

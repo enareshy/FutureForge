@@ -5,16 +5,17 @@
 // themselves act as the operational ledger, so a handler simply drives the
 // engine core against an existing job.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
 import { EXCHANGE_HANDLER_CODES, SOURCE_MODULE } from "./constants.js";
 import { publicImportJob, publicExportJob } from "./repository.js";
-import { runImportJob, createImportJob, reconcileImport } from "./importer.js";
-import { runExportJob, createExportJob, getExportJobRow } from "./exporter.js";
-import { getImportJobRow } from "./importer.js";
-import { getExportDefinitionRow } from "./export-definitions.js";
-import { getImportDefinitionRow, withImportChildren } from "./import-definitions.js";
-import { listConfig } from "./configuration.js";
+import { runImportJob, createImportJob, reconcileImport, runImportJobAsync, createImportJobAsync, reconcileImportAsync } from "./importer.js";
+import { runExportJob, createExportJob, getExportJobRow, runExportJobAsync, createExportJobAsync, getExportJobRowAsync } from "./exporter.js";
+import { getImportJobRow, getImportJobRowAsync } from "./importer.js";
+import { getExportDefinitionRow, getExportDefinitionRowAsync } from "./export-definitions.js";
+import { getImportDefinitionRow, withImportChildren, getImportDefinitionRowAsync, withImportChildrenAsync } from "./import-definitions.js";
+import { listConfig, listConfigAsync } from "./configuration.js";
 import { paginate } from "./validation.js";
 
 // ── Submission helpers ───────────────────────────────────────────────────────
@@ -34,28 +35,67 @@ function submit(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority 
   );
 }
 
+async function submitAsync(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority = "normal", queue = "default", idempotencyKey = null }) {
+  return await submitJobAsync(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      payload: { tenant_id: Number(tenantId), ...handlerParams },
+      tenant_id: Number(tenantId),
+      priority,
+      queue,
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+}
+
 export function submitImportJob(db, { tenantId, importJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_IMPORT", handlerParams: { import_job_id: Number(importJobId) }, actor, ip, queue: "imports", idempotencyKey });
+}
+
+export async function submitImportJobAsync(db, { tenantId, importJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "DATA_IMPORT", handlerParams: { import_job_id: Number(importJobId) }, actor, ip, queue: "imports", idempotencyKey });
 }
 
 export function submitValidateJob(db, { tenantId, importJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_IMPORT_VALIDATE", handlerParams: { import_job_id: Number(importJobId) }, actor, ip, queue: "imports", idempotencyKey });
 }
 
+export async function submitValidateJobAsync(db, { tenantId, importJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "DATA_IMPORT_VALIDATE", handlerParams: { import_job_id: Number(importJobId) }, actor, ip, queue: "imports", idempotencyKey });
+}
+
 export function submitExportJob(db, { tenantId, exportJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_EXPORT", handlerParams: { export_job_id: Number(exportJobId) }, actor, ip, queue: "exports", idempotencyKey });
+}
+
+export async function submitExportJobAsync(db, { tenantId, exportJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "DATA_EXPORT", handlerParams: { export_job_id: Number(exportJobId) }, actor, ip, queue: "exports", idempotencyKey });
 }
 
 export function submitReconcileJob(db, { tenantId, importJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_RECONCILIATION", handlerParams: { import_job_id: Number(importJobId) }, actor, ip, idempotencyKey });
 }
 
+export async function submitReconcileJobAsync(db, { tenantId, importJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "DATA_RECONCILIATION", handlerParams: { import_job_id: Number(importJobId) }, actor, ip, idempotencyKey });
+}
+
 export function submitRetryJob(db, { tenantId, importJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_EXCHANGE_RETRY", handlerParams: { import_job_id: Number(importJobId) }, actor, ip, queue: "imports", priority: "high", idempotencyKey });
 }
 
+export async function submitRetryJobAsync(db, { tenantId, importJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "DATA_EXCHANGE_RETRY", handlerParams: { import_job_id: Number(importJobId) }, actor, ip, queue: "imports", priority: "high", idempotencyKey });
+}
+
 export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_EXCHANGE_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low" });
+}
+
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "DATA_EXCHANGE_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low" });
 }
 
 // ── Ledger query helpers ─────────────────────────────────────────────────────
@@ -90,6 +130,36 @@ export function listExchangeJobs(db, { tenantId, direction, status, page, pageSi
   return { items: items.slice(0, limit), total: items.length, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
 }
 
+export async function listExchangeJobsAsync(db, { tenantId, direction, status, page, pageSize } = {}) {
+  const { limit, offset, page: currentPage } = paginate({ page, pageSize }, { defaultPageSize: 50, maxPageSize: 500 });
+  const dir = direction ? String(direction).toUpperCase() : null;
+  const items = [];
+  if (!dir || dir === "IMPORT") {
+    const clauses = ["tenant_id = ?"];
+    const params = [Number(tenantId)];
+    if (status) {
+      clauses.push("status = ?");
+      params.push(String(status).toUpperCase());
+    }
+    const where = `WHERE ${clauses.join(" AND ")}`;
+    const rows = await queryAllAsync(db, `SELECT * FROM ie_import_jobs ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    items.push(...rows.map((row) => ({ ...publicImportJob(row), direction: "IMPORT" })));
+  }
+  if (!dir || dir === "EXPORT") {
+    const clauses = ["tenant_id = ?"];
+    const params = [Number(tenantId)];
+    if (status) {
+      clauses.push("status = ?");
+      params.push(String(status).toUpperCase());
+    }
+    const where = `WHERE ${clauses.join(" AND ")}`;
+    const rows = await queryAllAsync(db, `SELECT * FROM ie_export_jobs ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    items.push(...rows.map((row) => ({ ...publicExportJob(row), direction: "EXPORT" })));
+  }
+  items.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  return { items: items.slice(0, limit), total: items.length, page: currentPage, page_size: limit, source_module: SOURCE_MODULE };
+}
+
 export function getExchangeJob(db, tenantId, direction, ref) {
   if (String(direction).toUpperCase() === "IMPORT") {
     const row = getImportJobRow(db, tenantId, ref);
@@ -99,10 +169,28 @@ export function getExchangeJob(db, tenantId, direction, ref) {
   return row ? { ...publicExportJob(row), direction: "EXPORT" } : null;
 }
 
+export async function getExchangeJobAsync(db, tenantId, direction, ref) {
+  if (String(direction).toUpperCase() === "IMPORT") {
+    const row = await getImportJobRowAsync(db, tenantId, ref);
+    return row ? { ...publicImportJob(row), direction: "IMPORT" } : null;
+  }
+  const row = await getExportJobRowAsync(db, tenantId, ref);
+  return row ? { ...publicExportJob(row), direction: "EXPORT" } : null;
+}
+
 // ── Retry & reconcile runners ────────────────────────────────────────────────
 
 export function failedRecordNumbers(db, tenantId, importJobId) {
   const rows = queryAll(
+    db,
+    "SELECT DISTINCT record_number FROM ie_import_record_results WHERE tenant_id = ? AND job_id = ? AND status IN ('ERROR', 'FAILED') ORDER BY record_number",
+    [Number(tenantId), Number(importJobId)]
+  );
+  return rows.map((row) => Number(row.record_number)).filter((n) => n > 0);
+}
+
+export async function failedRecordNumbersAsync(db, tenantId, importJobId) {
+  const rows = await queryAllAsync(
     db,
     "SELECT DISTINCT record_number FROM ie_import_record_results WHERE tenant_id = ? AND job_id = ? AND status IN ('ERROR', 'FAILED') ORDER BY record_number",
     [Number(tenantId), Number(importJobId)]
@@ -130,6 +218,26 @@ export async function retryImportJob(db, { tenantId, importJobId, actor = null, 
   return { retried: numbers.length, job: result };
 }
 
+export async function retryImportJobAsync(db, { tenantId, importJobId, actor = null, ip = null } = {}) {
+  const original = await queryOneAsync(db, "SELECT * FROM ie_import_jobs WHERE id = ? AND tenant_id = ?", [Number(importJobId), Number(tenantId)]);
+  if (!original) return { retried: 0, message: "Import job not found" };
+  const numbers = await failedRecordNumbersAsync(db, tenantId, importJobId);
+  if (!numbers.length) return { retried: 0, message: "No failed records to retry" };
+  const definitionRow = original.definition_id ? await queryOneAsync(db, "SELECT * FROM ie_import_definitions WHERE id = ?", [original.definition_id]) : null;
+  const definition = definitionRow ? await withImportChildrenAsync(db, definitionRow) : null;
+  if (!definition) return { retried: 0, message: "The definition for this import job no longer exists" };
+  const { job } = await createImportJobAsync(db, {
+    tenantId,
+    definition,
+    mode: "IMPORT",
+    params: { options: { retry_of: original.job_ref } },
+    actor,
+    ip,
+  });
+  const result = await runImportJobAsync(db, { jobId: job.id, params: { record_numbers: numbers }, actor, ip });
+  return { retried: numbers.length, job: result };
+}
+
 export function reconcileImportJob(db, { tenantId, importJobId } = {}) {
   const job = queryOne(db, "SELECT * FROM ie_import_jobs WHERE id = ? AND tenant_id = ?", [Number(importJobId), Number(tenantId)]);
   if (!job) return { status: "PENDING", message: "Import job not found" };
@@ -143,6 +251,21 @@ export function reconcileImportJob(db, { tenantId, importJobId } = {}) {
     failed: job.failed_count || 0,
   };
   return reconcileImport(db, { tenantId, jobId: job.id, strategy: "COUNT", counters, sourceCount: job.total_records || counters.processed });
+}
+
+export async function reconcileImportJobAsync(db, { tenantId, importJobId } = {}) {
+  const job = await queryOneAsync(db, "SELECT * FROM ie_import_jobs WHERE id = ? AND tenant_id = ?", [Number(importJobId), Number(tenantId)]);
+  if (!job) return { status: "PENDING", message: "Import job not found" };
+  const counters = {
+    processed: job.processed_records || 0,
+    success: job.success_count || 0,
+    created: job.created_count || 0,
+    updated: job.updated_count || 0,
+    skipped: job.skipped_count || 0,
+    rejected: job.rejected_count || 0,
+    failed: job.failed_count || 0,
+  };
+  return await reconcileImportAsync(db, { tenantId, jobId: job.id, strategy: "COUNT", counters, sourceCount: job.total_records || counters.processed });
 }
 
 // ── Maintenance ──────────────────────────────────────────────────────────────
@@ -174,6 +297,41 @@ export function runExchangeMaintenance(db, { tenantId = null, limit = 2000 } = {
       const rows = queryAll(db, "SELECT id FROM ie_import_checkpoints WHERE job_id = ? ORDER BY checkpoint_number DESC", [job.id]);
       for (const stale of rows.slice(50)) {
         run(db, "DELETE FROM ie_import_checkpoints WHERE id = ?", [stale.id]);
+        summary.checkpoints_pruned += 1;
+      }
+    }
+    void cutoff;
+  }
+  return summary;
+}
+
+export async function runExchangeMaintenanceAsync(db, { tenantId = null, limit = 2000 } = {}) {
+  const tenantRows = tenantId
+    ? [{ tenant_id: Number(tenantId) }]
+    : await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM ie_export_jobs WHERE tenant_id IS NOT NULL");
+  const summary = { tenants: tenantRows.length, exports_expired: 0, blobs_pruned: 0, checkpoints_pruned: 0, ran_at: nowIso() };
+  const cap = Number(limit) || 2000;
+  for (const row of tenantRows) {
+    const tenant = Number(row.tenant_id);
+    const config = await listConfigAsync(db, tenant);
+    const retentionDays = Number(config.export_expiry_days) || 30;
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    const expired = await queryAllAsync(
+      db,
+      "SELECT * FROM ie_export_results WHERE tenant_id = ? AND status = 'AVAILABLE' AND expires_at IS NOT NULL AND expires_at < ? LIMIT ?",
+      [tenant, nowIso(), cap]
+    );
+    for (const result of expired) {
+      await runAsync(db, "UPDATE ie_export_results SET status = 'EXPIRED' WHERE id = ?", [result.id]);
+      summary.exports_expired += 1;
+      summary.blobs_pruned += (await runAsync(db, "DELETE FROM ie_blobs WHERE tenant_id = ? AND storage_uri = ?", [tenant, result.storage_uri])).changes || 0;
+    }
+    // Keep only the most recent checkpoints per import job.
+    const jobs = await queryAllAsync(db, "SELECT id FROM ie_import_jobs WHERE tenant_id = ? ORDER BY id DESC LIMIT ?", [tenant, 500]);
+    for (const job of jobs) {
+      const rows = await queryAllAsync(db, "SELECT id FROM ie_import_checkpoints WHERE job_id = ? ORDER BY checkpoint_number DESC", [job.id]);
+      for (const stale of rows.slice(50)) {
+        await runAsync(db, "DELETE FROM ie_import_checkpoints WHERE id = ?", [stale.id]);
         summary.checkpoints_pruned += 1;
       }
     }

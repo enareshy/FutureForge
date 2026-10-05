@@ -46,6 +46,7 @@ export function registerConnector(connector, { replace = true } = {}) {
     testConnection: connector.testConnection || (() => ({ ok: true, message: "No connection test implemented" })),
     discoverSchema: connector.discoverSchema || (() => ({ fields: [], sample: [] })),
     read: connector.read,
+    readAsync: connector.readAsync || null,
     write: connector.write,
   };
   registry.set(entry.code, entry);

@@ -5,12 +5,13 @@
 // It registers into platform seams (events, jobs, search, security, audit) and
 // never duplicates them.
 import { queryAll, queryOne } from "../../db.js";
-import { tenantIds } from "../search/registry.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
-import { ensureReportingEventTypes } from "./events.js";
-import { ensureReportingJobTypes, registerReportingHandlers } from "./jobs.js";
-import { ensureReportingSearch, registerReportingSources } from "./search.js";
-import { ensureReportingConfig } from "./configuration.js";
+import { ensureReportingEventTypes, ensureReportingEventTypesAsync } from "./events.js";
+import { ensureReportingJobTypes, ensureReportingJobTypesAsync, registerReportingHandlers } from "./jobs.js";
+import { ensureReportingSearch, ensureReportingSearchAsync, registerReportingSources } from "./search.js";
+import { ensureReportingConfig, ensureReportingConfigAsync } from "./configuration.js";
 import { dataSourceCatalog } from "./datasources.js";
 import { listEntities } from "./semantic.js";
 
@@ -32,6 +33,38 @@ export function ensureReportingFoundation(db) {
     configuration += ensureReportingConfig(db, tenantId).created || 0;
   }
   const search = ensureReportingSearch(db).created || 0;
+
+  return {
+    source_module: SOURCE_MODULE,
+    data_sources: dataSourceCatalog().map((entry) => ({ code: entry.code, status: entry.status })),
+    semantic_entities: listEntities().length,
+    event_types: eventTypes,
+    job_types: jobTypes.created,
+    handlers,
+    configuration,
+    search,
+    tenants: tenants.length,
+  };
+}
+
+export async function ensureReportingFoundationAsync(db) {
+  const eventTypes = await ensureReportingEventTypesAsync(db);
+  const jobTypes = await ensureReportingJobTypesAsync(db);
+  const handlers = registerReportingHandlers();
+  registerReportingSources();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+
+  let configuration = 0;
+  for (const tenantId of tenants) {
+    configuration += (await ensureReportingConfigAsync(db, tenantId)).created || 0;
+  }
+  const search = (await ensureReportingSearchAsync(db)).created || 0;
 
   return {
     source_module: SOURCE_MODULE,
@@ -70,5 +103,32 @@ export function reportingHealth(db, tenantId = null) {
       history: scoped("reporting_history"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM reporting_reports").length,
+  };
+}
+
+export async function reportingHealthAsync(db, tenantId = null) {
+  const scope = tenantId ? Number(tenantId) : null;
+  const scoped = async (table) =>
+    Number((scope ? await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ?`, [scope]) : await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0);
+  return {
+    source_module: SOURCE_MODULE,
+    sources: dataSourceCatalog().map((entry) => ({ code: entry.code, status: entry.status })),
+    entities: listEntities().map((entry) => entry.code),
+    counts: {
+      reports: await scoped("reporting_reports"),
+      dashboards: await scoped("reporting_dashboards"),
+      widgets: await scoped("reporting_dashboard_widgets"),
+      metrics: await scoped("reporting_metrics"),
+      kpis: await scoped("reporting_kpis"),
+      executions: await scoped("reporting_executions"),
+      exports: await scoped("reporting_exports"),
+      schedules: await scoped("reporting_schedules"),
+      jobs: await scoped("reporting_jobs"),
+      bi_connections: await scoped("reporting_bi_connections"),
+      bi_datasets: await scoped("reporting_bi_datasets"),
+      read_model: await scoped("reporting_read_model"),
+      history: await scoped("reporting_history"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM reporting_reports")).length,
   };
 }

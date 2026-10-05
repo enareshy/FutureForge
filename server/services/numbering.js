@@ -75,3 +75,9 @@ export function nextNumber(db, input = {}, actor = null, options = {}) {
   const allocation = allocations.generateNumber(db, input, actor, options);
   return allocation?.number ?? null;
 }
+
+// Async twin of `nextNumber` for migrated write routes.
+export async function nextNumberAsync(db, input = {}, actor = null, options = {}) {
+  const allocation = await allocations.generateNumberAsync(db, input, actor, options);
+  return allocation?.number ?? null;
+}

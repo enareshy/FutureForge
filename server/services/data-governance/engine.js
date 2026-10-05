@@ -7,7 +7,8 @@
 // rule-type-specific business logic beyond the small built-in evaluator set;
 // new behaviour is added by registering an evaluator or a rule type.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { evaluationFailed, invalidRule, objectNotFound } from "./errors.js";
 import {
   DEFAULT_EVALUATION_LIMIT,
@@ -16,16 +17,16 @@ import {
 } from "./constants.js";
 import { evaluateExpression } from "./expressions.js";
 import { readAttribute, isBlank, severityRank, valuePreview, parseObject, normalizeText } from "./validation.js";
-import { activeRulesForObject } from "./rules.js";
-import { findCatalogByType } from "./catalog.js";
-import { computeScore } from "./dimensions.js";
-import { getConfig, setConfig } from "./configuration.js";
-import { loadGovernedObject, requireAdapter } from "./adapter.js";
+import { activeRulesForObject, activeRulesForObjectAsync } from "./rules.js";
+import { findCatalogByType, findCatalogByTypeAsync } from "./catalog.js";
+import { computeScore, computeScoreAsync } from "./dimensions.js";
+import { getConfig, getConfigAsync, setConfig, setConfigAsync } from "./configuration.js";
+import { loadGovernedObject, loadGovernedObjectAsync, requireAdapter } from "./adapter.js";
 import { publicResult, publicViolation } from "./repository.js";
 import { resultRef } from "./refs.js";
-import { createException } from "./exceptions.js";
-import { publishGovernanceEvent } from "./events.js";
-import { validateValue } from "../reference.js";
+import { createException, createExceptionAsync } from "./exceptions.js";
+import { publishGovernanceEvent, publishGovernanceEventAsync } from "./events.js";
+import { validateValue, validateValueAsync } from "../reference.js";
 
 const EVALUATORS = new Map();
 
@@ -85,6 +86,25 @@ function evaluateUnique(db, { tenantId, objectType, objectId, adapterCode }, rul
   });
 }
 
+async function evaluateUniqueAsync(db, { tenantId, objectType, objectId, adapterCode }, rule, payload) {
+  const attribute = rule.attribute_name || parseObject(rule.expression_json, {}).conditions?.[0]?.attribute;
+  const actual = readAttribute(payload.attributes, attribute);
+  if (isBlank(actual)) {
+    return baseOutcome(rule, true, { message: `${attribute} is empty; uniqueness not applicable`, expected: "unique" });
+  }
+  const adapter = requireAdapter(adapterCode);
+  if (typeof adapter.findDuplicatesAsync !== "function") {
+    return baseOutcome(rule, true, { message: "Adapter cannot evaluate uniqueness; skipped", expected: "unique" });
+  }
+  const duplicates = await adapter.findDuplicatesAsync(db, { tenantId, objectType, attributeName: attribute, value: actual, excludeObjectId: objectId });
+  const passed = duplicates.length === 0;
+  return baseOutcome(rule, passed, {
+    message: passed ? `${attribute} is unique` : `${attribute} duplicates ${duplicates.length} other object(s)`,
+    detected: actual,
+    expected: "unique",
+  });
+}
+
 function evaluateReference(db, { tenantId }, rule, payload) {
   const expression = parseObject(rule.expression_json, {});
   const attribute = rule.attribute_name || expression.conditions?.[0]?.attribute;
@@ -95,6 +115,23 @@ function evaluateReference(db, { tenantId }, rule, payload) {
   const domain = expression.params?.reference_domain || expression.reference_domain || rule.reference_domain || "";
   if (!domain) return baseOutcome(rule, true, { message: "No reference domain configured; skipped", expected: "valid reference" });
   const result = validateValue(db, { domain_code: domain, value: String(actual) }, { tenantId });
+  return baseOutcome(rule, Boolean(result.valid), {
+    message: result.valid ? `${attribute} resolves in ${domain}` : `${attribute} is not a valid ${domain} value (${result.reason})`,
+    detected: actual,
+    expected: domain,
+  });
+}
+
+async function evaluateReferenceAsync(db, { tenantId }, rule, payload) {
+  const expression = parseObject(rule.expression_json, {});
+  const attribute = rule.attribute_name || expression.conditions?.[0]?.attribute;
+  const actual = readAttribute(payload.attributes, attribute);
+  if (isBlank(actual)) {
+    return baseOutcome(rule, true, { message: `${attribute} is empty; reference not applicable`, expected: "valid reference" });
+  }
+  const domain = expression.params?.reference_domain || expression.reference_domain || rule.reference_domain || "";
+  if (!domain) return baseOutcome(rule, true, { message: "No reference domain configured; skipped", expected: "valid reference" });
+  const result = await validateValueAsync(db, { domain_code: domain, value: String(actual) }, { tenantId });
   return baseOutcome(rule, Boolean(result.valid), {
     message: result.valid ? `${attribute} resolves in ${domain}` : `${attribute} is not a valid ${domain} value (${result.reason})`,
     detected: actual,
@@ -132,8 +169,29 @@ export function evaluateRule(db, context, rule, payload) {
   }
 }
 
+export async function evaluateRuleAsync(db, context, rule, payload) {
+  const evaluator = EVALUATORS.get(String(rule.rule_type).toUpperCase());
+  if (evaluator) return await evaluator(db, context, rule, payload);
+  switch (String(rule.rule_type).toUpperCase()) {
+    case "REQUIRED":
+    case "NOT_NULL":
+      return evaluateRequired(rule, payload);
+    case "UNIQUE":
+      return await evaluateUniqueAsync(db, context, rule, payload);
+    case "REFERENCE":
+      return await evaluateReferenceAsync(db, context, rule, payload);
+    default:
+      return evaluateGeneric(rule, payload);
+  }
+}
+
 function exceptionFloor(db, tenantId) {
   const configured = getConfig(db, tenantId, "exception_min_severity");
+  return severityRank(configured) || SEVERITY_RANK.warning;
+}
+
+async function exceptionFloorAsync(db, tenantId) {
+  const configured = await getConfigAsync(db, tenantId, "exception_min_severity");
   return severityRank(configured) || SEVERITY_RANK.warning;
 }
 
@@ -239,6 +297,109 @@ export function evaluateObject(
   return state;
 }
 
+export async function evaluateObjectAsync(
+  db,
+  { tenantId, objectType, objectId, actor = null, trigger = "manual", adapterCode = null, payload = null, policyId = null, persist = true, ip = null } = {}
+) {
+  const catalog = await findCatalogByTypeAsync(db, tenantId, objectType);
+  const adapter = adapterCode || catalog?.source_adapter || "platform.objects";
+  const domainId = catalog?.domain_id ?? null;
+  const resolved =
+    payload ||
+    (await loadGovernedObjectAsync(db, { tenantId, objectType, objectId, adapterCode: adapter }));
+  if (!resolved) throw objectNotFound(objectType, objectId);
+
+  let rules = await activeRulesForObjectAsync(db, tenantId, objectType);
+  if (policyId) rules = rules.filter((rule) => Number(rule.policy_id) === Number(policyId));
+
+  const startedAt = Date.now();
+  const checks = [];
+  for (const rule of rules) {
+    checks.push(await evaluateRuleAsync(db, { tenantId, objectType, objectId, adapterCode: adapter, domainId }, rule, resolved));
+  }
+
+  const dimensions = {};
+  for (const check of checks) {
+    const dimension = check.dimension || "validity";
+    const entry = dimensions[dimension] || { total: 0, passed: 0 };
+    entry.total += 1;
+    if (check.passed) entry.passed += 1;
+    dimensions[dimension] = entry;
+  }
+
+  const score = await computeScoreAsync({ dimensions }, { db, tenantId });
+  const failures = checks.filter((check) => !check.passed);
+  const evaluationState = rules.length === 0 ? "NOT_EVALUATED" : failures.length ? "FAILED" : "PASSED";
+  const state = {
+    ...score,
+    evaluation_state: evaluationState,
+    object_type: resolved.object_type,
+    object_id: resolved.object_id,
+    object_name: resolved.object_name,
+    domain_id: domainId,
+    organization_id: resolved.organization_id,
+    plant_id: resolved.plant_id,
+    duration_ms: Date.now() - startedAt,
+    checks,
+    violations: failures,
+  };
+  if (!persist) return state;
+
+  const persisted = await persistResultAsync(db, { tenantId, domainId, resolved, score: state, trigger, actor });
+  const violations = [];
+  for (const failure of failures) {
+    violations.push(await persistViolationAsync(db, { tenantId, domainId, resultId: persisted.id, resolved, failure }));
+  }
+  state.result = publicResult(persisted);
+  state.violations = violations.map(publicViolation);
+
+  let exceptions = [];
+  if (await getConfigAsync(db, tenantId, "auto_raise_exceptions") !== false) {
+    const floor = await exceptionFloorAsync(db, tenantId);
+    exceptions = [];
+    for (const failure of failures.filter((entry) => severityRank(entry.severity) >= floor)) {
+      const raised = await raiseExceptionForFailureAsync(db, { tenantId, domainId, resolved, failure, actor, ip });
+      if (raised) exceptions.push(raised);
+    }
+  }
+  state.exceptions = exceptions;
+
+  await writeAuditAsync(db, {
+    actor,
+    action: "data_quality.evaluate",
+    resourceType: "dg_quality_result",
+    resourceId: persisted.id,
+    details: { object_type: resolved.object_type, object_id: resolved.object_id, score: state.overall_score, status: state.quality_status, violations: failures.length },
+    ip,
+  });
+  await publishGovernanceEventAsync(db, {
+    eventType: "DataQualityEvaluated",
+    tenantId,
+    objectType: resolved.object_type,
+    objectId: resolved.object_id,
+    organizationId: resolved.organization_id,
+    payload: {
+      result_ref: persisted.result_ref,
+      object_type: resolved.object_type,
+      object_id: resolved.object_id,
+      overall_score: state.overall_score,
+      quality_status: state.quality_status,
+      violation_count: failures.length,
+      evaluation_state: evaluationState,
+    },
+  }, actor);
+  for (const failure of failures) {
+    await publishGovernanceEventAsync(db, {
+      eventType: "DataQualityViolationDetected",
+      tenantId,
+      objectType: resolved.object_type,
+      objectId: resolved.object_id,
+      payload: { rule_code: failure.rule_code, dimension: failure.dimension, severity: failure.severity, message: failure.message },
+    }, actor);
+  }
+  return state;
+}
+
 function persistResult(db, { tenantId, domainId, resolved, score, trigger, actor }) {
   run(
     db,
@@ -276,6 +437,43 @@ function persistResult(db, { tenantId, domainId, resolved, score, trigger, actor
   return queryOne(db, "SELECT * FROM dg_quality_results WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
+async function persistResultAsync(db, { tenantId, domainId, resolved, score, trigger, actor }) {
+  await runAsync(
+    db,
+    `UPDATE dg_quality_results SET is_current = 0, updated_at = ? WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND is_current = 1`,
+    [nowIso(), Number(tenantId), resolved.object_type, String(resolved.object_id)]
+  );
+  const result = await runAsync(
+    db,
+    `INSERT INTO dg_quality_results
+      (result_ref, tenant_id, organization_id, plant_id, domain_id, object_type, object_id, object_name, overall_score,
+       quality_status, dimensions_json, evaluation_version, rule_count, violation_count, is_current, triggered_by, duration_ms,
+       evaluated_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?, ?, ?, ?, ?)`,
+    [
+      resultRef(),
+      Number(tenantId),
+      resolved.organization_id ?? null,
+      resolved.plant_id ?? null,
+      domainId,
+      resolved.object_type,
+      String(resolved.object_id),
+      resolved.object_name || "",
+      score.overall_score,
+      score.quality_status,
+      JSON.stringify(score.dimensions || {}),
+      score.rule_count,
+      score.violation_count,
+      normalizeText(trigger, "manual"),
+      score.duration_ms,
+      nowIso(),
+      nowIso(),
+      nowIso(),
+    ]
+  );
+  return await queryOneAsync(db, "SELECT * FROM dg_quality_results WHERE id = ?", [Number(result.lastInsertId)]);
+}
+
 function persistViolation(db, { tenantId, domainId, resultId, resolved, failure }) {
   run(
     db,
@@ -307,9 +505,70 @@ function persistViolation(db, { tenantId, domainId, resultId, resolved, failure 
   return queryOne(db, "SELECT * FROM dg_quality_violations WHERE id = ?", [Number(result.lastInsertId)]);
 }
 
+async function persistViolationAsync(db, { tenantId, domainId, resultId, resolved, failure }) {
+  await runAsync(
+    db,
+    `UPDATE dg_quality_violations SET is_current = 0 WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND is_current = 1`,
+    [Number(tenantId), resolved.object_type, String(resolved.object_id)]
+  );
+  const result = await runAsync(
+    db,
+    `INSERT INTO dg_quality_violations
+      (tenant_id, result_id, domain_id, object_type, object_id, rule_id, rule_code, attribute_name, dimension, severity, message, detected_value, expected_value, is_current, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+    [
+      Number(tenantId),
+      resultId,
+      domainId,
+      resolved.object_type,
+      String(resolved.object_id),
+      failure.rule_id ?? null,
+      failure.rule_code,
+      failure.attribute_name || "",
+      failure.dimension,
+      failure.severity,
+      failure.message,
+      failure.detected_value,
+      failure.expected_value,
+      nowIso(),
+    ]
+  );
+  return await queryOneAsync(db, "SELECT * FROM dg_quality_violations WHERE id = ?", [Number(result.lastInsertId)]);
+}
+
 function raiseExceptionForFailure(db, { tenantId, domainId, resolved, failure, actor, ip }) {
   try {
     return createException(
+      db,
+      {
+        tenant_id: tenantId,
+        organization_id: resolved.organization_id,
+        plant_id: resolved.plant_id,
+        domain_id: domainId,
+        object_type: resolved.object_type,
+        object_id: resolved.object_id,
+        attribute_name: failure.attribute_name,
+        rule_id: failure.rule_id,
+        rule_code: failure.rule_code,
+        dimension: failure.dimension,
+        severity: failure.severity,
+        description: failure.message,
+        detected_value: failure.detected_value,
+        expected_value: failure.expected_value,
+      },
+      actor,
+      tenantId,
+      ip
+    );
+  } catch (error) {
+    if (String(error.code || "").includes("EXCEPTION_CONFLICT")) return null;
+    throw error;
+  }
+}
+
+async function raiseExceptionForFailureAsync(db, { tenantId, domainId, resolved, failure, actor, ip }) {
+  try {
+    return await createExceptionAsync(
       db,
       {
         tenant_id: tenantId,
@@ -372,12 +631,58 @@ export function evaluateType(
   };
 }
 
+export async function evaluateTypeAsync(
+  db,
+  { tenantId, objectType, objectIds = null, actor = null, trigger = "batch", persist = true, limit = DEFAULT_EVALUATION_LIMIT, offset = 0, ip = null } = {}
+) {
+  if (Array.isArray(objectIds) && objectIds.length > MAX_BATCH_SIZE) {
+    throw evaluationFailed(`Cannot evaluate more than ${MAX_BATCH_SIZE} objects in one batch`);
+  }
+  const catalog = await findCatalogByTypeAsync(db, tenantId, objectType);
+  const adapter = requireAdapter(catalog?.source_adapter || "platform.objects");
+  const targets = Array.isArray(objectIds)
+    ? objectIds.map((id) => ({ object_id: String(id) }))
+    : await adapter.listAsync(db, { tenantId, objectType, limit: Math.min(limit, MAX_BATCH_SIZE), offset });
+  const results = [];
+  for (const target of targets) {
+    try {
+      results.push(await evaluateObjectAsync(db, { tenantId, objectType, objectId: target.object_id, actor, trigger, persist, ip }));
+    } catch (error) {
+      results.push({ object_type: objectType, object_id: target.object_id, error: error.message, code: error.code || null });
+    }
+  }
+  const evaluated = results.filter((entry) => !entry.error);
+  const failed = evaluated.filter((entry) => entry.evaluation_state === "FAILED");
+  return {
+    object_type: objectType,
+    processed: results.length,
+    evaluated: evaluated.length,
+    failed_objects: failed.length,
+    errors: results.length - evaluated.length,
+    average_score: evaluated.length ? Math.round((evaluated.reduce((sum, entry) => sum + (entry.overall_score || 0), 0) / evaluated.length) * 100) / 100 : null,
+    results,
+  };
+}
+
 export function setEvaluatorConfig(db, tenantId, key, value, actor = null, ip = null) {
   return setConfig(db, tenantId, key, value, actor, ip);
 }
 
+export async function setEvaluatorConfigAsync(db, tenantId, key, value, actor = null, ip = null) {
+  return await setConfigAsync(db, tenantId, key, value, actor, ip);
+}
+
 export function listRuleResultsForObject(db, { tenantId, objectType, objectId }) {
   const violations = queryAll(
+    db,
+    `SELECT * FROM dg_quality_violations WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND is_current = 1 ORDER BY severity DESC, rule_code`,
+    [Number(tenantId), String(objectType), String(objectId)]
+  );
+  return violations.map(publicViolation);
+}
+
+export async function listRuleResultsForObjectAsync(db, { tenantId, objectType, objectId }) {
+  const violations = await queryAllAsync(
     db,
     `SELECT * FROM dg_quality_violations WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND is_current = 1 ORDER BY severity DESC, rule_code`,
     [Number(tenantId), String(objectType), String(objectId)]

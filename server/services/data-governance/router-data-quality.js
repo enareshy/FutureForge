@@ -1,42 +1,49 @@
 // REST router for Data Quality (rules, evaluation, results, scores, exceptions,
 // duplicate detection and remediation). Mounted at /api/data-quality and
 // /api/v1/data-quality.
+//
+// Every route is authorized against an IAM permission resource. The whole
+// request path runs on the async `pg` layer so a slow query never stalls the
+// process; only the pure `/meta` handler stays synchronous.
 import { Rules, Engine, Results, Exceptions, Duplicates, Remediation, Validation } from "./index.js";
 
-export function createDataQualityRouter({ express, db, auth, can, wrap }) {
+export function createDataQualityRouter({ express, db, auth, authAsync, can, canAsync, wrap }) {
   const router = express.Router();
   const tenantOf = (req) => req.tenantId ?? null;
 
-  const canRules = (action) => can("iam.data_quality.rules", action);
-  const canEvaluate = (action) => can("iam.data_quality.evaluation", action);
-  const canResults = (action) => can("iam.data_quality.results", action);
-  const canExceptions = (action) => can("iam.data_quality.exceptions", action);
-  const canDuplicates = (action) => can("iam.data_quality.duplicates", action);
-  const canRemediation = (action) => can("iam.data_quality.remediation", action);
+  const guard = authAsync || auth;
+  const gate = canAsync || can;
+
+  const canRules = (action) => gate("iam.data_quality.rules", action);
+  const canEvaluate = (action) => gate("iam.data_quality.evaluation", action);
+  const canResults = (action) => gate("iam.data_quality.results", action);
+  const canExceptions = (action) => gate("iam.data_quality.exceptions", action);
+  const canDuplicates = (action) => gate("iam.data_quality.duplicates", action);
+  const canRemediation = (action) => gate("iam.data_quality.remediation", action);
 
   router.get(
     "/meta",
-    auth,
-    can("iam.data_quality", "read"),
+    guard,
+    gate("iam.data_quality", "read"),
     wrap((_req, res) => res.json({ vocabularies: Validation.vocabulary(), evaluators: Engine.listEvaluators(), duplicate_strategies: Duplicates.listDuplicateStrategies() }))
   );
 
   // ── Rules ─────────────────────────────────────────────────────────────────
   router.get(
     "/rules",
-    auth,
+    guard,
     canRules("read"),
-    wrap((req, res) => res.json(Rules.listRules(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Rules.listRulesAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
   router.post(
     "/rules",
-    auth,
+    guard,
     canRules("create"),
-    wrap((req, res) => res.status(201).json(Rules.createRule(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Rules.createRuleAsync(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.post(
     "/rules/validate",
-    auth,
+    guard,
     canRules("read"),
     wrap((req, res) => {
       try {
@@ -48,16 +55,16 @@ export function createDataQualityRouter({ express, db, auth, can, wrap }) {
   );
   router.get(
     "/rules/:ref",
-    auth,
+    guard,
     canRules("read"),
-    wrap((req, res) => res.json(Rules.getRule(db, req.params.ref, { includeVersions: req.query.includeVersions === "true" })))
+    wrap(async (req, res) => res.json(await Rules.getRuleAsync(db, req.params.ref, { includeVersions: req.query.includeVersions === "true" })))
   );
   router.post(
     "/rules/:ref/validate",
-    auth,
+    guard,
     canRules("read"),
-    wrap((req, res) => {
-      const rule = Rules.getRule(db, req.params.ref);
+    wrap(async (req, res) => {
+      const rule = await Rules.getRuleAsync(db, req.params.ref);
       const normalized = Rules.validateRuleInput({
         rule_type: rule.rule_type,
         object_type: rule.object_type,
@@ -73,34 +80,34 @@ export function createDataQualityRouter({ express, db, auth, can, wrap }) {
   );
   router.post(
     "/rules/:ref/activate",
-    auth,
+    guard,
     canRules("execute"),
-    wrap((req, res) => res.json(Rules.setRuleStatus(db, req.params.ref, "active", req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Rules.setRuleStatusAsync(db, req.params.ref, "active", req.actor, req.ip)))
   );
-  const updateRule = wrap((req, res) => res.json(Rules.updateRule(db, req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/rules/:ref", auth, canRules("update"), updateRule);
-  router.patch("/rules/:ref", auth, canRules("update"), updateRule);
+  const updateRule = wrap(async (req, res) => res.json(await Rules.updateRuleAsync(db, req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/rules/:ref", guard, canRules("update"), updateRule);
+  router.patch("/rules/:ref", guard, canRules("update"), updateRule);
   router.post(
     "/rules/:ref/status",
-    auth,
+    guard,
     canRules("execute"),
-    wrap((req, res) => res.json(Rules.setRuleStatus(db, req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Rules.setRuleStatusAsync(db, req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.get(
     "/rules/:ref/versions",
-    auth,
+    guard,
     canRules("read"),
-    wrap((req, res) => res.json({ items: Rules.listRuleVersions(db, req.params.ref) }))
+    wrap(async (req, res) => res.json({ items: await Rules.listRuleVersionsAsync(db, req.params.ref) }))
   );
 
   // ── Evaluation ────────────────────────────────────────────────────────────
   router.post(
     "/evaluate",
-    auth,
+    guard,
     canEvaluate("execute"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const result = Engine.evaluateObject(db, {
+      const result = await Engine.evaluateObjectAsync(db, {
         tenantId: tenantOf(req),
         objectType: body.object_type,
         objectId: body.object_id,
@@ -114,12 +121,12 @@ export function createDataQualityRouter({ express, db, auth, can, wrap }) {
   );
   router.post(
     "/evaluate/batch",
-    auth,
+    guard,
     canEvaluate("execute"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
       res.json(
-        Engine.evaluateType(db, {
+        await Engine.evaluateTypeAsync(db, {
           tenantId: tenantOf(req),
           objectType: body.object_type,
           objectIds: body.object_ids || null,
@@ -136,17 +143,17 @@ export function createDataQualityRouter({ express, db, auth, can, wrap }) {
   // ── Results & violations ──────────────────────────────────────────────────
   router.get(
     "/results",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) => res.json(Results.listResults(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Results.listResultsAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
   router.get(
     "/results/:objectType/:objectId",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) =>
+    wrap(async (req, res) =>
       res.json(
-        Results.getResult(db, {
+        await Results.getResultAsync(db, {
           tenantId: tenantOf(req),
           objectType: req.params.objectType,
           objectId: req.params.objectId,
@@ -157,11 +164,11 @@ export function createDataQualityRouter({ express, db, auth, can, wrap }) {
   );
   router.get(
     "/results/:objectType/:objectId/history",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) =>
+    wrap(async (req, res) =>
       res.json({
-        items: Results.objectHistory(db, {
+        items: await Results.objectHistoryAsync(db, {
           tenantId: tenantOf(req),
           objectType: req.params.objectType,
           objectId: req.params.objectId,
@@ -172,192 +179,192 @@ export function createDataQualityRouter({ express, db, auth, can, wrap }) {
   );
   router.get(
     "/violations",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) => res.json(Results.listViolations(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Results.listViolationsAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
 
   // ── Scores & dashboards ───────────────────────────────────────────────────
   router.get(
     "/scores",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) => res.json(Results.scoreSummary(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Results.scoreSummaryAsync(db, { tenantId: tenantOf(req) })))
   );
   router.get(
     "/scores/domains",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) => res.json({ items: Results.domainScores(db, { tenantId: tenantOf(req) }) }))
+    wrap(async (req, res) => res.json({ items: await Results.domainScoresAsync(db, { tenantId: tenantOf(req) }) }))
   );
   router.get(
     "/scores/domains/:domainId",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) => res.json({ items: Results.domainScores(db, { tenantId: tenantOf(req), domainId: req.params.domainId }) }))
+    wrap(async (req, res) => res.json({ items: await Results.domainScoresAsync(db, { tenantId: tenantOf(req), domainId: req.params.domainId }) }))
   );
   router.get(
     "/scores/object-types",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) => res.json({ items: Results.typeScores(db, { tenantId: tenantOf(req), objectType: req.query.objectType }) }))
+    wrap(async (req, res) => res.json({ items: await Results.typeScoresAsync(db, { tenantId: tenantOf(req), objectType: req.query.objectType }) }))
   );
   router.get(
     "/scores/trend",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) => res.json({ items: Results.trend(db, { tenantId: tenantOf(req), objectType: req.query.objectType || null, days: req.query.days }) }))
+    wrap(async (req, res) => res.json({ items: await Results.trendAsync(db, { tenantId: tenantOf(req), objectType: req.query.objectType || null, days: req.query.days }) }))
   );
   router.get(
     "/scores/objects/:objectType/:objectId",
-    auth,
+    guard,
     canResults("read"),
-    wrap((req, res) =>
-      res.json(Results.getResult(db, { tenantId: tenantOf(req), objectType: req.params.objectType, objectId: req.params.objectId }))
+    wrap(async (req, res) =>
+      res.json(await Results.getResultAsync(db, { tenantId: tenantOf(req), objectType: req.params.objectType, objectId: req.params.objectId }))
     )
   );
 
   // ── Exceptions ────────────────────────────────────────────────────────────
   router.get(
     "/exceptions",
-    auth,
+    guard,
     canExceptions("read"),
-    wrap((req, res) => res.json(Exceptions.listExceptions(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Exceptions.listExceptionsAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
   router.post(
     "/exceptions",
-    auth,
+    guard,
     canExceptions("create"),
-    wrap((req, res) => res.status(201).json(Exceptions.createException(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Exceptions.createExceptionAsync(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.get(
     "/exceptions/summary",
-    auth,
+    guard,
     canExceptions("read"),
-    wrap((req, res) => res.json(Exceptions.exceptionSummary(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Exceptions.exceptionSummaryAsync(db, { tenantId: tenantOf(req) })))
   );
   router.get(
     "/exceptions/:ref",
-    auth,
+    guard,
     canExceptions("read"),
-    wrap((req, res) => res.json(Exceptions.getException(db, req.params.ref, { includeComments: req.query.includeComments !== "false" })))
+    wrap(async (req, res) => res.json(await Exceptions.getExceptionAsync(db, req.params.ref, { includeComments: req.query.includeComments !== "false" })))
   );
-  const updateException = wrap((req, res) =>
-    res.json(Exceptions.updateException(db, req.params.ref, req.body || {}, req.actor, req.ip))
+  const updateException = wrap(async (req, res) =>
+    res.json(await Exceptions.updateExceptionAsync(db, req.params.ref, req.body || {}, req.actor, req.ip))
   );
-  router.put("/exceptions/:ref", auth, canExceptions("update"), updateException);
-  router.patch("/exceptions/:ref", auth, canExceptions("update"), updateException);
+  router.put("/exceptions/:ref", guard, canExceptions("update"), updateException);
+  router.patch("/exceptions/:ref", guard, canExceptions("update"), updateException);
   router.post(
     "/exceptions/:ref/assign",
-    auth,
+    guard,
     canExceptions("execute"),
-    wrap((req, res) => res.json(Exceptions.assignException(db, req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Exceptions.assignExceptionAsync(db, req.params.ref, req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/exceptions/:ref/status",
-    auth,
+    guard,
     canExceptions("execute"),
-    wrap((req, res) => res.json(Exceptions.transitionException(db, req.params.ref, req.body?.status, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Exceptions.transitionExceptionAsync(db, req.params.ref, req.body?.status, req.body || {}, req.actor, req.ip)))
   );
   const exceptionAction = (status) =>
-    wrap((req, res) => res.json(Exceptions.transitionException(db, req.params.ref, status, req.body || {}, req.actor, req.ip)));
-  router.post("/exceptions/:ref/resolve", auth, canExceptions("execute"), exceptionAction("resolved"));
-  router.post("/exceptions/:ref/verify", auth, canExceptions("execute"), exceptionAction("verified"));
-  router.post("/exceptions/:ref/close", auth, canExceptions("execute"), exceptionAction("closed"));
-  router.post("/exceptions/:ref/waive", auth, canExceptions("execute"), exceptionAction("waived"));
-  router.post("/exceptions/:ref/reject", auth, canExceptions("execute"), exceptionAction("rejected"));
+    wrap(async (req, res) => res.json(await Exceptions.transitionExceptionAsync(db, req.params.ref, status, req.body || {}, req.actor, req.ip)));
+  router.post("/exceptions/:ref/resolve", guard, canExceptions("execute"), exceptionAction("resolved"));
+  router.post("/exceptions/:ref/verify", guard, canExceptions("execute"), exceptionAction("verified"));
+  router.post("/exceptions/:ref/close", guard, canExceptions("execute"), exceptionAction("closed"));
+  router.post("/exceptions/:ref/waive", guard, canExceptions("execute"), exceptionAction("waived"));
+  router.post("/exceptions/:ref/reject", guard, canExceptions("execute"), exceptionAction("rejected"));
   router.get(
     "/exceptions/:ref/comments",
-    auth,
+    guard,
     canExceptions("read"),
-    wrap((req, res) => res.json({ items: Exceptions.listExceptionComments(db, req.params.ref) }))
+    wrap(async (req, res) => res.json({ items: await Exceptions.listExceptionCommentsAsync(db, req.params.ref) }))
   );
   router.post(
     "/exceptions/:ref/comments",
-    auth,
+    guard,
     canExceptions("update"),
-    wrap((req, res) => res.status(201).json(Exceptions.addExceptionComment(db, req.params.ref, req.body || {}, req.actor)))
+    wrap(async (req, res) => res.status(201).json(await Exceptions.addExceptionCommentAsync(db, req.params.ref, req.body || {}, req.actor)))
   );
 
   // ── Duplicate detection ───────────────────────────────────────────────────
   router.get(
     "/duplicates",
-    auth,
+    guard,
     canDuplicates("read"),
-    wrap((req, res) =>
+    wrap(async (req, res) =>
       res.json({
-        match_rules: Duplicates.listMatchRules(db, { tenantId: tenantOf(req), objectType: req.query.objectType, status: req.query.status }),
-        candidates: Duplicates.listCandidates(db, { ...req.query, tenantId: tenantOf(req) }),
+        match_rules: await Duplicates.listMatchRulesAsync(db, { tenantId: tenantOf(req), objectType: req.query.objectType, status: req.query.status }),
+        candidates: await Duplicates.listCandidatesAsync(db, { ...req.query, tenantId: tenantOf(req) }),
       })
     )
   );
   router.get(
     "/duplicates/match-rules",
-    auth,
+    guard,
     canDuplicates("read"),
-    wrap((req, res) => res.json({ items: Duplicates.listMatchRules(db, { tenantId: tenantOf(req), objectType: req.query.objectType, status: req.query.status }) }))
+    wrap(async (req, res) => res.json({ items: await Duplicates.listMatchRulesAsync(db, { tenantId: tenantOf(req), objectType: req.query.objectType, status: req.query.status }) }))
   );
   router.post(
     "/duplicates/match-rules",
-    auth,
+    guard,
     canDuplicates("create"),
-    wrap((req, res) => res.status(201).json(Duplicates.createMatchRule(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Duplicates.createMatchRuleAsync(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.patch(
     "/duplicates/match-rules/:ref",
-    auth,
+    guard,
     canDuplicates("update"),
-    wrap((req, res) => res.json(Duplicates.updateMatchRule(db, req.params.ref, req.body || {}, req.actor)))
+    wrap(async (req, res) => res.json(await Duplicates.updateMatchRuleAsync(db, req.params.ref, req.body || {}, req.actor)))
   );
   router.get(
     "/duplicates/candidates",
-    auth,
+    guard,
     canDuplicates("read"),
-    wrap((req, res) => res.json(Duplicates.listCandidates(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Duplicates.listCandidatesAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
   router.post(
     "/duplicates/detect",
-    auth,
+    guard,
     canDuplicates("execute"),
-    wrap((req, res) => res.json(Duplicates.detectDuplicates(db, { tenantId: tenantOf(req), objectType: req.body?.object_type, matchRuleId: req.body?.match_rule_id, actor: req.actor, ip: req.ip })))
+    wrap(async (req, res) => res.json(await Duplicates.detectDuplicatesAsync(db, { tenantId: tenantOf(req), objectType: req.body?.object_type, matchRuleId: req.body?.match_rule_id, actor: req.actor, ip: req.ip })))
   );
   router.post(
     "/duplicates/candidates/:ref/resolve",
-    auth,
+    guard,
     canDuplicates("execute"),
-    wrap((req, res) => res.json(Duplicates.resolveCandidate(db, req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Duplicates.resolveCandidateAsync(db, req.params.ref, req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/duplicates/:ref/resolve",
-    auth,
+    guard,
     canDuplicates("execute"),
-    wrap((req, res) => res.json(Duplicates.resolveCandidate(db, req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Duplicates.resolveCandidateAsync(db, req.params.ref, req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/duplicates/summary",
-    auth,
+    guard,
     canDuplicates("read"),
-    wrap((req, res) => res.json(Duplicates.duplicateSummary(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Duplicates.duplicateSummaryAsync(db, { tenantId: tenantOf(req) })))
   );
 
   // ── Remediation ───────────────────────────────────────────────────────────
   router.get(
     "/remediations",
-    auth,
+    guard,
     canRemediation("read"),
-    wrap((req, res) => res.json({ items: Remediation.listRemediations(db, { ...req.query, tenantId: tenantOf(req) }) }))
+    wrap(async (req, res) => res.json({ items: await Remediation.listRemediationsAsync(db, { ...req.query, tenantId: tenantOf(req) }) }))
   );
   router.post(
     "/remediations",
-    auth,
+    guard,
     canRemediation("execute"),
-    wrap((req, res) => res.status(201).json(Remediation.applyRemediation(db, { ...(req.body || {}), tenant_id: tenantOf(req) }, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Remediation.applyRemediationAsync(db, { ...(req.body || {}), tenant_id: tenantOf(req) }, req.actor, req.ip)))
   );
   router.get(
     "/remediations/summary",
-    auth,
+    guard,
     canRemediation("read"),
-    wrap((req, res) => res.json(Remediation.remediationSummary(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Remediation.remediationSummaryAsync(db, { tenantId: tenantOf(req) })))
   );
 
   return router;

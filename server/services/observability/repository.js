@@ -5,6 +5,7 @@
 // queries go through `paged` so pagination, filtering and ordering stay
 // consistent and safe (values are always bound, never interpolated).
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 
 export function parseJson(raw, fallback = null) {
   if (raw === null || raw === undefined || raw === "") return fallback;
@@ -50,9 +51,28 @@ export function paged(db, table, { where = [], params = [], orderBy = "id DESC",
   return { items: rows.map(map), total, page: safePage, pageSize: safeSize };
 }
 
+export async function pagedAsync(db, table, { where = [], params = [], orderBy = "id DESC", page = 1, pageSize = 50, map = (row) => row } = {}) {
+  const safePage = Math.max(1, Number(page) || 1);
+  const safeSize = Math.min(500, Math.max(1, Number(pageSize) || 50));
+  const offset = (safePage - 1) * safeSize;
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} ${clause}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM ${table} ${clause} ORDER BY ${orderBy} LIMIT ? OFFSET ?`, [...params, safeSize, offset]);
+  return { items: rows.map(map), total, page: safePage, pageSize: safeSize };
+}
+
 export function tableExists(db, table) {
   try {
     const row = queryOne(db, "SELECT to_regclass(?) AS r", [table]);
+    return Boolean(row?.r);
+  } catch {
+    return false;
+  }
+}
+
+export async function tableExistsAsync(db, table) {
+  try {
+    const row = await queryOneAsync(db, "SELECT to_regclass(?) AS r", [table]);
     return Boolean(row?.r);
   } catch {
     return false;
@@ -72,6 +92,23 @@ export function columnExists(db, table, column) {
   }
 }
 
+export async function columnExistsAsync(db, table, column) {
+  try {
+    const row = await queryOneAsync(
+      db,
+      "SELECT 1 AS present FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+      [table, column]
+    );
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
+
 export function tenantExists(db, tenantId) {
   return Boolean(queryOne(db, "SELECT id FROM organizations WHERE id = ?", [Number(tenantId)]));
+}
+
+export async function tenantExistsAsync(db, tenantId) {
+  return Boolean(await queryOneAsync(db, "SELECT id FROM organizations WHERE id = ?", [Number(tenantId)]));
 }

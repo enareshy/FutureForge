@@ -3,7 +3,9 @@
 // at /api/classification and /api/v1/classification.
 //
 // Every route is authorized against an IAM permission resource; the client is
-// never trusted to declare its own authorization.
+// never trusted to declare its own authorization. The DB-backed surface runs on
+// the asynchronous pool; only the pure vocabulary, unit conversion and seed
+// routes stay synchronous.
 import {
   constants,
   Validation,
@@ -26,29 +28,29 @@ import {
 
 const R = constants.CLASSIFICATION_RESOURCES;
 
-export function createClassificationRouter({ express, db, auth, can, wrap }) {
+export function createClassificationRouter({ express, db, auth, can, authAsync, canAsync, wrap }) {
   const router = express.Router();
   const tenantOf = (req) => req.tenantId ?? null;
   const idem = (req) => req.get("Idempotency-Key") || req.body?.idempotency_key || req.body?.idempotencyKey || "";
 
-  const canOverview = (a) => can(R.overview, a);
-  const canClassifications = (a) => can(R.classifications, a);
-  const canClasses = (a) => can(R.classes, a);
-  const canCharacteristics = (a) => can(R.characteristics, a);
-  const canGroups = (a) => can(R.groups, a);
-  const canValues = (a) => can(R.values, a);
-  const canAssignments = (a) => can(R.assignments, a);
-  const canValidation = (a) => can(R.validation, a);
-  const canSearch = (a) => can(R.search, a);
-  const canGovernance = (a) => can(R.governance, a);
-  const canAudit = (a) => can(R.auditTrail, a);
-  const canMetrics = (a) => can(R.metrics, a);
-  const canAdmin = (a) => can(R.admin, a);
+  const canOverview = (a) => canAsync(R.overview, a);
+  const canClassifications = (a) => canAsync(R.classifications, a);
+  const canClasses = (a) => canAsync(R.classes, a);
+  const canCharacteristics = (a) => canAsync(R.characteristics, a);
+  const canGroups = (a) => canAsync(R.groups, a);
+  const canValues = (a) => canAsync(R.values, a);
+  const canAssignments = (a) => canAsync(R.assignments, a);
+  const canValidation = (a) => canAsync(R.validation, a);
+  const canSearch = (a) => canAsync(R.search, a);
+  const canGovernance = (a) => canAsync(R.governance, a);
+  const canAudit = (a) => canAsync(R.auditTrail, a);
+  const canMetrics = (a) => canAsync(R.metrics, a);
+  const canAdmin = (a) => canAsync(R.admin, a);
 
   // ── Meta, health, metrics ─────────────────────────────────────────────────
   router.get(
     "/meta",
-    auth,
+    authAsync,
     canOverview("read"),
     wrap((_req, res) => {
       res.json({
@@ -75,474 +77,474 @@ export function createClassificationRouter({ express, db, auth, can, wrap }) {
 
   router.get(
     "/health",
-    auth,
+    authAsync,
     canMetrics("read"),
-    wrap((req, res) => res.json({ ...Metrics.healthCheck(db, { tenantId: tenantOf(req) }), ...Foundation.classificationHealth(db, tenantOf(req)) }))
+    wrap(async (req, res) => res.json({ ...(await Metrics.healthCheckAsync(db, { tenantId: tenantOf(req) })), ...(await Foundation.classificationHealthAsync(db, tenantOf(req))) }))
   );
 
   router.get(
     "/metrics",
-    auth,
+    authAsync,
     canMetrics("read"),
-    wrap((req, res) => res.json(Metrics.metricsSnapshot(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Metrics.metricsSnapshotAsync(db, { tenantId: tenantOf(req) })))
   );
 
   router.get(
     "/coverage",
-    auth,
+    authAsync,
     canMetrics("read"),
-    wrap((req, res) => res.json(Metrics.coverageReport(db, { tenantId: tenantOf(req), objectType: req.query.object_type || req.query.objectType, totalObjects: req.query.total_objects ?? req.query.totalObjects })))
+    wrap(async (req, res) => res.json(await Metrics.coverageReportAsync(db, { tenantId: tenantOf(req), objectType: req.query.object_type || req.query.objectType, totalObjects: req.query.total_objects ?? req.query.totalObjects })))
   );
 
   // ── Configuration ─────────────────────────────────────────────────────────
   router.get(
     "/config",
-    auth,
+    authAsync,
     canAdmin("read"),
-    wrap((req, res) => res.json(Configuration.listConfig(db, tenantOf(req))))
+    wrap(async (req, res) => res.json(await Configuration.listConfigAsync(db, tenantOf(req))))
   );
-  const setConfig = wrap((req, res) => res.json(Configuration.setConfig(db, tenantOf(req), req.params.key, req.body?.value, req.actor, req.ip)));
-  router.put("/config/:key", auth, canAdmin("update"), setConfig);
-  router.patch("/config/:key", auth, canAdmin("update"), setConfig);
+  const setConfig = wrap(async (req, res) => res.json(await Configuration.setConfigAsync(db, tenantOf(req), req.params.key, req.body?.value, req.actor, req.ip)));
+  router.put("/config/:key", authAsync, canAdmin("update"), setConfig);
+  router.patch("/config/:key", authAsync, canAdmin("update"), setConfig);
 
   // ── Classifications ───────────────────────────────────────────────────────
   router.get(
     "/classifications",
-    auth,
+    authAsync,
     canClassifications("read"),
-    wrap((req, res) => res.json(Definitions.listClassifications(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Definitions.listClassificationsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/classifications",
-    auth,
+    authAsync,
     canClassifications("create"),
-    wrap((req, res) => res.status(201).json(Definitions.createClassification(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Definitions.createClassificationAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/classifications/:ref",
-    auth,
+    authAsync,
     canClassifications("read"),
-    wrap((req, res) => res.json(Definitions.getClassification(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Definitions.getClassificationAsync(db, tenantOf(req), req.params.ref)))
   );
-  const updateClassification = wrap((req, res) => res.json(Definitions.updateClassification(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/classifications/:ref", auth, canClassifications("update"), updateClassification);
-  router.patch("/classifications/:ref", auth, canClassifications("update"), updateClassification);
+  const updateClassification = wrap(async (req, res) => res.json(await Definitions.updateClassificationAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/classifications/:ref", authAsync, canClassifications("update"), updateClassification);
+  router.patch("/classifications/:ref", authAsync, canClassifications("update"), updateClassification);
   router.post(
     "/classifications/:ref/status",
-    auth,
+    authAsync,
     canClassifications("update"),
-    wrap((req, res) => res.json(Definitions.setClassificationStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Definitions.setClassificationStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.post(
     "/classifications/:ref/approve",
-    auth,
+    authAsync,
     canClassifications("update"),
-    wrap((req, res) => res.json(Definitions.approveClassification(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Definitions.approveClassificationAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
   router.delete(
     "/classifications/:ref",
-    auth,
+    authAsync,
     canClassifications("delete"),
-    wrap((req, res) => res.json(Definitions.deleteClassification(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Definitions.deleteClassificationAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
   router.get(
     "/classifications/:ref/versions",
-    auth,
+    authAsync,
     canClassifications("read"),
-    wrap((req, res) => res.json(Definitions.listClassificationVersions(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Definitions.listClassificationVersionsAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/classifications/:ref/versions",
-    auth,
+    authAsync,
     canClassifications("update"),
-    wrap((req, res) => res.status(201).json(Definitions.createClassificationVersion(db, tenantOf(req), req.params.ref, { changeReason: req.body?.change_reason || req.body?.changeReason, actor: req.actor })))
+    wrap(async (req, res) => res.status(201).json(await Definitions.createClassificationVersionAsync(db, tenantOf(req), req.params.ref, { changeReason: req.body?.change_reason || req.body?.changeReason, actor: req.actor })))
   );
   router.get(
     "/classifications/:ref/audit",
-    auth,
+    authAsync,
     canAudit("read"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const ref = req.params.ref;
       const numeric = Number(ref);
       const scope = Number.isInteger(numeric) && String(numeric) === String(ref).trim() ? { entityId: numeric } : { entityRef: ref };
-      return res.json(Definitions.listClassificationAudit(db, { tenantId: tenantOf(req), ...scope, ...req.query }));
+      return res.json(await Definitions.listClassificationAuditAsync(db, { tenantId: tenantOf(req), ...scope, ...req.query }));
     })
   );
   router.get(
     "/classifications/:ref/tree",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Hierarchy.classTree(db, tenantOf(req), req.params.ref, { status: req.query.status || null })))
+    wrap(async (req, res) => res.json(await Hierarchy.classTreeAsync(db, tenantOf(req), req.params.ref, { status: req.query.status || null })))
   );
   router.post(
     "/classifications/:ref/reorder-classes",
-    auth,
+    authAsync,
     canClasses("update"),
-    wrap((req, res) => res.json(Hierarchy.reorderClasses(db, tenantOf(req), { classificationId: req.params.ref, parentClassId: req.body?.parent_class_id ?? null, orderedIds: req.body?.ordered_ids || req.body?.orderedIds || [] }, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Hierarchy.reorderClassesAsync(db, tenantOf(req), { classificationId: req.params.ref, parentClassId: req.body?.parent_class_id ?? null, orderedIds: req.body?.ordered_ids || req.body?.orderedIds || [] }, req.actor, req.ip)))
   );
 
   // ── Classes ───────────────────────────────────────────────────────────────
   router.get(
     "/classes",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Hierarchy.listClasses(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Hierarchy.listClassesAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/classes",
-    auth,
+    authAsync,
     canClasses("create"),
-    wrap((req, res) => res.status(201).json(Hierarchy.createClass(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Hierarchy.createClassAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/classes/:ref",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Hierarchy.getClass(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Hierarchy.getClassAsync(db, tenantOf(req), req.params.ref)))
   );
-  const updateClass = wrap((req, res) => res.json(Hierarchy.updateClass(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/classes/:ref", auth, canClasses("update"), updateClass);
-  router.patch("/classes/:ref", auth, canClasses("update"), updateClass);
+  const updateClass = wrap(async (req, res) => res.json(await Hierarchy.updateClassAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/classes/:ref", authAsync, canClasses("update"), updateClass);
+  router.patch("/classes/:ref", authAsync, canClasses("update"), updateClass);
   router.post(
     "/classes/:ref/status",
-    auth,
+    authAsync,
     canClasses("update"),
-    wrap((req, res) => res.json(Hierarchy.setClassStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Hierarchy.setClassStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.post(
     "/classes/:ref/move",
-    auth,
+    authAsync,
     canClasses("update"),
-    wrap((req, res) => res.json(Hierarchy.moveClass(db, tenantOf(req), req.params.ref, { parentClassId: req.body?.parent_class_id ?? req.body?.parentClassId ?? null, sortOrder: req.body?.sort_order ?? req.body?.sortOrder ?? null }, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Hierarchy.moveClassAsync(db, tenantOf(req), req.params.ref, { parentClassId: req.body?.parent_class_id ?? req.body?.parentClassId ?? null, sortOrder: req.body?.sort_order ?? req.body?.sortOrder ?? null }, req.actor, req.ip)))
   );
   router.post(
     "/classes/:ref/copy",
-    auth,
+    authAsync,
     canClasses("create"),
-    wrap((req, res) => res.status(201).json(Hierarchy.copyClass(db, tenantOf(req), req.params.ref, { targetClassificationId: req.body?.target_classification_id ?? null, targetParentClassId: req.body?.target_parent_class_id ?? null, codeSuffix: req.body?.code_suffix || "_COPY" }, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Hierarchy.copyClassAsync(db, tenantOf(req), req.params.ref, { targetClassificationId: req.body?.target_classification_id ?? null, targetParentClassId: req.body?.target_parent_class_id ?? null, codeSuffix: req.body?.code_suffix || "_COPY" }, req.actor, req.ip)))
   );
   router.delete(
     "/classes/:ref",
-    auth,
+    authAsync,
     canClasses("delete"),
-    wrap((req, res) => res.json(Hierarchy.deleteClass(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Hierarchy.deleteClassAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
   router.get(
     "/classes/:ref/children",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Hierarchy.classChildren(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Hierarchy.classChildrenAsync(db, tenantOf(req), req.params.ref)))
   );
   router.get(
     "/classes/:ref/ancestors",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Hierarchy.classAncestors(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Hierarchy.classAncestorsAsync(db, tenantOf(req), req.params.ref)))
   );
   router.get(
     "/classes/:ref/descendants",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Hierarchy.classDescendants(db, tenantOf(req), req.params.ref, { includeSelf: String(req.query.include_self || "") === "true" })))
+    wrap(async (req, res) => res.json(await Hierarchy.classDescendantsAsync(db, tenantOf(req), req.params.ref, { includeSelf: String(req.query.include_self || "") === "true" })))
   );
   router.get(
     "/classes/:ref/versions",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Hierarchy.listClassVersions(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Hierarchy.listClassVersionsAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/classes/:ref/versions",
-    auth,
+    authAsync,
     canClasses("update"),
-    wrap((req, res) => res.status(201).json(Hierarchy.createClassVersion(db, tenantOf(req), req.params.ref, { changeReason: req.body?.change_reason || "", actor: req.actor })))
+    wrap(async (req, res) => res.status(201).json(await Hierarchy.createClassVersionAsync(db, tenantOf(req), req.params.ref, { changeReason: req.body?.change_reason || "", actor: req.actor })))
   );
   router.get(
     "/classes/:ref/effective",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Inheritance.resolveEffectiveCharacteristics(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Inheritance.resolveEffectiveCharacteristicsAsync(db, tenantOf(req), req.params.ref)))
   );
   router.get(
     "/classes/:ref/characteristics",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Characteristics.listClassCharacteristics(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Characteristics.listClassCharacteristicsAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/classes/:ref/characteristics",
-    auth,
+    authAsync,
     canClasses("update"),
-    wrap((req, res) => res.status(201).json(Characteristics.addClassCharacteristic(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Characteristics.addClassCharacteristicAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/classes/:ref/validate",
-    auth,
+    authAsync,
     canValidation("read"),
-    wrap((req, res) => res.json(ValidationService.validateClassValues(db, tenantOf(req), req.params.ref, req.body?.values ?? req.body ?? {}, { partial: req.body?.partial === true })))
+    wrap(async (req, res) => res.json(await ValidationService.validateClassValuesAsync(db, tenantOf(req), req.params.ref, req.body?.values ?? req.body ?? {}, { partial: req.body?.partial === true })))
   );
   router.get(
     "/classes/:ref/approved-values",
-    auth,
+    authAsync,
     canClasses("read"),
-    wrap((req, res) => res.json(Inheritance.validateAllowedValueModes(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Inheritance.validateAllowedValueModesAsync(db, tenantOf(req), req.params.ref)))
   );
 
-  const updateClassCharacteristic = wrap((req, res) => res.json(Characteristics.updateClassCharacteristic(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/class-characteristics/:ref", auth, canClasses("update"), updateClassCharacteristic);
-  router.patch("/class-characteristics/:ref", auth, canClasses("update"), updateClassCharacteristic);
+  const updateClassCharacteristic = wrap(async (req, res) => res.json(await Characteristics.updateClassCharacteristicAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/class-characteristics/:ref", authAsync, canClasses("update"), updateClassCharacteristic);
+  router.patch("/class-characteristics/:ref", authAsync, canClasses("update"), updateClassCharacteristic);
   router.delete(
     "/class-characteristics/:ref",
-    auth,
+    authAsync,
     canClasses("update"),
-    wrap((req, res) => res.json(Characteristics.removeClassCharacteristic(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Characteristics.removeClassCharacteristicAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
 
   // ── Characteristics ───────────────────────────────────────────────────────
   router.get(
     "/characteristics",
-    auth,
+    authAsync,
     canCharacteristics("read"),
-    wrap((req, res) => res.json(Characteristics.listCharacteristics(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Characteristics.listCharacteristicsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/characteristics",
-    auth,
+    authAsync,
     canCharacteristics("create"),
-    wrap((req, res) => res.status(201).json(Characteristics.createCharacteristic(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Characteristics.createCharacteristicAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/characteristics/:ref",
-    auth,
+    authAsync,
     canCharacteristics("read"),
-    wrap((req, res) => res.json(Characteristics.getCharacteristic(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Characteristics.getCharacteristicAsync(db, tenantOf(req), req.params.ref)))
   );
-  const updateCharacteristic = wrap((req, res) => res.json(Characteristics.updateCharacteristic(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/characteristics/:ref", auth, canCharacteristics("update"), updateCharacteristic);
-  router.patch("/characteristics/:ref", auth, canCharacteristics("update"), updateCharacteristic);
+  const updateCharacteristic = wrap(async (req, res) => res.json(await Characteristics.updateCharacteristicAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/characteristics/:ref", authAsync, canCharacteristics("update"), updateCharacteristic);
+  router.patch("/characteristics/:ref", authAsync, canCharacteristics("update"), updateCharacteristic);
   router.post(
     "/characteristics/:ref/status",
-    auth,
+    authAsync,
     canCharacteristics("update"),
-    wrap((req, res) => res.json(Characteristics.setCharacteristicStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Characteristics.setCharacteristicStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.delete(
     "/characteristics/:ref",
-    auth,
+    authAsync,
     canCharacteristics("delete"),
-    wrap((req, res) => res.json(Characteristics.deleteCharacteristic(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Characteristics.deleteCharacteristicAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
   router.get(
     "/characteristics/:ref/versions",
-    auth,
+    authAsync,
     canCharacteristics("read"),
-    wrap((req, res) => res.json(Characteristics.listCharacteristicVersions(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Characteristics.listCharacteristicVersionsAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/characteristics/:ref/versions",
-    auth,
+    authAsync,
     canCharacteristics("update"),
-    wrap((req, res) => res.status(201).json(Characteristics.createCharacteristicVersion(db, tenantOf(req), req.params.ref, { changeReason: req.body?.change_reason || "", actor: req.actor })))
+    wrap(async (req, res) => res.status(201).json(await Characteristics.createCharacteristicVersionAsync(db, tenantOf(req), req.params.ref, { changeReason: req.body?.change_reason || "", actor: req.actor })))
   );
   router.get(
     "/characteristics/:ref/allowed-values",
-    auth,
+    authAsync,
     canValues("read"),
-    wrap((req, res) => res.json(Characteristics.listAllowedValues(db, tenantOf(req), req.params.ref, { status: req.query.status || null, q: req.query.q || null })))
+    wrap(async (req, res) => res.json(await Characteristics.listAllowedValuesAsync(db, tenantOf(req), req.params.ref, { status: req.query.status || null, q: req.query.q || null })))
   );
   router.post(
     "/characteristics/:ref/allowed-values",
-    auth,
+    authAsync,
     canValues("create"),
-    wrap((req, res) => res.status(201).json(Characteristics.createAllowedValue(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Characteristics.createAllowedValueAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
   );
 
-  const updateAllowedValue = wrap((req, res) => res.json(Characteristics.updateAllowedValue(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/allowed-values/:ref", auth, canValues("update"), updateAllowedValue);
-  router.patch("/allowed-values/:ref", auth, canValues("update"), updateAllowedValue);
+  const updateAllowedValue = wrap(async (req, res) => res.json(await Characteristics.updateAllowedValueAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/allowed-values/:ref", authAsync, canValues("update"), updateAllowedValue);
+  router.patch("/allowed-values/:ref", authAsync, canValues("update"), updateAllowedValue);
   router.delete(
     "/allowed-values/:ref",
-    auth,
+    authAsync,
     canValues("delete"),
-    wrap((req, res) => res.json(Characteristics.deleteAllowedValue(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Characteristics.deleteAllowedValueAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
 
   // ── Characteristic groups ─────────────────────────────────────────────────
   router.get(
     "/groups",
-    auth,
+    authAsync,
     canGroups("read"),
-    wrap((req, res) => res.json(Characteristics.listGroups(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Characteristics.listGroupsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/groups",
-    auth,
+    authAsync,
     canGroups("create"),
-    wrap((req, res) => res.status(201).json(Characteristics.createGroup(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Characteristics.createGroupAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
-  const updateGroup = wrap((req, res) => res.json(Characteristics.updateGroup(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/groups/:ref", auth, canGroups("update"), updateGroup);
-  router.patch("/groups/:ref", auth, canGroups("update"), updateGroup);
+  const updateGroup = wrap(async (req, res) => res.json(await Characteristics.updateGroupAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/groups/:ref", authAsync, canGroups("update"), updateGroup);
+  router.patch("/groups/:ref", authAsync, canGroups("update"), updateGroup);
   router.delete(
     "/groups/:ref",
-    auth,
+    authAsync,
     canGroups("delete"),
-    wrap((req, res) => res.json(Characteristics.deleteGroup(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Characteristics.deleteGroupAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
   router.get(
     "/groups/:ref/members",
-    auth,
+    authAsync,
     canGroups("read"),
-    wrap((req, res) => res.json(Characteristics.listGroupMembers(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Characteristics.listGroupMembersAsync(db, tenantOf(req), req.params.ref)))
   );
   router.post(
     "/groups/:ref/members",
-    auth,
+    authAsync,
     canGroups("update"),
-    wrap((req, res) => res.status(201).json(Characteristics.addGroupMember(db, tenantOf(req), req.params.ref, req.body?.characteristic_id ?? req.body?.characteristicId ?? req.body?.characteristic, { sequence: req.body?.sequence ?? null }, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Characteristics.addGroupMemberAsync(db, tenantOf(req), req.params.ref, req.body?.characteristic_id ?? req.body?.characteristicId ?? req.body?.characteristic, { sequence: req.body?.sequence ?? null }, req.actor, req.ip)))
   );
   router.delete(
     "/groups/:ref/members/:characteristicRef",
-    auth,
+    authAsync,
     canGroups("update"),
-    wrap((req, res) => res.json(Characteristics.removeGroupMember(db, tenantOf(req), req.params.ref, req.params.characteristicRef)))
+    wrap(async (req, res) => res.json(await Characteristics.removeGroupMemberAsync(db, tenantOf(req), req.params.ref, req.params.characteristicRef)))
   );
 
   // ── Rules ─────────────────────────────────────────────────────────────────
   router.get(
     "/rules",
-    auth,
+    authAsync,
     canValidation("read"),
-    wrap((req, res) => res.json(Rules.listRules(db, tenantOf(req), { classId: req.query.class_id ?? req.query.classId, characteristicId: req.query.characteristic_id ?? req.query.characteristicId, ruleType: req.query.rule_type ?? req.query.ruleType, status: req.query.status })))
+    wrap(async (req, res) => res.json(await Rules.listRulesAsync(db, tenantOf(req), { classId: req.query.class_id ?? req.query.classId, characteristicId: req.query.characteristic_id ?? req.query.characteristicId, ruleType: req.query.rule_type ?? req.query.ruleType, status: req.query.status })))
   );
   router.post(
     "/rules",
-    auth,
+    authAsync,
     canValidation("update"),
-    wrap((req, res) => res.status(201).json(Rules.createRule(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Rules.createRuleAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
-  const updateRule = wrap((req, res) => res.json(Rules.updateRule(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/rules/:ref", auth, canValidation("update"), updateRule);
-  router.patch("/rules/:ref", auth, canValidation("update"), updateRule);
+  const updateRule = wrap(async (req, res) => res.json(await Rules.updateRuleAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/rules/:ref", authAsync, canValidation("update"), updateRule);
+  router.patch("/rules/:ref", authAsync, canValidation("update"), updateRule);
   router.delete(
     "/rules/:ref",
-    auth,
+    authAsync,
     canValidation("update"),
-    wrap((req, res) => res.json(Rules.deleteRule(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Rules.deleteRuleAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
 
   // ── Assignments ───────────────────────────────────────────────────────────
   router.get(
     "/assignments",
-    auth,
+    authAsync,
     canAssignments("read"),
-    wrap((req, res) => res.json(Assignments.listAssignments(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await Assignments.listAssignmentsAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.post(
     "/assignments",
-    auth,
+    authAsync,
     canAssignments("create"),
-    wrap((req, res) => res.status(201).json(Assignments.assignClass(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Assignments.assignClassAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip)))
   );
   router.get(
     "/assignments/:ref",
-    auth,
+    authAsync,
     canAssignments("read"),
-    wrap((req, res) => res.json(Assignments.getAssignment(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Assignments.getAssignmentAsync(db, tenantOf(req), req.params.ref)))
   );
   router.put(
     "/assignments/:ref/values",
-    auth,
+    authAsync,
     canAssignments("update"),
-    wrap((req, res) => res.json(Assignments.setAssignmentValues(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Assignments.setAssignmentValuesAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/assignments/:ref/values",
-    auth,
+    authAsync,
     canAssignments("update"),
-    wrap((req, res) => res.json(Assignments.setAssignmentValues(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Assignments.setAssignmentValuesAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
   );
   router.post(
     "/assignments/:ref/status",
-    auth,
+    authAsync,
     canAssignments("update"),
-    wrap((req, res) => res.json(Assignments.setAssignmentStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Assignments.setAssignmentStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.post(
     "/assignments/:ref/reclassify",
-    auth,
+    authAsync,
     canAssignments("update"),
-    wrap((req, res) => res.json(Assignments.reclassify(db, tenantOf(req), req.params.ref, { classId: req.body?.class_id ?? req.body?.classId, values: req.body?.values, validate: req.body?.validate !== false }, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Assignments.reclassifyAsync(db, tenantOf(req), req.params.ref, { classId: req.body?.class_id ?? req.body?.classId, values: req.body?.values, validate: req.body?.validate !== false }, req.actor, req.ip)))
   );
   router.post(
     "/assignments/:ref/validate",
-    auth,
+    authAsync,
     canValidation("read"),
-    wrap((req, res) => res.json(Assignments.validateAssignment(db, tenantOf(req), req.params.ref)))
+    wrap(async (req, res) => res.json(await Assignments.validateAssignmentAsync(db, tenantOf(req), req.params.ref)))
   );
   router.delete(
     "/assignments/:ref",
-    auth,
+    authAsync,
     canAssignments("delete"),
-    wrap((req, res) => res.json(Assignments.unassign(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Assignments.unassignAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip)))
   );
 
   // ── Object-centric read/validate contract ─────────────────────────────────
   router.get(
     "/objects/:objectType/:objectId",
-    auth,
+    authAsync,
     canAssignments("read"),
-    wrap((req, res) => res.json(Assignments.objectClassifications(db, tenantOf(req), req.params.objectType, req.params.objectId, { includeInactive: String(req.query.include_inactive || "") === "true" })))
+    wrap(async (req, res) => res.json(await Assignments.objectClassificationsAsync(db, tenantOf(req), req.params.objectType, req.params.objectId, { includeInactive: String(req.query.include_inactive || "") === "true" })))
   );
   router.get(
     "/objects/:objectType/:objectId/values",
-    auth,
+    authAsync,
     canAssignments("read"),
-    wrap((req, res) => res.json(Assignments.resolveObjectValues(db, tenantOf(req), req.params.objectType, req.params.objectId)))
+    wrap(async (req, res) => res.json(await Assignments.resolveObjectValuesAsync(db, tenantOf(req), req.params.objectType, req.params.objectId)))
   );
   router.get(
     "/objects/:objectType/:objectId/effective",
-    auth,
+    authAsync,
     canAssignments("read"),
-    wrap((req, res) => res.json({ items: Assignments.effectiveCharacteristicsForObject(db, tenantOf(req), req.params.objectType, req.params.objectId) }))
+    wrap(async (req, res) => res.json({ items: await Assignments.effectiveCharacteristicsForObjectAsync(db, tenantOf(req), req.params.objectType, req.params.objectId) }))
   );
   router.post(
     "/objects/:objectType/:objectId/validate",
-    auth,
+    authAsync,
     canValidation("read"),
-    wrap((req, res) => res.json(ValidationService.validateObject(db, tenantOf(req), { objectType: req.params.objectType, objectId: req.params.objectId })))
+    wrap(async (req, res) => res.json(await ValidationService.validateObjectAsync(db, tenantOf(req), { objectType: req.params.objectType, objectId: req.params.objectId })))
   );
   router.post(
     "/objects/:objectType/validate-batch",
-    auth,
+    authAsync,
     canValidation("read"),
-    wrap((req, res) => res.json(ValidationService.validateBatch(db, tenantOf(req), { objectType: req.params.objectType, objectIds: req.body?.object_ids || req.body?.objectIds || [] })))
+    wrap(async (req, res) => res.json(await ValidationService.validateBatchAsync(db, tenantOf(req), { objectType: req.params.objectType, objectIds: req.body?.object_ids || req.body?.objectIds || [] })))
   );
 
   // ── Duplicate detection ───────────────────────────────────────────────────
   router.post(
     "/duplicates/scan",
-    auth,
+    authAsync,
     canGovernance("read"),
-    wrap((req, res) => res.json(Duplicates.detectClassificationDuplicates(db, { tenantId: tenantOf(req), classRef: req.body?.class_id ?? req.body?.classRef ?? null, objectType: req.body?.object_type ?? null, threshold: req.body?.threshold ?? null, actor: req.actor })))
+    wrap(async (req, res) => res.json(await Duplicates.detectClassificationDuplicatesAsync(db, { tenantId: tenantOf(req), classRef: req.body?.class_id ?? req.body?.classRef ?? null, objectType: req.body?.object_type ?? null, threshold: req.body?.threshold ?? null, actor: req.actor })))
   );
   router.get(
     "/duplicates/summary",
-    auth,
+    authAsync,
     canGovernance("read"),
-    wrap((req, res) => res.json(Duplicates.duplicateSummary(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Duplicates.duplicateSummaryAsync(db, { tenantId: tenantOf(req) })))
   );
 
   // ── Units ─────────────────────────────────────────────────────────────────
   router.get(
     "/units",
-    auth,
+    authAsync,
     canCharacteristics("read"),
     wrap((req, res) => res.json(Units.listUnits(db, { tenantId: tenantOf(req), uomClass: req.query.uom_class ?? null, q: req.query.q || null })))
   );
   router.post(
     "/units/convert",
-    auth,
+    authAsync,
     canCharacteristics("read"),
     wrap((req, res) => res.json(Units.convertValue(req.body?.value, req.body?.from_unit ?? req.body?.fromUnit, req.body?.to_unit ?? req.body?.toUnit, { units: Units.listUnits(db, { tenantId: tenantOf(req), limit: 2000 }) })))
   );
@@ -550,47 +552,47 @@ export function createClassificationRouter({ express, db, auth, can, wrap }) {
   // ── History & lineage ─────────────────────────────────────────────────────
   router.get(
     "/history",
-    auth,
+    authAsync,
     canAudit("read"),
-    wrap((req, res) => res.json(History.listHistory(db, { tenantId: tenantOf(req), ...req.query })))
+    wrap(async (req, res) => res.json(await History.listHistoryAsync(db, { tenantId: tenantOf(req), ...req.query })))
   );
   router.get(
     "/lineage/:objectType/:objectId",
-    auth,
+    authAsync,
     canAudit("read"),
-    wrap((req, res) => res.json(History.objectLineage(db, tenantOf(req), req.params.objectType, req.params.objectId)))
+    wrap(async (req, res) => res.json(await History.objectLineageAsync(db, tenantOf(req), req.params.objectType, req.params.objectId)))
   );
 
   // ── Jobs ──────────────────────────────────────────────────────────────────
   router.post(
     "/jobs/bulk-assign",
-    auth,
+    authAsync,
     canAssignments("update"),
-    wrap((req, res) => res.status(202).json(Jobs.submitBulkAssignJob(db, { tenantId: tenantOf(req), classId: req.body?.class_id ?? req.body?.classId, objectType: req.body?.object_type ?? req.body?.objectType, objectIds: req.body?.object_ids || req.body?.objectIds || [], values: req.body?.values || null, action: req.body?.action || "ASSIGN", actor: req.actor, ip: req.ip, idempotencyKey: idem(req) })))
+    wrap(async (req, res) => res.status(202).json(await Jobs.submitBulkAssignJobAsync(db, { tenantId: tenantOf(req), classId: req.body?.class_id ?? req.body?.classId, objectType: req.body?.object_type ?? req.body?.objectType, objectIds: req.body?.object_ids || req.body?.objectIds || [], values: req.body?.values || null, action: req.body?.action || "ASSIGN", actor: req.actor, ip: req.ip, idempotencyKey: idem(req) })))
   );
   router.post(
     "/jobs/bulk-validate",
-    auth,
+    authAsync,
     canValidation("read"),
-    wrap((req, res) => res.status(202).json(Jobs.submitBulkValidateJob(db, { tenantId: tenantOf(req), objectType: req.body?.object_type ?? req.body?.objectType, objectIds: req.body?.object_ids || req.body?.objectIds || [], actor: req.actor, ip: req.ip, idempotencyKey: idem(req) })))
+    wrap(async (req, res) => res.status(202).json(await Jobs.submitBulkValidateJobAsync(db, { tenantId: tenantOf(req), objectType: req.body?.object_type ?? req.body?.objectType, objectIds: req.body?.object_ids || req.body?.objectIds || [], actor: req.actor, ip: req.ip, idempotencyKey: idem(req) })))
   );
   router.post(
     "/jobs/duplicate-scan",
-    auth,
+    authAsync,
     canGovernance("read"),
-    wrap((req, res) => res.status(202).json(Jobs.submitDuplicateScanJob(db, { tenantId: tenantOf(req), classRef: req.body?.class_id ?? req.body?.classRef ?? null, objectType: req.body?.object_type ?? null, threshold: req.body?.threshold ?? null, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) })))
+    wrap(async (req, res) => res.status(202).json(await Jobs.submitDuplicateScanJobAsync(db, { tenantId: tenantOf(req), classRef: req.body?.class_id ?? req.body?.classRef ?? null, objectType: req.body?.object_type ?? null, threshold: req.body?.threshold ?? null, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) })))
   );
   router.post(
     "/jobs/maintenance",
-    auth,
+    authAsync,
     canAdmin("update"),
-    wrap((req, res) => res.status(202).json(Jobs.submitMaintenanceJob(db, { tenantId: tenantOf(req), actor: req.actor, ip: req.ip, idempotencyKey: idem(req) })))
+    wrap(async (req, res) => res.status(202).json(await Jobs.submitMaintenanceJobAsync(db, { tenantId: tenantOf(req), actor: req.actor, ip: req.ip, idempotencyKey: idem(req) })))
   );
 
   // ── Seed ──────────────────────────────────────────────────────────────────
   router.post(
     "/seed",
-    auth,
+    authAsync,
     canAdmin("create"),
     wrap((req, res) => res.json(Seed.seedClassification(db, tenantOf(req))))
   );

@@ -26,6 +26,16 @@ export function withEventSuppression(fn) {
   }
 }
 
+// Async twin of `withEventSuppression` for migrated seed/bootstrap paths.
+export async function withEventSuppressionAsync(fn) {
+  suppressionDepth += 1;
+  try {
+    return await fn();
+  } finally {
+    suppressionDepth -= 1;
+  }
+}
+
 export function eventsSuppressed() {
   return suppressionDepth > 0;
 }

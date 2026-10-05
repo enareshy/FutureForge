@@ -5,6 +5,7 @@
 // per-tenant configuration. It registers into platform seams (IAM, events, jobs,
 // search, reference data) and never duplicates them.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { tenantIds } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
 import { ensureClassificationUnits } from "./units.js";
@@ -64,5 +65,26 @@ export function classificationHealth(db, tenantId = null) {
       history: scoped("cla_change_history"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM cla_assignments").length,
+  };
+}
+
+export async function classificationHealthAsync(db, tenantId = null) {
+  const scoped = async (table) =>
+    tenantId
+      ? Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ?`, [Number(tenantId)]))?.c || 0)
+      : Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0);
+  return {
+    source_module: SOURCE_MODULE,
+    counts: {
+      classifications: await scoped("cla_classifications"),
+      classes: await scoped("cla_classes"),
+      characteristics: await scoped("cla_characteristics"),
+      allowed_values: await scoped("cla_allowed_values"),
+      assignments: await scoped("cla_assignments"),
+      assignment_values: await scoped("cla_assignment_values"),
+      rules: await scoped("cla_rules"),
+      history: await scoped("cla_change_history"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM cla_assignments")).length,
   };
 }

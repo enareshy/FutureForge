@@ -1,8 +1,8 @@
 // Cross-cutting hooks for the Integration & API Framework. Audit, search and
 // structured logging are intentionally best-effort: an observability outage
 // must never fail (or roll back) an integration write.
-import { writeAudit } from "../audit.js";
-import { emitObjectChanged } from "../search/hooks.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { emitObjectChanged, emitObjectChangedAsync } from "../search/hooks.js";
 
 export function correlationId(req) {
   return (
@@ -46,9 +46,37 @@ export function auditIntegration(db, input = {}) {
   }
 }
 
+export async function auditIntegrationAsync(db, input = {}) {
+  const { actor = null, action, resourceType, resourceId, details = {}, reason = null, ip = null, status = "success", errorMessage = null, correlationId: correlation = null } = input;
+  try {
+    return await writeAuditAsync(db, {
+      actor,
+      action,
+      resourceType,
+      resourceId: resourceId === undefined || resourceId === null ? null : String(resourceId),
+      details: { ...details, correlationId: correlation || details.correlationId || undefined },
+      reason,
+      ip,
+      status,
+      errorMessage,
+      source: "integration",
+    });
+  } catch {
+    return null;
+  }
+}
+
 export function emitChanged(db, { objectType, object, operation = "upsert", actor = null, reason = "integration" } = {}) {
   try {
     return emitObjectChanged(db, { objectType, object, operation, reason, actor });
+  } catch {
+    return null;
+  }
+}
+
+export async function emitChangedAsync(db, { objectType, object, operation = "upsert", actor = null, reason = "integration" } = {}) {
+  try {
+    return await emitObjectChangedAsync(db, { objectType, object, operation, reason, actor });
   } catch {
     return null;
   }

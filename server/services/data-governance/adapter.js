@@ -4,8 +4,9 @@
 // their own adapter; `platform.objects` is the built-in adapter over the Object
 // & Relationship Framework.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { adapterNotFound } from "./errors.js";
-import { getObject, listObjects } from "../objects.js";
+import { getObject, getObjectAsync, listObjects, listObjectsAsync } from "../objects.js";
 import { readAttribute } from "./validation.js";
 
 const adapters = new Map();
@@ -61,8 +62,24 @@ const objectsAdapter = {
     if (objectType && String(type).toLowerCase() !== String(objectType).toLowerCase()) return null;
     return normalizeLoaded(type, row.id, row, { fields: { revision: row.revision } });
   },
+  async loadAsync(db, { tenantId, objectType, objectId }) {
+    let row;
+    try {
+      row = await getObjectAsync(db, objectId, Number(tenantId));
+    } catch {
+      row = null;
+    }
+    if (!row) return null;
+    const type = row.type?.code || objectType;
+    if (objectType && String(type).toLowerCase() !== String(objectType).toLowerCase()) return null;
+    return normalizeLoaded(type, row.id, row, { fields: { revision: row.revision } });
+  },
   list(db, { tenantId, objectType, limit = 500, offset = 0 }) {
     const result = listObjects(db, { type: objectType, page: Math.floor(offset / Math.max(1, limit)) + 1, pageSize: limit }, Number(tenantId));
+    return (result.items || []).map((row) => normalizeLoaded(objectType, row.id, row));
+  },
+  async listAsync(db, { tenantId, objectType, limit = 500, offset = 0 }) {
+    const result = await listObjectsAsync(db, { type: objectType, page: Math.floor(offset / Math.max(1, limit)) + 1, pageSize: limit }, Number(tenantId));
     return (result.items || []).map((row) => normalizeLoaded(objectType, row.id, row));
   },
   // Uniqueness over a governed attribute. Extracts the attribute from the
@@ -70,6 +87,19 @@ const objectsAdapter = {
   findDuplicates(db, { tenantId, objectType, attributeName, value, excludeObjectId, limit = 25 }) {
     if (!attributeName) return [];
     return queryAll(
+      db,
+      `SELECT o.id, o.name, o.code FROM objects o
+       JOIN metadata_types t ON t.id = o.object_type_id
+       WHERE o.tenant_id = ? AND t.code = ? AND o.deleted_at IS NULL
+         AND o.id <> ?
+         AND (o.data_json::jsonb ->> ?) = (?::text)
+       LIMIT ?`,
+      [Number(tenantId), String(objectType), Number(excludeObjectId) || -1, String(attributeName), String(value), Number(limit)]
+    );
+  },
+  async findDuplicatesAsync(db, { tenantId, objectType, attributeName, value, excludeObjectId, limit = 25 }) {
+    if (!attributeName) return [];
+    return await queryAllAsync(
       db,
       `SELECT o.id, o.name, o.code FROM objects o
        JOIN metadata_types t ON t.id = o.object_type_id
@@ -103,6 +133,13 @@ export function ensureDefaultAdapters() {
 export function loadGovernedObject(db, { tenantId, objectType, objectId, adapterCode = "platform.objects" }) {
   const adapter = requireAdapter(adapterCode);
   return adapter.load(db, { tenantId, objectType, objectId });
+}
+
+export async function loadGovernedObjectAsync(db, { tenantId, objectType, objectId, adapterCode = "platform.objects" }) {
+  const adapter = requireAdapter(adapterCode);
+  return adapter.loadAsync
+    ? await adapter.loadAsync(db, { tenantId, objectType, objectId })
+    : adapter.load(db, { tenantId, objectType, objectId });
 }
 
 export function readByPath(payload, path) {

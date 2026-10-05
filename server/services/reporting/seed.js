@@ -5,12 +5,13 @@
 // reusable set of analytical assets (KPIs, a parts report and an operations
 // dashboard) so the capability is usable immediately after boot.
 import { queryOne } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { withEventSuppression } from "../events/emit.js";
-import { ensureReportingFoundation } from "./foundation.js";
+import { ensureReportingFoundation, ensureReportingFoundationAsync } from "./foundation.js";
 import { KPI_CATALOG, REPORTING_RESOURCES } from "./constants.js";
-import { createKpi, setKpiStatus } from "./kpis.js";
-import { createReport, publishReport } from "./reports.js";
-import { createDashboard, publishDashboard } from "./dashboards.js";
+import { createKpi, setKpiStatus, createKpiAsync, setKpiStatusAsync } from "./kpis.js";
+import { createReport, publishReport, createReportAsync, publishReportAsync } from "./reports.js";
+import { createDashboard, publishDashboard, createDashboardAsync, publishDashboardAsync } from "./dashboards.js";
 
 const CROSS_DOMAIN_REPORT = "OBJECTS_BY_TYPE";
 const OPERATIONS_DASHBOARD = "OPERATIONS_OVERVIEW";
@@ -22,10 +23,24 @@ function resolveTenantId(db, tenantId) {
   return helix?.id ?? null;
 }
 
+async function resolveTenantIdAsync(db, tenantId) {
+  const explicit = Number(tenantId);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const helix = await queryOneAsync(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  return helix?.id ?? null;
+}
+
 function resolveSeedActor(db) {
   const admin = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin' LIMIT 1");
   if (admin) return { id: admin.id, username: admin.username };
   const any = queryOne(db, "SELECT id, username FROM users ORDER BY id LIMIT 1");
+  return any ? { id: any.id, username: any.username } : null;
+}
+
+async function resolveSeedActorAsync(db) {
+  const admin = await queryOneAsync(db, "SELECT id, username FROM users WHERE username = 'admin' LIMIT 1");
+  if (admin) return { id: admin.id, username: admin.username };
+  const any = await queryOneAsync(db, "SELECT id, username FROM users ORDER BY id LIMIT 1");
   return any ? { id: any.id, username: any.username } : null;
 }
 
@@ -106,12 +121,95 @@ export function ensureDefaultReportingAssets(db, tenantId) {
   return { created };
 }
 
+export async function ensureDefaultReportingAssetsAsync(db, tenantId) {
+  const tenant = await resolveTenantIdAsync(db, tenantId);
+  if (!tenant) return { created: 0, reason: "no_tenant" };
+  const actor = await resolveSeedActorAsync(db);
+  let created = 0;
+
+  for (const kpi of KPI_CATALOG) {
+    if (await queryOneAsync(db, "SELECT id FROM reporting_kpis WHERE tenant_id = ? AND code = ?", [tenant, kpi.code])) continue;
+    const record = await createKpiAsync(db, tenant, { ...kpi, visibility: undefined }, actor);
+    await setKpiStatusAsync(db, tenant, record.code, "ACTIVE", actor);
+    created += 1;
+  }
+
+  let report = await queryOneAsync(db, "SELECT id FROM reporting_reports WHERE tenant_id = ? AND code = ?", [tenant, CROSS_DOMAIN_REPORT]);
+  if (!report) {
+    const record = await createReportAsync(
+      db,
+      tenant,
+      {
+        code: CROSS_DOMAIN_REPORT,
+        name: "Objects by type",
+        description: "Cross-domain count of business objects grouped by object type.",
+        report_type: "CROSS_DOMAIN",
+        visibility: "ORGANIZATION",
+        definition: {
+          entity: "object",
+          columns: [
+            { attribute: "number", label: "Number" },
+            { attribute: "name", label: "Name" },
+            { attribute: "object_type", label: "Object type" },
+            { attribute: "status", label: "Status" },
+          ],
+          group_by: ["object_type"],
+          aggregations: [{ function: "COUNT", attribute: null, alias: "object_count" }],
+          sort: [{ target: "object_count", direction: "DESC" }],
+          visualization: { type: "BAR", x: "object_type", y: "object_count" },
+        },
+        visualization: { type: "BAR", x: "object_type", y: "object_count" },
+      },
+      actor
+    );
+    await publishReportAsync(db, tenant, record.id, actor);
+    report = { id: record.id };
+    created += 1;
+  }
+
+  if (!(await queryOneAsync(db, "SELECT id FROM reporting_dashboards WHERE tenant_id = ? AND code = ?", [tenant, OPERATIONS_DASHBOARD]))) {
+    const kpiRows = (await Promise.all(KPI_CATALOG.slice(0, 3).map((kpi) => queryOneAsync(db, "SELECT id FROM reporting_kpis WHERE tenant_id = ? AND code = ?", [tenant, kpi.code])))).filter(Boolean);
+    const dashboard = await createDashboardAsync(
+      db,
+      tenant,
+      {
+        code: OPERATIONS_DASHBOARD,
+        name: "Operations overview",
+        description: "Reusable operations dashboard for PDM and engineering change KPIs.",
+        dashboard_type: "OPERATIONAL",
+        visibility: "ORGANIZATION",
+        is_default: true,
+        layout: { columns: 2, row_height: 220 },
+        widgets: [
+          { widget_type: "REPORT", title: "Objects by type", report_id: report.id, layout: { w: 2, h: 1 } },
+          ...kpiRows.map((kpi, index) => ({ widget_type: "KPI_CARD", title: `KPI ${index + 1}`, kpi_id: kpi.id, sequence: index + 10, layout: { w: 1, h: 1 } })),
+        ],
+      },
+      actor
+    );
+    await publishDashboardAsync(db, tenant, dashboard.id, actor);
+    created += 1;
+  }
+
+  return { created };
+}
+
 export function seedReporting(db, tenantId) {
   return withEventSuppression(() => {
     const tenant = resolveTenantId(db, tenantId);
     const foundation = ensureReportingFoundation(db);
     if (!tenant) return { foundation, seeded: false, reason: "no_tenant" };
     const assets = ensureDefaultReportingAssets(db, tenant);
+    return { foundation, assets, seeded: true };
+  });
+}
+
+export async function seedReportingAsync(db, tenantId) {
+  return withEventSuppression(async () => {
+    const tenant = await resolveTenantIdAsync(db, tenantId);
+    const foundation = await ensureReportingFoundationAsync(db);
+    if (!tenant) return { foundation, seeded: false, reason: "no_tenant" };
+    const assets = await ensureDefaultReportingAssetsAsync(db, tenant);
     return { foundation, assets, seeded: true };
   });
 }
@@ -123,4 +221,13 @@ export function ensureReportingSeed(db, tenantId) {
   const existing = queryOne(db, "SELECT id FROM reporting_reports WHERE tenant_id = ? AND code = ?", [tenant, CROSS_DOMAIN_REPORT]);
   if (existing) return { seeded: false, reason: "already_present" };
   return seedReporting(db, tenant);
+}
+
+export async function ensureReportingSeedAsync(db, tenantId) {
+  await withEventSuppression(() => ensureReportingFoundationAsync(db));
+  const tenant = await resolveTenantIdAsync(db, tenantId);
+  if (!tenant) return { seeded: false, reason: "no_tenant" };
+  const existing = await queryOneAsync(db, "SELECT id FROM reporting_reports WHERE tenant_id = ? AND code = ?", [tenant, CROSS_DOMAIN_REPORT]);
+  if (existing) return { seeded: false, reason: "already_present" };
+  return await seedReportingAsync(db, tenant);
 }

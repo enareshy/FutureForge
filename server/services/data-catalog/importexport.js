@@ -6,22 +6,41 @@
 // domain services so validation, audit, events and versioning are identical to
 // an interactive write. Every run is recorded in dc_import_runs.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { importFailed, exportFailed, invalidConfiguration } from "./errors.js";
 import { normalizeText, normalizeUpper, parseObject, toBool, toInt } from "./validation.js";
-import { getConfig } from "./configuration.js";
+import { getConfig, getConfigAsync } from "./configuration.js";
 import { publicImportRun } from "./repository.js";
-import { createTerm, addSynonym, addMapping, listTerms } from "./glossary.js";
-import { createCatalogObject, createAttribute } from "./objects.js";
-import { createSource, addSourceMapping } from "./sources.js";
-import { createConsumer, addConsumerMapping } from "./consumers.js";
-import { createClassification } from "./classifications.js";
-import { createLineage } from "./lineage.js";
+import { createTerm, addSynonym, addMapping, listTerms, createTermAsync, addSynonymAsync, addMappingAsync, listTermsAsync } from "./glossary.js";
+import { createCatalogObject, createAttribute, createCatalogObjectAsync, createAttributeAsync } from "./objects.js";
+import { createSource, addSourceMapping, createSourceAsync, addSourceMappingAsync } from "./sources.js";
+import { createConsumer, addConsumerMapping, createConsumerAsync, addConsumerMappingAsync } from "./consumers.js";
+import { createClassification, createClassificationAsync } from "./classifications.js";
+import { createLineage, createLineageAsync } from "./lineage.js";
 
 export const IMPORTABLE_RESOURCES = ["terms", "objects", "attributes", "sources", "consumers", "classifications", "term_mappings", "source_mappings", "consumer_mappings", "lineage"];
 
 function createImportRun(db, { tenantId, resourceType, format, dryRun, transferRef, jobRef, actor }) {
   const result = run(
+    db,
+    "INSERT INTO dc_import_runs (tenant_id, resource_type, format, status, dry_run, stats_json, errors_json, transfer_ref, job_ref, created_by, created_at) VALUES (?, ?, ?, 'running', ?, '{}', '[]', ?, ?, ?, ?)",
+    [
+      Number(tenantId),
+      normalizeText(resourceType),
+      normalizeText(format) || "json",
+      dryRun ? 1 : 0,
+      normalizeText(transferRef),
+      normalizeText(jobRef),
+      actor?.id ?? null,
+      nowIso(),
+    ]
+  );
+  return Number(result.lastInsertId);
+}
+
+async function createImportRunAsync(db, { tenantId, resourceType, format, dryRun, transferRef, jobRef, actor }) {
+  const result = await runAsync(
     db,
     "INSERT INTO dc_import_runs (tenant_id, resource_type, format, status, dry_run, stats_json, errors_json, transfer_ref, job_ref, created_by, created_at) VALUES (?, ?, ?, 'running', ?, '{}', '[]', ?, ?, ?, ?)",
     [
@@ -49,6 +68,17 @@ function completeImportRun(db, id, { status, stats, errors }) {
   return publicImportRun(queryOne(db, "SELECT * FROM dc_import_runs WHERE id = ?", [id]));
 }
 
+async function completeImportRunAsync(db, id, { status, stats, errors }) {
+  await runAsync(db, "UPDATE dc_import_runs SET status = ?, stats_json = ?, errors_json = ?, completed_at = ? WHERE id = ?", [
+    status,
+    JSON.stringify(stats || {}),
+    JSON.stringify(errors || []),
+    nowIso(),
+    id,
+  ]);
+  return publicImportRun(await queryOneAsync(db, "SELECT * FROM dc_import_runs WHERE id = ?", [id]));
+}
+
 export function listImportRuns(db, { tenantId, status, limit = 50 } = {}) {
   const clauses = ["tenant_id = ?"];
   const params = [Number(tenantId)];
@@ -62,10 +92,31 @@ export function listImportRuns(db, { tenantId, status, limit = 50 } = {}) {
   ]).map(publicImportRun);
 }
 
+export async function listImportRunsAsync(db, { tenantId, status, limit = 50 } = {}) {
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (status) {
+    clauses.push("status = ?");
+    params.push(normalizeText(status));
+  }
+  const rows = await queryAllAsync(db, `SELECT * FROM dc_import_runs WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT ?`, [
+    ...params,
+    Number(limit) || 50,
+  ]);
+  return rows.map(publicImportRun);
+}
+
 export function getImportRun(db, id, tenantId = null) {
   const row = tenantId
     ? queryOne(db, "SELECT * FROM dc_import_runs WHERE id = ? AND tenant_id = ?", [Number(id), Number(tenantId)])
     : queryOne(db, "SELECT * FROM dc_import_runs WHERE id = ?", [Number(id)]);
+  return publicImportRun(row);
+}
+
+export async function getImportRunAsync(db, id, tenantId = null) {
+  const row = tenantId
+    ? await queryOneAsync(db, "SELECT * FROM dc_import_runs WHERE id = ? AND tenant_id = ?", [Number(id), Number(tenantId)])
+    : await queryOneAsync(db, "SELECT * FROM dc_import_runs WHERE id = ?", [Number(id)]);
   return publicImportRun(row);
 }
 
@@ -96,6 +147,36 @@ function applyRecord(db, resourceType, record, actor, tenantId) {
       return addConsumerMapping(db, record.consumer_ref ?? record.consumer_code ?? record.consumer_id, record, actor, tenantId);
     case "lineage":
       return createLineage(db, record, actor, tenantId);
+    default:
+      throw importFailed(`Unsupported import resource: ${resourceType}`, { resource_type: resourceType, allowed: IMPORTABLE_RESOURCES });
+  }
+}
+
+async function applyRecordAsync(db, resourceType, record, actor, tenantId) {
+  switch (resourceType) {
+    case "terms": {
+      const term = await createTermAsync(db, record, actor, tenantId);
+      if (Array.isArray(record.synonyms)) for (const synonym of record.synonyms) await addSynonymAsync(db, term.id, synonym, actor, tenantId);
+      return term;
+    }
+    case "objects":
+      return await createCatalogObjectAsync(db, record, actor, tenantId);
+    case "attributes":
+      return await createAttributeAsync(db, record.object_ref ?? record.object_type ?? record.object_id, record, actor, tenantId);
+    case "sources":
+      return await createSourceAsync(db, record, actor, tenantId);
+    case "consumers":
+      return await createConsumerAsync(db, record, actor, tenantId);
+    case "classifications":
+      return await createClassificationAsync(db, record, actor, tenantId);
+    case "term_mappings":
+      return await addMappingAsync(db, record.term_ref ?? record.term_id, record, actor, tenantId);
+    case "source_mappings":
+      return await addSourceMappingAsync(db, record.source_ref ?? record.source_code ?? record.source_id, record, actor, tenantId);
+    case "consumer_mappings":
+      return await addConsumerMappingAsync(db, record.consumer_ref ?? record.consumer_code ?? record.consumer_id, record, actor, tenantId);
+    case "lineage":
+      return await createLineageAsync(db, record, actor, tenantId);
     default:
       throw importFailed(`Unsupported import resource: ${resourceType}`, { resource_type: resourceType, allowed: IMPORTABLE_RESOURCES });
   }
@@ -141,11 +222,69 @@ export function importCatalog(db, { tenantId, resourceType, records = [], dryRun
   return { import_run: importRun, stats, errors };
 }
 
+export async function importCatalogAsync(db, { tenantId, resourceType, records = [], dryRun = false, transferRef = "", jobRef = "", actor = null, ip = null } = {}) {
+  const resource = normalizeText(resourceType);
+  if (!IMPORTABLE_RESOURCES.includes(resource)) {
+    throw importFailed(`Unsupported import resource: ${resource}`, { resource_type: resource, allowed: IMPORTABLE_RESOURCES });
+  }
+  const batchSize = toInt(await getConfigAsync(db, tenantId, "import_batch_size"), 500) || 500;
+  if (!Array.isArray(records)) throw importFailed("Import records must be an array", { resource_type: resource });
+  const runId = await createImportRunAsync(db, { tenantId, resourceType: resource, format: "json", dryRun, transferRef, jobRef, actor });
+  const stats = { total: records.length, created: 0, skipped: 0, failed: 0, batches: 0 };
+  const errors = [];
+  for (let offset = 0; offset < records.length; offset += batchSize) {
+    const batch = records.slice(offset, offset + batchSize);
+    stats.batches += 1;
+    for (const record of batch) {
+      if (dryRun) {
+        stats.skipped += 1;
+        continue;
+      }
+      try {
+        await applyRecordAsync(db, resource, record, actor, tenantId);
+        stats.created += 1;
+      } catch (error) {
+        stats.failed += 1;
+        if (errors.length < 200) errors.push({ index: offset, message: error.message, code: error.code || null });
+      }
+    }
+  }
+  const status = stats.failed === 0 ? "completed" : stats.created === 0 ? "failed" : "partial";
+  const importRun = await completeImportRunAsync(db, runId, { status, stats, errors });
+  await writeAuditAsync(db, {
+    actor,
+    action: "data_catalog.import",
+    resourceType: "dc_import_run",
+    resourceId: runId,
+    details: { resource_type: resource, dry_run: dryRun, stats },
+    ip,
+  });
+  return { import_run: importRun, stats, errors };
+}
+
 export function exportCatalog(db, { tenantId, resourceTypes = null, format = "json", limit = 5000 } = {}) {
   const requested = (Array.isArray(resourceTypes) && resourceTypes.length ? resourceTypes : ["terms", "objects", "sources", "consumers", "classifications", "lineage"]).map(normalizeText);
   const data = {};
   for (const resource of requested) {
     data[resource] = exportResource(db, tenantId, resource, limit);
+  }
+  if (format === "csv") {
+    const rows = [];
+    for (const [resource, items] of Object.entries(data)) {
+      for (const item of items) rows.push({ resource, ...flatten(item) });
+    }
+    return { format: "csv", content: toCsv(rows), record_count: rows.length, resources: requested };
+  }
+  if (format !== "json") throw exportFailed(`Unsupported export format: ${format}`, { format });
+  const count = Object.values(data).reduce((total, items) => total + items.length, 0);
+  return { format: "json", data, content: JSON.stringify(data, null, 2), record_count: count, resources: requested };
+}
+
+export async function exportCatalogAsync(db, { tenantId, resourceTypes = null, format = "json", limit = 5000 } = {}) {
+  const requested = (Array.isArray(resourceTypes) && resourceTypes.length ? resourceTypes : ["terms", "objects", "sources", "consumers", "classifications", "lineage"]).map(normalizeText);
+  const data = {};
+  for (const resource of requested) {
+    data[resource] = await exportResourceAsync(db, tenantId, resource, limit);
   }
   if (format === "csv") {
     const rows = [];
@@ -175,6 +314,27 @@ function exportResource(db, tenantId, resource, limit) {
       return queryAll(db, "SELECT * FROM dc_classifications WHERE tenant_id = ? ORDER BY code LIMIT ?", [Number(tenantId), limit]);
     case "lineage":
       return queryAll(db, "SELECT * FROM dc_lineage WHERE tenant_id = ? ORDER BY id LIMIT ?", [Number(tenantId), limit]);
+    default:
+      throw exportFailed(`Unsupported export resource: ${resource}`, { resource_type: resource });
+  }
+}
+
+async function exportResourceAsync(db, tenantId, resource, limit) {
+  switch (resource) {
+    case "terms":
+      return (await listTermsAsync(db, { tenantId, page: 1, pageSize: limit })).items;
+    case "objects":
+      return await queryAllAsync(db, "SELECT * FROM dc_catalog_objects WHERE tenant_id = ? ORDER BY object_type LIMIT ?", [Number(tenantId), limit]);
+    case "attributes":
+      return await queryAllAsync(db, "SELECT * FROM dc_catalog_attributes WHERE tenant_id = ? ORDER BY object_id, attribute_name LIMIT ?", [Number(tenantId), limit]);
+    case "sources":
+      return await queryAllAsync(db, "SELECT * FROM dc_sources WHERE tenant_id = ? ORDER BY code LIMIT ?", [Number(tenantId), limit]);
+    case "consumers":
+      return await queryAllAsync(db, "SELECT * FROM dc_consumers WHERE tenant_id = ? ORDER BY code LIMIT ?", [Number(tenantId), limit]);
+    case "classifications":
+      return await queryAllAsync(db, "SELECT * FROM dc_classifications WHERE tenant_id = ? ORDER BY code LIMIT ?", [Number(tenantId), limit]);
+    case "lineage":
+      return await queryAllAsync(db, "SELECT * FROM dc_lineage WHERE tenant_id = ? ORDER BY id LIMIT ?", [Number(tenantId), limit]);
     default:
       throw exportFailed(`Unsupported export resource: ${resource}`, { resource_type: resource });
   }

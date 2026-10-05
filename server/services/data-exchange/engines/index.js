@@ -39,6 +39,7 @@ export const Engines = {
   mergeRecords: Duplicate.mergeRecords,
   // schema
   targetSchema: Schema.targetSchema,
+  targetSchemaAsync: Schema.targetSchemaAsync,
   discoverSourceSchema: Schema.discoverSourceSchema,
   validateTargetRecord: Schema.validateTargetRecord,
 };

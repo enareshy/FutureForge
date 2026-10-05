@@ -5,9 +5,10 @@
 // observable and retryable. Handlers reconstruct the initiating subject so
 // authorization is never silently dropped for an asynchronous run.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
-import { getJobTypeRow, createJobType } from "../jobs/types.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
+import { getJobTypeRow, createJobType, getJobTypeRowAsync, createJobTypeAsync } from "../jobs/types.js";
 import { OBSERVABILITY_HANDLER_CODES, OBSERVABILITY_JOB_TYPES, OBSERVABILITY_QUEUE } from "./constants.js";
 import { jobRef as makeJobRef } from "./identifiers.js";
 import { parseJson, stringifyJson } from "./repository.js";
@@ -57,9 +58,31 @@ export function ensureObservabilityJobTypes(db) {
   return { created };
 }
 
+// Async twin of `ensureObservabilityJobTypes` for migrated request paths.
+export async function ensureObservabilityJobTypesAsync(db) {
+  let created = 0;
+  for (const def of OBSERVABILITY_JOB_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    await createJobTypeAsync(db, { ...def }, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
 function recordJob(db, { tenantId, handlerCode, jobTypeCode, entityType = null, entityRef = null, platformJob, actor = null }) {
   const ts = nowIso();
   const result = run(
+    db,
+    `INSERT INTO observability_jobs (job_ref, tenant_id, handler_code, job_type_code, entity_type, entity_ref, platform_job_id, status, attempts, max_attempts, progress_json, created_by, queued_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'QUEUED', 0, 1, '{}', ?, ?, ?, ?)`,
+    [makeJobRef(), Number(tenantId), handlerCode, jobTypeCode, entityType, entityRef, platformJob?.id ?? null, actor?.id ?? null, ts, ts, ts]
+  );
+  return Number(result.lastInsertId);
+}
+
+async function recordJobAsync(db, { tenantId, handlerCode, jobTypeCode, entityType = null, entityRef = null, platformJob, actor = null }) {
+  const ts = nowIso();
+  const result = await runAsync(
     db,
     `INSERT INTO observability_jobs (job_ref, tenant_id, handler_code, job_type_code, entity_type, entity_ref, platform_job_id, status, attempts, max_attempts, progress_json, created_by, queued_at, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'QUEUED', 0, 1, '{}', ?, ?, ?, ?)`,
@@ -85,24 +108,61 @@ function submit(db, { tenantId, jobTypeCode, handlerCode, handlerInput = {}, ent
   return { ...platformJob, observability_job: publicObservabilityJob(queryOne(db, "SELECT * FROM observability_jobs WHERE id = ?", [jobId])) };
 }
 
+async function submitAsync(db, { tenantId, jobTypeCode, handlerCode, handlerInput = {}, entityType = null, entityRef = null, actor = null, ip = null, priority = "normal", queue = OBSERVABILITY_QUEUE, idempotencyKey = null }) {
+  const platformJob = await submitJobAsync(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      input: { tenant_id: Number(tenantId), actor_id: actor?.id ?? null, ...handlerInput },
+      tenant_id: Number(tenantId),
+      priority,
+      queue,
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+  const jobId = await recordJobAsync(db, { tenantId, handlerCode, jobTypeCode, entityType, entityRef, platformJob, actor });
+  return { ...platformJob, observability_job: publicObservabilityJob(await queryOneAsync(db, "SELECT * FROM observability_jobs WHERE id = ?", [jobId])) };
+}
+
 export function submitCollectJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null, trigger = "MANUAL" } = {}) {
   return submit(db, { tenantId, jobTypeCode: "OBSERVABILITY_COLLECT", handlerCode: OBSERVABILITY_HANDLER_CODES.COLLECT, handlerInput: { trigger }, entityType: "collection", entityRef: "collection", actor, ip, idempotencyKey });
+}
+
+export async function submitCollectJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null, trigger = "MANUAL" } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "OBSERVABILITY_COLLECT", handlerCode: OBSERVABILITY_HANDLER_CODES.COLLECT, handlerInput: { trigger }, entityType: "collection", entityRef: "collection", actor, ip, idempotencyKey });
 }
 
 export function submitFreshnessJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "OBSERVABILITY_FRESHNESS_CHECK", handlerCode: OBSERVABILITY_HANDLER_CODES.FRESHNESS, entityType: "freshness", entityRef: "freshness", actor, ip, idempotencyKey });
 }
 
+export async function submitFreshnessJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "OBSERVABILITY_FRESHNESS_CHECK", handlerCode: OBSERVABILITY_HANDLER_CODES.FRESHNESS, entityType: "freshness", entityRef: "freshness", actor, ip, idempotencyKey });
+}
+
 export function submitHealthJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "OBSERVABILITY_HEALTH_CHECK", handlerCode: OBSERVABILITY_HANDLER_CODES.HEALTH, entityType: "health", entityRef: "health", actor, ip, idempotencyKey });
+}
+
+export async function submitHealthJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "OBSERVABILITY_HEALTH_CHECK", handlerCode: OBSERVABILITY_HANDLER_CODES.HEALTH, entityType: "health", entityRef: "health", actor, ip, idempotencyKey });
 }
 
 export function submitSloJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "OBSERVABILITY_SLO_EVALUATE", handlerCode: OBSERVABILITY_HANDLER_CODES.SLO, entityType: "slo", entityRef: "slo", actor, ip, priority: "low", idempotencyKey });
 }
 
+export async function submitSloJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "OBSERVABILITY_SLO_EVALUATE", handlerCode: OBSERVABILITY_HANDLER_CODES.SLO, entityType: "slo", entityRef: "slo", actor, ip, priority: "low", idempotencyKey });
+}
+
 export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "OBSERVABILITY_MAINTENANCE", handlerCode: OBSERVABILITY_HANDLER_CODES.MAINTENANCE, entityType: "maintenance", entityRef: "maintenance", actor, ip, priority: "low", queue: "default", idempotencyKey });
+}
+
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "OBSERVABILITY_MAINTENANCE", handlerCode: OBSERVABILITY_HANDLER_CODES.MAINTENANCE, entityType: "maintenance", entityRef: "maintenance", actor, ip, priority: "low", queue: "default", idempotencyKey });
 }
 
 export function listObservabilityJobs(db, tenantId, query = {}) {
@@ -124,11 +184,40 @@ export function listObservabilityJobs(db, tenantId, query = {}) {
   return { items: rows.map(publicObservabilityJob), total, page, pageSize };
 }
 
+// Async twin of `listObservabilityJobs` for migrated read routes.
+export async function listObservabilityJobsAsync(db, tenantId, query = {}) {
+  const where = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  if (query.handler_code || query.handlerCode) {
+    where.push("handler_code = ?");
+    params.push(String(query.handler_code || query.handlerCode));
+  }
+  const page = Math.max(1, Number(query.page) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number(query.page_size || query.pageSize) || 50));
+  const clause = where.join(" AND ");
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM observability_jobs WHERE ${clause}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM observability_jobs WHERE ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+  return { items: rows.map(publicObservabilityJob), total, page, pageSize };
+}
+
 export function getObservabilityJob(db, tenantId, ref) {
   const raw = String(ref ?? "");
   const row = /^\d+$/.test(raw)
     ? queryOne(db, "SELECT * FROM observability_jobs WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
     : queryOne(db, "SELECT * FROM observability_jobs WHERE tenant_id = ? AND job_ref = ?", [Number(tenantId), raw]);
+  return publicObservabilityJob(row);
+}
+
+// Async twin of `getObservabilityJob` for migrated read routes.
+export async function getObservabilityJobAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const row = /^\d+$/.test(raw)
+    ? await queryOneAsync(db, "SELECT * FROM observability_jobs WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
+    : await queryOneAsync(db, "SELECT * FROM observability_jobs WHERE tenant_id = ? AND job_ref = ?", [Number(tenantId), raw]);
   return publicObservabilityJob(row);
 }
 
