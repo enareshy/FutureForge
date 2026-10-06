@@ -20,6 +20,11 @@ import { matchSubscriptions } from "./router.js";
 import { getSubscriptionRow } from "./subscriptions.js";
 import { getEventTypeRow } from "./registry.js";
 import { auditEvent, log } from "./hooks.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { auditEventAsync } from "./hooks.js";
+import { matchSubscriptionsAsync } from "./router.js";
+import { getSubscriptionRowAsync } from "./subscriptions.js";
+import { getEventTypeRowAsync } from "./registry.js";
 
 // Builds the SQL that selects the events a replay applies to. Every clause is
 // parameterised; the tenant clause is always applied when provided.
@@ -91,6 +96,26 @@ export function previewReplay(db, criteria = {}) {
   };
 }
 
+export async function previewReplayAsync(db, criteria = {}) {
+  const { where, params } = criteriaQuery(db, criteria);
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM event_records ${where}`, params)).c;
+  const sample = await queryAllAsync(db, `SELECT * FROM event_records ${where} ORDER BY created_at DESC, id DESC LIMIT 20`, params);
+  const byType = await queryAllAsync(
+    db,
+    `SELECT event_type_code, COUNT(*) AS count FROM event_records ${where} GROUP BY event_type_code ORDER BY count DESC LIMIT 10`,
+    params
+  );
+  const targets = await resolveTargetsAsync(db, criteria);
+  return {
+    scope_type: normalizeReplayScope(criteria.scope_type),
+    criteria,
+    matched_events: total,
+    by_event_type: byType,
+    target_subscriptions: targets.map((s) => ({ id: s.id, code: s.code, subscriber: s.subscriber, handler: s.handler || "" })),
+    sample: sample.map((r) => ({ id: r.id, event_ref: r.event_ref, event_type_code: r.event_type_code, created_at: r.created_at })),
+  };
+}
+
 // Resolves the subscriptions a replay targets. Explicit ids/codes win; otherwise
 // the active subscriptions that match the first candidate event are used.
 export function resolveTargets(db, criteria = {}) {
@@ -102,6 +127,18 @@ export function resolveTargets(db, criteria = {}) {
   const first = queryOne(db, `SELECT * FROM event_records ${where} ORDER BY id LIMIT 1`, params);
   if (!first) return [];
   return matchSubscriptions(db, first);
+}
+
+export async function resolveTargetsAsync(db, criteria = {}) {
+  const explicit = criteria.target_subscriptions || criteria.subscription_ids || criteria.subscriptions;
+  if (Array.isArray(explicit) && explicit.length) {
+    const rows = await Promise.all(explicit.map((value) => getSubscriptionRowAsync(db, value)));
+    return rows.filter(Boolean);
+  }
+  const { where, params } = criteriaQuery(db, criteria);
+  const first = await queryOneAsync(db, `SELECT * FROM event_records ${where} ORDER BY id LIMIT 1`, params);
+  if (!first) return [];
+  return matchSubscriptionsAsync(db, first);
 }
 
 // Creates a replay request. Dry runs stop at validation/preview; live replays
@@ -170,6 +207,68 @@ export function createReplay(db, input = {}, actor = null, tenantId = null) {
   return { ...publicReplay(queryOne(db, "SELECT * FROM event_replays WHERE id = ?", [replayId])), preview };
 }
 
+export async function createReplayAsync(db, input = {}, actor = null, tenantId = null) {
+  const scope = normalizeReplayScope(input.scope_type || input.scope);
+  if (!REPLAY_SCOPES.includes(scope)) throw new HttpError(400, `Unsupported replay scope ${scope}`);
+  const criteria = {
+    ...(input.criteria || {}),
+    event_type_code: input.event_type_code ?? input.criteria?.event_type_code,
+    event_ref: input.event_ref ?? input.criteria?.event_ref,
+    source_module: input.source_module ?? input.criteria?.source_module,
+    source_object_id: input.source_object_id ?? input.criteria?.source_object_id,
+    from: input.from ?? input.criteria?.from,
+    to: input.to ?? input.criteria?.to,
+    tenant_id: tenantId ?? input.tenant_id ?? null,
+  };
+  if (scope === "event" && !criteria.event_ref && !criteria.event_refs) throw new HttpError(400, "scope_type 'event' requires event_ref");
+  if (scope === "type" && !criteria.event_type_code) throw new HttpError(400, "scope_type 'type' requires event_type_code");
+  if (scope === "module" && !criteria.source_module) throw new HttpError(400, "scope_type 'module' requires source_module");
+  if (scope === "aggregate" && !criteria.source_object_id) throw new HttpError(400, "scope_type 'aggregate' requires source_object_id");
+  if (scope === "tenant" && criteria.tenant_id === null) throw new HttpError(400, "scope_type 'tenant' requires tenant_id");
+  if (criteria.event_type_code) await assertReplayAllowedAsync(db, criteria.event_type_code);
+
+  const dryRun = Boolean(input.dry_run);
+  const preview = await previewReplayAsync(db, criteria);
+  const targets = (input.target_subscriptions && Array.isArray(input.target_subscriptions)
+    ? (await Promise.all(input.target_subscriptions.map((v) => getSubscriptionRowAsync(db, v)))).filter(Boolean)
+    : await resolveTargetsAsync(db, criteria));
+  const ts = nowIso();
+  const replayRef = ref("RPL");
+  const status = dryRun ? "validated" : "validated";
+  const result = await runAsync(
+    db,
+    `INSERT INTO event_replays
+      (replay_ref, scope_type, criteria_json, target_subscriptions_json, dry_run, status, requested_by, requested_at,
+       total_events, matched_events, replayed_events, failed_events, skipped_events, rate_limit_per_second, tenant_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)`,
+    [
+      replayRef,
+      scope,
+      toJson(criteria, {}),
+      toJson(targets.map((s) => s.id), []),
+      dryRun ? 1 : 0,
+      status,
+      actor?.id ?? null,
+      ts,
+      preview.matched_events,
+      preview.matched_events,
+      clampInt(input.rate_limit_per_second ?? input.rateLimitPerSecond, 1, 10000, 25),
+      tenantId ?? input.tenant_id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  const replayId = Number(result.lastInsertId);
+  await auditEventAsync(db, {
+    actor,
+    action: dryRun ? "event.replay.preview" : "event.replay.create",
+    resourceType: "event_replay",
+    resourceId: replayId,
+    details: { replay_ref: replayRef, scope, matched: preview.matched_events, targets: targets.length, dry_run: dryRun },
+  });
+  return { ...publicReplay(await queryOneAsync(db, "SELECT * FROM event_replays WHERE id = ?", [replayId])), preview };
+}
+
 function insertReplayDelivery(db, event, subscription, replayRef) {
   const ts = nowIso();
   const retry = safeParse(subscription.retry_policy_json, {});
@@ -216,11 +315,65 @@ function insertReplayDelivery(db, event, subscription, replayRef) {
   return Number(result.lastInsertId);
 }
 
+async function insertReplayDeliveryAsync(db, event, subscription, replayRef) {
+  const ts = nowIso();
+  const retry = safeParse(subscription.retry_policy_json, {});
+  const maxAttempts = clampInt(retry.max_attempts, 1, 50, 5);
+  const result = await runAsync(
+    db,
+    `INSERT INTO event_deliveries
+      (event_id, event_ref, subscription_id, event_type_code, event_version, subscriber, handler, topic_code, queue_code,
+       consumer_group, partition_key, sequence_number, priority, status, attempts, max_attempts, available_at,
+       payload_json, correlation_id, causation_id, trace_id, idempotency_key, security_classification,
+       tenant_id, organization_id, plant_id, site_id, replay_ref, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      event.id,
+      event.event_ref,
+      subscription.id,
+      event.event_type_code,
+      event.event_version,
+      subscription.subscriber,
+      subscription.handler || "",
+      subscription.topic_code || "",
+      subscription.queue_code || "",
+      subscription.consumer_group || "",
+      event.partition_key || null,
+      event.sequence_number ?? null,
+      event.priority || "normal",
+      maxAttempts,
+      ts,
+      event.payload_json,
+      event.correlation_id || null,
+      event.causation_id || null,
+      event.trace_id || null,
+      `${event.event_ref}:${subscription.id}:replay:${replayRef}`,
+      event.security_classification || "internal",
+      event.tenant_id ?? null,
+      event.organization_id ?? null,
+      event.plant_id ?? null,
+      event.site_id ?? null,
+      replayRef,
+      ts,
+      ts,
+    ]
+  );
+  return Number(result.lastInsertId);
+}
+
 // Resolves a replay by numeric id or public replay_ref, so both the job engine
 // (which uses ids) and the REST API (which uses refs) address the same row.
 function getReplayRow(db, refValue) {
   const numeric = Number(refValue);
   return queryOne(db, "SELECT * FROM event_replays WHERE id = ? OR replay_ref = ?", [
+    Number.isFinite(numeric) ? numeric : -1,
+    String(refValue),
+  ]);
+}
+
+async function getReplayRowAsync(db, refValue) {
+  const numeric = Number(refValue);
+  return queryOneAsync(db, "SELECT * FROM event_replays WHERE id = ? OR replay_ref = ?", [
     Number.isFinite(numeric) ? numeric : -1,
     String(refValue),
   ]);
@@ -291,6 +444,70 @@ export async function runReplay(db, id, actor = null, { maxEvents = 100000 } = {
   return publicReplay(queryOne(db, "SELECT * FROM event_replays WHERE id = ?", [replay.id]));
 }
 
+export async function runReplayAsync(db, id, actor = null, { maxEvents = 100000 } = {}) {
+  const replay = await getReplayRowAsync(db, id);
+  if (!replay) throw new HttpError(404, "Replay not found");
+  if (replay.status === "completed" || replay.status === "running") return publicReplay(replay);
+  const criteria = safeParse(replay.criteria_json, {});
+  const targetIds = safeParse(replay.target_subscriptions_json, []);
+  const targetRows = await Promise.all(targetIds.map((value) => getSubscriptionRowAsync(db, value)));
+  const targets = targetRows.filter(Boolean);
+  const ts = nowIso();
+  await runAsync(db, "UPDATE event_replays SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?", [ts, ts, replay.id]);
+
+  if (replay.dry_run) {
+    await runAsync(db, "UPDATE event_replays SET status = 'completed', finished_at = ?, updated_at = ? WHERE id = ?", [ts, ts, replay.id]);
+    return publicReplay(await queryOneAsync(db, "SELECT * FROM event_replays WHERE id = ?", [replay.id]));
+  }
+  if (!targets.length) {
+    await runAsync(db, "UPDATE event_replays SET status = 'failed', error_message = ?, finished_at = ?, updated_at = ? WHERE id = ?", [
+      "No target subscriptions resolved for replay",
+      ts,
+      ts,
+      replay.id,
+    ]);
+    return publicReplay(await queryOneAsync(db, "SELECT * FROM event_replays WHERE id = ?", [replay.id]));
+  }
+
+  const { where, params } = criteriaQuery(db, { ...criteria, tenant_id: replay.tenant_id ?? criteria.tenant_id });
+  const events = await queryAllAsync(db, `SELECT * FROM event_records ${where} ORDER BY id ASC LIMIT ?`, [...params, clampInt(maxEvents, 1, 1000000, 100000)]);
+  const rate = clampInt(replay.rate_limit_per_second, 1, 10000, 25);
+  let replayed = 0;
+  let failed = 0;
+  let skipped = 0;
+  for (const event of events) {
+    for (const subscription of targets) {
+      try {
+        await insertReplayDeliveryAsync(db, event, subscription, replay.replay_ref);
+        replayed += 1;
+      } catch (error) {
+        failed += 1;
+        log("warn", "event.replay.delivery_failed", { replay_ref: replay.replay_ref, event_ref: event.event_ref, error: error.message });
+      }
+    }
+    // Bound the burst so a replay cannot saturate the consumer queue.
+    if (rate > 0 && replayed > 0 && replayed % rate === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+  const finished = nowIso();
+  const status = failed === 0 ? "completed" : replayed > 0 ? "partial" : "failed";
+  await runAsync(
+    db,
+    `UPDATE event_replays SET status = ?, replayed_events = ?, failed_events = ?, skipped_events = ?, finished_at = ?, updated_at = ? WHERE id = ?`,
+    [normalizeReplayStatus(status), replayed, failed, skipped, finished, finished, replay.id]
+  );
+  await auditEventAsync(db, {
+    actor,
+    action: "event.replay.run",
+    resourceType: "event_replay",
+    resourceId: replay.id,
+    details: { replay_ref: replay.replay_ref, replayed, failed, status },
+  });
+  log("info", "event.replay.completed", { replay_ref: replay.replay_ref, replayed, failed, status });
+  return publicReplay(await queryOneAsync(db, "SELECT * FROM event_replays WHERE id = ?", [replay.id]));
+}
+
 export function cancelReplay(db, id, actor = null) {
   const replay = getReplayRow(db, id);
   if (!replay) throw new HttpError(404, "Replay not found");
@@ -298,6 +515,15 @@ export function cancelReplay(db, id, actor = null) {
   run(db, "UPDATE event_replays SET status = 'cancelled', finished_at = ?, updated_at = ? WHERE id = ?", [nowIso(), nowIso(), replay.id]);
   auditEvent(db, { actor, action: "event.replay.cancel", resourceType: "event_replay", resourceId: replay.id, details: { replay_ref: replay.replay_ref } });
   return publicReplay(queryOne(db, "SELECT * FROM event_replays WHERE id = ?", [replay.id]));
+}
+
+export async function cancelReplayAsync(db, id, actor = null) {
+  const replay = await getReplayRowAsync(db, id);
+  if (!replay) throw new HttpError(404, "Replay not found");
+  if (replay.status === "completed") throw new HttpError(409, "Replay already completed");
+  await runAsync(db, "UPDATE event_replays SET status = 'cancelled', finished_at = ?, updated_at = ? WHERE id = ?", [nowIso(), nowIso(), replay.id]);
+  await auditEventAsync(db, { actor, action: "event.replay.cancel", resourceType: "event_replay", resourceId: replay.id, details: { replay_ref: replay.replay_ref } });
+  return publicReplay(await queryOneAsync(db, "SELECT * FROM event_replays WHERE id = ?", [replay.id]));
 }
 
 export function listReplays(db, { tenantId, status, scopeType, q, page = 1, pageSize = 50 } = {}) {
@@ -330,6 +556,36 @@ export function listReplays(db, { tenantId, status, scopeType, q, page = 1, page
   return { items: rows.map(publicReplay), total, page: Number(page), page_size: Number(pageSize) };
 }
 
+export async function listReplaysAsync(db, { tenantId, status, scopeType, q, page = 1, pageSize = 50 } = {}) {
+  const clauses = [];
+  const params = [];
+  if (tenantId !== undefined && tenantId !== null) {
+    clauses.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (status) {
+    clauses.push("status = ?");
+    params.push(status);
+  }
+  if (scopeType) {
+    clauses.push("scope_type = ?");
+    params.push(scopeType);
+  }
+  if (q) {
+    clauses.push("(LOWER(replay_ref) ILIKE ? OR LOWER(scope_type) ILIKE ?)");
+    const like = `%${String(q).toLowerCase()}%`;
+    params.push(like, like);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM event_replays ${where}`, params)).c;
+  const rows = await queryAllAsync(db, `SELECT * FROM event_replays ${where} ORDER BY requested_at DESC, id DESC LIMIT ? OFFSET ?`, [
+    ...params,
+    Number(pageSize),
+    (Number(page) - 1) * Number(pageSize),
+  ]);
+  return { items: rows.map(publicReplay), total, page: Number(page), page_size: Number(pageSize) };
+}
+
 export function getReplay(db, refValue) {
   const id = Number(refValue);
   const row = queryOne(db, "SELECT * FROM event_replays WHERE id = ? OR replay_ref = ?", [Number.isFinite(id) ? id : -1, String(refValue)]);
@@ -338,6 +594,17 @@ export function getReplay(db, refValue) {
     ...publicReplay(row),
     preview: previewReplay(db, { ...safeParse(row.criteria_json, {}), tenant_id: row.tenant_id }),
     replay_deliveries: queryOne(db, "SELECT COUNT(*) AS c FROM event_deliveries WHERE replay_ref = ?", [row.replay_ref]).c,
+  };
+}
+
+export async function getReplayAsync(db, refValue) {
+  const id = Number(refValue);
+  const row = await queryOneAsync(db, "SELECT * FROM event_replays WHERE id = ? OR replay_ref = ?", [Number.isFinite(id) ? id : -1, String(refValue)]);
+  if (!row) throw new HttpError(404, "Replay not found");
+  return {
+    ...publicReplay(row),
+    preview: await previewReplayAsync(db, { ...safeParse(row.criteria_json, {}), tenant_id: row.tenant_id }),
+    replay_deliveries: (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM event_deliveries WHERE replay_ref = ?", [row.replay_ref])).c,
   };
 }
 
@@ -354,9 +621,30 @@ export function replayStats(db, { tenantId = null } = {}) {
   return { total: totals?.total || 0, replayed: totals?.replayed || 0, failed: totals?.failed || 0, by_status: byStatus };
 }
 
+export async function replayStatsAsync(db, { tenantId = null } = {}) {
+  const clause = tenantId !== undefined && tenantId !== null ? "WHERE tenant_id = ?" : "";
+  const params = tenantId !== undefined && tenantId !== null ? [Number(tenantId)] : [];
+  const rows = await queryAllAsync(db, `SELECT status, COUNT(*) AS count FROM event_replays ${clause} GROUP BY status`, params);
+  const byStatus = Object.fromEntries(rows.map((r) => [r.status, r.count]));
+  const totals = await queryOneAsync(
+    db,
+    `SELECT COALESCE(SUM(replayed_events),0) AS replayed, COALESCE(SUM(failed_events),0) AS failed, COUNT(*) AS total FROM event_replays ${clause}`,
+    params
+  );
+  return { total: totals?.total || 0, replayed: totals?.replayed || 0, failed: totals?.failed || 0, by_status: byStatus };
+}
+
 // Validates that an event type allows replay before a request is accepted.
 export function assertReplayAllowed(db, eventTypeCode) {
   const type = getEventTypeRow(db, eventTypeCode);
+  if (type && type.replay_policy === "denied") {
+    throw new HttpError(403, `Replay is denied for event type ${eventTypeCode}`);
+  }
+  return true;
+}
+
+export async function assertReplayAllowedAsync(db, eventTypeCode) {
+  const type = await getEventTypeRowAsync(db, eventTypeCode);
   if (type && type.replay_policy === "denied") {
     throw new HttpError(403, `Replay is denied for event type ${eventTypeCode}`);
   }

@@ -186,6 +186,17 @@ describe("async change write twins mirror the synchronous service", () => {
     assert.deepEqual(asyncRemoved, syncRemoved);
   });
 
+  test("decideOrderAsync matches decideOrder", async () => {
+    const asyncOrder = await Orders.createOrderAsync(asyncDb, TENANT, { title: "Decide order" }, null, null);
+    const syncOrder = Orders.createOrder(syncDb, TENANT, { title: "Decide order" }, null, null);
+    await Orders.submitOrderAsync(asyncDb, TENANT, asyncOrder.id, null, null);
+    Orders.submitOrder(syncDb, TENANT, syncOrder.id, null, null);
+    const asyncDecided = await Orders.decideOrderAsync(asyncDb, TENANT, asyncOrder.id, "APPROVED", null, null);
+    const syncDecided = Orders.decideOrder(syncDb, TENANT, syncOrder.id, "APPROVED", null, null);
+    assert.deepEqual(stripTimestamps(asyncDecided), stripTimestamps(syncDecided));
+    assert.equal(asyncDecided.status, "APPROVED");
+  });
+
   test("notice create/issue matches once the order is released", async () => {
     const asyncOrder = await Orders.createOrderAsync(asyncDb, TENANT, { title: "Notice order" }, null, null);
     const syncOrder = Orders.createOrder(syncDb, TENANT, { title: "Notice order" }, null, null);
@@ -193,9 +204,9 @@ describe("async change write twins mirror the synchronous service", () => {
     AffectedItems.addAffectedItem(syncDb, TENANT, syncOrder.id, { object_type: "pdm_item", object_id: "NOTICE-1" }, null, null);
     await Orders.submitOrderAsync(asyncDb, TENANT, asyncOrder.id, null, null);
     Orders.submitOrder(syncDb, TENANT, syncOrder.id, null, null);
-    Orders.decideOrder(asyncDb, TENANT, asyncOrder.id, "APPROVED", null, null);
+    await Orders.decideOrderAsync(asyncDb, TENANT, asyncOrder.id, "APPROVED", null, null);
     Orders.decideOrder(syncDb, TENANT, syncOrder.id, "APPROVED", null, null);
-    Orders.releaseOrder(asyncDb, TENANT, asyncOrder.id, null, null);
+    await Orders.releaseOrderAsync(asyncDb, TENANT, asyncOrder.id, null, null);
     Orders.releaseOrder(syncDb, TENANT, syncOrder.id, null, null);
 
     const asyncNotice = await Notices.createNoticeAsync(asyncDb, TENANT, { change_order_id: asyncOrder.id }, null, null);

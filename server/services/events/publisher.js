@@ -8,6 +8,7 @@
 // events that do not need the outbox.
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
 import { queryOneAsync, runAsync, transactionAsync, inAsyncTransaction } from "../../db-async.js";
+import { queryAllAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import {
   buildEnvelope,
@@ -22,7 +23,7 @@ import {
 import { publicEvent, publicDelivery, eventUuid, ref } from "./repository.js";
 import { getEventTypeRow, createEventType, resolveSchema, getEventTypeRowAsync, createEventTypeAsync, resolveSchemaAsync } from "./registry.js";
 import { enqueueOutbox, enqueueOutboxAsync } from "./outbox.js";
-import { routeEvent } from "./router.js";
+import { routeEvent, routeEventAsync } from "./router.js";
 import { nextSequence, nextSequenceAsync } from "./ordering.js";
 import { auditEvent, auditEventAsync, log } from "./hooks.js";
 
@@ -66,6 +67,12 @@ export function validateEvent(db, input = {}, { actor = null, tenantId = null, s
 function buildEventRecord(db, envelope, type) {
   const partitionKey = orderingPartitionKey(envelope, type);
   const sequence = type.ordering_required || envelope.ordering_scope !== "none" ? nextSequence(db, partitionKey) : null;
+  return { ...envelope, partition_key: partitionKey || envelope.partition_key, sequence_number: sequence };
+}
+
+async function buildEventRecordAsync(db, envelope, type) {
+  const partitionKey = orderingPartitionKey(envelope, type);
+  const sequence = type.ordering_required || envelope.ordering_scope !== "none" ? await nextSequenceAsync(db, partitionKey) : null;
   return { ...envelope, partition_key: partitionKey || envelope.partition_key, sequence_number: sequence };
 }
 
@@ -189,6 +196,20 @@ export function publishBatch(db, inputs = [], actor = null, options = {}) {
   return { total: items.length, published: events.length, failed: failures.length, events, failures };
 }
 
+export async function publishBatchAsync(db, inputs = [], actor = null, options = {}) {
+  const items = Array.isArray(inputs) ? inputs : inputs.events || [];
+  const events = [];
+  const failures = [];
+  for (const input of items) {
+    try {
+      events.push(await publishEventAsync(db, input, actor, options));
+    } catch (error) {
+      failures.push({ event_type_code: input?.event_type_code || input?.event_type || null, error: error.message, category: error.category || "business_validation" });
+    }
+  }
+  return { total: items.length, published: events.length, failed: failures.length, events, failures };
+}
+
 // `publishAsync` and `publishWithCorrelation` are convenience shapes required by
 // the framework contract. Async publishing always goes through the outbox.
 export function publishAsync(db, input = {}, actor = null, options = {}) {
@@ -198,6 +219,11 @@ export function publishAsync(db, input = {}, actor = null, options = {}) {
 export function publishWithCorrelation(db, input = {}, actor = null, options = {}) {
   const correlationId = input.correlation_id || input.correlationId || ref("COR");
   return publishEvent(db, { ...input, correlation_id: correlationId }, actor, options);
+}
+
+export async function publishWithCorrelationAsync(db, input = {}, actor = null, options = {}) {
+  const correlationId = input.correlation_id || input.correlationId || ref("COR");
+  return publishEventAsync(db, { ...input, correlation_id: correlationId }, actor, options);
 }
 
 // ── Async twins ─────────────────────────────────────────────────────────────
@@ -239,9 +265,6 @@ export async function validateEventAsync(db, input = {}, { actor = null, tenantI
 export async function publishEventAsync(db, input = {}, actor = null, options = {}) {
   const tenantId = options.tenantId ?? input.tenant_id ?? actor?.tenant_id ?? null;
   const useOutbox = options.useOutbox === undefined ? !options.immediate : Boolean(options.useOutbox);
-  if (!useOutbox) {
-    throw new HttpError(400, "publishEventAsync only supports the transactional outbox path");
-  }
   const idempotencyKey = input.idempotency_key ?? input.idempotencyKey ?? null;
   if (idempotencyKey) {
     const existing = await queryOneAsync(db, "SELECT * FROM event_records WHERE idempotency_key = ?", [idempotencyKey]);
@@ -254,11 +277,10 @@ export async function publishEventAsync(db, input = {}, actor = null, options = 
   const eventRef = envelope.event_ref || ref("EVT");
   const eventIdUuid = input.event_id || eventUuid();
   const traceId = envelope.trace_id || input.trace_id || null;
+  const status = useOutbox ? "queued" : "published";
 
   const persist = async () => {
-    const partitionKey = orderingPartitionKey(envelope, type);
-    const sequence = type.ordering_required || envelope.ordering_scope !== "none" ? await nextSequenceAsync(db, partitionKey) : null;
-    const record = { ...envelope, partition_key: partitionKey || envelope.partition_key, sequence_number: sequence };
+    const record = await buildEventRecordAsync(db, envelope, type);
     const result = await runAsync(
       db,
       `INSERT INTO event_records
@@ -291,7 +313,7 @@ export async function publishEventAsync(db, input = {}, actor = null, options = 
         envelope.payload_schema_version,
         toJson(envelope.metadata, {}),
         envelope.security_classification,
-        "queued",
+        status,
         tenantId,
         input.organization_id ?? envelope.metadata?.organization_id ?? null,
         input.plant_id ?? envelope.metadata?.plant_id ?? null,
@@ -303,17 +325,19 @@ export async function publishEventAsync(db, input = {}, actor = null, options = 
       ]
     );
     const id = Number(result.lastInsertId);
-    await enqueueOutboxAsync(db, {
-      event_ref: eventRef,
-      event_type_code: envelope.event_type_code,
-      event_version: envelope.event_version,
-      payload: envelope.payload,
-      metadata: envelope.metadata,
-      aggregate_type: envelope.source_object_type,
-      aggregate_id: envelope.source_object_id,
-      correlation_id: envelope.correlation_id,
-      tenant_id: tenantId,
-    });
+    if (useOutbox) {
+      await enqueueOutboxAsync(db, {
+        event_ref: eventRef,
+        event_type_code: envelope.event_type_code,
+        event_version: envelope.event_version,
+        payload: envelope.payload,
+        metadata: envelope.metadata,
+        aggregate_type: envelope.source_object_type,
+        aggregate_id: envelope.source_object_id,
+        correlation_id: envelope.correlation_id,
+        tenant_id: tenantId,
+      });
+    }
     return queryOneAsync(db, "SELECT * FROM event_records WHERE id = ?", [id]);
   };
 
@@ -321,17 +345,23 @@ export async function publishEventAsync(db, input = {}, actor = null, options = 
   // and the outbox row commit together; otherwise open one for the pair.
   const eventRow = inAsyncTransaction() ? await persist() : await transactionAsync(db, persist);
 
+  let deliveries = [];
+  if (!useOutbox) {
+    const routeResult = await routeEventAsync(db, eventRow, { trigger: options.trigger || "publish" });
+    deliveries = routeResult.deliveries;
+  }
+
   await auditEventAsync(db, {
     actor,
     action: "event.publish",
     resourceType: "event_record",
     resourceId: eventRow.id,
-    details: { event_type: envelope.event_type_code, event_ref: eventRef, queued: true, subscribers: 0 },
+    details: { event_type: envelope.event_type_code, event_ref: eventRef, queued: useOutbox, subscribers: deliveries.length },
     correlation: envelope.correlation_id,
     category: "data",
   });
-  log("info", "event.published", { event_ref: eventRef, event_type: envelope.event_type_code, queued: true });
-  return { ...publicEvent(eventRow, { includePayload: true }), deliveries: [], queued: true };
+  log("info", "event.published", { event_ref: eventRef, event_type: envelope.event_type_code, queued: useOutbox });
+  return { ...publicEvent(eventRow, { includePayload: true }), deliveries, queued: useOutbox };
 }
 
 // Routes an already-stored event (used by the outbox, replay and manual
@@ -340,6 +370,12 @@ export function routeStoredEvent(db, refValue, options = {}) {
   const row = getEventRow(db, refValue);
   if (!row) throw new HttpError(404, "Event not found");
   return routeEvent(db, row, options);
+}
+
+export async function routeStoredEventAsync(db, refValue, options = {}) {
+  const row = await getEventRowAsync(db, refValue);
+  if (!row) throw new HttpError(404, "Event not found");
+  return routeEventAsync(db, row, options);
 }
 
 export { routeEvent };
@@ -354,10 +390,26 @@ export function getEventRow(db, refValue) {
   ]);
 }
 
+export async function getEventRowAsync(db, refValue) {
+  const id = Number(refValue);
+  return queryOneAsync(db, "SELECT * FROM event_records WHERE id = ? OR event_ref = ? OR event_id = ?", [
+    Number.isFinite(id) ? id : -1,
+    String(refValue),
+    String(refValue),
+  ]);
+}
+
 export function getEvent(db, refValue, { includePayload = false } = {}) {
   const row = getEventRow(db, refValue);
   if (!row) throw new HttpError(404, "Event not found");
   const deliveries = listDeliveries(db, { eventId: row.id });
+  return { ...publicEvent(row, { includePayload }), deliveries: deliveries.items };
+}
+
+export async function getEventAsync(db, refValue, { includePayload = false } = {}) {
+  const row = await getEventRowAsync(db, refValue);
+  if (!row) throw new HttpError(404, "Event not found");
+  const deliveries = await listDeliveriesAsync(db, { eventId: row.id });
   return { ...publicEvent(row, { includePayload }), deliveries: deliveries.items };
 }
 
@@ -419,6 +471,64 @@ export function listEvents(db, { tenantId, eventTypeCode, eventVersion, sourceMo
   return { items: rows.map((r) => publicEvent(r)), total, page: Number(page), page_size: Number(pageSize) };
 }
 
+export async function listEventsAsync(db, { tenantId, eventTypeCode, eventVersion, sourceModule, status, correlationId, traceId, objectId, q, from, to, page = 1, pageSize = 50 } = {}) {
+  const clauses = [];
+  const params = [];
+  if (tenantId !== undefined && tenantId !== null) {
+    clauses.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (eventTypeCode) {
+    clauses.push("event_type_code = ?");
+    params.push(eventTypeCode);
+  }
+  if (eventVersion) {
+    clauses.push("event_version = ?");
+    params.push(Number(eventVersion));
+  }
+  if (sourceModule) {
+    clauses.push("source_module = ?");
+    params.push(sourceModule);
+  }
+  if (status) {
+    clauses.push("status = ?");
+    params.push(status);
+  }
+  if (correlationId) {
+    clauses.push("correlation_id = ?");
+    params.push(correlationId);
+  }
+  if (traceId) {
+    clauses.push("trace_id = ?");
+    params.push(traceId);
+  }
+  if (objectId) {
+    clauses.push("source_object_id = ?");
+    params.push(String(objectId));
+  }
+  if (from) {
+    clauses.push("created_at >= ?");
+    params.push(from);
+  }
+  if (to) {
+    clauses.push("created_at <= ?");
+    params.push(to);
+  }
+  if (q) {
+    clauses.push("(LOWER(event_ref) ILIKE ? OR LOWER(event_type_code) ILIKE ? OR LOWER(correlation_id) ILIKE ? OR LOWER(source_object_id) ILIKE ?)");
+    const like = `%${String(q).toLowerCase()}%`;
+    params.push(like, like, like, like);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM event_records ${where}`, params)).c;
+  const rows = await queryAllAsync(db, `SELECT * FROM event_records ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, [
+    ...params,
+    Number(pageSize),
+    (Number(page) - 1) * Number(pageSize),
+  ]);
+  return { items: rows.map((r) => publicEvent(r)), total, page: Number(page), page_size: Number(pageSize) };
+}
+
 export function listDeliveries(db, { tenantId, eventId, eventRef, subscriptionId, status, handler, correlationId, queueCode, q, page = 1, pageSize = 50 } = {}) {
   const clauses = [];
   const params = [];
@@ -462,6 +572,56 @@ export function listDeliveries(db, { tenantId, eventId, eventRef, subscriptionId
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const total = queryOne(db, `SELECT COUNT(*) AS c FROM event_deliveries ${where}`, params).c;
   const rows = queryAll(db, `SELECT * FROM event_deliveries ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, [
+    ...params,
+    Number(pageSize),
+    (Number(page) - 1) * Number(pageSize),
+  ]);
+  return { items: rows.map((r) => publicDelivery(r)), total, page: Number(page), page_size: Number(pageSize) };
+}
+
+export async function listDeliveriesAsync(db, { tenantId, eventId, eventRef, subscriptionId, status, handler, correlationId, queueCode, q, page = 1, pageSize = 50 } = {}) {
+  const clauses = [];
+  const params = [];
+  if (tenantId !== undefined && tenantId !== null) {
+    clauses.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  if (eventId) {
+    clauses.push("event_id = ?");
+    params.push(Number(eventId));
+  }
+  if (eventRef) {
+    clauses.push("event_ref = ?");
+    params.push(String(eventRef));
+  }
+  if (subscriptionId) {
+    clauses.push("subscription_id = ?");
+    params.push(Number(subscriptionId));
+  }
+  if (status) {
+    clauses.push("status = ?");
+    params.push(status);
+  }
+  if (handler) {
+    clauses.push("handler = ?");
+    params.push(handler);
+  }
+  if (correlationId) {
+    clauses.push("correlation_id = ?");
+    params.push(correlationId);
+  }
+  if (queueCode) {
+    clauses.push("queue_code = ?");
+    params.push(queueCode);
+  }
+  if (q) {
+    clauses.push("(LOWER(event_ref) ILIKE ? OR LOWER(event_type_code) ILIKE ? OR LOWER(handler) ILIKE ? OR LOWER(subscriber) ILIKE ?)");
+    const like = `%${String(q).toLowerCase()}%`;
+    params.push(like, like, like, like);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM event_deliveries ${where}`, params)).c;
+  const rows = await queryAllAsync(db, `SELECT * FROM event_deliveries ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, [
     ...params,
     Number(pageSize),
     (Number(page) - 1) * Number(pageSize),

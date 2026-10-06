@@ -203,6 +203,22 @@ describe("async file core writes", () => {
     assert.equal(event.status, "published");
   });
 
+  test("file events list and summary read through the async layer", async () => {
+    const file = await upload("async-events.txt");
+    await request(port, "PUT", `/api/files/${file.file_ref}`, {
+      token,
+      body: { description: "async events" },
+    });
+
+    const forFile = await request(port, "GET", `/api/files/${file.file_ref}/events`, { token });
+    assert.equal(forFile.status, 200);
+    assert.ok(forFile.body.items.some((e) => e.event_type === "FileMetadataUpdated"), "file event is listed");
+
+    const all = await request(port, "GET", "/api/files/events", { token });
+    assert.equal(all.status, 200);
+    assert.ok(all.body.items.some((e) => e.file_id === file.id), "tenant event feed lists the file event");
+  });
+
   test("move goes through the async layer and audits", async () => {
     const file = await upload("async-move.txt");
     const folder = await request(port, "POST", "/api/folders", { token, body: { name: "Async Move Target" } });

@@ -1369,7 +1369,7 @@ export async function decideApprovalAsync(db, reference, approvalId, body, actor
       release.id,
     ]);
     await rollbackAsync(db, objectRow, rule || {}, actor, tenantId, ip);
-    workflow.onApprovalComplete(db, { release: { ...release, status: "rejected" }, object: objectRow, rule });
+    await workflow.onApprovalCompleteAsync(db, { release: { ...release, status: "rejected" }, object: objectRow, rule });
     await writeAuditAsync(db, {
       actor,
       action: "lifecycle.release.reject",
@@ -1414,7 +1414,7 @@ export async function decideApprovalAsync(db, reference, approvalId, body, actor
       ts,
       release.id,
     ]);
-    workflow.onApprovalComplete(db, { release: { ...release, status: "changes_requested" }, object: objectRow, rule });
+    await workflow.onApprovalCompleteAsync(db, { release: { ...release, status: "changes_requested" }, object: objectRow, rule });
     await writeAuditAsync(db, {
       actor,
       action: "lifecycle.release.request_changes",
@@ -1448,7 +1448,7 @@ export async function decideApprovalAsync(db, reference, approvalId, body, actor
         });
       }
     }
-    workflow.onApprovalComplete(db, { release: { ...refreshed, status: "approved" }, object: objectRow, rule, moved });
+    await workflow.onApprovalCompleteAsync(db, { release: { ...refreshed, status: "approved" }, object: objectRow, rule, moved });
     await writeAuditAsync(db, {
       actor,
       action: "lifecycle.release.approve",

@@ -170,6 +170,7 @@ export {
   scheduleReminderForRule,
   scheduleReminderForRuleAsync,
   sweepReminders,
+  sweepRemindersAsync,
   cancelRemindersForObject,
   listReminders,
   listRemindersAsync,

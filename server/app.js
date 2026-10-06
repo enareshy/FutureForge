@@ -2795,10 +2795,10 @@ export function createApp(db) {
 
   app.post(
     "/api/workflow-escalations/sweep",
-    auth,
-    canWorkflowConfig("execute"),
-    wrap((req, res) => {
-      res.json(workflow.sweepEscalations(db, { tenantId: req.tenantId }));
+    authAsync,
+    canWorkflowConfigAsync("execute"),
+    wrap(async (req, res) => {
+      res.json(await workflow.sweepEscalationsAsync(db, { tenantId: req.tenantId }));
     })
   );
 
@@ -3726,23 +3726,6 @@ export function createApp(db) {
   // Enforces per-object audit visibility from the effective policy before
   // returning history. The route permission gates the feature; this gate
   // decides whether this particular caller may read this object's history.
-  function assertHistoryVisible(req, objectType) {
-    if (tenants.isPlatformAdmin(db, req.actor.id)) return;
-    const { policy } = audit.resolvePolicy(db, req.tenantId, objectType);
-    if (policy.visibility === "admin") {
-      const check = authorization.checkPermission(db, req.actor.id, "iam.audit.events", "read");
-      if (!check.allowed) throw new HttpError(403, "Audit history for this object requires administrator access");
-      return;
-    }
-    if (policy.visibility === "manager") {
-      const check = authorization.checkPermission(db, req.actor.id, "iam.objects.instances", "read");
-      if (!check.allowed) throw new HttpError(403, "You do not have manager access to this object's history");
-      return;
-    }
-    // "user" visibility: any caller holding the object-history permission may
-    // read this object's timeline; rows remain tenant-scoped by the query.
-  }
-
   async function assertHistoryVisibleAsync(req, objectType) {
     if (await tenants.isPlatformAdminAsync(db, req.actor.id)) return;
     const { policy } = await audit.resolvePolicyAsync(db, req.tenantId, objectType);
@@ -3796,11 +3779,11 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/events",
-    auth,
-    can("iam.audit.events", "create"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.events", "create"),
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const result = audit.capture(
+      const result = await audit.captureAsync(
         db,
         audit.auditFromRequest(req, {
           action: body.action,
@@ -3822,7 +3805,7 @@ export function createApp(db) {
         })
       );
       if (!result) throw new HttpError(400, "Audit event was rejected by policy or validation");
-      res.status(201).json(audit.getEvent(db, result.id, auditScope(req)));
+      res.status(201).json(await audit.getEventAsync(db, result.id, await auditScopeAsync(req)));
     })
   );
 
@@ -3854,19 +3837,19 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/export",
-    auth,
-    can("iam.audit.export", "execute"),
-    audit.auditRoute(db, {
+    authAsync,
+    canAsync("iam.audit.export", "execute"),
+    audit.auditRouteAsync(db, {
       action: "audit.export",
       objectType: "audit_event",
       objectId: (req) => req.body?.format || "csv",
       reasonFrom: (req) => (req.body?.reason ? String(req.body.reason) : null),
     }),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const result = audit.exportEvents(db, {
+      const result = await audit.exportEventsAsync(db, {
         filters: { ...eventFilters(req), ...(body.filters || {}), q: body.q ?? req.query.q },
-        scope: auditScope(req),
+        scope: await auditScopeAsync(req),
         format: body.format || "csv",
         limit: body.limit,
       });
@@ -3905,42 +3888,42 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/policies",
-    auth,
-    can("iam.audit.policies", "create"),
-    audit.auditRoute(db, {
+    authAsync,
+    canAsync("iam.audit.policies", "create"),
+    audit.auditRouteAsync(db, {
       action: "audit.policy.create",
       objectType: "audit_policy",
       objectId: (req) => req.body?.object_type,
       objectName: (req) => req.body?.name,
       reasonFrom: () => null,
     }),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      const isPlatform = await tenants.isPlatformAdminAsync(db, req.actor.id);
       const tenantId = isPlatform && (body.tenant_id === null || body.tenantId === null)
         ? null
         : body.tenant_id ?? body.tenantId ?? req.tenantId;
-      res.status(201).json(audit.createPolicy(db, { ...body, tenant_id: tenantId }, req.actor, tenantId));
+      res.status(201).json(await audit.createPolicyAsync(db, { ...body, tenant_id: tenantId }, req.actor, tenantId));
     })
   );
 
   app.put(
     "/api/audit/policies/:id",
-    auth,
-    can("iam.audit.policies", "update"),
-    audit.auditRoute(db, {
+    authAsync,
+    canAsync("iam.audit.policies", "update"),
+    audit.auditRouteAsync(db, {
       action: "audit.policy.update",
       objectType: "audit_policy",
       objectId: (req) => req.params.id,
       reasonFrom: () => null,
     }),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       res.json(
-        audit.updatePolicy(
+        await audit.updatePolicyAsync(
           db,
           req.params.id,
           req.body || {},
-          tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId
+          (await tenants.isPlatformAdminAsync(db, req.actor.id)) ? null : req.tenantId
         )
       );
     })
@@ -3948,17 +3931,17 @@ export function createApp(db) {
 
   app.delete(
     "/api/audit/policies/:id",
-    auth,
-    can("iam.audit.policies", "delete"),
-    audit.auditRoute(db, {
+    authAsync,
+    canAsync("iam.audit.policies", "delete"),
+    audit.auditRouteAsync(db, {
       action: "audit.policy.delete",
       objectType: "audit_policy",
       objectId: (req) => req.params.id,
       reasonFrom: () => null,
     }),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       res.json(
-        audit.deletePolicy(db, req.params.id, tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId)
+        await audit.deletePolicyAsync(db, req.params.id, (await tenants.isPlatformAdminAsync(db, req.actor.id)) ? null : req.tenantId)
       );
     })
   );
@@ -3975,18 +3958,18 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/retention/run",
-    auth,
-    can("iam.audit.retention", "execute"),
-    audit.auditRoute(db, {
+    authAsync,
+    canAsync("iam.audit.retention", "execute"),
+    audit.auditRouteAsync(db, {
       action: "audit.retention.run",
       objectType: "audit_retention",
       reasonFrom: () => null,
     }),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      const isPlatform = await tenants.isPlatformAdminAsync(db, req.actor.id);
       res.json(
-        audit.runRetention(db, {
+        await audit.runRetentionAsync(db, {
           tenantId: isPlatform && body.tenantId !== undefined ? body.tenantId : req.tenantId,
           policyId: body.policyId,
           actor: req.actor,
@@ -4001,14 +3984,14 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/events/batch",
-    auth,
-    can("iam.audit.events", "create"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.events", "create"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       const events = Array.isArray(body.events) ? body.events : [];
       if (!events.length) throw new HttpError(400, "events must be a non-empty array");
       if (events.length > 500) throw new HttpError(400, "A batch may contain at most 500 events");
-      const ids = audit.recordBatch(
+      const ids = await audit.recordBatchAsync(
         db,
         events.map((event) =>
           audit.auditFromRequest(req, {
@@ -4124,16 +4107,16 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/exports",
-    auth,
-    can("iam.audit.export", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.export", "execute"),
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      const isPlatform = await tenants.isPlatformAdminAsync(db, req.actor.id);
       const tenantId = isPlatform && (body.tenant_id === null || body.tenantId === null)
         ? null
         : body.tenant_id ?? body.tenantId ?? req.tenantId;
       res.status(202).json(
-        audit.requestAuditExport(
+        await audit.requestAuditExportAsync(
           db,
           {
             ...body,
@@ -4172,10 +4155,10 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/policies/validate",
-    auth,
-    can("iam.audit.policies", "read"),
-    wrap((req, res) => {
-      res.json(audit.validatePolicy(db, req.body || {}));
+    authAsync,
+    canAsync("iam.audit.policies", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.validatePolicyAsync(db, req.body || {}));
     })
   );
 
@@ -4206,28 +4189,28 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/action-types",
-    auth,
-    can("iam.audit.policies", "create"),
-    wrap((req, res) => {
-      res.status(201).json(audit.createActionType(db, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.audit.policies", "create"),
+    wrap(async (req, res) => {
+      res.status(201).json(await audit.createActionTypeAsync(db, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.put(
     "/api/audit/action-types/:code",
-    auth,
-    can("iam.audit.policies", "update"),
-    wrap((req, res) => {
-      res.json(audit.updateActionType(db, req.params.code, req.body || {}, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.audit.policies", "update"),
+    wrap(async (req, res) => {
+      res.json(await audit.updateActionTypeAsync(db, req.params.code, req.body || {}, req.actor, clientIp(req)));
     })
   );
 
   app.delete(
     "/api/audit/action-types/:code",
-    auth,
-    can("iam.audit.policies", "delete"),
-    wrap((req, res) => {
-      res.json(audit.deleteActionType(db, req.params.code, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.audit.policies", "delete"),
+    wrap(async (req, res) => {
+      res.json(await audit.deleteActionTypeAsync(db, req.params.code, req.actor, clientIp(req)));
     })
   );
 
@@ -4248,28 +4231,28 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/filters",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
-      res.status(201).json(audit.createSavedFilter(db, req.body || {}, req.actor, req.tenantId));
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
+      res.status(201).json(await audit.createSavedFilterAsync(db, req.body || {}, req.actor, req.tenantId));
     })
   );
 
   app.put(
     "/api/audit/filters/:id",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
-      res.json(audit.updateSavedFilter(db, req.params.id, req.body || {}, req.actor, req.tenantId));
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.updateSavedFilterAsync(db, req.params.id, req.body || {}, req.actor, req.tenantId));
     })
   );
 
   app.delete(
     "/api/audit/filters/:id",
-    auth,
-    can("iam.audit.events", "read"),
-    wrap((req, res) => {
-      res.json(audit.deleteSavedFilter(db, req.params.id, req.actor, req.tenantId));
+    authAsync,
+    canAsync("iam.audit.events", "read"),
+    wrap(async (req, res) => {
+      res.json(await audit.deleteSavedFilterAsync(db, req.params.id, req.actor, req.tenantId));
     })
   );
 
@@ -4307,30 +4290,30 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/retention/policies",
-    auth,
-    can("iam.audit.retention", "create"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.retention", "create"),
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      const isPlatform = await tenants.isPlatformAdminAsync(db, req.actor.id);
       const tenantId = isPlatform && (body.tenant_id === null || body.tenantId === null)
         ? null
         : body.tenant_id ?? body.tenantId ?? req.tenantId;
-      res.status(201).json(audit.createRetentionPolicy(db, { ...body, tenant_id: tenantId }, req.actor, tenantId));
+      res.status(201).json(await audit.createRetentionPolicyAsync(db, { ...body, tenant_id: tenantId }, req.actor, tenantId));
     })
   );
 
   app.put(
     "/api/audit/retention/policies/:id",
-    auth,
-    can("iam.audit.retention", "update"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.retention", "update"),
+    wrap(async (req, res) => {
       res.json(
-        audit.updateRetentionPolicy(
+        await audit.updateRetentionPolicyAsync(
           db,
           req.params.id,
           req.body || {},
           req.actor,
-          tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId
+          (await tenants.isPlatformAdminAsync(db, req.actor.id)) ? null : req.tenantId
         )
       );
     })
@@ -4338,15 +4321,15 @@ export function createApp(db) {
 
   app.delete(
     "/api/audit/retention/policies/:id",
-    auth,
-    can("iam.audit.retention", "delete"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.retention", "delete"),
+    wrap(async (req, res) => {
       res.json(
-        audit.deleteRetentionPolicy(
+        await audit.deleteRetentionPolicyAsync(
           db,
           req.params.id,
           req.actor,
-          tenants.isPlatformAdmin(db, req.actor.id) ? null : req.tenantId
+          (await tenants.isPlatformAdminAsync(db, req.actor.id)) ? null : req.tenantId
         )
       );
     })
@@ -4354,13 +4337,13 @@ export function createApp(db) {
 
   app.post(
     "/api/audit/retention/execute",
-    auth,
-    can("iam.audit.retention", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.audit.retention", "execute"),
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const isPlatform = tenants.isPlatformAdmin(db, req.actor.id);
+      const isPlatform = await tenants.isPlatformAdminAsync(db, req.actor.id);
       res.json(
-        audit.executeRetentionPolicies(db, {
+        await audit.executeRetentionPoliciesAsync(db, {
           tenantId: isPlatform && body.tenantId !== undefined ? body.tenantId : req.tenantId,
           policyId: body.policyId,
           actor: req.actor,
@@ -4372,10 +4355,10 @@ export function createApp(db) {
 
   app.get(
     "/api/iam/principals/:userId/access",
-    auth,
-    can("iam.users", "read"),
-    wrap((req, res) => {
-      res.json(effectiveAccess(db, req.params.userId));
+    authAsync,
+    canAsync("iam.users", "read"),
+    wrap(async (req, res) => {
+      res.json(await effectiveAccessAsync(db, req.params.userId));
     })
   );
 
@@ -4437,10 +4420,10 @@ export function createApp(db) {
 
   app.get(
     "/api/permissions/matrix",
-    auth,
-    can("iam.permissions", "read"),
-    wrap((req, res) => {
-      res.json(authorization.permissionMatrix(db, req.query));
+    authAsync,
+    canAsync("iam.permissions", "read"),
+    wrap(async (req, res) => {
+      res.json(await authorization.permissionMatrixAsync(db, req.query));
     })
   );
 
@@ -4519,15 +4502,15 @@ export function createApp(db) {
 
   app.post(
     "/api/authorization/check",
-    auth,
-    wrap((req, res) => {
+    authAsync,
+    wrap(async (req, res) => {
       const { userId, user, resource, action, context, organizationId } = req.body || {};
       const subject = userId || user;
       if (!subject || !resource || !action) {
         throw new HttpError(400, "userId, resource and action are required");
       }
       const ctx = { ...(context || {}), organizationId: organizationId ?? context?.organizationId };
-      const result = authorization.checkPermissionAudited(
+      const result = await authorization.checkPermissionAuditedAsync(
         db,
         subject,
         resource,
@@ -4542,10 +4525,10 @@ export function createApp(db) {
 
   app.get(
     "/api/authorization/effective/:userId",
-    auth,
-    wrap((req, res) => {
+    authAsync,
+    wrap(async (req, res) => {
       res.json(
-        authorization.effectivePermissions(db, req.params.userId, {
+        await authorization.effectivePermissionsAsync(db, req.params.userId, {
           organizationId: req.query.organizationId,
         })
       );
@@ -4954,10 +4937,10 @@ export function createApp(db) {
 
   app.post(
     "/api/notification-deliveries/process",
-    auth,
-    can("iam.notifications.history", "execute"),
-    wrap((req, res) => {
-      res.json(notifications.processQueue(db, { limit: req.body?.limit }));
+    authAsync,
+    canAsync("iam.notifications.history", "execute"),
+    wrap(async (req, res) => {
+      res.json(await notifications.processQueueAsync(db, { limit: req.body?.limit }));
     })
   );
 
@@ -4981,10 +4964,10 @@ export function createApp(db) {
 
   app.post(
     "/api/notification-reminders/sweep",
-    auth,
-    can("iam.notifications.history", "execute"),
-    wrap((req, res) => {
-      res.json(notifications.sweepReminders(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.notifications.history", "execute"),
+    wrap(async (req, res) => {
+      res.json(await notifications.sweepRemindersAsync(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
     })
   );
 
@@ -5082,10 +5065,10 @@ export function createApp(db) {
 
   app.post(
     "/api/delivery/process",
-    auth,
-    can("iam.delivery.requests", "execute"),
-    wrap((req, res) => {
-      res.json(delivery.processDue(db, { limit: req.body?.limit, tenantId: deliveryScope(req) }));
+    authAsync,
+    canAsync("iam.delivery.requests", "execute"),
+    wrap(async (req, res) => {
+      res.json(await delivery.processDueAsync(db, { limit: req.body?.limit, tenantId: deliveryScope(req) }));
     })
   );
 
@@ -5223,10 +5206,10 @@ export function createApp(db) {
 
   app.post(
     "/api/delivery/reminders/sweep",
-    auth,
-    can("iam.delivery.reminders", "execute"),
-    wrap((req, res) => {
-      res.json(delivery.sweepReminders(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.reminders", "execute"),
+    wrap(async (req, res) => {
+      res.json(await delivery.sweepRemindersAsync(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
     })
   );
 
@@ -5269,10 +5252,10 @@ export function createApp(db) {
 
   app.post(
     "/api/delivery/escalations/sweep",
-    auth,
-    can("iam.delivery.reminders", "execute"),
-    wrap((req, res) => {
-      res.json(delivery.sweepEscalations(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.delivery.reminders", "execute"),
+    wrap(async (req, res) => {
+      res.json(await delivery.sweepEscalationsAsync(db, { tenantId: req.tenantId, limit: req.body?.limit, actor: req.actor, ip: clientIp(req) }));
     })
   );
 
@@ -5972,11 +5955,11 @@ export function createApp(db) {
 
   app.get(
     "/api/files/events",
-    auth,
-    can("iam.files.browser", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.files.browser", "read"),
+    wrap(async (req, res) => {
       res.json(
-        files.listFileEvents(db, {
+        await files.listFileEventsAsync(db, {
           fileId: req.query.fileId,
           eventType: req.query.eventType,
           tenantId: filePlatformAll(req) ? null : fileTenant(req),
@@ -6164,7 +6147,7 @@ export function createApp(db) {
   // the stored object. The physical storage key never leaves the backend.
   app.get(
     "/api/files/download/:token",
-    auth,
+    authAsync,
     wrap(async (req, res) => {
       const payload = verifyDownloadToken(req.params.token);
       const provider = getStorageProvider();
@@ -6426,11 +6409,11 @@ export function createApp(db) {
 
   app.get(
     "/api/files/:reference/events",
-    auth,
-    can("iam.files.details", "read"),
-    wrap((req, res) => {
-      const file = files.getFile(db, req.params.reference, req.actor, fileTenant(req)).file;
-      res.json(files.listFileEvents(db, { fileId: file.id, eventType: req.query.eventType, limit: req.query.limit }));
+    authAsync,
+    canAsync("iam.files.details", "read"),
+    wrap(async (req, res) => {
+      const file = (await files.getFileAsync(db, req.params.reference, req.actor, fileTenant(req))).file;
+      res.json(await files.listFileEventsAsync(db, { fileId: file.id, eventType: req.query.eventType, limit: req.query.limit }));
     })
   );
 
@@ -7812,22 +7795,27 @@ export function createApp(db) {
   );
   app.post(
     "/api/v1/security/evaluate",
-    auth,
-    can("iam.security.decisions", "read"),
-    wrap((req, res) =>
-      res.json(security.explainAuthorization(db, req.actor, securityTenant(req), req.body || {}, { ip: clientIp(req), correlationId: req.correlationId }))
+    authAsync,
+    canAsync("iam.security.decisions", "read"),
+    wrap(async (req, res) =>
+      res.json(
+        await security.explainAuthorizationAsync(db, req.actor, securityTenant(req), req.body || {}, {
+          ip: clientIp(req),
+          correlationId: req.correlationId,
+        })
+      )
     )
   );
   // Batch evaluation reuses the same deterministic engine; order is preserved.
   app.post(
     "/api/v1/security/evaluate/batch",
-    auth,
-    can("iam.security.decisions", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.security.decisions", "read"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       const requests = Array.isArray(body.requests) ? body.requests : Array.isArray(body) ? body : [];
       res.json(
-        security.explainAuthorizationBatch(
+        await security.explainAuthorizationBatchAsync(
           db,
           req.actor,
           securityTenant(req),
@@ -7857,12 +7845,12 @@ export function createApp(db) {
   });
   app.post(
     "/api/v1/authorization/check",
-    auth,
-    can("iam.security.decisions", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.security.decisions", "read"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       res.json(
-        security.explainAuthorization(
+        await security.explainAuthorizationAsync(
           db,
           req.actor,
           securityTenant(req),
@@ -7874,15 +7862,15 @@ export function createApp(db) {
   );
   app.post(
     "/api/v1/authorization/batch-check",
-    auth,
-    can("iam.security.decisions", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.security.decisions", "read"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       const requests = (Array.isArray(body.requests) ? body.requests : []).map((request) =>
         authorizationInput(request, subjectIdFrom(request))
       );
       res.json(
-        security.explainAuthorizationBatch(
+        await security.explainAuthorizationBatchAsync(
           db,
           req.actor,
           securityTenant(req),
@@ -9035,30 +9023,30 @@ export function createApp(db) {
 
   // ── Event & Messaging Framework ───────────────────────────────────────────
   const eventTenant = (req) => req.tenantId ?? null;
-  const canEvents = (action) => can("iam.events", action);
-  const canEventRegistry = (action) => can("iam.events.registry", action);
-  const canEventPublish = (action) => can("iam.events.publish", action);
-  const canEventSubscriptions = (action) => can("iam.events.subscriptions", action);
-  const canEventTopology = (action) => can("iam.events.topology", action);
-  const canEventDeliveries = (action) => can("iam.events.deliveries", action);
-  const canEventDeadLetters = (action) => can("iam.events.deadletters", action);
-  const canEventReplay = (action) => can("iam.events.replay", action);
-  const canEventRetention = (action) => can("iam.events.retention", action);
-  const canEventMonitoring = (action) => can("iam.events.monitoring", action);
+  const canEvents = (action) => canAsync("iam.events", action);
+  const canEventRegistry = (action) => canAsync("iam.events.registry", action);
+  const canEventPublish = (action) => canAsync("iam.events.publish", action);
+  const canEventSubscriptions = (action) => canAsync("iam.events.subscriptions", action);
+  const canEventTopology = (action) => canAsync("iam.events.topology", action);
+  const canEventDeliveries = (action) => canAsync("iam.events.deliveries", action);
+  const canEventDeadLetters = (action) => canAsync("iam.events.deadletters", action);
+  const canEventReplay = (action) => canAsync("iam.events.replay", action);
+  const canEventRetention = (action) => canAsync("iam.events.retention", action);
+  const canEventMonitoring = (action) => canAsync("iam.events.monitoring", action);
   const truthy = (value) => value === true || /^(1|true|yes|on)$/i.test(String(value ?? ""));
 
   const eventsRouter = express.Router();
 
   eventsRouter.get(
     "/meta",
-    auth,
+    authAsync,
     canEvents("read"),
-    wrap((_req, res) => {
+    wrap(async (_req, res) => {
       res.json({
         ...events.Validation.vocabulary(),
         bus_providers: events.Bus.listBusProviders(),
         handlers: events.Handlers.listHandlers(),
-        event_types: events.Registry.listEventTypes(db, { pageSize: 500 }).items.map((t) => ({ code: t.code, name: t.name, category: t.category })),
+        event_types: (await events.Registry.listEventTypesAsync(db, { pageSize: 500 })).items.map((t) => ({ code: t.code, name: t.name, category: t.category })),
       });
     })
   );
@@ -9066,132 +9054,132 @@ export function createApp(db) {
   // ── Event registry & schema versions ──────────────────────────────────────
   eventsRouter.get(
     "/event-types",
-    auth,
+    authAsync,
     canEventRegistry("read"),
-    wrap((req, res) => {
-      res.json(events.Registry.listEventTypes(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Registry.listEventTypesAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/event-types",
-    auth,
+    authAsync,
     canEventRegistry("create"),
-    wrap((req, res) => {
-      res.status(201).json(events.Registry.createEventType(db, req.body || {}, req.actor, eventTenant(req)));
+    wrap(async (req, res) => {
+      res.status(201).json(await events.Registry.createEventTypeAsync(db, req.body || {}, req.actor, eventTenant(req)));
     })
   );
   eventsRouter.get(
     "/event-types/:code",
-    auth,
+    authAsync,
     canEventRegistry("read"),
-    wrap((req, res) => {
-      res.json(events.Registry.getEventType(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Registry.getEventTypeAsync(db, req.params.code));
     })
   );
   eventsRouter.patch(
     "/event-types/:code",
-    auth,
+    authAsync,
     canEventRegistry("update"),
-    wrap((req, res) => {
-      res.json(events.Registry.updateEventType(db, req.params.code, req.body || {}, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Registry.updateEventTypeAsync(db, req.params.code, req.body || {}, req.actor));
     })
   );
   eventsRouter.delete(
     "/event-types/:code",
-    auth,
+    authAsync,
     canEventRegistry("delete"),
-    wrap((req, res) => {
-      res.json(events.Registry.deleteEventType(db, req.params.code, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Registry.deleteEventTypeAsync(db, req.params.code, req.actor));
     })
   );
   eventsRouter.get(
     "/event-types/:code/versions",
-    auth,
+    authAsync,
     canEventRegistry("read"),
-    wrap((req, res) => {
-      res.json({ items: events.Registry.listVersions(db, req.params.code) });
+    wrap(async (req, res) => {
+      res.json({ items: await events.Registry.listVersionsAsync(db, req.params.code) });
     })
   );
   eventsRouter.post(
     "/event-types/:code/versions",
-    auth,
+    authAsync,
     canEventRegistry("create"),
-    wrap((req, res) => {
-      res.status(201).json(events.Registry.addVersion(db, req.params.code, req.body || {}, req.actor));
+    wrap(async (req, res) => {
+      res.status(201).json(await events.Registry.addVersionAsync(db, req.params.code, req.body || {}, req.actor));
     })
   );
   eventsRouter.patch(
     "/event-types/:code/versions/:version",
-    auth,
+    authAsync,
     canEventRegistry("update"),
-    wrap((req, res) => {
-      res.json(events.Registry.setVersionStatus(db, req.params.code, Number(req.params.version), req.body?.status, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Registry.setVersionStatusAsync(db, req.params.code, Number(req.params.version), req.body?.status, req.actor));
     })
   );
   eventsRouter.post(
     "/event-types/:code/compatibility",
-    auth,
+    authAsync,
     canEventRegistry("read"),
-    wrap((req, res) => {
-      res.json(events.Registry.checkCompatibility(db, req.params.code, req.body || {}));
+    wrap(async (req, res) => {
+      res.json(await events.Registry.checkCompatibilityAsync(db, req.params.code, req.body || {}));
     })
   );
 
   // ── Publishing ────────────────────────────────────────────────────────────
   eventsRouter.get(
     "/",
-    auth,
+    authAsync,
     canEventPublish("read"),
-    wrap((req, res) => {
-      res.json(events.Publisher.listEvents(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Publisher.listEventsAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/",
-    auth,
+    authAsync,
     canEventPublish("create"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
       const useOutbox = body.async === false ? false : !truthy(req.query.immediate) && body.immediate !== true;
-      res.status(202).json(events.Publisher.publishEvent(db, body, req.actor, { tenantId: eventTenant(req), useOutbox }));
+      res.status(202).json(await events.Publisher.publishEventAsync(db, body, req.actor, { tenantId: eventTenant(req), useOutbox }));
     })
   );
   eventsRouter.post(
     "/publish",
-    auth,
+    authAsync,
     canEventPublish("create"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
       const useOutbox = body.async === false ? false : !truthy(req.query.immediate) && body.immediate !== true;
-      res.status(202).json(events.Publisher.publishEvent(db, body, req.actor, { tenantId: eventTenant(req), useOutbox }));
+      res.status(202).json(await events.Publisher.publishEventAsync(db, body, req.actor, { tenantId: eventTenant(req), useOutbox }));
     })
   );
   eventsRouter.post(
     "/batch",
-    auth,
+    authAsync,
     canEventPublish("create"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const result = events.Publisher.publishBatch(db, body.events || body, req.actor, { tenantId: eventTenant(req), useOutbox: truthy(req.query.immediate) ? false : true });
+      const result = await events.Publisher.publishBatchAsync(db, body.events || body, req.actor, { tenantId: eventTenant(req), useOutbox: truthy(req.query.immediate) ? false : true });
       res.status(207).json(result);
     })
   );
   eventsRouter.post(
     "/validate",
-    auth,
+    authAsync,
     canEventPublish("read"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
-      const validated = events.Publisher.validateEvent(db, body, { actor: req.actor, tenantId: eventTenant(req) });
+      const validated = await events.Publisher.validateEventAsync(db, body, { actor: req.actor, tenantId: eventTenant(req) });
       res.json({ valid: true, envelope: validated.envelope, event_type_code: validated.envelope.event_type_code, resolved_schema: validated.schema });
     })
   );
   eventsRouter.post(
     "/serialize",
-    auth,
+    authAsync,
     canEventPublish("read"),
-    wrap((req, res) => {
-      const validated = events.Publisher.validateEvent(db, req.body || {}, { actor: req.actor, tenantId: eventTenant(req) });
+    wrap(async (req, res) => {
+      const validated = await events.Publisher.validateEventAsync(db, req.body || {}, { actor: req.actor, tenantId: eventTenant(req) });
       res.json({ serialized: events.Publisher.serializeEvent(validated.envelope) });
     })
   );
@@ -9199,539 +9187,539 @@ export function createApp(db) {
   // ── Deliveries & consumers ────────────────────────────────────────────────
   eventsRouter.get(
     "/deliveries",
-    auth,
+    authAsync,
     canEventDeliveries("read"),
-    wrap((req, res) => {
-      res.json(events.Publisher.listDeliveries(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Publisher.listDeliveriesAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.get(
     "/deliveries/stats",
-    auth,
+    authAsync,
     canEventDeliveries("read"),
-    wrap((req, res) => {
-      res.json(events.Consumer.consumerStats(db, { tenantId: eventTenant(req), ...req.query }));
+    wrap(async (req, res) => {
+      res.json(await events.Consumer.consumerStatsAsync(db, { tenantId: eventTenant(req), ...req.query }));
     })
   );
   eventsRouter.get(
     "/deliveries/:id",
-    auth,
+    authAsync,
     canEventDeliveries("read"),
-    wrap((req, res) => {
-      const list = events.Publisher.listDeliveries(db, { pageSize: 1 });
-      const row = queryOne(db, "SELECT * FROM event_deliveries WHERE id = ?", [Number(req.params.id)]);
+    wrap(async (req, res) => {
+      const list = await events.Publisher.listDeliveriesAsync(db, { pageSize: 1 });
+      const row = await queryOneAsync(db, "SELECT * FROM event_deliveries WHERE id = ?", [Number(req.params.id)]);
       if (!row) throw new HttpError(404, "Delivery not found");
-      res.json({ ...list, item: events.Repository.publicDelivery(row, { includePayload: true }), attempts: events.Consumer.listAttempts(db, row.id) });
+      res.json({ ...list, item: events.Repository.publicDelivery(row, { includePayload: true }), attempts: await events.Consumer.listAttemptsAsync(db, row.id) });
     })
   );
   eventsRouter.post(
     "/deliveries/:id/retry",
-    auth,
+    authAsync,
     canEventDeliveries("update"),
-    wrap((req, res) => {
-      res.json(events.Consumer.retryDelivery(db, req.params.id, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Consumer.retryDeliveryAsync(db, req.params.id, req.actor));
     })
   );
   eventsRouter.post(
     "/deliveries/:id/skip",
-    auth,
+    authAsync,
     canEventDeliveries("update"),
-    wrap((req, res) => {
-      res.json(events.Consumer.skipDelivery(db, req.params.id, req.actor, req.body?.reason));
+    wrap(async (req, res) => {
+      res.json(await events.Consumer.skipDeliveryAsync(db, req.params.id, req.actor, req.body?.reason));
     })
   );
   eventsRouter.get(
     "/deliveries/:id/attempts",
-    auth,
+    authAsync,
     canEventDeliveries("read"),
-    wrap((req, res) => {
-      res.json({ items: events.Consumer.listAttempts(db, req.params.id) });
+    wrap(async (req, res) => {
+      res.json({ items: await events.Consumer.listAttemptsAsync(db, req.params.id) });
     })
   );
 
   // ── Subscriptions ─────────────────────────────────────────────────────────
   eventsRouter.get(
     "/subscriptions",
-    auth,
+    authAsync,
     canEventSubscriptions("read"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.listSubscriptions(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.listSubscriptionsAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/subscriptions",
-    auth,
+    authAsync,
     canEventSubscriptions("create"),
-    wrap((req, res) => {
-      res.status(201).json(events.Subscriptions.createSubscription(db, req.body || {}, req.actor, eventTenant(req)));
+    wrap(async (req, res) => {
+      res.status(201).json(await events.Subscriptions.createSubscriptionAsync(db, req.body || {}, req.actor, eventTenant(req)));
     })
   );
   eventsRouter.get(
     "/subscriptions/:code",
-    auth,
+    authAsync,
     canEventSubscriptions("read"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.getSubscription(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.getSubscriptionAsync(db, req.params.code));
     })
   );
   eventsRouter.patch(
     "/subscriptions/:code",
-    auth,
+    authAsync,
     canEventSubscriptions("update"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.updateSubscription(db, req.params.code, req.body || {}, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.updateSubscriptionAsync(db, req.params.code, req.body || {}, req.actor));
     })
   );
   eventsRouter.delete(
     "/subscriptions/:code",
-    auth,
+    authAsync,
     canEventSubscriptions("delete"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.deleteSubscription(db, req.params.code, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.deleteSubscriptionAsync(db, req.params.code, req.actor));
     })
   );
   eventsRouter.post(
     "/subscriptions/:code/status",
-    auth,
+    authAsync,
     canEventSubscriptions("update"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.setSubscriptionStatus(db, req.params.code, req.body?.status, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.setSubscriptionStatusAsync(db, req.params.code, req.body?.status, req.actor));
     })
   );
   eventsRouter.post(
     "/subscriptions/:code/validate",
-    auth,
+    authAsync,
     canEventSubscriptions("read"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.validateSubscription(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.validateSubscriptionAsync(db, req.params.code));
     })
   );
   eventsRouter.post(
     "/subscriptions/:code/test",
-    auth,
+    authAsync,
     canEventSubscriptions("read"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.testSubscription(db, req.params.code, req.body || {}));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.testSubscriptionAsync(db, req.params.code, req.body || {}));
     })
   );
   eventsRouter.get(
     "/subscriptions/:code/stats",
-    auth,
+    authAsync,
     canEventSubscriptions("read"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.subscriptionStats(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.subscriptionStatsAsync(db, req.params.code));
     })
   );
 
   // ── Topics / queues / consumer groups ─────────────────────────────────────
   eventsRouter.get(
     "/topics",
-    auth,
+    authAsync,
     canEventTopology("read"),
-    wrap((req, res) => {
-      res.json(events.Bus.listTopics(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.listTopicsAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/topics",
-    auth,
+    authAsync,
     canEventTopology("create"),
-    wrap((req, res) => {
-      res.status(201).json(events.Bus.createTopic(db, req.body || {}, req.actor, eventTenant(req)));
+    wrap(async (req, res) => {
+      res.status(201).json(await events.Bus.createTopicAsync(db, req.body || {}, req.actor, eventTenant(req)));
     })
   );
   eventsRouter.get(
     "/topics/:code",
-    auth,
+    authAsync,
     canEventTopology("read"),
-    wrap((req, res) => {
-      res.json(events.Bus.getTopic(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.getTopicAsync(db, req.params.code));
     })
   );
   eventsRouter.patch(
     "/topics/:code",
-    auth,
+    authAsync,
     canEventTopology("update"),
-    wrap((req, res) => {
-      res.json(events.Bus.updateTopic(db, req.params.code, req.body || {}));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.updateTopicAsync(db, req.params.code, req.body || {}));
     })
   );
   eventsRouter.delete(
     "/topics/:code",
-    auth,
+    authAsync,
     canEventTopology("delete"),
-    wrap((req, res) => {
-      res.json(events.Bus.deleteTopic(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.deleteTopicAsync(db, req.params.code));
     })
   );
   eventsRouter.get(
     "/queues",
-    auth,
+    authAsync,
     canEventTopology("read"),
-    wrap((req, res) => {
-      res.json(events.Bus.listQueues(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.listQueuesAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/queues",
-    auth,
+    authAsync,
     canEventTopology("create"),
-    wrap((req, res) => {
-      res.status(201).json(events.Bus.createQueue(db, req.body || {}, req.actor, eventTenant(req)));
+    wrap(async (req, res) => {
+      res.status(201).json(await events.Bus.createQueueAsync(db, req.body || {}, req.actor, eventTenant(req)));
     })
   );
   eventsRouter.get(
     "/queues/:code",
-    auth,
+    authAsync,
     canEventTopology("read"),
-    wrap((req, res) => {
-      res.json(events.Bus.getQueue(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.getQueueAsync(db, req.params.code));
     })
   );
   eventsRouter.patch(
     "/queues/:code",
-    auth,
+    authAsync,
     canEventTopology("update"),
-    wrap((req, res) => {
-      res.json(events.Bus.updateQueue(db, req.params.code, req.body || {}));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.updateQueueAsync(db, req.params.code, req.body || {}));
     })
   );
   eventsRouter.delete(
     "/queues/:code",
-    auth,
+    authAsync,
     canEventTopology("delete"),
-    wrap((req, res) => {
-      res.json(events.Bus.deleteQueue(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.deleteQueueAsync(db, req.params.code));
     })
   );
   eventsRouter.get(
     "/queues/:code/stats",
-    auth,
+    authAsync,
     canEventTopology("read"),
-    wrap((req, res) => {
-      res.json(events.Bus.queueStats(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.queueStatsAsync(db, req.params.code));
     })
   );
   eventsRouter.get(
     "/consumer-groups",
-    auth,
+    authAsync,
     canEventTopology("read"),
-    wrap((req, res) => {
-      res.json(events.Bus.listConsumerGroups(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.listConsumerGroupsAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/consumer-groups",
-    auth,
+    authAsync,
     canEventTopology("create"),
-    wrap((req, res) => {
-      res.status(201).json(events.Bus.createConsumerGroup(db, req.body || {}, req.actor, eventTenant(req)));
+    wrap(async (req, res) => {
+      res.status(201).json(await events.Bus.createConsumerGroupAsync(db, req.body || {}, req.actor, eventTenant(req)));
     })
   );
   eventsRouter.get(
     "/consumer-groups/:code",
-    auth,
+    authAsync,
     canEventTopology("read"),
-    wrap((req, res) => {
-      res.json(events.Bus.getConsumerGroup(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.getConsumerGroupAsync(db, req.params.code));
     })
   );
   eventsRouter.patch(
     "/consumer-groups/:code",
-    auth,
+    authAsync,
     canEventTopology("update"),
-    wrap((req, res) => {
-      res.json(events.Bus.updateConsumerGroup(db, req.params.code, req.body || {}));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.updateConsumerGroupAsync(db, req.params.code, req.body || {}));
     })
   );
   eventsRouter.delete(
     "/consumer-groups/:code",
-    auth,
+    authAsync,
     canEventTopology("delete"),
-    wrap((req, res) => {
-      res.json(events.Bus.deleteConsumerGroup(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.deleteConsumerGroupAsync(db, req.params.code));
     })
   );
 
   // ── Handlers & outbox ─────────────────────────────────────────────────────
   eventsRouter.get(
     "/handlers",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((_req, res) => {
+    wrap(async (_req, res) => {
       res.json({ items: events.Handlers.listHandlers() });
     })
   );
   eventsRouter.get(
     "/handlers/stats",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json({ items: events.Handlers.handlerStats(db, { tenantId: eventTenant(req), ...req.query }), slow: events.Handlers.slowHandlers(db, { tenantId: eventTenant(req) }) });
+    wrap(async (req, res) => {
+      res.json({ items: await events.Handlers.handlerStatsAsync(db, { tenantId: eventTenant(req), ...req.query }), slow: await events.Handlers.slowHandlersAsync(db, { tenantId: eventTenant(req) }) });
     })
   );
   eventsRouter.get(
     "/handlers/:code",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json(events.Handlers.handlerDetail(db, req.params.code, { tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Handlers.handlerDetailAsync(db, req.params.code, { tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.get(
     "/outbox",
-    auth,
+    authAsync,
     canEventPublish("read"),
-    wrap((req, res) => {
-      res.json(events.Outbox.listOutbox(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Outbox.listOutboxAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.get(
     "/outbox/stats",
-    auth,
+    authAsync,
     canEventPublish("read"),
-    wrap((req, res) => {
-      res.json(events.Outbox.outboxStats(db, { tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Outbox.outboxStatsAsync(db, { tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/outbox/process",
-    auth,
+    authAsync,
     canEventPublish("update"),
     wrap(async (req, res) => {
-      res.json(await events.Outbox.processOutbox(db, { limit: Number(req.body?.limit) || 50 }));
+      res.json(await events.Outbox.processOutboxAsync(db, { limit: Number(req.body?.limit) || 50 }));
     })
   );
   eventsRouter.post(
     "/outbox/:id/retry",
-    auth,
+    authAsync,
     canEventPublish("update"),
-    wrap((req, res) => {
-      res.json(events.Outbox.retryOutbox(db, req.params.id, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Outbox.retryOutboxAsync(db, req.params.id, req.actor));
     })
   );
 
   // ── Dead letters ──────────────────────────────────────────────────────────
   eventsRouter.get(
     "/dead-letters",
-    auth,
+    authAsync,
     canEventDeadLetters("read"),
-    wrap((req, res) => {
-      res.json(events.DeadLetter.listDeadLetters(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.DeadLetter.listDeadLettersAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.get(
     "/dead-letters/stats",
-    auth,
+    authAsync,
     canEventDeadLetters("read"),
-    wrap((req, res) => {
-      res.json(events.DeadLetter.deadLetterStats(db, { tenantId: eventTenant(req), ...req.query }));
+    wrap(async (req, res) => {
+      res.json(await events.DeadLetter.deadLetterStatsAsync(db, { tenantId: eventTenant(req), ...req.query }));
     })
   );
   eventsRouter.post(
     "/dead-letters/bulk-retry",
-    auth,
+    authAsync,
     canEventDeadLetters("update"),
-    wrap((req, res) => {
-      res.json(events.DeadLetter.retryDeadLetters(db, { ...(req.body || {}), tenantId: eventTenant(req), actor: req.actor }));
+    wrap(async (req, res) => {
+      res.json(await events.DeadLetter.retryDeadLettersAsync(db, { ...(req.body || {}), tenantId: eventTenant(req), actor: req.actor }));
     })
   );
   eventsRouter.get(
     "/dead-letters/:id",
-    auth,
+    authAsync,
     canEventDeadLetters("read"),
-    wrap((req, res) => {
-      res.json(events.DeadLetter.getDeadLetter(db, req.params.id));
+    wrap(async (req, res) => {
+      res.json(await events.DeadLetter.getDeadLetterAsync(db, req.params.id));
     })
   );
   eventsRouter.post(
     "/dead-letters/:id/resolve",
-    auth,
+    authAsync,
     canEventDeadLetters("update"),
-    wrap((req, res) => {
-      res.json(events.DeadLetter.resolveDeadLetter(db, req.params.id, { action: req.body?.action, reason: req.body?.reason, actor: req.actor }));
+    wrap(async (req, res) => {
+      res.json(await events.DeadLetter.resolveDeadLetterAsync(db, req.params.id, { action: req.body?.action, reason: req.body?.reason, actor: req.actor }));
     })
   );
 
   // ── Replay ────────────────────────────────────────────────────────────────
   eventsRouter.get(
     "/replays",
-    auth,
+    authAsync,
     canEventReplay("read"),
-    wrap((req, res) => {
-      res.json(events.Replay.listReplays(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Replay.listReplaysAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/replays/preview",
-    auth,
+    authAsync,
     canEventReplay("read"),
-    wrap((req, res) => {
-      res.json(events.Replay.previewReplay(db, { ...(req.body || {}), tenant_id: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Replay.previewReplayAsync(db, { ...(req.body || {}), tenant_id: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/replays",
-    auth,
+    authAsync,
     canEventReplay("create"),
-    wrap((req, res) => {
-      res.status(201).json(events.Replay.createReplay(db, req.body || {}, req.actor, eventTenant(req)));
+    wrap(async (req, res) => {
+      res.status(201).json(await events.Replay.createReplayAsync(db, req.body || {}, req.actor, eventTenant(req)));
     })
   );
   eventsRouter.get(
     "/replays/stats",
-    auth,
+    authAsync,
     canEventReplay("read"),
-    wrap((req, res) => {
-      res.json(events.Replay.replayStats(db, { tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Replay.replayStatsAsync(db, { tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.get(
     "/replays/:ref",
-    auth,
+    authAsync,
     canEventReplay("read"),
-    wrap((req, res) => {
-      res.json(events.Replay.getReplay(db, req.params.ref));
+    wrap(async (req, res) => {
+      res.json(await events.Replay.getReplayAsync(db, req.params.ref));
     })
   );
   eventsRouter.post(
     "/replays/:ref/run",
-    auth,
+    authAsync,
     canEventReplay("update"),
     wrap(async (req, res) => {
-      res.json(await events.Replay.runReplay(db, req.params.ref, req.actor));
+      res.json(await events.Replay.runReplayAsync(db, req.params.ref, req.actor));
     })
   );
   eventsRouter.post(
     "/replays/:ref/cancel",
-    auth,
+    authAsync,
     canEventReplay("update"),
-    wrap((req, res) => {
-      res.json(events.Replay.cancelReplay(db, req.params.ref, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Replay.cancelReplayAsync(db, req.params.ref, req.actor));
     })
   );
 
   // ── Retention ─────────────────────────────────────────────────────────────
   eventsRouter.get(
     "/retention-policies",
-    auth,
+    authAsync,
     canEventRetention("read"),
-    wrap((req, res) => {
-      res.json(events.Retention.listRetentionPolicies(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Retention.listRetentionPoliciesAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/retention-policies",
-    auth,
+    authAsync,
     canEventRetention("create"),
-    wrap((req, res) => {
-      res.status(201).json(events.Retention.createRetentionPolicy(db, req.body || {}, req.actor, eventTenant(req)));
+    wrap(async (req, res) => {
+      res.status(201).json(await events.Retention.createRetentionPolicyAsync(db, req.body || {}, req.actor, eventTenant(req)));
     })
   );
   eventsRouter.get(
     "/retention-policies/:code",
-    auth,
+    authAsync,
     canEventRetention("read"),
-    wrap((req, res) => {
-      res.json(events.Retention.getRetentionPolicy(db, req.params.code));
+    wrap(async (req, res) => {
+      res.json(await events.Retention.getRetentionPolicyAsync(db, req.params.code));
     })
   );
   eventsRouter.patch(
     "/retention-policies/:code",
-    auth,
+    authAsync,
     canEventRetention("update"),
-    wrap((req, res) => {
-      res.json(events.Retention.updateRetentionPolicy(db, req.params.code, req.body || {}, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Retention.updateRetentionPolicyAsync(db, req.params.code, req.body || {}, req.actor));
     })
   );
   eventsRouter.delete(
     "/retention-policies/:code",
-    auth,
+    authAsync,
     canEventRetention("delete"),
-    wrap((req, res) => {
-      res.json(events.Retention.deleteRetentionPolicy(db, req.params.code, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Retention.deleteRetentionPolicyAsync(db, req.params.code, req.actor));
     })
   );
   eventsRouter.post(
     "/retention-policies/:code/apply",
-    auth,
+    authAsync,
     canEventRetention("update"),
-    wrap((req, res) => {
-      res.json(events.Retention.applyRetentionPolicy(db, req.params.code, { dryRun: truthy(req.body?.dry_run), actor: req.actor }));
+    wrap(async (req, res) => {
+      res.json(await events.Retention.applyRetentionPolicyAsync(db, req.params.code, { dryRun: truthy(req.body?.dry_run), actor: req.actor }));
     })
   );
   eventsRouter.post(
     "/retention/apply",
-    auth,
+    authAsync,
     canEventRetention("update"),
-    wrap((req, res) => {
-      res.json(events.Retention.applyRetention(db, { dryRun: truthy(req.body?.dry_run), actor: req.actor, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Retention.applyRetentionAsync(db, { dryRun: truthy(req.body?.dry_run), actor: req.actor, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.get(
     "/retention/stats",
-    auth,
+    authAsync,
     canEventRetention("read"),
-    wrap((req, res) => {
-      res.json(events.Retention.retentionStats(db, { tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Retention.retentionStatsAsync(db, { tenantId: eventTenant(req) }));
     })
   );
 
   // ── Monitoring & traceability ─────────────────────────────────────────────
   eventsRouter.get(
     "/monitoring/dashboard",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json(events.Monitoring.dashboardSummary(db, { tenantId: eventTenant(req), ...req.query }));
+    wrap(async (req, res) => {
+      res.json(await events.Monitoring.dashboardSummaryAsync(db, { tenantId: eventTenant(req), ...req.query }));
     })
   );
   eventsRouter.get(
     "/monitoring/throughput",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json(events.Monitoring.throughputTimeseries(db, { tenantId: eventTenant(req), ...req.query }));
+    wrap(async (req, res) => {
+      res.json(await events.Monitoring.throughputTimeseriesAsync(db, { tenantId: eventTenant(req), ...req.query }));
     })
   );
   eventsRouter.get(
     "/monitoring/failures",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json(events.Monitoring.failureBreakdown(db, { tenantId: eventTenant(req), ...req.query }));
+    wrap(async (req, res) => {
+      res.json(await events.Monitoring.failureBreakdownAsync(db, { tenantId: eventTenant(req), ...req.query }));
     })
   );
   eventsRouter.get(
     "/monitoring/latency",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json(events.Monitoring.latencyStats(db, { tenantId: eventTenant(req), ...req.query }));
+    wrap(async (req, res) => {
+      res.json(await events.Monitoring.latencyStatsAsync(db, { tenantId: eventTenant(req), ...req.query }));
     })
   );
   eventsRouter.get(
     "/monitoring/health",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json(events.Monitoring.healthCheck(db, { tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Monitoring.healthCheckAsync(db, { tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.get(
     "/monitoring/ordering",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json(events.Ordering.orderingState(db, { tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Ordering.orderingStateAsync(db, { tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.get(
     "/monitoring/traceability",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json(events.Monitoring.traceability(db, { correlationId: req.query.correlationId, traceId: req.query.traceId, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Monitoring.traceabilityAsync(db, { correlationId: req.query.correlationId, traceId: req.query.traceId, tenantId: eventTenant(req) }));
     })
   );
 
@@ -9743,164 +9731,164 @@ export function createApp(db) {
 
   eventsRouter.get(
     "/definitions",
-    auth,
+    authAsync,
     canEventRegistry("read"),
-    wrap((req, res) => {
-      res.json(events.Registry.listEventTypes(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Registry.listEventTypesAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.post(
     "/definitions",
-    auth,
+    authAsync,
     canEventRegistry("create"),
-    wrap((req, res) => {
-      res.status(201).json(events.Registry.createEventType(db, req.body || {}, req.actor, eventTenant(req)));
+    wrap(async (req, res) => {
+      res.status(201).json(await events.Registry.createEventTypeAsync(db, req.body || {}, req.actor, eventTenant(req)));
     })
   );
   eventsRouter.get(
     "/definitions/:id",
-    auth,
+    authAsync,
     canEventRegistry("read"),
-    wrap((req, res) => {
-      res.json(events.Registry.getEventType(db, req.params.id));
+    wrap(async (req, res) => {
+      res.json(await events.Registry.getEventTypeAsync(db, req.params.id));
     })
   );
   eventsRouter.put(
     "/definitions/:id",
-    auth,
+    authAsync,
     canEventRegistry("update"),
-    wrap((req, res) => {
-      res.json(events.Registry.updateEventType(db, req.params.id, req.body || {}, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Registry.updateEventTypeAsync(db, req.params.id, req.body || {}, req.actor));
     })
   );
   eventsRouter.post(
     "/definitions/:id/activate",
-    auth,
+    authAsync,
     canEventRegistry("update"),
-    wrap((req, res) => {
-      const type = events.Registry.getEventType(db, req.params.id);
-      res.json(events.Registry.setVersionStatus(db, req.params.id, eventDefinitionVersion(req, type), "active", req.actor));
+    wrap(async (req, res) => {
+      const type = await events.Registry.getEventTypeAsync(db, req.params.id);
+      res.json(await events.Registry.setVersionStatusAsync(db, req.params.id, eventDefinitionVersion(req, type), "active", req.actor));
     })
   );
   eventsRouter.post(
     "/definitions/:id/deprecate",
-    auth,
+    authAsync,
     canEventRegistry("update"),
-    wrap((req, res) => {
-      const type = events.Registry.getEventType(db, req.params.id);
-      res.json(events.Registry.setVersionStatus(db, req.params.id, eventDefinitionVersion(req, type), "deprecated", req.actor));
+    wrap(async (req, res) => {
+      const type = await events.Registry.getEventTypeAsync(db, req.params.id);
+      res.json(await events.Registry.setVersionStatusAsync(db, req.params.id, eventDefinitionVersion(req, type), "deprecated", req.actor));
     })
   );
 
   eventsRouter.get(
     "/history",
-    auth,
+    authAsync,
     canEventPublish("read"),
-    wrap((req, res) => {
-      res.json(events.Publisher.listEvents(db, { ...req.query, tenantId: eventTenant(req) }));
+    wrap(async (req, res) => {
+      res.json(await events.Publisher.listEventsAsync(db, { ...req.query, tenantId: eventTenant(req) }));
     })
   );
   eventsRouter.get(
     "/history/:eventId",
-    auth,
+    authAsync,
     canEventPublish("read"),
-    wrap((req, res) => {
-      res.json(events.Publisher.getEvent(db, req.params.eventId, { includePayload: true }));
+    wrap(async (req, res) => {
+      res.json(await events.Publisher.getEventAsync(db, req.params.eventId, { includePayload: true }));
     })
   );
 
   eventsRouter.put(
     "/topics/:id",
-    auth,
+    authAsync,
     canEventTopology("update"),
-    wrap((req, res) => {
-      res.json(events.Bus.updateTopic(db, req.params.id, req.body || {}));
+    wrap(async (req, res) => {
+      res.json(await events.Bus.updateTopicAsync(db, req.params.id, req.body || {}));
     })
   );
 
   eventsRouter.put(
     "/subscriptions/:id",
-    auth,
+    authAsync,
     canEventSubscriptions("update"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.updateSubscription(db, req.params.id, req.body || {}, req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.updateSubscriptionAsync(db, req.params.id, req.body || {}, req.actor));
     })
   );
   eventsRouter.post(
     "/subscriptions/:id/pause",
-    auth,
+    authAsync,
     canEventSubscriptions("update"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.setSubscriptionStatus(db, req.params.id, "suspended", req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.setSubscriptionStatusAsync(db, req.params.id, "suspended", req.actor));
     })
   );
   eventsRouter.post(
     "/subscriptions/:id/resume",
-    auth,
+    authAsync,
     canEventSubscriptions("update"),
-    wrap((req, res) => {
-      res.json(events.Subscriptions.setSubscriptionStatus(db, req.params.id, "active", req.actor));
+    wrap(async (req, res) => {
+      res.json(await events.Subscriptions.setSubscriptionStatusAsync(db, req.params.id, "active", req.actor));
     })
   );
 
   eventsRouter.post(
     "/replay",
-    auth,
+    authAsync,
     canEventReplay("create"),
     wrap(async (req, res) => {
       const body = req.body || {};
-      const created = events.Replay.createReplay(db, body, req.actor, eventTenant(req));
+      const created = await events.Replay.createReplayAsync(db, body, req.actor, eventTenant(req));
       if (body.run === false) return res.status(201).json(created);
-      res.status(202).json(await events.Replay.runReplay(db, created.replay_ref, req.actor));
+      res.status(202).json(await events.Replay.runReplayAsync(db, created.replay_ref, req.actor));
     })
   );
   eventsRouter.post(
     "/:eventId/replay",
-    auth,
+    authAsync,
     canEventReplay("create"),
     wrap(async (req, res) => {
       const body = { scope_type: "event", event_ref: req.params.eventId, ...(req.body || {}) };
-      const created = events.Replay.createReplay(db, body, req.actor, eventTenant(req));
+      const created = await events.Replay.createReplayAsync(db, body, req.actor, eventTenant(req));
       if (body.run === false) return res.status(201).json(created);
-      res.status(202).json(await events.Replay.runReplay(db, created.replay_ref, req.actor));
+      res.status(202).json(await events.Replay.runReplayAsync(db, created.replay_ref, req.actor));
     })
   );
 
   eventsRouter.post(
     "/dead-letters/:id/retry",
-    auth,
+    authAsync,
     canEventDeadLetters("update"),
-    wrap((req, res) => {
-      res.json(events.DeadLetter.resolveDeadLetter(db, req.params.id, { action: "retry", reason: req.body?.reason, actor: req.actor }));
+    wrap(async (req, res) => {
+      res.json(await events.DeadLetter.resolveDeadLetterAsync(db, req.params.id, { action: "retry", reason: req.body?.reason, actor: req.actor }));
     })
   );
   eventsRouter.post(
     "/dead-letters/:id/replay",
-    auth,
+    authAsync,
     canEventDeadLetters("update"),
-    wrap((req, res) => {
-      res.json(events.DeadLetter.resolveDeadLetter(db, req.params.id, { action: "retry", reason: req.body?.reason || "replayed by operator", actor: req.actor }));
+    wrap(async (req, res) => {
+      res.json(await events.DeadLetter.resolveDeadLetterAsync(db, req.params.id, { action: "retry", reason: req.body?.reason || "replayed by operator", actor: req.actor }));
     })
   );
 
   eventsRouter.get(
     "/metrics",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
-      res.json(events.Monitoring.dashboardSummary(db, { tenantId: eventTenant(req), ...req.query }));
+    wrap(async (req, res) => {
+      res.json(await events.Monitoring.dashboardSummaryAsync(db, { tenantId: eventTenant(req), ...req.query }));
     })
   );
   eventsRouter.get(
     "/consumers",
-    auth,
+    authAsync,
     canEventMonitoring("read"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       res.json({
         items: events.Handlers.listHandlers(),
-        stats: events.Handlers.handlerStats(db, { tenantId: eventTenant(req), ...req.query }),
-        consumer_groups: events.Bus.listConsumerGroups(db, { tenantId: eventTenant(req) }),
-        slow: events.Handlers.slowHandlers(db, { tenantId: eventTenant(req) }),
+        stats: await events.Handlers.handlerStatsAsync(db, { tenantId: eventTenant(req), ...req.query }),
+        consumer_groups: await events.Bus.listConsumerGroupsAsync(db, { tenantId: eventTenant(req) }),
+        slow: await events.Handlers.slowHandlersAsync(db, { tenantId: eventTenant(req) }),
       });
     })
   );
@@ -9908,27 +9896,27 @@ export function createApp(db) {
   // ── Event records (generic, must be registered last to avoid shadowing) ──
   eventsRouter.get(
     "/:ref",
-    auth,
+    authAsync,
     canEventPublish("read"),
-    wrap((req, res) => {
-      res.json(events.Publisher.getEvent(db, req.params.ref, { includePayload: true }));
+    wrap(async (req, res) => {
+      res.json(await events.Publisher.getEventAsync(db, req.params.ref, { includePayload: true }));
     })
   );
   eventsRouter.post(
     "/:ref/route",
-    auth,
+    authAsync,
     canEventPublish("create"),
-    wrap((req, res) => {
-      res.json(events.Publisher.routeStoredEvent(db, req.params.ref, { trigger: "api" }));
+    wrap(async (req, res) => {
+      res.json(await events.Publisher.routeStoredEventAsync(db, req.params.ref, { trigger: "api" }));
     })
   );
   eventsRouter.get(
     "/:ref/deliveries",
-    auth,
+    authAsync,
     canEventDeliveries("read"),
-    wrap((req, res) => {
-      const event = events.Publisher.getEvent(db, req.params.ref);
-      res.json(events.Publisher.listDeliveries(db, { ...req.query, eventId: event.id }));
+    wrap(async (req, res) => {
+      const event = await events.Publisher.getEventAsync(db, req.params.ref);
+      res.json(await events.Publisher.listDeliveriesAsync(db, { ...req.query, eventId: event.id }));
     })
   );
 
@@ -10396,7 +10384,7 @@ export function createApp(db) {
   app.use("/api/v1/digital-thread", threadRouter);
 
   // ── P2 Standards & Exchange ───────────────────────────────────────────────
-  const exchangeRouter = createExchangeRouter({ express, db, auth, can, wrap });
+  const exchangeRouter = createExchangeRouter({ express, db, auth, authAsync, can, canAsync, wrap });
   app.use("/api/standards-exchange", exchangeRouter);
   app.use("/api/v1/standards-exchange", exchangeRouter);
 

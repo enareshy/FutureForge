@@ -139,7 +139,9 @@ export {
   deleteEscalationRule,
   deleteEscalationRuleAsync,
   applyEscalation,
+  applyEscalationAsync,
   sweepEscalations,
+  sweepEscalationsAsync,
   readEscalationTenant,
 } from "./workflow/escalations.js";
 
@@ -275,12 +277,14 @@ export {
   deleteBinding,
   deleteBindingAsync,
   triggerEvent,
+  triggerEventAsync,
   readBindingTenant,
 } from "./workflow/bindings.js";
 
 export {
   resolveLifecycleApprovers,
   onLifecycleApprovalComplete,
+  onLifecycleApprovalCompleteAsync,
   lifecycleExecutor,
   registerLifecycleExecutor,
 } from "./workflow/lifecycle-bridge.js";

@@ -5,9 +5,12 @@
 // history are discoverable with the same facets, authorization and saved
 // searches as every other module.
 import { queryAll, queryOne } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { registerObjectType, tenantIds } from "../search/registry.js";
+import { registerObjectTypeAsync, tenantIdsAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { getObjectType, registerObjectType as registerSecurityObjectType } from "../security/repository.js";
+import { getObjectTypeAsync, registerObjectTypeAsync as registerSecurityObjectTypeAsync } from "../security/repository.js";
 import { EXCHANGE_RESOURCES, SEARCH_OBJECT_TYPES } from "./constants.js";
 
 function defFor(code) {
@@ -169,6 +172,23 @@ export function ensureExchangeSearch(db) {
       }
       if (!getObjectType(db, Number(tenantId), def.code)) {
         registerSecurityObjectType(db, { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource }, null, tenantId);
+      }
+    }
+  }
+  return { created };
+}
+
+export async function ensureExchangeSearchAsync(db) {
+  let created = 0;
+  for (const tenantId of await tenantIdsAsync(db)) {
+    for (const def of SEARCH_REGISTRATIONS) {
+      const existing = await queryOneAsync(db, "SELECT id FROM search_object_types WHERE code = ? AND tenant_id = ?", [def.code, Number(tenantId)]);
+      if (!existing) {
+        await registerObjectTypeAsync(db, def, null, tenantId, null);
+        created += 1;
+      }
+      if (!(await getObjectTypeAsync(db, Number(tenantId), def.code))) {
+        await registerSecurityObjectTypeAsync(db, { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource }, null, tenantId);
       }
     }
   }

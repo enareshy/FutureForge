@@ -45,6 +45,7 @@ export {
   capture,
   captureAsync,
   recordBatch,
+  recordBatchAsync,
   writeAudit,
   writeAuditAsync,
   recordObjectChange,
@@ -77,9 +78,13 @@ export {
   getPolicyRow,
   getPolicyRowAsync,
   createPolicy,
+  createPolicyAsync,
   updatePolicy,
+  updatePolicyAsync,
   deletePolicy,
+  deletePolicyAsync,
   validatePolicy,
+  validatePolicyAsync,
   ensureDefaultPolicies,
 } from "./audit/policies.js";
 
@@ -121,12 +126,14 @@ export {
   auditMetricsAsync,
 } from "./audit/query.js";
 
-export { EXPORT_FORMATS, EXPORT_COLUMNS, toCsv, toExcelXml, exportEvents } from "./audit/export.js";
+export { EXPORT_FORMATS, EXPORT_COLUMNS, toCsv, toExcelXml, exportEvents, exportEventsAsync } from "./audit/export.js";
 
 export {
   publicAuditExport,
   requestAuditExport,
+  requestAuditExportAsync,
   runAuditExport,
+  runAuditExportAsync,
   listAuditExports,
   listAuditExportsAsync,
   getAuditExport,
@@ -134,6 +141,7 @@ export {
   markAuditExportDownloaded,
   markAuditExportDownloadedAsync,
   expireAuditExports,
+  expireAuditExportsAsync,
 } from "./audit/exports.js";
 
 export {
@@ -143,8 +151,11 @@ export {
   getActionType,
   getActionTypeAsync,
   createActionType,
+  createActionTypeAsync,
   updateActionType,
+  updateActionTypeAsync,
   deleteActionType,
+  deleteActionTypeAsync,
   ensureSystemActionTypes,
 } from "./audit/actions.js";
 
@@ -155,8 +166,11 @@ export {
   getSavedFilter,
   getSavedFilterAsync,
   createSavedFilter,
+  createSavedFilterAsync,
   updateSavedFilter,
+  updateSavedFilterAsync,
   deleteSavedFilter,
+  deleteSavedFilterAsync,
 } from "./audit/filters.js";
 
 export {
@@ -166,11 +180,16 @@ export {
   getRetentionPolicy,
   getRetentionPolicyAsync,
   createRetentionPolicy,
+  createRetentionPolicyAsync,
   updateRetentionPolicy,
+  updateRetentionPolicyAsync,
   deleteRetentionPolicy,
+  deleteRetentionPolicyAsync,
   ensureDefaultRetentionPolicies,
   executeRetentionPolicies,
+  executeRetentionPoliciesAsync,
   runRetention,
+  runRetentionAsync,
   listRetentionRuns,
   listRetentionRunsAsync,
   archiveStats,
@@ -191,6 +210,7 @@ export {
   auditContext,
   captureApiFailures,
   auditRoute,
+  auditRouteAsync,
   auditFromRequest,
 } from "./audit/hooks.js";
 

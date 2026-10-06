@@ -137,6 +137,7 @@ export {
   cancelReminderAsync,
   completeRemindersForObject,
   sweepReminders,
+  sweepRemindersAsync,
   listRuns,
   listRunsAsync,
 } from "./delivery/reminders.js";
@@ -153,6 +154,7 @@ export {
   cancelEscalation,
   cancelEscalationAsync,
   sweepEscalations,
+  sweepEscalationsAsync,
   completeEscalationsForObject,
 } from "./delivery/escalations.js";
 

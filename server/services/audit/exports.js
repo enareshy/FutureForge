@@ -4,12 +4,12 @@
 import { queryAll, queryOne, run, nowIso, randomUuid } from "../../db.js";
 import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { listEvents } from "./query.js";
+import { listEvents, listEventsAsync } from "./query.js";
 import { EXPORT_COLUMNS, toCsv, toExcelXml, EXPORT_FORMATS } from "./export.js";
 import { normalizeExportFormat, validateExportRequestInput } from "./validation.js";
-import { capture } from "./events.js";
+import { capture, captureAsync } from "./events.js";
 import { publishAuditEvent, AUDIT_EVENT_TYPES } from "./publisher.js";
-import { submitJob } from "../jobs/jobs.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
 
 const RETENTION_DAYS = Number(process.env.AUDIT_EXPORT_RETENTION_DAYS || 7);
 const EXPORT_ROW_CAP = Number(process.env.AUDIT_EXPORT_ROW_CAP || 50000);
@@ -268,6 +268,141 @@ export function expireAuditExports(db, { tenantId = null } = {}) {
     params.push(Number(tenantId));
   }
   const result = run(db, `UPDATE audit_export_requests SET status = 'expired', updated_at = ? WHERE ${where}`, params);
+  return { expired: result.changes };
+}
+
+// ── Async write twins ───────────────────────────────────────────────────────
+
+export async function requestAuditExportAsync(db, body = {}, actor = null, tenantId = null, ip = null) {
+  const input = validateExportRequestInput(body);
+  const rawTenant = body.tenant_id !== undefined ? body.tenant_id : (body.tenantId !== undefined ? body.tenantId : tenantId);
+  const effectiveTenant = rawTenant === null || rawTenant === undefined || rawTenant === "" ? null : Number(rawTenant);
+  const uuid = randomUuid();
+  const ts = nowIso();
+  const name = input.name || `Audit export ${ts}`;
+  const scope = body.scope && typeof body.scope === "object" ? body.scope : {};
+  await runAsync(
+    db,
+    `INSERT INTO audit_export_requests
+       (uuid, tenant_id, requested_by, name, format, status, filters_json, scope_json, columns_json, reason, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
+    [
+      uuid,
+      effectiveTenant,
+      actor?.id ?? null,
+      name,
+      input.format,
+      JSON.stringify(input.filters || {}),
+      JSON.stringify(scope),
+      JSON.stringify(input.columns || []),
+      input.reason,
+      ts,
+      ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM audit_export_requests WHERE uuid = ?", [uuid]);
+  try {
+    const job = await submitJobAsync(
+      db,
+      {
+        job_type_code: "AUDIT_EXPORT",
+        name: `Audit export ${uuid}`,
+        tenant_id: effectiveTenant,
+        organization_id: actor?.organization_id ?? null,
+        input: { export_id: row.id },
+        idempotency_key: `audit-export:${uuid}`,
+        related_object_type: "audit_export",
+        related_object_id: String(row.id),
+        source_module: "audit",
+      },
+      { actor, ip }
+    );
+    await runAsync(db, "UPDATE audit_export_requests SET job_id = ?, updated_at = ? WHERE id = ?", [
+      job?.id ?? null,
+      nowIso(),
+      row.id,
+    ]);
+    await captureAsync(db, {
+      actor,
+      tenant_id: effectiveTenant,
+      action: "audit.export.request",
+      event_type: "EXPORT",
+      category: "compliance",
+      object_type: "audit_export",
+      object_id: uuid,
+      object_name: name,
+      details: { format: input.format, job: job?.job_ref || null },
+      reason: input.reason,
+      ip,
+    });
+    publishAuditEvent(AUDIT_EVENT_TYPES.EXPORT_REQUESTED, {
+      tenant_id: effectiveTenant,
+      export_uuid: uuid,
+      format: input.format,
+      actor: actor ? { id: actor.id, username: actor.username } : null,
+    });
+    return {
+      ...publicAuditExport(await queryOneAsync(db, "SELECT * FROM audit_export_requests WHERE id = ?", [row.id])),
+      job_ref: job?.job_ref || null,
+    };
+  } catch (err) {
+    await runAsync(db, "UPDATE audit_export_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", [
+      String(err.message || err).slice(0, 1000),
+      nowIso(),
+      row.id,
+    ]);
+    throw err;
+  }
+}
+
+export async function runAuditExportAsync(db, exportId) {
+  const row = await queryOneAsync(db, "SELECT * FROM audit_export_requests WHERE id = ?", [Number(exportId)]);
+  if (!row) throw new HttpError(404, "Audit export not found");
+  await runAsync(db, "UPDATE audit_export_requests SET status = 'processing', updated_at = ? WHERE id = ?", [nowIso(), row.id]);
+  try {
+    const filters = safeParse(row.filters_json, {});
+    const columns = safeParse(row.columns_json, []);
+    const { items, total } = await listEventsAsync(
+      db,
+      { ...filters, page: 1, pageSize: EXPORT_ROW_CAP, sort: filters.sort || "created_at", order: filters.order || "desc" },
+      { tenantId: row.tenant_id, scopeAll: row.tenant_id == null }
+    );
+    const content = render(items, row.format, columns);
+    const expiresAt = addDays(RETENTION_DAYS);
+    await runAsync(
+      db,
+      `UPDATE audit_export_requests
+         SET status = 'completed', row_count = ?, content = ?, content_type = ?, completed_at = ?,
+             expires_at = ?, error = NULL, updated_at = ?
+       WHERE id = ?`,
+      [items.length, content, contentTypeFor(row.format), nowIso(), expiresAt, nowIso(), row.id]
+    );
+    publishAuditEvent(AUDIT_EVENT_TYPES.EXPORT_COMPLETED, {
+      tenant_id: row.tenant_id,
+      export_uuid: row.uuid,
+      format: row.format,
+      row_count: items.length,
+      truncated: items.length < total,
+    });
+  } catch (err) {
+    await runAsync(
+      db,
+      "UPDATE audit_export_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+      [String(err.message || err).slice(0, 1000), nowIso(), row.id]
+    );
+    throw err;
+  }
+  return publicAuditExport(await queryOneAsync(db, "SELECT * FROM audit_export_requests WHERE id = ?", [row.id]));
+}
+
+export async function expireAuditExportsAsync(db, { tenantId = null } = {}) {
+  const params = [nowIso(), nowIso()];
+  let where = "status = 'completed' AND expires_at IS NOT NULL AND expires_at < ?";
+  if (tenantId) {
+    where += " AND tenant_id = ?";
+    params.push(Number(tenantId));
+  }
+  const result = await runAsync(db, `UPDATE audit_export_requests SET status = 'expired', updated_at = ? WHERE ${where}`, params);
   return { expired: result.changes };
 }
 

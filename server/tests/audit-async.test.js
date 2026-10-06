@@ -230,3 +230,174 @@ describe("async audit read twins mirror the synchronous service", () => {
     );
   });
 });
+
+describe("async audit write twins", () => {
+  let database;
+  let actor;
+  let tenantId;
+
+  before(() => {
+    database = db();
+    seedDatabase(database);
+    actor = queryOne(database, "SELECT id, username, display_name FROM users WHERE username = 'admin'");
+    actor.tenant_id = queryOne(database, "SELECT id FROM organizations WHERE code = 'helix'").id;
+    tenantId = actor.tenant_id;
+  });
+
+  test("recordBatchAsync captures each entry", async () => {
+    const ids = await audit.recordBatchAsync(database, [
+      { actor, tenant_id: tenantId, action: "object.update", object_type: "part", object_id: "BATCH-1" },
+      { actor, tenant_id: tenantId, action: "object.update", object_type: "part", object_id: "BATCH-2" },
+    ]);
+    assert.equal(ids.length, 2);
+    for (const id of ids) {
+      assert.ok(queryOne(database, "SELECT id FROM audit_logs WHERE id = ?", [id]));
+    }
+  });
+
+  test("policy write twins round-trip and reject duplicates", async () => {
+    const created = await audit.createPolicyAsync(
+      database,
+      { object_type: "async_policy_probe", name: "Async policy", capture_views: true, retention_days: 30 },
+      actor,
+      tenantId
+    );
+    assert.ok(created.id > 0);
+    assert.equal(created.object_type, "async_policy_probe");
+
+    await assert.rejects(
+      () => audit.createPolicyAsync(database, { object_type: "async_policy_probe", name: "Dup" }, actor, tenantId),
+      /already exists/
+    );
+
+    const updated = await audit.updatePolicyAsync(database, created.id, { name: "Async policy v2" }, tenantId);
+    assert.equal(updated.name, "Async policy v2");
+
+    const validated = await audit.validatePolicyAsync(database, {
+      object_type: "async_policy_probe",
+      name: "Validated",
+    });
+    assert.equal(validated.valid, true);
+    assert.ok(Array.isArray(validated.warnings));
+
+    const deleted = await audit.deletePolicyAsync(database, created.id, tenantId);
+    assert.equal(deleted.ok, true);
+    assert.equal(audit.getPolicyRow(database, created.id), null);
+  });
+
+  test("action type write twins round-trip", async () => {
+    const code = "async.probe.action";
+    const created = await audit.createActionTypeAsync(
+      database,
+      { code, label: "Async probe", category: "configuration", event_type: "CONFIGURATION_CHANGED" },
+      actor,
+      "127.0.0.1"
+    );
+    assert.equal(created.code, code);
+
+    const updated = await audit.updateActionTypeAsync(database, code, { label: "Async probe v2" }, actor, "127.0.0.1");
+    assert.equal(updated.label, "Async probe v2");
+
+    const deleted = await audit.deleteActionTypeAsync(database, code, actor, "127.0.0.1");
+    assert.equal(deleted.ok, true);
+    await assert.rejects(() => audit.getActionTypeAsync(database, code), /not found/);
+  });
+
+  test("saved filter write twins round-trip", async () => {
+    const created = await audit.createSavedFilterAsync(
+      database,
+      { name: "Async filter", scope: "security", filters: { category: "security" }, shared: true },
+      actor,
+      tenantId
+    );
+    assert.ok(created.id > 0);
+    assert.equal(created.name, "Async filter");
+
+    const updated = await audit.updateSavedFilterAsync(database, created.id, { name: "Async filter v2" }, actor, tenantId);
+    assert.equal(updated.name, "Async filter v2");
+
+    const deleted = await audit.deleteSavedFilterAsync(database, created.id, actor, tenantId);
+    assert.equal(deleted.ok, true);
+    await assert.rejects(
+      () => audit.getSavedFilterAsync(database, created.id, { tenantId, ownerId: actor.id }),
+      /not found/
+    );
+  });
+
+  test("retention policy write twins round-trip", async () => {
+    const created = await audit.createRetentionPolicyAsync(
+      database,
+      { name: "Async retention", category: "*", object_type: "async_probe", retention_days: 90, priority: 500 },
+      actor,
+      tenantId
+    );
+    assert.ok(created.id > 0);
+
+    const updated = await audit.updateRetentionPolicyAsync(database, created.id, { retention_days: 120 }, actor, tenantId);
+    assert.equal(updated.retention_days, 120);
+
+    const deleted = await audit.deleteRetentionPolicyAsync(database, created.id, actor, tenantId);
+    assert.equal(deleted.ok, true);
+  });
+
+  test("retention run and execute twins honour dry-run", async () => {
+    const run = await audit.runRetentionAsync(database, { tenantId, actor, dryRun: true });
+    assert.equal(run.dry_run, true);
+    assert.ok(Array.isArray(run.runs));
+
+    const policy = await audit.createRetentionPolicyAsync(
+      database,
+      { name: "Async execute", category: "*", object_type: "async_exec_probe", retention_days: 1, priority: 900 },
+      actor,
+      tenantId
+    );
+    const executed = await audit.executeRetentionPoliciesAsync(database, {
+      tenantId,
+      policyId: policy.id,
+      actor,
+      dryRun: true,
+    });
+    assert.equal(executed.dry_run, true);
+    assert.ok(Array.isArray(executed.runs));
+
+    await audit.deleteRetentionPolicyAsync(database, policy.id, actor, tenantId);
+  });
+
+  test("export twins produce and download a completed export", async () => {
+    const request = await audit.requestAuditExportAsync(
+      database,
+      { format: "csv", filters: { objectType: "part" } },
+      actor,
+      tenantId,
+      "10.0.0.20"
+    );
+    assert.ok(request.id > 0);
+    assert.equal(request.status, "pending");
+
+    const completed = await audit.runAuditExportAsync(database, request.id);
+    assert.equal(completed.status, "completed");
+    assert.ok(completed.row_count >= 0);
+
+    const download = await audit.getAuditExportAsync(database, request.uuid, { tenantId, includeContent: true });
+    assert.equal(typeof download.content, "string");
+    assert.ok(download.filename.endsWith(".csv"));
+
+    await audit.markAuditExportDownloadedAsync(database, request.id);
+    const expired = await audit.expireAuditExportsAsync(database, { tenantId });
+    assert.equal(typeof expired.expired, "number");
+  });
+
+  test("exportEventsAsync mirrors exportEvents", async () => {
+    const sync = audit.exportEvents(database, { filters: {}, scope: { scopeAll: true }, format: "csv", limit: 50 });
+    const async_ = await audit.exportEventsAsync(database, {
+      filters: {},
+      scope: { scopeAll: true },
+      format: "csv",
+      limit: 50,
+    });
+    assert.equal(async_.count, sync.count);
+    assert.equal(async_.total, sync.total);
+    assert.equal(async_.content_type, sync.content_type);
+    assert.equal(async_.content, sync.content);
+  });
+});

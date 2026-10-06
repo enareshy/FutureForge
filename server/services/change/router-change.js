@@ -4,9 +4,8 @@
 //
 // Every route is entirely one data-access layer (per the async migration
 // rule): data routes use `authAsync`/`canAsync` + `*Async` service twins,
-// while pure-vocabulary (`/meta`), bootstrap (`/foundation/ensure`, `/seed`)
-// and `POST /orders/:ref/decide` (still-sync Workflow binding trigger) stay on
-// the sync `auth`/`can` + sync service.
+// while pure-vocabulary (`/meta`) and bootstrap (`/foundation/ensure`, `/seed`)
+// stay on the sync `auth`/`can` + sync service.
 import { Constants, Validation, Requests, Orders, Notices, AffectedItems, Relationships, Configuration, Foundation, Seed } from "./index.js";
 
 const R = Constants.CHANGE_RESOURCES;
@@ -80,12 +79,12 @@ export function createChangeRouter({ express, db, auth, can, authAsync, canAsync
   router.get("/orders/:ref", authAsync, canOrdersAsync("read"), wrap(async (req, res) => res.json(await Orders.getOrderAsync(db, tenantOf(req), req.params.ref))));
   router.put("/orders/:ref", authAsync, canOrdersAsync("update"), wrap(async (req, res) => res.json(await Orders.updateOrderAsync(db, tenantOf(req), req.params.ref, req.body, req.actor, req.ip))));
   router.post("/orders/:ref/submit", authAsync, canOrdersAsync("update"), wrap(async (req, res) => res.json(await Orders.submitOrderAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
-  // Sync: `decideOrder` fires the sync Workflow binding trigger.
+  // Fully async: `decideOrderAsync` fires the async Workflow binding trigger.
   router.post(
     "/orders/:ref/decide",
-    auth,
-    canCcb("execute"),
-    wrap((req, res) => res.json(Orders.decideOrder(db, tenantOf(req), req.params.ref, req.body?.decision, req.actor, req.ip)))
+    authAsync,
+    canCcbAsync("execute"),
+    wrap(async (req, res) => res.json(await Orders.decideOrderAsync(db, tenantOf(req), req.params.ref, req.body?.decision, req.actor, req.ip)))
   );
   router.post("/orders/:ref/release", authAsync, canOrdersAsync("execute"), wrap(async (req, res) => res.json(await Orders.releaseOrderAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
   router.post("/orders/:ref/cancel", authAsync, canOrdersAsync("update"), wrap(async (req, res) => res.json(await Orders.cancelOrderAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));

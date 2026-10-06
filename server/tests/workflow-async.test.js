@@ -1,9 +1,10 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { migrate, openTestDatabase } from "../db.js";
+import { migrate, openTestDatabase, queryOne, run } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
+import * as workflow from "../services/workflow.js";
 
 function listen(app) {
   return new Promise((resolve) => {
@@ -427,5 +428,68 @@ describe("async workflow read surface", () => {
     const cancelled = await request(port, "POST", `/api/workflow-instances/${sid}/cancel`, { token, body: { reason: "async cancel" } });
     assert.equal(cancelled.status, 200);
     assert.equal(cancelled.body.status, "cancelled");
+  });
+});
+
+describe("async workflow lifecycle bridge", () => {
+  let database;
+  let tenantId;
+
+  before(() => {
+    database = openTestDatabase();
+    migrate(database);
+    seedDatabase(database);
+    tenantId = queryOne(database, "SELECT id FROM organizations WHERE code = 'helix'").id;
+  });
+
+  after(() => database?.close());
+
+  test("starts a bound workflow when a lifecycle release is approved", async () => {
+    const before = (await workflow.listInstancesAsync(database, {}, tenantId)).total;
+    const object = await queryOne(database, "SELECT id FROM objects WHERE code = 'PROD-1000'");
+    const result = await workflow.onLifecycleApprovalCompleteAsync(database, {
+      release: { id: 999, status: "approved", tenant_id: tenantId, object_id: object.id },
+      object: { id: object.id, code: "PROD-1000", organization_id: null },
+      rule: { code: "product-approval" },
+    });
+    assert.equal(result.delegated, true);
+    assert.ok(result.started.length >= 1, "the async trigger started a bound instance");
+    const after = (await workflow.listInstancesAsync(database, {}, tenantId)).total;
+    assert.ok(after > before);
+  });
+
+  test("sweepEscalationsAsync applies a matching rule to a due task", async () => {
+    await workflow.createEscalationRuleAsync(
+      database,
+      { code: "async-sweep", name: "Async Sweep", after_minutes: 0, action: "raise_priority", priority: "urgent" },
+      { id: 1, username: "admin", tenant_id: tenantId },
+      "test",
+      tenantId
+    );
+
+    const started = await workflow.startInstanceAsync(
+      database,
+      { workflow_code: "change-request-review", title: "Async escalation sweep" },
+      { id: 1, username: "admin", tenant_id: tenantId },
+      tenantId
+    );
+    const task = queryOne(database, "SELECT * FROM workflow_tasks WHERE instance_id = ? ORDER BY id LIMIT 1", [started.id]);
+    assert.ok(task, "the instance produced a task");
+
+    run(
+      database,
+      "UPDATE workflow_tasks SET status = 'assigned', escalated = 0, due_at = '2000-01-01 00:00:00', escalation_at = '2000-01-01 00:00:00' WHERE id = ?",
+      [task.id]
+    );
+
+    const summary = await workflow.sweepEscalationsAsync(database, { tenantId, limit: 100 });
+    assert.ok(summary.swept >= 1);
+    const applied = summary.results.find((r) => r.task_id === task.id);
+    assert.ok(applied, "the due task was swept");
+    assert.equal(applied.action, "raise_priority");
+
+    const reloaded = queryOne(database, "SELECT * FROM workflow_tasks WHERE id = ?", [task.id]);
+    assert.equal(reloaded.escalated, 1);
+    assert.equal(reloaded.priority, "urgent");
   });
 });

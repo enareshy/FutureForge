@@ -10,17 +10,16 @@
 // affected set as a frozen Versioning baseline, the change's immutable
 // record of what was released and to what.
 //
-// Async note: `decideOrder` remains on the synchronous layer because it depends
-// on the still-synchronous Workflow binding trigger
-// (bindings.js triggerEvent); everything else, including `releaseOrder`, has an
-// async twin. The `releaseOrder` route therefore runs entirely on the
-// asynchronous layer now that the Versioning kernel has async twins.
+// Async note: every service function, including `decideOrder`, now has an async
+// twin. The Change router therefore runs entirely on the asynchronous layer,
+// including `POST /orders/:ref/decide` after the Workflow binding trigger gained
+// its own async counterpart (bindings.js triggerEventAsync).
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { nextNumber, nextNumberAsync } from "../numbering.js";
 import { createDefinition as createEffectivityDefinition, createAssignment as createEffectivityAssignment, createDefinitionAsync as createEffectivityDefinitionAsync, createAssignmentAsync as createEffectivityAssignmentAsync } from "../versioning/effectivities.js";
 import { createBaseline, freezeBaseline, createBaselineAsync, freezeBaselineAsync } from "../versioning/baselines.js";
-import { triggerEvent } from "../workflow/bindings.js";
+import { triggerEvent, triggerEventAsync } from "../workflow/bindings.js";
 import { updateRow, updateRowAsync, assertVersion, bumpVersion } from "./sql.js";
 import { publicOrder } from "./repository.js";
 import { orderRef } from "./refs.js";
@@ -251,6 +250,34 @@ export async function updateOrderAsync(db, tenantId, ref, body = {}, actor = nul
   return publicOrder(updated);
 }
 
+export async function decideOrderAsync(db, tenantId, ref, decision, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = await requireOrderRowAsync(db, tenant, ref);
+  const approved = String(decision).toUpperCase() === "APPROVED";
+  const updated = await transitionOrderAsync(
+    db,
+    tenant,
+    row,
+    approved ? "APPROVED" : "REJECTED",
+    actor,
+    ip,
+    approved ? "ChangeOrderApproved" : "ChangeOrderRejected"
+  );
+  if (approved) {
+    try {
+      await triggerEventAsync(
+        db,
+        "lifecycle.release.approved",
+        { object_type: "change_order", object_id: updated.id, object_code: updated.order_number, organization_id: updated.organization_id },
+        { actor, tenantId: tenant, ip }
+      );
+    } catch {
+      // Workflow binding is optional; the ECO approval stands regardless.
+    }
+  }
+  return publicOrder(updated);
+}
+
 function transitionOrder(db, tenant, row, nextStatus, actor, ip, eventType) {
   const target = assertOrderTransition(row.status, nextStatus);
   const before = publicOrder(row);
@@ -299,9 +326,9 @@ export async function cancelOrderAsync(db, tenantId, ref, actor = null, ip = nul
 // `lifecycle.release.approved` event so any registered `workflow_bindings`
 // row (see foundation.js) can auto-start a CCB workflow instance — the exact
 // mechanism proven by server/tests/workflow.test.js's lifecycle-bridge test.
-// This is additive: the ECO's own approval is authoritative regardless of
+// This additive: the ECO's own approval is authoritative regardless of
 // whether a binding is registered or the trigger succeeds.
-// Sync only (see file header): triggers `workflow/bindings.js triggerEvent`.
+// Sync twin retained for CLI/seeders/tests; the route uses `decideOrderAsync`.
 export function decideOrder(db, tenantId, ref, decision, actor = null, ip = null) {
   const tenant = Number(tenantId);
   const row = requireOrderRow(db, tenant, ref);

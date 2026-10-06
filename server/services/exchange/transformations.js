@@ -4,6 +4,7 @@
 // delegates to the Import & Export Framework transformation engine; this module
 // owns identity, versioning, lifecycle, validation and record/document apply.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { transformationRef } from "./identifiers.js";
 import { transformationEngine } from "./engine-ref.js";
 import { DEFINITION_STATUSES, DIRECTIONS, MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from "./constants.js";
@@ -30,8 +31,25 @@ export function getTransformationRow(db, tenantId, ref) {
   return queryOne(db, "SELECT * FROM exchange_transformations WHERE tenant_id = ? AND (transformation_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
 }
 
+export async function getTransformationRowAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const raw = String(ref ?? "");
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const byId = await queryOneAsync(db, "SELECT * FROM exchange_transformations WHERE id = ? AND tenant_id = ?", [Number(raw), tenant]);
+    if (byId) return byId;
+  }
+  return await queryOneAsync(db, "SELECT * FROM exchange_transformations WHERE tenant_id = ? AND (transformation_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
+}
+
 export function requireTransformationRow(db, tenantId, ref) {
   const row = getTransformationRow(db, tenantId, ref);
+  if (!row) throw transformationNotFound(ref);
+  return row;
+}
+
+export async function requireTransformationRowAsync(db, tenantId, ref) {
+  const row = await getTransformationRowAsync(db, tenantId, ref);
   if (!row) throw transformationNotFound(ref);
   return row;
 }
@@ -88,6 +106,17 @@ function insertTransformationVersion(db, tenantId, row, { changeSummary, actor }
   );
 }
 
+async function insertTransformationVersionAsync(db, tenantId, row, { changeSummary, actor }) {
+  const existing = await queryOneAsync(db, "SELECT id FROM exchange_transformation_versions WHERE transformation_id = ? AND version = ?", [row.id, row.version]);
+  if (existing) return;
+  await runAsync(
+    db,
+    `INSERT INTO exchange_transformation_versions (transformation_id, tenant_id, version, status, steps_json, change_summary, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, tenantId, row.version, row.status, row.steps_json, changeSummary, actor?.id ?? null, nowIso()]
+  );
+}
+
 export function createTransformation(db, tenantId, body = {}, actor = null) {
   const tenant = Number(tenantId);
   const input = normalizeTransformationInput(body);
@@ -104,6 +133,25 @@ export function createTransformation(db, tenantId, body = {}, actor = null) {
   );
   const row = queryOne(db, "SELECT * FROM exchange_transformations WHERE id = ?", [Number(result.lastInsertId)]);
   insertTransformationVersion(db, tenant, row, { changeSummary: "Initial version", actor });
+  return publicTransformation(row);
+}
+
+export async function createTransformationAsync(db, tenantId, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const input = normalizeTransformationInput(body);
+  assertKnownSteps(input.steps);
+  const existing = await queryOneAsync(db, "SELECT id FROM exchange_transformations WHERE tenant_id = ? AND code = ?", [tenant, input.code]);
+  if (existing) throw transformationConflict(input.code);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO exchange_transformations
+       (transformation_ref, tenant_id, code, name, description, direction, stage, steps_json, version, status, immutable, metadata_json, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?, ?, ?)`,
+    [transformationRef(input.code), tenant, input.code, input.name, input.description, input.direction, input.stage, toJson(input.steps, []), input.status, toJson(input.metadata, {}), actor?.id ?? null, actor?.id ?? null, ts, ts]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM exchange_transformations WHERE id = ?", [Number(result.lastInsertId)]);
+  await insertTransformationVersionAsync(db, tenant, row, { changeSummary: "Initial version", actor });
   return publicTransformation(row);
 }
 
@@ -125,12 +173,38 @@ export function updateTransformation(db, tenantId, ref, body = {}, actor = null)
   return publicTransformation(updated);
 }
 
+export async function updateTransformationAsync(db, tenantId, ref, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireTransformationRowAsync(db, tenant, ref);
+  const wasImmutable = Boolean(row.immutable);
+  if (wasImmutable) await insertTransformationVersionAsync(db, tenant, row, { changeSummary: body.change_summary || "Superseded", actor });
+  const input = normalizeTransformationInput(body, row);
+  assertKnownSteps(input.steps);
+  await runAsync(
+    db,
+    `UPDATE exchange_transformations SET name=?, description=?, direction=?, stage=?, steps_json=?, status=?, metadata_json=?,
+       version=version+${wasImmutable ? 1 : 0}, immutable=0, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?`,
+    [input.name, input.description, input.direction, input.stage, toJson(input.steps, []), input.status, toJson(input.metadata, {}), actor?.id ?? null, nowIso(), row.id, tenant]
+  );
+  const updated = await queryOneAsync(db, "SELECT * FROM exchange_transformations WHERE id = ?", [row.id]);
+  if (wasImmutable) await insertTransformationVersionAsync(db, tenant, updated, { changeSummary: body.change_summary || "New version", actor });
+  return publicTransformation(updated);
+}
+
 export function publishTransformation(db, tenantId, ref, body = {}, actor = null) {
   const tenant = Number(tenantId);
   const row = requireTransformationRow(db, tenant, ref);
   insertTransformationVersion(db, tenant, row, { changeSummary: body.change_summary || "Published", actor });
   run(db, "UPDATE exchange_transformations SET status='ACTIVE', immutable=1, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [actor?.id ?? null, nowIso(), row.id, tenant]);
   return publicTransformation(queryOne(db, "SELECT * FROM exchange_transformations WHERE id = ?", [row.id]));
+}
+
+export async function publishTransformationAsync(db, tenantId, ref, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireTransformationRowAsync(db, tenant, ref);
+  await insertTransformationVersionAsync(db, tenant, row, { changeSummary: body.change_summary || "Published", actor });
+  await runAsync(db, "UPDATE exchange_transformations SET status='ACTIVE', immutable=1, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [actor?.id ?? null, nowIso(), row.id, tenant]);
+  return publicTransformation(await queryOneAsync(db, "SELECT * FROM exchange_transformations WHERE id = ?", [row.id]));
 }
 
 export function setTransformationStatus(db, tenantId, ref, status, actor = null) {
@@ -142,11 +216,28 @@ export function setTransformationStatus(db, tenantId, ref, status, actor = null)
   return publicTransformation(queryOne(db, "SELECT * FROM exchange_transformations WHERE id = ?", [row.id]));
 }
 
+export async function setTransformationStatusAsync(db, tenantId, ref, status, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireTransformationRowAsync(db, tenant, ref);
+  const next = normalizeUpper(status);
+  if (!DEFINITION_STATUSES.includes(next)) throw invalidTransformation(`Unsupported status: ${status}`);
+  await runAsync(db, "UPDATE exchange_transformations SET status=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [next, actor?.id ?? null, nowIso(), row.id, tenant]);
+  return publicTransformation(await queryOneAsync(db, "SELECT * FROM exchange_transformations WHERE id = ?", [row.id]));
+}
+
 export function deleteTransformation(db, tenantId, ref) {
   const tenant = Number(tenantId);
   const row = requireTransformationRow(db, tenant, ref);
   if (row.immutable) throw transformationImmutable(row.code, row.version);
   run(db, "DELETE FROM exchange_transformations WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
+  return { deleted: true, ref: row.transformation_ref };
+}
+
+export async function deleteTransformationAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const row = await requireTransformationRowAsync(db, tenant, ref);
+  if (row.immutable) throw transformationImmutable(row.code, row.version);
+  await runAsync(db, "DELETE FROM exchange_transformations WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
   return { deleted: true, ref: row.transformation_ref };
 }
 
@@ -174,10 +265,41 @@ export function listTransformations(db, tenantId, query = {}) {
   return { items: rows.map(publicTransformation), total, page, pageSize };
 }
 
+export async function listTransformationsAsync(db, tenantId, query = {}) {
+  const tenant = Number(tenantId);
+  const { page, pageSize, offset } = pageArgs(query);
+  const clauses = ["tenant_id = ?"];
+  const params = [tenant];
+  if (query.status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(query.status));
+  }
+  if (query.direction) {
+    clauses.push("(direction = ? OR direction = 'BOTH')");
+    params.push(normalizeUpper(query.direction));
+  }
+  if (query.q) {
+    clauses.push("(code ILIKE ? OR name ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like);
+  }
+  const where = clauses.join(" AND ");
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM exchange_transformations WHERE ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM exchange_transformations WHERE ${where} ORDER BY code ASC LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+  return { items: rows.map(publicTransformation), total, page, pageSize };
+}
+
 export function getTransformation(db, tenantId, ref) {
   const row = requireTransformationRow(db, tenantId, ref);
   const output = publicTransformation(row);
   output.versions = listTransformationVersions(db, tenantId, row.id).items;
+  return output;
+}
+
+export async function getTransformationAsync(db, tenantId, ref) {
+  const row = await requireTransformationRowAsync(db, tenantId, ref);
+  const output = publicTransformation(row);
+  output.versions = (await listTransformationVersionsAsync(db, tenantId, row.id)).items;
   return output;
 }
 
@@ -187,8 +309,25 @@ export function listTransformationVersions(db, tenantId, ref) {
   return { items: rows.map(publicTransformationVersion), total: rows.length };
 }
 
+export async function listTransformationVersionsAsync(db, tenantId, ref) {
+  const row = await requireTransformationRowAsync(db, tenantId, ref);
+  const rows = await queryAllAsync(db, "SELECT * FROM exchange_transformation_versions WHERE transformation_id = ? ORDER BY version DESC", [row.id]);
+  return { items: rows.map(publicTransformationVersion), total: rows.length };
+}
+
 export function validateTransformation(db, tenantId, ref) {
   const row = requireTransformationRow(db, tenantId, ref);
+  const steps = parseJson(row.steps_json, []);
+  const known = new Set(transformationTypes());
+  const errors = [];
+  for (const step of steps) {
+    if (!known.has(step.transformation_type)) errors.push({ code: "unknown_type", message: `Unknown transformation type: ${step.transformation_type}`, step: step.sequence });
+  }
+  return { transformation: publicTransformation(row), valid: errors.length === 0, errors, known_types: [...known] };
+}
+
+export async function validateTransformationAsync(db, tenantId, ref) {
+  const row = await requireTransformationRowAsync(db, tenantId, ref);
   const steps = parseJson(row.steps_json, []);
   const known = new Set(transformationTypes());
   const errors = [];
@@ -204,9 +343,39 @@ export function resolveTransformation(db, tenantId, code) {
   return row ? publicTransformation(row) : null;
 }
 
+export async function resolveTransformationAsync(db, tenantId, code) {
+  if (!code) return null;
+  const row = await getTransformationRowAsync(db, tenantId, code);
+  return row ? publicTransformation(row) : null;
+}
+
 // Applies profile steps to a single record (FIELD and RECORD stages).
 export function applyTransformationProfile(db, tenantId, ref, record, ctx = {}) {
   const row = ref ? requireTransformationRow(db, tenantId, ref) : null;
+  if (!row) return { transformation: null, target: record, errors: [], warnings: [] };
+  const steps = parseJson(row.steps_json, []).filter((step) => step.status !== "inactive");
+  if (row.stage === "FIELD" || steps.every((step) => normalizeUpper(step.stage) === "FIELD")) {
+    const target = { ...record };
+    const errors = [];
+    for (const step of steps) {
+      if (normalizeUpper(step.stage) !== "FIELD" || !step.target_field) continue;
+      try {
+        const field = step.target_field;
+        const current = step.target_field.split(".").reduce((value, key) => (value == null ? undefined : value[key]), target);
+        const next = applyTransformations([{ transformation_type: step.transformation_type, config: step.config }], current, { record: target, context: ctx.context });
+        setDeep(target, field, next);
+      } catch (error) {
+        errors.push({ code: error.code || "transformation_error", field: step.target_field, message: error.message });
+      }
+    }
+    return { transformation: publicTransformation(row), target, errors, warnings: [] };
+  }
+  return { transformation: publicTransformation(row), target: record, errors: [], warnings: [] };
+}
+
+// Applies profile steps to a single record (FIELD and RECORD stages).
+export async function applyTransformationProfileAsync(db, tenantId, ref, record, ctx = {}) {
+  const row = ref ? await requireTransformationRowAsync(db, tenantId, ref) : null;
   if (!row) return { transformation: null, target: record, errors: [], warnings: [] };
   const steps = parseJson(row.steps_json, []).filter((step) => step.status !== "inactive");
   if (row.stage === "FIELD" || steps.every((step) => normalizeUpper(step.stage) === "FIELD")) {

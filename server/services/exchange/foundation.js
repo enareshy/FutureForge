@@ -5,13 +5,20 @@
 // configuration and enterprise validation handlers. It registers into platform
 // seams (events, jobs, search, security) and never duplicates them.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { tenantIds } from "../search/registry.js";
+import { tenantIdsAsync } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
 import { ensureExchangeEventTypes } from "./events.js";
+import { ensureExchangeEventTypesAsync } from "./events.js";
 import { ensureExchangeJobTypes, registerExchangeHandlers } from "./jobs.js";
+import { ensureExchangeJobTypesAsync } from "./jobs.js";
 import { ensureExchangeSearch, registerExchangeSources } from "./search.js";
+import { ensureExchangeSearchAsync } from "./search.js";
 import { ensureExchangeConfig } from "./configuration.js";
+import { ensureExchangeConfigAsync } from "./configuration.js";
 import { ensureAdapters, ensureFormats } from "./formats.js";
+import { ensureAdaptersAsync, ensureFormatsAsync } from "./formats.js";
 import { registerEnterpriseValidationHandlers } from "./validation.js";
 import { adapterCatalog, ensureBuiltinAdapters } from "./adapters/index.js";
 import { listIntegrations } from "./integrations.js";
@@ -59,6 +66,49 @@ export function ensureExchangeFoundation(db) {
   };
 }
 
+export async function ensureExchangeFoundationAsync(db) {
+  const adapters = adapterCatalog();
+  const integrationCodes = listIntegrations().map((entry) => entry.code);
+  const eventTypes = await ensureExchangeEventTypesAsync(db);
+  const jobTypes = await ensureExchangeJobTypesAsync(db);
+  const handlers = registerExchangeHandlers();
+  const validationHandlers = registerEnterpriseValidationHandlers();
+  registerExchangeSources();
+  ensureBuiltinAdapters();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+
+  let formats = 0;
+  let adapterRows = 0;
+  let configuration = 0;
+  for (const tenantId of tenants) {
+    adapterRows += await ensureAdaptersAsync(db, tenantId);
+    formats += await ensureFormatsAsync(db, tenantId);
+    configuration += (await ensureExchangeConfigAsync(db, tenantId)).created || 0;
+  }
+  const search = (await ensureExchangeSearchAsync(db)).created || 0;
+
+  return {
+    source_module: SOURCE_MODULE,
+    adapters: adapters.length,
+    adapter_rows: adapterRows,
+    formats,
+    integrations: integrationCodes,
+    validation_handlers: validationHandlers.length,
+    event_types: eventTypes,
+    job_types: jobTypes.created,
+    handlers,
+    configuration,
+    search,
+    tenants: tenants.length,
+  };
+}
+
 export function exchangeHealth(db, tenantId = null) {
   const scope = tenantId ? Number(tenantId) : null;
   const scoped = (table) =>
@@ -85,5 +135,34 @@ export function exchangeHealth(db, tenantId = null) {
       history: scoped("exchange_history"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM exchange_definitions").length,
+  };
+}
+
+export async function exchangeHealthAsync(db, tenantId = null) {
+  const scope = tenantId ? Number(tenantId) : null;
+  const scoped = async (table) => {
+    const row = scope
+      ? await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ?`, [scope])
+      : await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`);
+    return Number(row?.c || 0);
+  };
+  return {
+    source_module: SOURCE_MODULE,
+    adapters: adapterCatalog().map((adapter) => ({ code: adapter.code, status: adapter.status, category: adapter.category })),
+    integrations: listIntegrations(),
+    counts: {
+      adapters: await scoped("exchange_adapters"),
+      formats: await scoped("exchange_formats"),
+      definitions: await scoped("exchange_definitions"),
+      mappings: await scoped("exchange_mappings"),
+      transformations: await scoped("exchange_transformations"),
+      validation_profiles: await scoped("exchange_validation_profiles"),
+      transactions: await scoped("exchange_transactions"),
+      jobs: await scoped("exchange_jobs"),
+      errors: await scoped("exchange_errors"),
+      reconciliations: await scoped("exchange_reconciliations"),
+      history: await scoped("exchange_history"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM exchange_definitions")).length,
   };
 }

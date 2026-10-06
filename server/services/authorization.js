@@ -4,7 +4,7 @@ import { HttpError, assertAction } from "../validation.js";
 import { effectiveAccess, effectiveAccessAsync } from "./access.js";
 import { ancestorResources, ancestorResourcesAsync, findResource, findResourceAsync } from "./catalog.js";
 import { ancestorOrganizationIds, ancestorOrganizationIdsAsync } from "./orgs.js";
-import { writeAudit } from "./audit.js";
+import { writeAudit, writeAuditAsync } from "./audit.js";
 
 const DENY_REASONS = {
   unknown_user: "User not found",
@@ -440,6 +440,86 @@ export function permissionMatrix(db, { roleId, applicationId } = {}) {
     ? queryAll(db, "SELECT * FROM roles WHERE id = ?", [roleId])
     : queryAll(db, "SELECT * FROM roles ORDER BY name");
   const grants = queryAll(
+    db,
+    roleId
+      ? `SELECT * FROM role_permissions WHERE role_id = ?`
+      : `SELECT * FROM role_permissions`,
+    roleId ? [Number(roleId)] : []
+  );
+
+  const grantMap = new Map();
+  for (const g of grants) {
+    grantMap.set(`${g.role_id}:${g.permission_id}:${g.organization_id}`, g.effect);
+  }
+
+  return {
+    actions: ["create", "read", "update", "delete", "execute"],
+    resources,
+    permissions,
+    roles,
+    grants: grants.map((g) => ({
+      roleId: g.role_id,
+      permissionId: g.permission_id,
+      effect: g.effect,
+      organizationId: g.organization_id,
+    })),
+    cells: roles.flatMap((role) =>
+      permissions.map((permission) => ({
+        roleId: role.id,
+        roleCode: role.code,
+        permissionId: permission.id,
+        permissionCode: permission.code,
+        resourceId: permission.resource_id,
+        action: permission.action,
+        effect: grantMap.get(`${role.id}:${permission.id}:0`) || "unset",
+      }))
+    ),
+  };
+}
+
+// Async twin of checkPermissionAudited: awaits the async decision and records
+// the audit entry through the async audit writer.
+export async function checkPermissionAuditedAsync(db, user, resource, action, context, actor, ip) {
+  const result = await checkPermissionAsync(db, user, resource, action, context);
+  await writeAuditAsync(db, {
+    actor: actor || { id: result.principal?.id, username: result.principal?.username },
+    action: result.allowed ? "authz.allow" : "authz.deny",
+    resourceType: "authorization",
+    resourceId: result.resource?.code || resource,
+    details: {
+      action,
+      reason: result.reason,
+      organizationId: result.organizationId,
+      subject: result.principal,
+    },
+    ip,
+  });
+  return result;
+}
+
+// Async twin of effectivePermissions.
+export async function effectivePermissionsAsync(db, userId, context = {}) {
+  return permissionsFromAccessAsync(db, await effectiveAccessAsync(db, userId), context);
+}
+
+// Async twin of permissionMatrix.
+export async function permissionMatrixAsync(db, { roleId, applicationId } = {}) {
+  const resources = await queryAllAsync(
+    db,
+    applicationId
+      ? `SELECT * FROM resources WHERE application_id = ? ORDER BY code`
+      : `SELECT * FROM resources ORDER BY code`,
+    applicationId ? [Number(applicationId)] : []
+  );
+  const permissions = await queryAllAsync(
+    db,
+    `SELECT p.*, r.code AS resource_code FROM permissions p JOIN resources r ON r.id = p.resource_id
+     ORDER BY r.code, p.action`
+  );
+  const roles = roleId
+    ? await queryAllAsync(db, "SELECT * FROM roles WHERE id = ?", [roleId])
+    : await queryAllAsync(db, "SELECT * FROM roles ORDER BY name");
+  const grants = await queryAllAsync(
     db,
     roleId
       ? `SELECT * FROM role_permissions WHERE role_id = ?`

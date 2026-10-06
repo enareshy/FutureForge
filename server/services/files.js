@@ -68,6 +68,7 @@ export {
   recordFileEvent,
   recordFileEventAsync,
   listFileEvents,
+  listFileEventsAsync,
   fileEventSummary,
   fileEventSummaryAsync,
   auditFile,

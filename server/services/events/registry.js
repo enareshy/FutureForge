@@ -101,6 +101,40 @@ export function listEventTypes(db, { tenantId, category, status, sourceModule, q
   return { items: rows.map((r) => publicEventType(r)), total, page: Number(page), page_size: Number(pageSize) };
 }
 
+export async function listEventTypesAsync(db, { tenantId, category, status, sourceModule, q, page = 1, pageSize = 50 } = {}) {
+  const clauses = [];
+  const params = [];
+  if (tenantId !== undefined && tenantId !== null) {
+    clauses.push("(tenant_id IS NULL OR tenant_id = ?)");
+    params.push(Number(tenantId));
+  }
+  if (category) {
+    clauses.push("category = ?");
+    params.push(category);
+  }
+  if (status) {
+    clauses.push("status = ?");
+    params.push(status);
+  }
+  if (sourceModule) {
+    clauses.push("source_module = ?");
+    params.push(sourceModule);
+  }
+  if (q) {
+    clauses.push("(LOWER(code) ILIKE ? OR LOWER(name) ILIKE ?)");
+    const like = `%${String(q).toLowerCase()}%`;
+    params.push(like, like);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM event_registry ${where}`, params)).c;
+  const rows = await queryAllAsync(db, `SELECT * FROM event_registry ${where} ORDER BY category, code LIMIT ? OFFSET ?`, [
+    ...params,
+    Number(pageSize),
+    (Number(page) - 1) * Number(pageSize),
+  ]);
+  return { items: rows.map((r) => publicEventType(r)), total, page: Number(page), page_size: Number(pageSize) };
+}
+
 export function getEventTypeRow(db, refValue) {
   const id = Number(refValue);
   return queryOne(db, "SELECT * FROM event_registry WHERE id = ? OR code = ?", [Number.isFinite(id) ? id : -1, String(refValue)]);
@@ -111,6 +145,14 @@ export function getEventType(db, refValue) {
   if (!row) throw new HttpError(404, "Event type not found");
   const versions = listVersions(db, row.code);
   const subscribers = queryOne(db, "SELECT COUNT(*) AS c FROM event_subscriptions WHERE event_type_code = ?", [row.code]).c;
+  return publicEventType(row, { versions, subscriberCount: subscribers });
+}
+
+export async function getEventTypeAsync(db, refValue) {
+  const row = await getEventTypeRowAsync(db, refValue);
+  if (!row) throw new HttpError(404, "Event type not found");
+  const versions = await listVersionsAsync(db, row.code);
+  const subscribers = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM event_subscriptions WHERE event_type_code = ?", [row.code])).c;
   return publicEventType(row, { versions, subscriberCount: subscribers });
 }
 
@@ -194,6 +236,37 @@ export function updateEventType(db, refValue, input = {}, actor = null) {
   return publicEventType(queryOne(db, "SELECT * FROM event_registry WHERE id = ?", [row.id]));
 }
 
+export async function updateEventTypeAsync(db, refValue, input = {}, actor = null) {
+  const row = await getEventTypeRowAsync(db, refValue);
+  if (!row) throw new HttpError(404, "Event type not found");
+  if (input.status !== undefined) assertEnum(input.status, EVENT_STATUSES, "status");
+  await runAsync(
+    db,
+    `UPDATE event_registry SET name=?, description=?, category=?, source_module=?, security_classification=?, retention_days=?,
+       replay_policy=?, ordering_required=?, ordering_scope=?, default_priority=?, status=?, enabled=?, example_json=?, updated_at=?
+     WHERE id=?`,
+    [
+      input.name ?? row.name,
+      input.description ?? row.description,
+      input.category !== undefined ? normalizeCategory(input.category) : row.category,
+      input.source_module !== undefined ? input.source_module : row.source_module,
+      input.security_classification !== undefined ? normalizeClassification(input.security_classification) : row.security_classification,
+      input.retention_days !== undefined ? clampInt(input.retention_days, 1, 3650, row.retention_days) : row.retention_days,
+      input.replay_policy !== undefined ? normalizeReplayPolicy(input.replay_policy) : row.replay_policy,
+      input.ordering_required !== undefined ? (input.ordering_required ? 1 : 0) : row.ordering_required,
+      input.ordering_scope !== undefined ? normalizeOrderingScope(input.ordering_scope) : row.ordering_scope,
+      input.default_priority !== undefined ? normalizePriority(input.default_priority) : row.default_priority,
+      input.status !== undefined ? normalizeEventStatus(input.status) : row.status,
+      input.enabled !== undefined ? (input.enabled ? 1 : 0) : row.enabled,
+      input.example !== undefined ? toJson(input.example, {}) : row.example_json,
+      nowIso(),
+      row.id,
+    ]
+  );
+  await auditEventAsync(db, { actor, action: "event.type.update", resourceType: "event_registry", resourceId: row.id, details: { code: row.code } });
+  return publicEventType(await queryOneAsync(db, "SELECT * FROM event_registry WHERE id = ?", [row.id]));
+}
+
 export function deleteEventType(db, refValue, actor = null) {
   const row = getEventTypeRow(db, refValue);
   if (!row) throw new HttpError(404, "Event type not found");
@@ -203,6 +276,18 @@ export function deleteEventType(db, refValue, actor = null) {
   run(db, "DELETE FROM event_registry WHERE id = ?", [row.id]);
   run(db, "DELETE FROM event_schemas WHERE event_type_id = ?", [row.id]);
   auditEvent(db, { actor, action: "event.type.delete", resourceType: "event_registry", resourceId: row.id, details: { code: row.code } });
+  return { deleted: true, id: row.id };
+}
+
+export async function deleteEventTypeAsync(db, refValue, actor = null) {
+  const row = await getEventTypeRowAsync(db, refValue);
+  if (!row) throw new HttpError(404, "Event type not found");
+  if (row.system) throw new HttpError(409, "System event types cannot be deleted");
+  const inUse = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM event_subscriptions WHERE event_type_code = ?", [row.code])).c;
+  if (inUse) throw new HttpError(409, "Event type is referenced by subscriptions");
+  await runAsync(db, "DELETE FROM event_registry WHERE id = ?", [row.id]);
+  await runAsync(db, "DELETE FROM event_schemas WHERE event_type_id = ?", [row.id]);
+  await auditEventAsync(db, { actor, action: "event.type.delete", resourceType: "event_registry", resourceId: row.id, details: { code: row.code } });
   return { deleted: true, id: row.id };
 }
 
@@ -247,11 +332,59 @@ export function ensureDefaultEventTypes(db) {
   return { created, repaired, total: SYSTEM_EVENT_TYPES.length };
 }
 
+export async function ensureDefaultEventTypesAsync(db) {
+  let created = 0;
+  let repaired = 0;
+  for (const entry of SYSTEM_EVENT_TYPES) {
+    const existing = await getEventTypeRowAsync(db, entry.code);
+    if (!existing) {
+      await createEventTypeAsync(db, { ...entry, system: true }, null, null);
+      created += 1;
+      continue;
+    }
+    // A domain module may have auto-registered a catalogue code before the
+    // foundation was installed. The catalogue is authoritative, so repair the
+    // row (system flag + declared metadata) rather than leaving it ad-hoc.
+    if (Number(existing.system) !== 1) {
+      await runAsync(
+        db,
+        `UPDATE event_registry SET name = ?, description = ?, category = ?, source_module = ?, security_classification = ?,
+           retention_days = ?, replay_policy = ?, ordering_required = ?, ordering_scope = ?, default_priority = ?,
+           status = 'active', enabled = 1, system = 1, updated_at = ?
+         WHERE id = ?`,
+        [
+          entry.name || entry.code,
+          entry.description || "",
+          normalizeCategory(entry.category),
+          entry.source_module || "",
+          normalizeClassification(entry.security_classification),
+          clampInt(entry.retention_days, 1, 3650, 90),
+          normalizeReplayPolicy(entry.replay_policy),
+          entry.ordering_required ? 1 : 0,
+          normalizeOrderingScope(entry.ordering_scope),
+          normalizePriority(entry.default_priority),
+          nowIso(),
+          existing.id,
+        ]
+      );
+      repaired += 1;
+    }
+  }
+  return { created, repaired, total: SYSTEM_EVENT_TYPES.length };
+}
+
 // ── Schema / version registry ───────────────────────────────────────────────
 export function listVersions(db, refValue) {
   const row = getEventTypeRow(db, refValue);
   if (!row) throw new HttpError(404, "Event type not found");
   const rows = queryAll(db, "SELECT * FROM event_schemas WHERE event_type_id = ? ORDER BY version DESC", [row.id]);
+  return rows.map(publicSchemaVersion);
+}
+
+export async function listVersionsAsync(db, refValue) {
+  const row = await getEventTypeRowAsync(db, refValue);
+  if (!row) throw new HttpError(404, "Event type not found");
+  const rows = await queryAllAsync(db, "SELECT * FROM event_schemas WHERE event_type_id = ? ORDER BY version DESC", [row.id]);
   return rows.map(publicSchemaVersion);
 }
 
@@ -297,6 +430,41 @@ export function addVersion(db, refValue, input = {}, actor = null) {
   return { version: publicSchemaVersion(queryOne(db, "SELECT * FROM event_schemas WHERE id = ?", [Number(result.lastInsertId)])), comparison };
 }
 
+export async function addVersionAsync(db, refValue, input = {}, actor = null) {
+  const row = await getEventTypeRowAsync(db, refValue);
+  if (!row) throw new HttpError(404, "Event type not found");
+  const version = clampInt(input.version, 1, 100000, Number(row.version) + 1);
+  if (await getVersionRowAsync(db, row.id, version)) throw new HttpError(409, `Version ${version} already exists`);
+  const latest = await queryOneAsync(db, "SELECT * FROM event_schemas WHERE event_type_id = ? ORDER BY version DESC LIMIT 1", [row.id]);
+  const schema = input.schema && typeof input.schema === "object" ? input.schema : safeParse(row.schema_json, {});
+  const example = input.example && typeof input.example === "object" ? input.example : {};
+  const comparison = latest ? compareSchemas(safeParse(latest.schema_json, {}), schema) : { compatible: true, compatibility: "backward", changes: [] };
+  const compatibility = input.compatibility ? normalizeCompatibility(input.compatibility) : comparison.compatibility;
+  assertEnum(compatibility, ["none", "backward", "forward", "full"], "compatibility");
+  const status = normalizeVersionStatus(input.status || "active");
+  const ts = nowIso();
+  if (status === "active") {
+    await runAsync(db, "UPDATE event_schemas SET status = 'deprecated', updated_at = ? WHERE event_type_id = ? AND status = 'active'", [ts, row.id]);
+  }
+  const result = await runAsync(
+    db,
+    `INSERT INTO event_schemas (event_type_id, version, status, compatibility, schema_json, example_json, notes, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, version, status, compatibility, toJson(schema, {}), toJson(example, {}), input.notes || "", actor?.id ?? null, ts, ts]
+  );
+  if (version >= Number(row.version)) {
+    await runAsync(db, "UPDATE event_registry SET version = ?, schema_json = ?, example_json = ?, updated_at = ? WHERE id = ?", [
+      version,
+      toJson(schema, {}),
+      toJson(example, {}),
+      ts,
+      row.id,
+    ]);
+  }
+  await auditEventAsync(db, { actor, action: "event.schema.version", resourceType: "event_registry", resourceId: row.id, details: { code: row.code, version, compatibility } });
+  return { version: publicSchemaVersion(await queryOneAsync(db, "SELECT * FROM event_schemas WHERE id = ?", [Number(result.lastInsertId)])), comparison };
+}
+
 export function setVersionStatus(db, refValue, version, status, actor = null) {
   const row = getEventTypeRow(db, refValue);
   if (!row) throw new HttpError(404, "Event type not found");
@@ -308,9 +476,30 @@ export function setVersionStatus(db, refValue, version, status, actor = null) {
   return publicSchemaVersion(queryOne(db, "SELECT * FROM event_schemas WHERE id = ?", [target.id]));
 }
 
+export async function setVersionStatusAsync(db, refValue, version, status, actor = null) {
+  const row = await getEventTypeRowAsync(db, refValue);
+  if (!row) throw new HttpError(404, "Event type not found");
+  assertEnum(status, VERSION_STATUSES, "status");
+  const target = await getVersionRowAsync(db, row.id, version);
+  if (!target) throw new HttpError(404, "Schema version not found");
+  await runAsync(db, "UPDATE event_schemas SET status = ?, updated_at = ? WHERE id = ?", [normalizeVersionStatus(status), nowIso(), target.id]);
+  await auditEventAsync(db, { actor, action: "event.schema.status", resourceType: "event_registry", resourceId: row.id, details: { code: row.code, version, status } });
+  return publicSchemaVersion(await queryOneAsync(db, "SELECT * FROM event_schemas WHERE id = ?", [target.id]));
+}
+
 // Checks a candidate payload/schema for compatibility with the registered type.
 export function checkCompatibility(db, refValue, input = {}) {
   const row = getEventTypeRow(db, refValue);
+  if (!row) throw new HttpError(404, "Event type not found");
+  const current = safeParse(row.schema_json, {});
+  const candidate = input.schema && typeof input.schema === "object" ? input.schema : current;
+  const comparison = compareSchemas(current, candidate);
+  const errors = input.payload !== undefined ? validatePayloadAgainstSchema(input.payload, candidate) : [];
+  return { event_type_code: row.code, current_version: row.version, ...comparison, payload_valid: errors.length === 0, payload_errors: errors };
+}
+
+export async function checkCompatibilityAsync(db, refValue, input = {}) {
+  const row = await getEventTypeRowAsync(db, refValue);
   if (!row) throw new HttpError(404, "Event type not found");
   const current = safeParse(row.schema_json, {});
   const candidate = input.schema && typeof input.schema === "object" ? input.schema : current;

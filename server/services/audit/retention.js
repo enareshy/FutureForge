@@ -1,8 +1,8 @@
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
-import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync, runAsync, transactionAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { publicPolicy } from "./policies.js";
-import { structuredLog, capture } from "./events.js";
+import { structuredLog, capture, captureAsync } from "./events.js";
 import { validateRetentionPolicyInput } from "./validation.js";
 import { publishAuditEvent, AUDIT_EVENT_TYPES } from "./publisher.js";
 
@@ -662,4 +662,332 @@ function recordRetentionRun(db, policy, { status = "success", dryRun = false, ac
     ]
   );
   return Number(result.lastInsertId);
+}
+
+// ── Async write twins ───────────────────────────────────────────────────────
+
+async function archiveAndPurgeAsync(db, where, params, { archive = true } = {}) {
+  const clause = where.join(" AND ");
+  const ids = (await queryAllAsync(db, `SELECT id FROM audit_logs WHERE ${clause}`, params)).map((r) => r.id);
+  if (!ids.length) return { archived: 0, purged: 0 };
+  if (archive) {
+    for (const id of ids) {
+      await runAsync(
+        db,
+        `INSERT INTO audit_logs_archive (${ARCHIVE_COLUMNS.join(", ")})
+         SELECT ${ARCHIVE_COLUMNS.join(", ")} FROM audit_logs WHERE id = ? ON CONFLICT DO NOTHING`,
+        [id]
+      );
+    }
+  }
+  await runAsync(db, "UPDATE audit_guard SET allow_delete = 1 WHERE id = 1");
+  try {
+    await runAsync(db, `DELETE FROM audit_logs WHERE ${clause}`, params);
+  } finally {
+    await runAsync(db, "UPDATE audit_guard SET allow_delete = 0 WHERE id = 1");
+  }
+  return { archived: archive ? ids.length : 0, purged: ids.length };
+}
+
+export async function runRetentionAsync(db, { tenantId, policyId, actor, dryRun = false, now = new Date() } = {}) {
+  const where = ["status = 'active'"];
+  const params = [];
+  if (policyId) {
+    where.push("id = ?");
+    params.push(Number(policyId));
+  }
+  if (tenantId) {
+    where.push("(tenant_id = ? OR tenant_id IS NULL)");
+    params.push(Number(tenantId));
+  }
+  const policies = await queryAllAsync(db, `SELECT * FROM audit_policies WHERE ${where.join(" AND ")}`, params);
+  const runs = [];
+  let archivedTotal = 0;
+  let purgedTotal = 0;
+
+  for (const row of policies) {
+    const policy = publicPolicy(row);
+    if (!policy.retention_days || policy.retention_days < 1) continue;
+    const cutoff = cutoffFor(policy.retention_days, now);
+    const selection = policySelection(policy, cutoff);
+    const clause = selection.where.join(" AND ");
+    const count = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM audit_logs WHERE ${clause}`, selection.params)).c;
+    let archived = 0;
+    let purged = 0;
+    let status = "success";
+    if (!dryRun && count > 0) {
+      try {
+        const outcome = await transactionAsync(db, () => archiveAndPurgeAsync(db, selection.where, selection.params));
+        archived = outcome.archived;
+        purged = outcome.purged;
+      } catch (err) {
+        status = "failed";
+        structuredLog("audit.retention.failed", { policy_id: policy.id, message: err?.message });
+      }
+    }
+    archivedTotal += archived;
+    purgedTotal += purged;
+    const runResult = await runAsync(
+      db,
+      `INSERT INTO audit_retention_runs
+        (tenant_id, policy_id, cutoff, archived, purged, status, dry_run, actor_id, details_json, started_at, finished_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        policy.tenant_id,
+        policy.id,
+        cutoff,
+        archived,
+        purged,
+        status,
+        dryRun ? 1 : 0,
+        actor?.id ?? null,
+        JSON.stringify({ object_type: policy.object_type, candidates: count, retention_days: policy.retention_days }),
+        nowIso(),
+        nowIso(),
+      ]
+    );
+    runs.push({
+      id: Number(runResult.lastInsertId),
+      policy_id: policy.id,
+      object_type: policy.object_type,
+      cutoff,
+      candidates: count,
+      archived,
+      purged,
+      status,
+      dry_run: !!dryRun,
+    });
+  }
+  return { archived: archivedTotal, purged: purgedTotal, dry_run: !!dryRun, runs };
+}
+
+export async function createRetentionPolicyAsync(db, body = {}, actor = null, tenantId = null) {
+  const input = validateRetentionPolicyInput(body, { partial: false });
+  const effectiveTenant =
+    body.tenant_id === null || body.tenantId === null
+      ? null
+      : (() => {
+          const raw = body.tenant_id ?? body.tenantId ?? tenantId;
+          return raw === null || raw === undefined || raw === "" ? null : Number(raw);
+        })();
+  const existing = await queryOneAsync(
+    db,
+    `SELECT id FROM audit_retention_policies
+      WHERE COALESCE(tenant_id, 0) = COALESCE(?, 0) AND category = ? AND object_type = ?`,
+    [effectiveTenant, input.category, input.object_type]
+  );
+  if (existing) throw new HttpError(409, "A retention policy already exists for this scope");
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO audit_retention_policies
+       (tenant_id, name, description, category, object_type, retention_days, action, legal_hold,
+        status, priority, system, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+    [
+      effectiveTenant,
+      input.name,
+      input.description || "",
+      input.category,
+      input.object_type,
+      input.retention_days ?? 2555,
+      input.action || "archive",
+      body.legal_hold === true || body.legalHold === true ? 1 : 0,
+      input.status || "active",
+      input.priority ?? 100,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  await captureAsync(db, {
+    actor,
+    tenant_id: effectiveTenant,
+    action: "audit.retention_policy.create",
+    event_type: "CONFIGURATION_CHANGED",
+    category: "configuration",
+    object_type: "audit_retention_policy",
+    object_id: result.lastInsertId,
+    object_name: input.name,
+    details: { category: input.category, object_type: input.object_type, retention_days: input.retention_days },
+    reason: body.reason,
+  });
+  return getRetentionPolicyAsync(db, result.lastInsertId, null);
+}
+
+export async function updateRetentionPolicyAsync(db, id, body = {}, actor = null, tenantId = null) {
+  const row = await getRetentionPolicyRowAsync(db, id);
+  if (!row) throw new HttpError(404, "Retention policy not found");
+  if (tenantId != null && row.tenant_id != null && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Retention policy not found");
+  }
+  const input = validateRetentionPolicyInput(body, { partial: true });
+  const next = {
+    name: input.name ?? row.name,
+    description: input.description ?? row.description,
+    category: input.category ?? row.category,
+    object_type: input.object_type ?? row.object_type,
+    retention_days: input.retention_days ?? row.retention_days,
+    action: input.action ?? row.action,
+    legal_hold: body.legal_hold === undefined && body.legalHold === undefined ? row.legal_hold : (body.legal_hold ?? body.legalHold) ? 1 : 0,
+    status: input.status ?? row.status,
+    priority: input.priority ?? row.priority,
+  };
+  if (row.system === 1 && next.status !== "active") {
+    throw new HttpError(409, "System retention policies cannot be disabled");
+  }
+  await runAsync(
+    db,
+    `UPDATE audit_retention_policies SET
+       name = ?, description = ?, category = ?, object_type = ?, retention_days = ?, action = ?,
+       legal_hold = ?, status = ?, priority = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      next.name,
+      next.description,
+      next.category,
+      next.object_type,
+      next.retention_days,
+      next.action,
+      next.legal_hold,
+      next.status,
+      next.priority,
+      nowIso(),
+      id,
+    ]
+  );
+  await captureAsync(db, {
+    actor,
+    tenant_id: row.tenant_id,
+    action: "audit.retention_policy.update",
+    event_type: "CONFIGURATION_CHANGED",
+    category: "configuration",
+    object_type: "audit_retention_policy",
+    object_id: id,
+    object_name: next.name,
+    details: { before: publicRetentionPolicy(row), after: next },
+    reason: body.reason,
+  });
+  return getRetentionPolicyAsync(db, id, null);
+}
+
+export async function deleteRetentionPolicyAsync(db, id, actor = null, tenantId = null) {
+  const row = await getRetentionPolicyRowAsync(db, id);
+  if (!row) throw new HttpError(404, "Retention policy not found");
+  if (tenantId != null && row.tenant_id != null && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Retention policy not found");
+  }
+  if (row.system === 1) throw new HttpError(409, "System retention policies cannot be deleted");
+  await runAsync(db, "DELETE FROM audit_retention_policies WHERE id = ?", [id]);
+  await captureAsync(db, {
+    actor,
+    tenant_id: row.tenant_id,
+    action: "audit.retention_policy.delete",
+    event_type: "CONFIGURATION_CHANGED",
+    category: "configuration",
+    object_type: "audit_retention_policy",
+    object_id: id,
+    object_name: row.name,
+  });
+  return { ok: true, id: Number(id) };
+}
+
+async function recordRetentionRunAsync(db, policy, { status = "success", dryRun = false, actor = null, archived = 0, purged = 0, candidates = 0, cutoff = null, reason = null } = {}) {
+  const result = await runAsync(
+    db,
+    `INSERT INTO audit_retention_runs
+       (tenant_id, policy_id, cutoff, archived, purged, status, dry_run, actor_id, details_json, started_at, finished_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      policy.tenant_id,
+      policy.id,
+      cutoff || cutoffFor(policy.retention_days, new Date()),
+      archived,
+      purged,
+      status,
+      dryRun ? 1 : 0,
+      actor?.id ?? null,
+      JSON.stringify({
+        retention_policy_id: policy.id,
+        retention_policy_name: policy.name,
+        action: policy.action,
+        category: policy.category,
+        object_type: policy.object_type,
+        retention_days: policy.retention_days,
+        candidates,
+        reason,
+      }),
+      nowIso(),
+      nowIso(),
+    ]
+  );
+  return Number(result.lastInsertId);
+}
+
+export async function executeRetentionPoliciesAsync(db, { tenantId, policyId, actor, dryRun = false, now = new Date() } = {}) {
+  const where = ["status = 'active'"];
+  const params = [];
+  if (policyId) {
+    where.push("id = ?");
+    params.push(Number(policyId));
+  }
+  if (tenantId) {
+    where.push("(tenant_id = ? OR tenant_id IS NULL)");
+    params.push(Number(tenantId));
+  }
+  const policies = await queryAllAsync(
+    db,
+    `SELECT * FROM audit_retention_policies WHERE ${where.join(" AND ")} ORDER BY priority ASC, id ASC`,
+    params
+  );
+  const runIds = [];
+  let archivedTotal = 0;
+  let purgedTotal = 0;
+  publishAuditEvent(AUDIT_EVENT_TYPES.RETENTION_STARTED, {
+    tenant_id: tenantId ?? null,
+    policies: policies.length,
+    dry_run: !!dryRun,
+    actor: actor ? { id: actor.id, username: actor.username } : null,
+  });
+  for (const row of policies) {
+    const policy = publicRetentionPolicy(row);
+    if (policy.legal_hold) {
+      runIds.push(await recordRetentionRunAsync(db, policy, { status: "skipped", dryRun, actor, reason: "legal_hold" }));
+      continue;
+    }
+    if (!policy.retention_days || policy.retention_days < 1) continue;
+    const cutoff = cutoffFor(policy.retention_days, now);
+    const selection = retentionSelection(policy, cutoff);
+    const clause = selection.where.join(" AND ");
+    const count = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM audit_logs WHERE ${clause}`, selection.params)).c;
+    let archived = 0;
+    let purged = 0;
+    let status = "success";
+    if (!dryRun && count > 0) {
+      try {
+        const outcome = await transactionAsync(db, () =>
+          archiveAndPurgeAsync(db, selection.where, selection.params, { archive: policy.action !== "purge" })
+        );
+        archived = outcome.archived;
+        purged = outcome.purged;
+      } catch (err) {
+        status = "failed";
+        structuredLog("audit.retention.policy.failed", { policy_id: policy.id, message: err?.message });
+      }
+    }
+    archivedTotal += archived;
+    purgedTotal += purged;
+    runIds.push(
+      await recordRetentionRunAsync(db, policy, { status, dryRun, actor, archived, purged, candidates: count, cutoff })
+    );
+  }
+  publishAuditEvent(AUDIT_EVENT_TYPES.RETENTION_COMPLETED, {
+    tenant_id: tenantId ?? null,
+    archived: archivedTotal,
+    purged: purgedTotal,
+    dry_run: !!dryRun,
+    runs: runIds.length,
+    actor: actor ? { id: actor.id, username: actor.username } : null,
+  });
+  return { archived: archivedTotal, purged: purgedTotal, dry_run: !!dryRun, runs: runIds };
 }

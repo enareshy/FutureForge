@@ -7,6 +7,7 @@
 //                object-type/UOM/classification/lifecycle/relationship checks
 //                resolved through injected platform checkers.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { validationProfileRef } from "./identifiers.js";
 import { validationEngine } from "./engine-ref.js";
 import { getAdapter } from "./adapters/index.js";
@@ -60,8 +61,25 @@ export function getValidationProfileRow(db, tenantId, ref) {
   return queryOne(db, "SELECT * FROM exchange_validation_profiles WHERE tenant_id = ? AND (profile_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
 }
 
+export async function getValidationProfileRowAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const raw = String(ref ?? "");
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const byId = await queryOneAsync(db, "SELECT * FROM exchange_validation_profiles WHERE id = ? AND tenant_id = ?", [Number(raw), tenant]);
+    if (byId) return byId;
+  }
+  return await queryOneAsync(db, "SELECT * FROM exchange_validation_profiles WHERE tenant_id = ? AND (profile_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
+}
+
 export function requireValidationProfileRow(db, tenantId, ref) {
   const row = getValidationProfileRow(db, tenantId, ref);
+  if (!row) throw validationProfileNotFound(ref);
+  return row;
+}
+
+export async function requireValidationProfileRowAsync(db, tenantId, ref) {
+  const row = await getValidationProfileRowAsync(db, tenantId, ref);
   if (!row) throw validationProfileNotFound(ref);
   return row;
 }
@@ -92,6 +110,19 @@ function insertRules(db, tenantId, profileId, rules) {
   });
 }
 
+async function insertRulesAsync(db, tenantId, profileId, rules) {
+  for (let index = 0; index < rules.length; index += 1) {
+    const raw = rules[index];
+    const rule = normalizeRule(raw, index);
+    await runAsync(
+      db,
+      `INSERT INTO exchange_validation_rules (profile_id, tenant_id, sequence, level, target_field, rule_type, config_json, severity, message, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [profileId, tenantId, rule.sequence, rule.level, rule.target_field, rule.rule_type, toJson(rule.config, {}), rule.severity, rule.message, rule.status, nowIso(), nowIso()]
+    );
+  }
+}
+
 export function createValidationProfile(db, tenantId, body = {}, actor = null) {
   const tenant = Number(tenantId);
   const code = normalizeUpper(body.code || "", { max: 120 });
@@ -120,6 +151,34 @@ export function createValidationProfile(db, tenantId, body = {}, actor = null) {
   return getValidationProfile(db, tenant, profileRow.id);
 }
 
+export async function createValidationProfileAsync(db, tenantId, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const code = normalizeUpper(body.code || "", { max: 120 });
+  if (!code) throw invalidValidationProfile("A validation profile code is required");
+  const status = normalizeUpper(body.status || "DRAFT");
+  if (!DEFINITION_STATUSES.includes(status)) throw invalidValidationProfile(`Unsupported status: ${status}`);
+  const existing = await queryOneAsync(db, "SELECT id FROM exchange_validation_profiles WHERE tenant_id = ? AND code = ?", [tenant, code]);
+  if (existing) throw validationProfileConflict(code);
+  const levels = Array.isArray(body.levels) ? body.levels.map((entry) => normalizeUpper(entry)).filter((entry) => VALIDATION_LEVELS.includes(entry)) : [...VALIDATION_LEVELS];
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO exchange_validation_profiles
+       (profile_ref, tenant_id, code, name, description, format_code, direction, target_object_type, levels_json, version, status, immutable, metadata_json, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?, ?, ?)`,
+    [
+      validationProfileRef(code), tenant, code, String(body.name || code).trim(), String(body.description || "").trim(),
+      normalizeUpper(body.format_code || body.formatCode || "", { max: 80 }),
+      normalizeUpper(body.direction || "IMPORT"),
+      String(body.target_object_type || body.targetObjectType || "").trim(),
+      toJson(levels, []), status, toJson(body.metadata || {}, {}), actor?.id ?? null, actor?.id ?? null, ts, ts,
+    ]
+  );
+  const profileRow = await queryOneAsync(db, "SELECT * FROM exchange_validation_profiles WHERE id = ?", [Number(result.lastInsertId)]);
+  if (Array.isArray(body.rules) && body.rules.length) await insertRulesAsync(db, tenant, profileRow.id, body.rules);
+  return getValidationProfileAsync(db, tenant, profileRow.id);
+}
+
 export function updateValidationProfile(db, tenantId, ref, body = {}, actor = null) {
   const tenant = Number(tenantId);
   const row = requireValidationProfileRow(db, tenant, ref);
@@ -134,6 +193,22 @@ export function updateValidationProfile(db, tenantId, ref, body = {}, actor = nu
     ]
   );
   return getValidationProfile(db, tenant, row.id);
+}
+
+export async function updateValidationProfileAsync(db, tenantId, ref, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireValidationProfileRowAsync(db, tenant, ref);
+  const levels = body.levels ? body.levels.map((entry) => normalizeUpper(entry)).filter((entry) => VALIDATION_LEVELS.includes(entry)) : parseJson(row.levels_json, []);
+  await runAsync(
+    db,
+    `UPDATE exchange_validation_profiles SET name=?, description=?, format_code=?, direction=?, target_object_type=?, levels_json=?, status=?, metadata_json=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?`,
+    [
+      String(body.name || row.name), String(body.description ?? row.description), normalizeUpper(body.format_code || body.formatCode || row.format_code || ""),
+      normalizeUpper(body.direction || row.direction), String(body.target_object_type || body.targetObjectType || row.target_object_type || ""),
+      toJson(levels, []), normalizeUpper(body.status || row.status), toJson(body.metadata || parseJson(row.metadata_json, {}), {}), actor?.id ?? null, nowIso(), row.id, tenant,
+    ]
+  );
+  return getValidationProfileAsync(db, tenant, row.id);
 }
 
 export function addValidationRule(db, tenantId, ref, body = {}, actor = null) {
@@ -152,10 +227,34 @@ export function addValidationRule(db, tenantId, ref, body = {}, actor = null) {
   return getValidationProfile(db, tenant, row.id);
 }
 
+export async function addValidationRuleAsync(db, tenantId, ref, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireValidationProfileRowAsync(db, tenant, ref);
+  const rule = normalizeRule(body);
+  const check = validateRule(rule);
+  if (!check.valid) throw invalidValidationProfile("Invalid validation rule", { errors: check.errors });
+  const max = Number((await queryOneAsync(db, "SELECT COALESCE(MAX(sequence),0) AS s FROM exchange_validation_rules WHERE profile_id = ?", [row.id]))?.s || 0);
+  await runAsync(
+    db,
+    `INSERT INTO exchange_validation_rules (profile_id, tenant_id, sequence, level, target_field, rule_type, config_json, severity, message, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, tenant, body.sequence ?? max + 10, rule.level, rule.target_field, rule.rule_type, toJson(rule.config, {}), rule.severity, rule.message, rule.status, nowIso(), nowIso()]
+  );
+  return getValidationProfileAsync(db, tenant, row.id);
+}
+
 export function deleteValidationRule(db, tenantId, ref, ruleId) {
+  const tenant = Number(tenantId);
   const row = requireValidationProfileRow(db, tenant, ref);
   run(db, "DELETE FROM exchange_validation_rules WHERE id = ? AND profile_id = ? AND tenant_id = ?", [Number(ruleId), row.id, Number(tenantId)]);
   return getValidationProfile(db, tenantId, row.id);
+}
+
+export async function deleteValidationRuleAsync(db, tenantId, ref, ruleId) {
+  const tenant = Number(tenantId);
+  const row = await requireValidationProfileRowAsync(db, tenant, ref);
+  await runAsync(db, "DELETE FROM exchange_validation_rules WHERE id = ? AND profile_id = ? AND tenant_id = ?", [Number(ruleId), row.id, Number(tenantId)]);
+  return getValidationProfileAsync(db, tenantId, row.id);
 }
 
 export function setValidationProfileStatus(db, tenantId, ref, status, actor = null) {
@@ -167,10 +266,26 @@ export function setValidationProfileStatus(db, tenantId, ref, status, actor = nu
   return getValidationProfile(db, tenant, ref);
 }
 
+export async function setValidationProfileStatusAsync(db, tenantId, ref, status, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireValidationProfileRowAsync(db, tenant, ref);
+  const next = normalizeUpper(status);
+  if (!DEFINITION_STATUSES.includes(next)) throw invalidValidationProfile(`Unsupported status: ${status}`);
+  await runAsync(db, "UPDATE exchange_validation_profiles SET status=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [next, actor?.id ?? null, nowIso(), row.id, tenant]);
+  return getValidationProfileAsync(db, tenant, ref);
+}
+
 export function deleteValidationProfile(db, tenantId, ref) {
   const tenant = Number(tenantId);
   const row = requireValidationProfileRow(db, tenant, ref);
   run(db, "DELETE FROM exchange_validation_profiles WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
+  return { deleted: true, ref: row.profile_ref };
+}
+
+export async function deleteValidationProfileAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const row = await requireValidationProfileRowAsync(db, tenant, ref);
+  await runAsync(db, "DELETE FROM exchange_validation_profiles WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
   return { deleted: true, ref: row.profile_ref };
 }
 
@@ -194,6 +309,26 @@ export function listValidationProfiles(db, tenantId, query = {}) {
   return { items: rows.map(publicValidationProfile), total, page, pageSize };
 }
 
+export async function listValidationProfilesAsync(db, tenantId, query = {}) {
+  const tenant = Number(tenantId);
+  const { page, pageSize, offset } = pageArgs(query);
+  const clauses = ["tenant_id = ?"];
+  const params = [tenant];
+  if (query.status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(query.status));
+  }
+  if (query.q) {
+    clauses.push("(code ILIKE ? OR name ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like);
+  }
+  const where = clauses.join(" AND ");
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM exchange_validation_profiles WHERE ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM exchange_validation_profiles WHERE ${where} ORDER BY code ASC LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+  return { items: rows.map(publicValidationProfile), total, page, pageSize };
+}
+
 export function getValidationProfile(db, tenantId, ref) {
   const row = requireValidationProfileRow(db, tenantId, ref);
   const output = publicValidationProfile(row);
@@ -201,10 +336,23 @@ export function getValidationProfile(db, tenantId, ref) {
   return output;
 }
 
+export async function getValidationProfileAsync(db, tenantId, ref) {
+  const row = await requireValidationProfileRowAsync(db, tenantId, ref);
+  const output = publicValidationProfile(row);
+  output.rules = (await queryAllAsync(db, "SELECT * FROM exchange_validation_rules WHERE profile_id = ? ORDER BY sequence ASC", [row.id])).map(publicValidationRule);
+  return output;
+}
+
 export function resolveValidationProfile(db, tenantId, code) {
   if (!code) return null;
   const row = getValidationProfileRow(db, tenantId, code);
   return row ? getValidationProfile(db, tenantId, row.id) : null;
+}
+
+export async function resolveValidationProfileAsync(db, tenantId, code) {
+  if (!code) return null;
+  const row = await getValidationProfileRowAsync(db, tenantId, code);
+  return row ? await getValidationProfileAsync(db, tenantId, row.id) : null;
 }
 
 function fileLevelFindings({ payload, fileName, mimeType, format, bytesLimit, maxBytes }) {
@@ -287,7 +435,41 @@ export function runValidation(db, tenantId, {
   return { ...mergeValidationResults({ findings }), levels_evaluated: activeLevels };
 }
 
+export async function runValidationAsync(db, tenantId, {
+  definition = null,
+  profile = null,
+  format = null,
+  adapter = null,
+  payload = null,
+  fileName = "",
+  mimeType = "",
+  records = null,
+  levels = null,
+  maxBytes = null,
+  context = {},
+} = {}) {
+  registerEnterpriseValidationHandlers();
+  const activeLevels = levels && levels.length ? levels.map((entry) => normalizeUpper(entry)) : profile?.levels || VALIDATION_LEVELS;
+  const findings = [];
+  if (activeLevels.includes("FILE")) findings.push(...fileLevelFindings({ payload, fileName, mimeType, format, bytesLimit: context.max_payload_bytes, maxBytes }));
+  if (activeLevels.includes("STANDARDS")) {
+    const adapterInstance = adapter ? (typeof adapter === "string" ? getAdapter(adapter) : adapter) : definition?.format_code ? getAdapter(await getAdapterCodeAsync(db, tenantId, definition.format_code)) : null;
+    findings.push(...standardsLevelFindings({ adapter: adapterInstance, payload, schema: format?.schema || null, maxBytes }));
+  }
+  if (activeLevels.includes("ENTERPRISE") && profile) {
+    const rules = profile.rules || [];
+    const list = Array.isArray(records) ? records : records ? [records] : [];
+    findings.push(...enterpriseLevelFindings({ rules, records: list, ctx: { ...context } }));
+  }
+  return { ...mergeValidationResults({ findings }), levels_evaluated: activeLevels };
+}
+
 function getAdapterCode(db, tenantId, formatCode) {
   const row = queryOne(db, "SELECT adapter_code FROM exchange_formats WHERE tenant_id = ? AND lower(code) = lower(?)", [Number(tenantId), normalizeUpper(formatCode)]);
+  return row?.adapter_code || null;
+}
+
+async function getAdapterCodeAsync(db, tenantId, formatCode) {
+  const row = await queryOneAsync(db, "SELECT adapter_code FROM exchange_formats WHERE tenant_id = ? AND lower(code) = lower(?)", [Number(tenantId), normalizeUpper(formatCode)]);
   return row?.adapter_code || null;
 }

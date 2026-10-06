@@ -15,6 +15,12 @@ import { publicJob, publicJobResult } from "./repository.js";
 import { execute } from "./processor.js";
 import { reconcileTransaction } from "./reconciliation.js";
 import { getConfig } from "./configuration.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { submitJobAsync } from "../jobs/jobs.js";
+import { getJobTypeRowAsync, createJobTypeAsync } from "../jobs/types.js";
+import { executeAsync } from "./processor.js";
+import { reconcileTransactionAsync } from "./reconciliation.js";
+import { getConfigAsync } from "./configuration.js";
 
 const EXCHANGE_QUEUE = "exchange";
 
@@ -28,9 +34,30 @@ export function ensureExchangeJobTypes(db) {
   return { created };
 }
 
+export async function ensureExchangeJobTypesAsync(db) {
+  let created = 0;
+  for (const def of EXCHANGE_JOB_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    await createJobTypeAsync(db, { ...def }, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
 function recordJob(db, { tenantId, handlerCode, platformJob, transactionRef = "" }) {
   const ts = nowIso();
   const result = run(
+    db,
+    `INSERT INTO exchange_jobs (job_ref, tenant_id, transaction_ref, handler_code, platform_job_id, status, attempts, max_attempts, progress_json, queued_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'QUEUED', 0, 1, '{}', ?, ?, ?)`,
+    [makeJobRef(), Number(tenantId), String(transactionRef || ""), handlerCode, platformJob?.id ?? null, ts, ts, ts]
+  );
+  return Number(result.lastInsertId);
+}
+
+async function recordJobAsync(db, { tenantId, handlerCode, platformJob, transactionRef = "" }) {
+  const ts = nowIso();
+  const result = await runAsync(
     db,
     `INSERT INTO exchange_jobs (job_ref, tenant_id, transaction_ref, handler_code, platform_job_id, status, attempts, max_attempts, progress_json, queued_at, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, 'QUEUED', 0, 1, '{}', ?, ?, ?)`,
@@ -53,6 +80,20 @@ function updateJob(db, exchangeJobId, patch = {}) {
   run(db, `UPDATE exchange_jobs SET ${columns.join(", ")} WHERE id = ?`, values);
 }
 
+async function updateJobAsync(db, exchangeJobId, patch = {}) {
+  const columns = [];
+  const values = [];
+  for (const [key, value] of Object.entries(patch)) {
+    columns.push(`${key} = ?`);
+    values.push(value);
+  }
+  if (!columns.length) return;
+  columns.push("updated_at = ?");
+  values.push(nowIso());
+  values.push(exchangeJobId);
+  await runAsync(db, `UPDATE exchange_jobs SET ${columns.join(", ")} WHERE id = ?`, values);
+}
+
 function submit(db, { tenantId, jobTypeCode, handlerCode, handlerParams, actor, ip, priority = "normal", queue = EXCHANGE_QUEUE, idempotencyKey = null }) {
   const platformJob = submitJob(
     db,
@@ -70,24 +111,61 @@ function submit(db, { tenantId, jobTypeCode, handlerCode, handlerParams, actor, 
   return { ...platformJob, exchange_job: publicJob(queryOne(db, "SELECT * FROM exchange_jobs WHERE id = ?", [exchangeJobId])) };
 }
 
+async function submitAsync(db, { tenantId, jobTypeCode, handlerCode, handlerParams, actor, ip, priority = "normal", queue = EXCHANGE_QUEUE, idempotencyKey = null }) {
+  const platformJob = await submitJobAsync(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      input: { tenant_id: Number(tenantId), ...handlerParams },
+      tenant_id: Number(tenantId),
+      priority,
+      queue,
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+  const exchangeJobId = await recordJobAsync(db, { tenantId, handlerCode, platformJob });
+  return { ...platformJob, exchange_job: publicJob(await queryOneAsync(db, "SELECT * FROM exchange_jobs WHERE id = ?", [exchangeJobId])) };
+}
+
 export function submitImportJob(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "EXCHANGE_IMPORT", handlerCode: EXCHANGE_HANDLER_CODES.IMPORT, handlerParams: { body }, actor, ip, idempotencyKey });
+}
+
+export async function submitImportJobAsync(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "EXCHANGE_IMPORT", handlerCode: EXCHANGE_HANDLER_CODES.IMPORT, handlerParams: { body }, actor, ip, idempotencyKey });
 }
 
 export function submitExportJob(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "EXCHANGE_EXPORT", handlerCode: EXCHANGE_HANDLER_CODES.EXPORT, handlerParams: { body }, actor, ip, idempotencyKey });
 }
 
+export async function submitExportJobAsync(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "EXCHANGE_EXPORT", handlerCode: EXCHANGE_HANDLER_CODES.EXPORT, handlerParams: { body }, actor, ip, idempotencyKey });
+}
+
 export function submitValidateJob(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "EXCHANGE_VALIDATE", handlerCode: EXCHANGE_HANDLER_CODES.VALIDATE, handlerParams: { body }, actor, ip, idempotencyKey });
+}
+
+export async function submitValidateJobAsync(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "EXCHANGE_VALIDATE", handlerCode: EXCHANGE_HANDLER_CODES.VALIDATE, handlerParams: { body }, actor, ip, idempotencyKey });
 }
 
 export function submitReconcileJob(db, { tenantId, transactionRef, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "EXCHANGE_RECONCILE", handlerCode: EXCHANGE_HANDLER_CODES.RECONCILE, handlerParams: { transaction_ref: transactionRef }, actor, ip, priority: "low", idempotencyKey });
 }
 
+export async function submitReconcileJobAsync(db, { tenantId, transactionRef, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "EXCHANGE_RECONCILE", handlerCode: EXCHANGE_HANDLER_CODES.RECONCILE, handlerParams: { transaction_ref: transactionRef }, actor, ip, priority: "low", idempotencyKey });
+}
+
 export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "EXCHANGE_MAINTENANCE", handlerCode: EXCHANGE_HANDLER_CODES.MAINTENANCE, handlerParams: {}, actor, ip, priority: "low", queue: "default", idempotencyKey });
+}
+
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "EXCHANGE_MAINTENANCE", handlerCode: EXCHANGE_HANDLER_CODES.MAINTENANCE, handlerParams: {}, actor, ip, priority: "low", queue: "default", idempotencyKey });
 }
 
 export function listExchangeJobs(db, tenantId, query = {}) {
@@ -110,6 +188,26 @@ export function listExchangeJobs(db, tenantId, query = {}) {
   return { items: rows.map(publicJob), total, page, pageSize };
 }
 
+export async function listExchangeJobsAsync(db, tenantId, query = {}) {
+  const page = Math.max(1, Number(query.page || 1));
+  const pageSize = Math.min(200, Math.max(1, Number(query.page_size || query.pageSize || 50)));
+  const offset = (page - 1) * pageSize;
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.status) {
+    clauses.push("status = ?");
+    params.push(String(query.status).toUpperCase());
+  }
+  if (query.transaction_ref || query.transactionRef) {
+    clauses.push("transaction_ref = ?");
+    params.push(String(query.transaction_ref || query.transactionRef));
+  }
+  const where = clauses.join(" AND ");
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM exchange_jobs WHERE ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM exchange_jobs WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+  return { items: rows.map(publicJob), total, page, pageSize };
+}
+
 export function getExchangeJob(db, tenantId, ref) {
   const raw = String(ref ?? "");
   const row = /^\d+$/.test(raw)
@@ -118,6 +216,17 @@ export function getExchangeJob(db, tenantId, ref) {
   if (!row) return null;
   const output = publicJob(row);
   output.results = queryAll(db, "SELECT * FROM exchange_job_results WHERE job_id = ? ORDER BY id DESC", [row.id]).map(publicJobResult);
+  return output;
+}
+
+export async function getExchangeJobAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const row = /^\d+$/.test(raw)
+    ? await queryOneAsync(db, "SELECT * FROM exchange_jobs WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
+    : await queryOneAsync(db, "SELECT * FROM exchange_jobs WHERE tenant_id = ? AND job_ref = ?", [Number(tenantId), raw]);
+  if (!row) return null;
+  const output = publicJob(row);
+  output.results = (await queryAllAsync(db, "SELECT * FROM exchange_job_results WHERE job_id = ? ORDER BY id DESC", [row.id])).map(publicJobResult);
   return output;
 }
 
@@ -138,11 +247,33 @@ export function runExchangeMaintenance(db, { tenantId = null } = {}) {
   return summary;
 }
 
+export async function runExchangeMaintenanceAsync(db, { tenantId = null } = {}) {
+  const tenants = tenantId
+    ? [{ tenant_id: Number(tenantId) }]
+    : await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM exchange_history WHERE tenant_id IS NOT NULL");
+  const summary = { tenants: tenants.length, history_pruned: 0, errors_pruned: 0, reconciliations_pruned: 0, ran_at: nowIso() };
+  for (const row of tenants) {
+    const tenant = Number(row.tenant_id);
+    const retentionDays = Number(await getConfigAsync(db, tenant, "history_retention_days") || 180);
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    summary.history_pruned += (await runAsync(db, "DELETE FROM exchange_history WHERE tenant_id = ? AND created_at < ?", [tenant, cutoff])).changes || 0;
+    summary.errors_pruned += (await runAsync(db, "DELETE FROM exchange_errors WHERE tenant_id = ? AND status IN ('RESOLVED','IGNORED') AND created_at < ?", [tenant, cutoff])).changes || 0;
+    summary.reconciliations_pruned += (await runAsync(db, "DELETE FROM exchange_reconciliations WHERE tenant_id = ? AND created_at < ?", [tenant, cutoff])).changes || 0;
+  }
+  return summary;
+}
+
 // ── Handler registration ─────────────────────────────────────────────────────
 function runHandlerBody(context, direction, operation) {
   const tenantId = Number(context.input.tenant_id ?? context.tenant_id);
   const body = context.input.body || {};
   return execute(context.db, tenantId, { ...body, direction, operation, options: body.options || {} }, context.actor, { ip: context.ip });
+}
+
+async function runHandlerBodyAsync(context, direction, operation) {
+  const tenantId = Number(context.input.tenant_id ?? context.tenant_id);
+  const body = context.input.body || {};
+  return executeAsync(context.db, tenantId, { ...body, direction, operation, options: body.options || {} }, context.actor, { ip: context.ip });
 }
 
 export function registerExchangeHandlers() {

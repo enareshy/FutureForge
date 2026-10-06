@@ -242,6 +242,22 @@ export function listFileEvents(db, { fileId = null, eventType = null, tenantId =
   return { items, total: items.length };
 }
 
+export async function listFileEventsAsync(db, { fileId = null, eventType = null, tenantId = null, limit = 100 } = {}) {
+  const where = [];
+  const params = [];
+  if (fileId) { where.push("file_id = ?"); params.push(Number(fileId)); }
+  if (eventType) { where.push("event_type = ?"); params.push(eventType); }
+  if (tenantId !== null && tenantId !== undefined) { where.push("tenant_id = ?"); params.push(Number(tenantId)); }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM file_events ${clause} ORDER BY created_at DESC, id DESC LIMIT ?`,
+    [...params, Math.min(500, Math.max(1, Number(limit) || 100))]
+  );
+  const items = rows.map(publicEvent);
+  return { items, total: items.length };
+}
+
 export function fileEventSummary(db, tenantId = null) {
   const params = [];
   let clause = "";

@@ -87,13 +87,14 @@ import {
 } from "./repository.js";
 import {
   authorizeRequest,
+  authorizeRequestAsync,
   invalidateSecurity,
   invalidateSecurityAsync,
   listMaskingStrategies,
   publicSecurityContext,
 } from "./index.js";
 import { buildSecurityContext, buildSecurityContextAsync } from "./context.js";
-import { evaluateFields } from "./engine.js";
+import { evaluateFields, evaluateFieldsAsync } from "./engine.js";
 import { ensureSecurityFoundation, ensureSecurityFoundationAsync } from "./foundation.js";
 
 function audit(db, actor, action, resourceType, resourceId, details, ip) {
@@ -437,9 +438,9 @@ export function effectivePermissionsFor(db, tenantId, userId) {
 }
 
 // ---------------------------------------------------------------------------
-// Asynchronous counterparts (Phase 2). The console CRUD and read routes run on
-// the asynchronous pool; the decision debugger stays on the synchronous layer
-// because it shares the full authorization engine.
+// Asynchronous counterparts (Phase 2). The console CRUD, read routes and the
+// decision debugger all run on the asynchronous pool; the debugger mirrors the
+// synchronous engine statement-for-statement via its async twins.
 // ---------------------------------------------------------------------------
 
 async function auditAsync(db, actor, action, resourceType, resourceId, details, ip) {
@@ -700,6 +701,63 @@ export async function effectiveSecurityContextAsync(db, tenantId, userId, option
     correlationId: options.correlationId,
   });
   return publicSecurityContext(context);
+}
+
+export async function explainAuthorizationAsync(db, actor, tenantId, input = {}, options = {}) {
+  return evaluateOneAsync(db, actor, tenantId, input, options);
+}
+
+// Batch authorization is evaluated request-by-request so a decision never
+// depends on the position of a request in the batch (deterministic). The
+// response preserves input order, which callers rely on when zipping results
+// back to rows (lists, exports, dashboards).
+export async function explainAuthorizationBatchAsync(db, actor, tenantId, input = {}, options = {}) {
+  const requests = Array.isArray(input.requests) ? input.requests : Array.isArray(input) ? input : [];
+  const maxBatch = Number(options.maxBatch) || 500;
+  if (requests.length > maxBatch) {
+    throw assertionError(`Batch size ${requests.length} exceeds the maximum of ${maxBatch}`);
+  }
+  const decisions = [];
+  for (const request of requests) {
+    decisions.push(await evaluateOneAsync(db, actor, tenantId, request || {}, options));
+  }
+  return { count: decisions.length, decisions };
+}
+
+async function evaluateOneAsync(db, actor, tenantId, input = {}, options = {}) {
+  const resource = {
+    type: String(input.resource_type ?? input.resourceType ?? input.object_type ?? ""),
+    id: input.resource_id ?? input.resourceId ?? null,
+    organizationId: input.organization_id ?? input.organizationId ?? null,
+    plantId: input.plant_id ?? input.plantId ?? null,
+    classification: input.classification ?? "",
+    attributes: input.attributes && typeof input.attributes === "object" ? input.attributes : {},
+  };
+  const action = String(input.action ?? "read");
+  const subject = input.user_id ?? input.userId
+    ? { id: Number(input.user_id ?? input.userId) }
+    : actor;
+  const decision = await authorizeRequestAsync(db, subject, {
+    action,
+    resource,
+    options: {
+      tenantId,
+      organizationId: resource.organizationId,
+      correlationId: options.correlationId,
+      cache: false,
+      journal: input.journal !== false,
+      ip: options.ip,
+    },
+  });
+  const fields = await evaluateFieldsAsync(
+    db,
+    await buildSecurityContextAsync(db, subject, { tenantId }),
+    resource.type,
+    action,
+    resource,
+    {}
+  );
+  return { ...decision, fields: fields.fields.map((field) => ({ field: field.field, effect: field.effect, strategy: field.strategy })) };
 }
 
 export { invalidateSecurityAsync };

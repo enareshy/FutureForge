@@ -2,8 +2,8 @@ import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
 import { writeAudit, writeAuditAsync } from "../audit.js";
-import { resolveRecipients } from "../notifications/recipients.js";
-import { submitRequest } from "./requests.js";
+import { resolveRecipients, resolveRecipientsAsync } from "../notifications/recipients.js";
+import { submitRequest, submitRequestAsync } from "./requests.js";
 import { addMinutes, assertEscalationStatus, safeParse } from "./validation.js";
 
 // Escalation execution. The business module supplies the escalation recipient
@@ -304,6 +304,99 @@ export function sweepEscalations(db, { tenantId = null, limit = 200, now = null,
       summary.rescheduled += 1;
     } else {
       run(
+        db,
+        "UPDATE delivery_escalations SET status = 'fired', fired_at = ?, last_run_at = ?, updated_at = ? WHERE id = ?",
+        [stamp, stamp, stamp, escalation.id]
+      );
+    }
+    void ip;
+  }
+  return summary;
+}
+
+async function resolveEscalationRecipientsAsync(db, escalation, details) {
+  if (escalation.recipient_id) {
+    const user = await queryOneAsync(db, "SELECT id, username, display_name, email, organization_id, tenant_id FROM users WHERE id = ?", [Number(escalation.recipient_id)]);
+    return user ? [user] : [];
+  }
+  const definition = safeParse(escalation.recipient_json, null) || details.recipient || { items: [{ type: "manager" }] };
+  const context = {
+    object: { type: escalation.object_type, id: escalation.object_id, name: escalation.object_name },
+    payload: details.payload || {},
+    ...(details.context || {}),
+  };
+  return resolveRecipientsAsync(db, definition, context, escalation.tenant_id);
+}
+
+async function recordRunAsync(db, { escalationId, reminderId = null, level, status, requestId = null, detail = "" }) {
+  await runAsync(
+    db,
+    "INSERT INTO delivery_runs (kind, escalation_id, reminder_id, level, status, request_id, detail, ran_at) VALUES ('escalation', ?, ?, ?, ?, ?, ?, ?)",
+    [escalationId, reminderId, level, status, requestId, detail, nowIso()]
+  );
+}
+
+// Async twin of sweepEscalations on the asynchronous pg layer.
+export async function sweepEscalationsAsync(db, { tenantId = null, limit = 200, now = null, actor = null, ip = null } = {}) {
+  const stamp = now || nowIso();
+  const params = [stamp];
+  let clause = "";
+  if (tenantId) {
+    clause = "AND COALESCE(tenant_id, 0) = ?";
+    params.push(Number(tenantId));
+  }
+  params.push(limit);
+  const due = await queryAllAsync(
+    db,
+    `SELECT * FROM delivery_escalations WHERE status = 'pending' AND due_at <= ? ${clause} ORDER BY due_at, id LIMIT ?`,
+    params
+  );
+  const summary = { processed: 0, escalated: 0, rescheduled: 0, skipped: 0, requests: [] };
+  for (const escalation of due) {
+    summary.processed += 1;
+    const details = safeParse(escalation.details_json, {});
+    let recipients = [];
+    try {
+      recipients = await resolveEscalationRecipientsAsync(db, escalation, details);
+    } catch (err) {
+      summary.skipped += 1;
+      await runAsync(db, "UPDATE delivery_escalations SET last_error = ?, updated_at = ? WHERE id = ?", [String(err.message), stamp, escalation.id]);
+      await recordRunAsync(db, { escalationId: escalation.id, reminderId: escalation.reminder_id, level: escalation.level, status: "skipped", detail: err.message });
+      continue;
+    }
+    for (const recipient of recipients) {
+      const request = await submitRequestAsync(db, {
+        tenant_id: escalation.tenant_id,
+        organization_id: escalation.organization_id,
+        source_module: escalation.source_module,
+        recipient_id: recipient.id,
+        recipient_name: recipient.display_name || recipient.username || "",
+        recipient_address: recipient.email || "",
+        channel: details.channel || "in_app",
+        subject: details.subject || `Escalation level ${escalation.level}: ${escalation.object_name || escalation.object_type || "attention required"}`,
+        body: details.body || "",
+        priority: escalation.priority || "high",
+        object_type: escalation.object_type,
+        object_id: escalation.object_id,
+        object_name: escalation.object_name,
+        deep_link: escalation.deep_link,
+        idempotency_key: `escalation:${escalation.id}:${recipient.id}:${escalation.level}`,
+        related: { escalation_id: escalation.id, reminder_id: escalation.reminder_id, level: escalation.level },
+      }, { actor });
+      summary.requests.push(request.id);
+      await recordRunAsync(db, { escalationId: escalation.id, reminderId: escalation.reminder_id, level: escalation.level, status: "fired", requestId: request.id, detail: `to ${recipient.username || recipient.id}` });
+    }
+    summary.escalated += recipients.length ? 1 : 0;
+    const nextLevel = Number(escalation.level) + 1;
+    if (recipients.length && nextLevel <= Number(escalation.max_level)) {
+      await runAsync(
+        db,
+        "UPDATE delivery_escalations SET level = ?, due_at = ?, last_run_at = ?, last_error = '', status = 'pending', updated_at = ? WHERE id = ?",
+        [nextLevel, addMinutes(stamp, escalation.after_minutes), stamp, stamp, escalation.id]
+      );
+      summary.rescheduled += 1;
+    } else {
+      await runAsync(
         db,
         "UPDATE delivery_escalations SET status = 'fired', fired_at = ?, last_run_at = ?, updated_at = ? WHERE id = ?",
         [stamp, stamp, stamp, escalation.id]

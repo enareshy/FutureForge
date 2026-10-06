@@ -5,6 +5,7 @@
 // engine (Engines.applyMappings); this module owns identity, versioning,
 // lifecycle, audit and document-level application.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { mappingRef } from "./identifiers.js";
 import { EngineRef } from "./engine-ref.js";
 import { DEFINITION_STATUSES, DIRECTIONS, MAPPING_SOURCE_KINDS, MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from "./constants.js";
@@ -31,8 +32,25 @@ export function getMappingRow(db, tenantId, ref) {
   return queryOne(db, "SELECT * FROM exchange_mappings WHERE tenant_id = ? AND (mapping_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
 }
 
+export async function getMappingRowAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const raw = String(ref ?? "");
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const byId = await queryOneAsync(db, "SELECT * FROM exchange_mappings WHERE id = ? AND tenant_id = ?", [Number(raw), tenant]);
+    if (byId) return byId;
+  }
+  return await queryOneAsync(db, "SELECT * FROM exchange_mappings WHERE tenant_id = ? AND (mapping_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
+}
+
 export function requireMappingRow(db, tenantId, ref) {
   const row = getMappingRow(db, tenantId, ref);
+  if (!row) throw mappingNotFound(ref);
+  return row;
+}
+
+export async function requireMappingRowAsync(db, tenantId, ref) {
+  const row = await getMappingRowAsync(db, tenantId, ref);
   if (!row) throw mappingNotFound(ref);
   return row;
 }
@@ -94,6 +112,17 @@ function insertMappingVersion(db, tenantId, row, { changeSummary, actor }) {
   );
 }
 
+async function insertMappingVersionAsync(db, tenantId, row, { changeSummary, actor }) {
+  const existing = await queryOneAsync(db, "SELECT id FROM exchange_mapping_versions WHERE mapping_id = ? AND version = ?", [row.id, row.version]);
+  if (existing) return;
+  await runAsync(
+    db,
+    `INSERT INTO exchange_mapping_versions (mapping_id, tenant_id, version, status, rules_json, change_summary, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, tenantId, row.version, row.status, parseJson(row.rules_json, []) ? toJson(parseJson(row.rules_json, []), []) : "[]", changeSummary, actor?.id ?? null, nowIso()]
+  );
+}
+
 export function createMapping(db, tenantId, body = {}, actor = null) {
   const tenant = Number(tenantId);
   const input = normalizeMappingInput(body);
@@ -116,6 +145,31 @@ export function createMapping(db, tenantId, body = {}, actor = null) {
   );
   const row = queryOne(db, "SELECT * FROM exchange_mappings WHERE id = ?", [Number(result.lastInsertId)]);
   insertMappingVersion(db, tenant, row, { changeSummary: "Initial version", actor });
+  return publicMapping(row);
+}
+
+export async function createMappingAsync(db, tenantId, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const input = normalizeMappingInput(body);
+  const check = validateMappings(input.rules, {});
+  if (!check.valid) throw invalidMapping("Invalid mapping rules", { errors: check.errors });
+  const existing = await queryOneAsync(db, "SELECT id FROM exchange_mappings WHERE tenant_id = ? AND code = ?", [tenant, input.code]);
+  if (existing) throw mappingConflict(input.code);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO exchange_mappings
+       (mapping_ref, tenant_id, code, name, description, format_code, direction, source_kind, source_object_type, target_object_type,
+        rules_json, version, status, immutable, metadata_json, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?, ?, ?)`,
+    [
+      mappingRef(input.code), tenant, input.code, input.name, input.description, input.format_code, input.direction, input.source_kind,
+      input.source_object_type, input.target_object_type, toJson(input.rules, []), input.status, toJson(input.metadata, {}),
+      actor?.id ?? null, actor?.id ?? null, ts, ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM exchange_mappings WHERE id = ?", [Number(result.lastInsertId)]);
+  await insertMappingVersionAsync(db, tenant, row, { changeSummary: "Initial version", actor });
   return publicMapping(row);
 }
 
@@ -145,12 +199,46 @@ export function updateMapping(db, tenantId, ref, body = {}, actor = null) {
   return publicMapping(updated);
 }
 
+export async function updateMappingAsync(db, tenantId, ref, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireMappingRowAsync(db, tenant, ref);
+  if (row.immutable) {
+    // Published mappings are immutable: roll forward a new working version.
+    await insertMappingVersionAsync(db, tenant, row, { changeSummary: body.change_summary || "Superseded", actor });
+    await runAsync(db, "UPDATE exchange_mappings SET immutable=0 WHERE id=?", [row.id]);
+  }
+  const input = normalizeMappingInput(body, row);
+  const check = validateMappings(input.rules, {});
+  if (!check.valid) throw invalidMapping("Invalid mapping rules", { errors: check.errors });
+  const rollForward = Boolean(row.immutable);
+  await runAsync(
+    db,
+    `UPDATE exchange_mappings SET name=?, description=?, format_code=?, direction=?, source_kind=?, source_object_type=?, target_object_type=?,
+       rules_json=?, status=?, metadata_json=?, version=version+${rollForward ? 1 : 0}, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?`,
+    [
+      input.name, input.description, input.format_code, input.direction, input.source_kind, input.source_object_type,
+      input.target_object_type, toJson(input.rules, []), input.status, toJson(input.metadata, {}), actor?.id ?? null, nowIso(), row.id, tenant,
+    ]
+  );
+  const updated = await queryOneAsync(db, "SELECT * FROM exchange_mappings WHERE id = ?", [row.id]);
+  if (rollForward) await insertMappingVersionAsync(db, tenant, updated, { changeSummary: body.change_summary || "New version", actor });
+  return publicMapping(updated);
+}
+
 export function publishMapping(db, tenantId, ref, body = {}, actor = null) {
   const tenant = Number(tenantId);
   const row = requireMappingRow(db, tenant, ref);
   insertMappingVersion(db, tenant, row, { changeSummary: body.change_summary || "Published", actor });
   run(db, "UPDATE exchange_mappings SET status='ACTIVE', immutable=1, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [actor?.id ?? null, nowIso(), row.id, tenant]);
   return publicMapping(queryOne(db, "SELECT * FROM exchange_mappings WHERE id = ?", [row.id]));
+}
+
+export async function publishMappingAsync(db, tenantId, ref, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireMappingRowAsync(db, tenant, ref);
+  await insertMappingVersionAsync(db, tenant, row, { changeSummary: body.change_summary || "Published", actor });
+  await runAsync(db, "UPDATE exchange_mappings SET status='ACTIVE', immutable=1, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [actor?.id ?? null, nowIso(), row.id, tenant]);
+  return publicMapping(await queryOneAsync(db, "SELECT * FROM exchange_mappings WHERE id = ?", [row.id]));
 }
 
 export function setMappingStatus(db, tenantId, ref, status, actor = null) {
@@ -162,11 +250,28 @@ export function setMappingStatus(db, tenantId, ref, status, actor = null) {
   return publicMapping(queryOne(db, "SELECT * FROM exchange_mappings WHERE id = ?", [row.id]));
 }
 
+export async function setMappingStatusAsync(db, tenantId, ref, status, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireMappingRowAsync(db, tenant, ref);
+  const next = normalizeUpper(status);
+  if (!DEFINITION_STATUSES.includes(next)) throw invalidMapping(`Unsupported status: ${status}`);
+  await runAsync(db, "UPDATE exchange_mappings SET status=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [next, actor?.id ?? null, nowIso(), row.id, tenant]);
+  return publicMapping(await queryOneAsync(db, "SELECT * FROM exchange_mappings WHERE id = ?", [row.id]));
+}
+
 export function deleteMapping(db, tenantId, ref) {
   const tenant = Number(tenantId);
   const row = requireMappingRow(db, tenant, ref);
   if (row.immutable) throw mappingImmutable(row.code, row.version);
   run(db, "DELETE FROM exchange_mappings WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
+  return { deleted: true, ref: row.mapping_ref };
+}
+
+export async function deleteMappingAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const row = await requireMappingRowAsync(db, tenant, ref);
+  if (row.immutable) throw mappingImmutable(row.code, row.version);
+  await runAsync(db, "DELETE FROM exchange_mappings WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
   return { deleted: true, ref: row.mapping_ref };
 }
 
@@ -194,6 +299,30 @@ export function listMappings(db, tenantId, query = {}) {
   return { items: rows.map(publicMapping), total, page, pageSize };
 }
 
+export async function listMappingsAsync(db, tenantId, query = {}) {
+  const tenant = Number(tenantId);
+  const { page, pageSize, offset } = pageArgs(query);
+  const clauses = ["tenant_id = ?"];
+  const params = [tenant];
+  if (query.status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(query.status));
+  }
+  if (query.direction) {
+    clauses.push("(direction = ? OR direction = 'BOTH')");
+    params.push(normalizeUpper(query.direction));
+  }
+  if (query.q) {
+    clauses.push("(code ILIKE ? OR name ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like);
+  }
+  const where = clauses.join(" AND ");
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM exchange_mappings WHERE ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM exchange_mappings WHERE ${where} ORDER BY code ASC LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+  return { items: rows.map(publicMapping), total, page, pageSize };
+}
+
 export function getMapping(db, tenantId, ref) {
   const row = requireMappingRow(db, tenantId, ref);
   const output = publicMapping(row);
@@ -201,9 +330,22 @@ export function getMapping(db, tenantId, ref) {
   return output;
 }
 
+export async function getMappingAsync(db, tenantId, ref) {
+  const row = await requireMappingRowAsync(db, tenantId, ref);
+  const output = publicMapping(row);
+  output.versions = (await listMappingVersionsAsync(db, tenantId, row.id)).items;
+  return output;
+}
+
 export function listMappingVersions(db, tenantId, ref) {
   const row = requireMappingRow(db, tenantId, ref);
   const rows = queryAll(db, "SELECT * FROM exchange_mapping_versions WHERE mapping_id = ? ORDER BY version DESC", [row.id]);
+  return { items: rows.map(publicMappingVersion), total: rows.length };
+}
+
+export async function listMappingVersionsAsync(db, tenantId, ref) {
+  const row = await requireMappingRowAsync(db, tenantId, ref);
+  const rows = await queryAllAsync(db, "SELECT * FROM exchange_mapping_versions WHERE mapping_id = ? ORDER BY version DESC", [row.id]);
   return { items: rows.map(publicMappingVersion), total: rows.length };
 }
 
@@ -214,9 +356,23 @@ export function validateMapping(db, tenantId, ref, { sourceFields = null, target
   return { mapping: publicMapping(row), ...result };
 }
 
+export async function validateMappingAsync(db, tenantId, ref, { sourceFields = null, targetFields = null } = {}) {
+  const row = await requireMappingRowAsync(db, tenantId, ref);
+  const rules = parseJson(row.rules_json, []);
+  const result = validateMappings(rules, { sourceFields, targetFields });
+  return { mapping: publicMapping(row), ...result };
+}
+
 // Applies a mapping's rules to a single record.
 export function applyMappingRecord(db, tenantId, ref, record, ctx = {}) {
   const row = requireMappingRow(db, tenantId, ref);
+  const rules = parseJson(row.rules_json, []);
+  return { mapping: publicMapping(row), ...applyMappings(rules, record, ctx) };
+}
+
+// Applies a mapping's rules to a single record.
+export async function applyMappingRecordAsync(db, tenantId, ref, record, ctx = {}) {
+  const row = await requireMappingRowAsync(db, tenantId, ref);
   const rules = parseJson(row.rules_json, []);
   return { mapping: publicMapping(row), ...applyMappings(rules, record, ctx) };
 }
@@ -243,8 +399,33 @@ export function applyMappingToDocument(db, tenantId, ref, document, ctx = {}) {
   return { mapping: row ? publicMapping(row) : null, records, errors, warnings };
 }
 
+export async function applyMappingToDocumentAsync(db, tenantId, ref, document, ctx = {}) {
+  const row = ref ? await requireMappingRowAsync(db, tenantId, ref) : null;
+  const rules = row ? parseJson(row.rules_json, []) : [];
+  const records = [];
+  const errors = [];
+  const warnings = [];
+  for (const object of document.objects || []) {
+    if (!rules.length) {
+      records.push({ ...object, code: object.external_id, data: { ...(object.attributes || {}) } });
+      continue;
+    }
+    const result = applyMappings(rules, object, ctx);
+    errors.push(...result.errors.map((entry) => ({ ...entry, object: object.external_id })));
+    warnings.push(...result.warnings.map((entry) => ({ ...entry, object: object.external_id })));
+    records.push({ object_type: object.object_type, external_id: object.external_id, ...result.target });
+  }
+  return { mapping: row ? publicMapping(row) : null, records, errors, warnings };
+}
+
 export function resolveMapping(db, tenantId, code) {
   if (!code) return null;
   const row = getMappingRow(db, tenantId, code);
+  return row ? publicMapping(row) : null;
+}
+
+export async function resolveMappingAsync(db, tenantId, code) {
+  if (!code) return null;
+  const row = await getMappingRowAsync(db, tenantId, code);
   return row ? publicMapping(row) : null;
 }

@@ -657,6 +657,17 @@ export function recordBatch(db, events = []) {
   return captured;
 }
 
+// Asynchronous twin of `recordBatch`; each entry is captured with `captureAsync`.
+export async function recordBatchAsync(db, events = []) {
+  if (!Array.isArray(events)) return [];
+  const captured = [];
+  for (const entry of events) {
+    const result = await captureAsync(db, entry);
+    if (result) captured.push(result.id);
+  }
+  return captured;
+}
+
 // Backwards-compatible writer used by all pre-existing modules. Keeps the
 // original call signature and maps details/ip onto the rich event model.
 export function writeAudit(db, { actor, action, resourceType, resourceId, details, ip } = {}) {

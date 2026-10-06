@@ -14,6 +14,10 @@ export function listUnits(db, { tenantId = null, uomClass = null, q = null, limi
   return ClassificationUnits.listUnits(db, { tenantId, uomClass, q, limit });
 }
 
+export function listUnitsAsync(db, { tenantId = null, uomClass = null, q = null, limit = 1000 } = {}) {
+  return ClassificationUnits.listUnitsAsync(db, { tenantId, uomClass, q, limit });
+}
+
 export function getUnit(db, code) {
   return ClassificationUnits.getUnit(db, code);
 }

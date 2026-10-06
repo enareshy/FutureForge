@@ -119,3 +119,9 @@ export function onApprovalComplete() {
   if (executor?.onApprovalComplete) return executor.onApprovalComplete(...arguments);
   return { delegated: false };
 }
+
+export async function onApprovalCompleteAsync() {
+  if (executor?.onApprovalCompleteAsync) return executor.onApprovalCompleteAsync(...arguments);
+  if (executor?.onApprovalComplete) return executor.onApprovalComplete(...arguments);
+  return { delegated: false };
+}

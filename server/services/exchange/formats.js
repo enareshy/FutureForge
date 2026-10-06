@@ -5,6 +5,7 @@
 // ever hard-coded in the engine: the catalog seeds rows, and every lookup goes
 // through here.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { formatRef } from "./identifiers.js";
 import { FORMAT_CATALOG, ADAPTER_CATALOG, FORMAT_STATUSES, DIRECTIONS, MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from "./constants.js";
 import { publicFormat, publicFormatVersion, publicAdapter, parseJson, toJson } from "./repository.js";
@@ -32,8 +33,29 @@ export function getFormatRow(db, tenantId, ref) {
   );
 }
 
+export async function getFormatRowAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const raw = String(ref ?? "");
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const byId = await queryOneAsync(db, "SELECT * FROM exchange_formats WHERE id = ? AND tenant_id = ?", [Number(raw), tenant]);
+    if (byId) return byId;
+  }
+  return await queryOneAsync(
+    db,
+    "SELECT * FROM exchange_formats WHERE tenant_id = ? AND (format_ref = ? OR lower(code) = lower(?))",
+    [tenant, raw, raw]
+  );
+}
+
 export function requireFormatRow(db, tenantId, ref) {
   const row = getFormatRow(db, tenantId, ref);
+  if (!row) throw formatNotFound(ref);
+  return row;
+}
+
+export async function requireFormatRowAsync(db, tenantId, ref) {
+  const row = await getFormatRowAsync(db, tenantId, ref);
   if (!row) throw formatNotFound(ref);
   return row;
 }
@@ -126,6 +148,57 @@ export function createFormat(db, tenantId, body = {}, actor = null, ip = null) {
   return publicFormat(queryOne(db, "SELECT * FROM exchange_formats WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
+export async function createFormatAsync(db, tenantId, body = {}, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const input = normalizeFormatInput(body);
+  if (!FORMAT_STATUSES.includes(input.status)) throw invalidFormat(`Unsupported format status: ${input.status}`);
+  if (input.adapter_code && !ADAPTER_CATALOG.some((entry) => entry.code === input.adapter_code)) {
+    throw adapterNotFound(input.adapter_code);
+  }
+  const existing = await queryOneAsync(db, "SELECT id FROM exchange_formats WHERE tenant_id = ? AND code = ?", [tenant, input.code]);
+  if (existing) throw formatConflict(input.code);
+  const caps = capabilityFlags(input.adapter_code, input.capabilities || {});
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO exchange_formats
+       (format_ref, tenant_id, code, name, standard_name, standard_version, description, category,
+        mime_types_json, extensions_json, direction, adapter_code, import_supported, export_supported, validate_supported,
+        capabilities_json, schema_json, status, effective_from, effective_to, is_system, display_order, metadata_json,
+        created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+    [
+      formatRef(input.code),
+      tenant,
+      input.code,
+      input.name,
+      input.standard_name,
+      input.standard_version,
+      input.description,
+      input.category,
+      toJson(input.mime_types, []),
+      toJson(input.extensions, []),
+      input.direction,
+      input.adapter_code,
+      caps.import_supported,
+      caps.export_supported,
+      caps.validate_supported,
+      toJson(input.capabilities, {}),
+      toJson(input.schema, {}),
+      input.status,
+      input.effective_from,
+      input.effective_to,
+      input.display_order,
+      toJson(input.metadata, {}),
+      actor?.id ?? null,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  return publicFormat(await queryOneAsync(db, "SELECT * FROM exchange_formats WHERE id = ?", [Number(result.lastInsertId)]));
+}
+
 export function updateFormat(db, tenantId, ref, body = {}, actor = null) {
   const tenant = Number(tenantId);
   const row = requireFormatRow(db, tenant, ref);
@@ -165,6 +238,45 @@ export function updateFormat(db, tenantId, ref, body = {}, actor = null) {
   return publicFormat(queryOne(db, "SELECT * FROM exchange_formats WHERE id = ?", [row.id]));
 }
 
+export async function updateFormatAsync(db, tenantId, ref, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireFormatRowAsync(db, tenant, ref);
+  const input = normalizeFormatInput({ ...publicToInput(row), ...body });
+  const caps = capabilityFlags(input.adapter_code, input.capabilities || {});
+  await runAsync(
+    db,
+    `UPDATE exchange_formats SET name=?, standard_name=?, standard_version=?, description=?, category=?,
+       mime_types_json=?, extensions_json=?, direction=?, adapter_code=?, import_supported=?, export_supported=?,
+       validate_supported=?, capabilities_json=?, schema_json=?, effective_from=?, effective_to=?, display_order=?,
+       metadata_json=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?`,
+    [
+      input.name,
+      input.standard_name,
+      input.standard_version,
+      input.description,
+      input.category,
+      toJson(input.mime_types, []),
+      toJson(input.extensions, []),
+      input.direction,
+      input.adapter_code,
+      caps.import_supported,
+      caps.export_supported,
+      caps.validate_supported,
+      toJson(input.capabilities, {}),
+      toJson(input.schema, {}),
+      input.effective_from,
+      input.effective_to,
+      input.display_order,
+      toJson(input.metadata, {}),
+      actor?.id ?? null,
+      nowIso(),
+      row.id,
+      tenant,
+    ]
+  );
+  return publicFormat(await queryOneAsync(db, "SELECT * FROM exchange_formats WHERE id = ?", [row.id]));
+}
+
 function publicToInput(row) {
   return {
     code: row.code,
@@ -196,6 +308,15 @@ export function setFormatStatus(db, tenantId, ref, status, actor = null) {
   return publicFormat(queryOne(db, "SELECT * FROM exchange_formats WHERE id = ?", [row.id]));
 }
 
+export async function setFormatStatusAsync(db, tenantId, ref, status, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireFormatRowAsync(db, tenant, ref);
+  const next = normalizeUpper(status);
+  if (!FORMAT_STATUSES.includes(next)) throw invalidFormat(`Unsupported format status: ${status}`);
+  await runAsync(db, "UPDATE exchange_formats SET status=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [next, actor?.id ?? null, nowIso(), row.id, tenant]);
+  return publicFormat(await queryOneAsync(db, "SELECT * FROM exchange_formats WHERE id = ?", [row.id]));
+}
+
 export function deleteFormat(db, tenantId, ref) {
   const tenant = Number(tenantId);
   const row = requireFormatRow(db, tenant, ref);
@@ -204,6 +325,17 @@ export function deleteFormat(db, tenantId, ref) {
     return setFormatStatus(db, tenant, ref, "OBSOLETE");
   }
   run(db, "DELETE FROM exchange_formats WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
+  return { deleted: true, ref: row.format_ref, code: row.code };
+}
+
+export async function deleteFormatAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const row = await requireFormatRowAsync(db, tenant, ref);
+  if (row.is_system) {
+    // System formats are retired, never removed, to preserve history.
+    return await setFormatStatusAsync(db, tenant, ref, "OBSOLETE");
+  }
+  await runAsync(db, "DELETE FROM exchange_formats WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
   return { deleted: true, ref: row.format_ref, code: row.code };
 }
 
@@ -239,6 +371,38 @@ export function listFormats(db, tenantId, query = {}) {
   return { items: rows.map(publicFormat), total, page, pageSize };
 }
 
+export async function listFormatsAsync(db, tenantId, query = {}) {
+  const tenant = Number(tenantId);
+  const { page, pageSize, offset } = pageArgs(query);
+  const clauses = ["tenant_id = ?"];
+  const params = [tenant];
+  if (query.status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(query.status));
+  }
+  if (query.category) {
+    clauses.push("category = ?");
+    params.push(normalizeUpper(query.category));
+  }
+  if (query.direction) {
+    clauses.push("(direction = ? OR direction = 'BOTH')");
+    params.push(normalizeUpper(query.direction));
+  }
+  if (query.q) {
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR standard_name ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const where = clauses.join(" AND ");
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM exchange_formats WHERE ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM exchange_formats WHERE ${where} ORDER BY display_order ASC, code ASC LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  return { items: rows.map(publicFormat), total, page, pageSize };
+}
+
 export function getFormat(db, tenantId, ref) {
   const row = requireFormatRow(db, tenantId, ref);
   const output = publicFormat(row);
@@ -246,10 +410,24 @@ export function getFormat(db, tenantId, ref) {
   return output;
 }
 
+export async function getFormatAsync(db, tenantId, ref) {
+  const row = await requireFormatRowAsync(db, tenantId, ref);
+  const output = publicFormat(row);
+  output.versions = (await listFormatVersionsAsync(db, tenantId, row.id)).items;
+  return output;
+}
+
 export function listFormatVersions(db, tenantId, formatRefValue) {
   const tenant = Number(tenantId);
   const row = requireFormatRow(db, tenant, formatRefValue);
   const rows = queryAll(db, "SELECT * FROM exchange_format_versions WHERE format_id = ? ORDER BY version DESC", [row.id]);
+  return { items: rows.map(publicFormatVersion), total: rows.length };
+}
+
+export async function listFormatVersionsAsync(db, tenantId, formatRefValue) {
+  const tenant = Number(tenantId);
+  const row = await requireFormatRowAsync(db, tenant, formatRefValue);
+  const rows = await queryAllAsync(db, "SELECT * FROM exchange_format_versions WHERE format_id = ? ORDER BY version DESC", [row.id]);
   return { items: rows.map(publicFormatVersion), total: rows.length };
 }
 
@@ -282,6 +460,35 @@ export function createFormatVersion(db, tenantId, formatRefValue, body = {}, act
   return publicFormatVersion(queryOne(db, "SELECT * FROM exchange_format_versions WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
+export async function createFormatVersionAsync(db, tenantId, formatRefValue, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireFormatRowAsync(db, tenant, formatRefValue);
+  const version = Number(body.version || ((await queryOneAsync(db, "SELECT MAX(version) AS v FROM exchange_format_versions WHERE format_id = ?", [row.id]))?.v || 0) + 1);
+  const existing = await queryOneAsync(db, "SELECT id FROM exchange_format_versions WHERE format_id = ? AND version = ?", [row.id, version]);
+  if (existing) throw formatConflict(`${row.code}@${version}`);
+  const result = await runAsync(
+    db,
+    `INSERT INTO exchange_format_versions
+       (format_id, tenant_id, version, standard_version, status, schema_json, capabilities_json, change_summary, effective_from, effective_to, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      row.id,
+      tenant,
+      version,
+      String(body.standard_version || row.standard_version || ""),
+      normalizeUpper(body.status || "ACTIVE"),
+      toJson(body.schema || {}, {}),
+      toJson(body.capabilities || {}, {}),
+      String(body.change_summary || body.changeSummary || ""),
+      body.effective_from || null,
+      body.effective_to || null,
+      actor?.id ?? null,
+      nowIso(),
+    ]
+  );
+  return publicFormatVersion(await queryOneAsync(db, "SELECT * FROM exchange_format_versions WHERE id = ?", [Number(result.lastInsertId)]));
+}
+
 // ── Adapter registry persistence ─────────────────────────────────────────────
 export function ensureAdapters(db, tenantId) {
   const tenant = Number(tenantId);
@@ -309,6 +516,58 @@ export function ensureAdapters(db, tenantId) {
       continue;
     }
     run(
+      db,
+      `INSERT INTO exchange_adapters
+         (tenant_id, code, name, description, provider, provider_version, category, status, capabilities_json, formats_json, library, is_builtin, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
+      [
+        tenant,
+        descriptor.code,
+        descriptor.name,
+        descriptor.description || "",
+        descriptor.provider || "platform",
+        descriptor.provider_version || "",
+        descriptor.category || "OTHER",
+        descriptor.status,
+        toJson(descriptor.capabilities || {}, {}),
+        toJson(FORMAT_CATALOG.filter((format) => format.adapter_code === descriptor.code).map((format) => format.code), []),
+        descriptor.library || "",
+        descriptor.provider === "platform" ? 1 : 0,
+        nowIso(),
+        nowIso(),
+      ]
+    );
+    created += 1;
+  }
+  return created;
+}
+
+export async function ensureAdaptersAsync(db, tenantId) {
+  const tenant = Number(tenantId);
+  let created = 0;
+  for (const descriptor of ADAPTER_CATALOG) {
+    const existing = await queryOneAsync(db, "SELECT id FROM exchange_adapters WHERE tenant_id = ? AND code = ?", [tenant, descriptor.code]);
+    if (existing) {
+      await runAsync(
+        db,
+        "UPDATE exchange_adapters SET name=?, description=?, provider=?, category=?, status=?, capabilities_json=?, library=?, is_builtin=?, formats_json=?, updated_at=? WHERE id=?",
+        [
+          descriptor.name,
+          descriptor.description || "",
+          descriptor.provider || "platform",
+          descriptor.category || "OTHER",
+          descriptor.status,
+          toJson(descriptor.capabilities || {}, {}),
+          descriptor.library || "",
+          descriptor.provider === "platform" ? 1 : 0,
+          toJson(FORMAT_CATALOG.filter((format) => format.adapter_code === descriptor.code).map((format) => format.code), []),
+          nowIso(),
+          existing.id,
+        ]
+      );
+      continue;
+    }
+    await runAsync(
       db,
       `INSERT INTO exchange_adapters
          (tenant_id, code, name, description, provider, provider_version, category, status, capabilities_json, formats_json, library, is_builtin, metadata_json, created_at, updated_at)
@@ -388,9 +647,68 @@ export function ensureFormats(db, tenantId) {
   return created;
 }
 
+export async function ensureFormatsAsync(db, tenantId) {
+  const tenant = Number(tenantId);
+  let created = 0;
+  for (const format of FORMAT_CATALOG) {
+    const existing = await queryOneAsync(db, "SELECT id, is_system FROM exchange_formats WHERE tenant_id = ? AND code = ?", [tenant, format.code]);
+    const descriptor = ADAPTER_CATALOG.find((entry) => entry.code === format.adapter_code);
+    const available = descriptor ? descriptor.status === "AVAILABLE" : false;
+    const caps = format.capabilities || {};
+    const importSupported = available && caps.parse ? 1 : 0;
+    const exportSupported = available && caps.serialize ? 1 : 0;
+    const validateSupported = available && (caps.validate !== false && (caps.parse || caps.compliance || caps.schema)) ? 1 : 0;
+    if (existing) {
+      await runAsync(
+        db,
+        "UPDATE exchange_formats SET is_system=1, import_supported=?, export_supported=?, validate_supported=?, updated_at=? WHERE id=?",
+        [importSupported, exportSupported, validateSupported, nowIso(), existing.id]
+      );
+      continue;
+    }
+    await runAsync(
+      db,
+      `INSERT INTO exchange_formats
+         (format_ref, tenant_id, code, name, standard_name, standard_version, description, category,
+          mime_types_json, extensions_json, direction, adapter_code, import_supported, export_supported, validate_supported,
+          capabilities_json, schema_json, status, is_system, display_order, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', 'ACTIVE', 1, ?, '{}', ?, ?)`,
+      [
+        formatRef(format.code),
+        tenant,
+        format.code,
+        format.name,
+        format.standard_name || "",
+        format.standard_version || "",
+        format.description || "",
+        format.category || "OTHER",
+        toJson(format.mime_types || [], []),
+        toJson(format.extensions || [], []),
+        format.direction || "BOTH",
+        format.adapter_code || "",
+        importSupported,
+        exportSupported,
+        validateSupported,
+        toJson(caps, {}),
+        format.display_order ?? 100,
+        nowIso(),
+        nowIso(),
+      ]
+    );
+    created += 1;
+  }
+  return created;
+}
+
 export function listAdapters(db, tenantId) {
   const tenant = Number(tenantId);
   const rows = queryAll(db, "SELECT * FROM exchange_adapters WHERE tenant_id = ? ORDER BY category, code", [tenant]);
+  return { items: rows.map(publicAdapter), total: rows.length };
+}
+
+export async function listAdaptersAsync(db, tenantId) {
+  const tenant = Number(tenantId);
+  const rows = await queryAllAsync(db, "SELECT * FROM exchange_adapters WHERE tenant_id = ? ORDER BY category, code", [tenant]);
   return { items: rows.map(publicAdapter), total: rows.length };
 }
 
@@ -401,8 +719,21 @@ export function getAdapter(db, tenantId, ref) {
   return publicAdapter(row);
 }
 
+export async function getAdapterAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const row = await queryOneAsync(db, "SELECT * FROM exchange_adapters WHERE tenant_id = ? AND (lower(code) = lower(?) OR id = ?)", [tenant, String(ref), Number(ref) || -1]);
+  if (!row) throw adapterNotFound(ref);
+  return publicAdapter(row);
+}
+
 export function formatOptions(db, tenantId, query = {}) {
   const list = listFormats(db, tenantId, { ...query, page_size: MAX_PAGE_SIZE });
+  if (query.page && Number(query.page) > Math.ceil(list.total / list.pageSize)) throw invalidQuery("Requested page is out of range");
+  return list;
+}
+
+export async function formatOptionsAsync(db, tenantId, query = {}) {
+  const list = await listFormatsAsync(db, tenantId, { ...query, page_size: MAX_PAGE_SIZE });
   if (query.page && Number(query.page) > Math.ceil(list.total / list.pageSize)) throw invalidQuery("Requested page is out of range");
   return list;
 }

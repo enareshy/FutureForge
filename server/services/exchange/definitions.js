@@ -5,11 +5,13 @@
 // security policy and scope. Published versions are immutable; editing a
 // published definition creates a new working version.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { definitionRef } from "./identifiers.js";
 import { DEFINITION_STATUSES, APPROVAL_STATUSES, DIRECTIONS, MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from "./constants.js";
 import { publicDefinition, publicDefinitionVersion, toJson, parseJson } from "./repository.js";
 import { definitionNotFound, definitionConflict, invalidDefinition } from "./errors.js";
 import { getFormatRow } from "./formats.js";
+import { getFormatRowAsync } from "./formats.js";
 import { normalizeUpper } from "../data-exchange/validation.js";
 
 const STRING_FIELDS = ["name", "description", "format_version", "source_object_type", "target_object_type", "mapping_code", "transformation_code", "validation_profile_code", "site"];
@@ -32,8 +34,25 @@ export function getDefinitionRow(db, tenantId, ref) {
   return queryOne(db, "SELECT * FROM exchange_definitions WHERE tenant_id = ? AND (definition_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
 }
 
+export async function getDefinitionRowAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const raw = String(ref ?? "");
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const byId = await queryOneAsync(db, "SELECT * FROM exchange_definitions WHERE id = ? AND tenant_id = ?", [Number(raw), tenant]);
+    if (byId) return byId;
+  }
+  return await queryOneAsync(db, "SELECT * FROM exchange_definitions WHERE tenant_id = ? AND (definition_ref = ? OR lower(code) = lower(?))", [tenant, raw, raw]);
+}
+
 export function requireDefinitionRow(db, tenantId, ref) {
   const row = getDefinitionRow(db, tenantId, ref);
+  if (!row) throw definitionNotFound(ref);
+  return row;
+}
+
+export async function requireDefinitionRowAsync(db, tenantId, ref) {
+  const row = await getDefinitionRowAsync(db, tenantId, ref);
   if (!row) throw definitionNotFound(ref);
   return row;
 }
@@ -82,11 +101,30 @@ function assertFormatExists(db, tenantId, formatCode) {
   return row;
 }
 
+async function assertFormatExistsAsync(db, tenantId, formatCode) {
+  const row = await getFormatRowAsync(db, tenantId, formatCode);
+  if (!row) throw invalidDefinition(`Unknown exchange format: ${formatCode}`, { format_code: formatCode });
+  return row;
+}
+
 function insertDefinitionVersion(db, tenantId, row, { status, approvalStatus, changeSummary, actor, publishedAt = null }) {
   const version = Number(row.version);
   const existing = queryOne(db, "SELECT id FROM exchange_definition_versions WHERE definition_id = ? AND version = ?", [row.id, version]);
   if (existing) return;
   run(
+    db,
+    `INSERT INTO exchange_definition_versions
+       (definition_id, tenant_id, version, status, approval_status, snapshot_json, change_summary, published_at, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, tenantId, version, status, approvalStatus, toJson(publicDefinition(row), {}), changeSummary, publishedAt, actor?.id ?? null, nowIso()]
+  );
+}
+
+async function insertDefinitionVersionAsync(db, tenantId, row, { status, approvalStatus, changeSummary, actor, publishedAt = null }) {
+  const version = Number(row.version);
+  const existing = await queryOneAsync(db, "SELECT id FROM exchange_definition_versions WHERE definition_id = ? AND version = ?", [row.id, version]);
+  if (existing) return;
+  await runAsync(
     db,
     `INSERT INTO exchange_definition_versions
        (definition_id, tenant_id, version, status, approval_status, snapshot_json, change_summary, published_at, created_by, created_at)
@@ -121,6 +159,35 @@ export function createDefinition(db, tenantId, body = {}, actor = null, ip = nul
   );
   const row = queryOne(db, "SELECT * FROM exchange_definitions WHERE id = ?", [Number(result.lastInsertId)]);
   insertDefinitionVersion(db, tenant, row, { status: row.status, approvalStatus: row.approval_status, changeSummary: "Initial version", actor });
+  return publicDefinition(row);
+}
+
+export async function createDefinitionAsync(db, tenantId, body = {}, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const input = normalizeDefinitionInput(body);
+  await assertFormatExistsAsync(db, tenant, input.format_code);
+  const existing = await queryOneAsync(db, "SELECT id FROM exchange_definitions WHERE tenant_id = ? AND code = ?", [tenant, input.code]);
+  if (existing) throw definitionConflict(input.code);
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO exchange_definitions
+       (definition_ref, tenant_id, organization_id, site, code, name, description, format_code, format_version, direction,
+        source_object_type, target_object_type, source_schema_json, mapping_code, transformation_code, validation_profile_code,
+        security_policy_json, scope_json, lifecycle_constraints_json, version, status, approval_status, owner_user_id,
+        effective_from, effective_to, metadata_json, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      definitionRef(input.code), tenant, input.organization_id, input.site, input.code, input.name, input.description,
+      input.format_code, input.format_version, input.direction, input.source_object_type, input.target_object_type,
+      toJson(input.source_schema, {}), input.mapping_code, input.transformation_code, input.validation_profile_code,
+      toJson(input.security_policy, {}), toJson(input.scope, {}), toJson(input.lifecycle_constraints, {}),
+      input.status, input.approval_status, input.owner_user_id, input.effective_from, input.effective_to,
+      toJson(input.metadata, {}), actor?.id ?? null, actor?.id ?? null, ts, ts,
+    ]
+  );
+  const row = await queryOneAsync(db, "SELECT * FROM exchange_definitions WHERE id = ?", [Number(result.lastInsertId)]);
+  await insertDefinitionVersionAsync(db, tenant, row, { status: row.status, approvalStatus: row.approval_status, changeSummary: "Initial version", actor });
   return publicDefinition(row);
 }
 
@@ -166,6 +233,48 @@ export function updateDefinition(db, tenantId, ref, body = {}, actor = null) {
   return publicDefinition(queryOne(db, "SELECT * FROM exchange_definitions WHERE id = ?", [row.id]));
 }
 
+export async function updateDefinitionAsync(db, tenantId, ref, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireDefinitionRowAsync(db, tenant, ref);
+  const published = Boolean(row.published_at);
+  const input = normalizeDefinitionInput(body, row);
+  await assertFormatExistsAsync(db, tenant, input.format_code);
+  if (published) {
+    // Published versions are immutable: roll the working copy forward.
+    await insertDefinitionVersionAsync(db, tenant, row, { status: row.status, approvalStatus: row.approval_status, changeSummary: body.change_summary || body.changeSummary || "Superseded", actor, publishedAt: row.published_at });
+    await runAsync(
+      db,
+      `UPDATE exchange_definitions SET name=?, description=?, format_code=?, format_version=?, direction=?, source_object_type=?,
+         target_object_type=?, source_schema_json=?, mapping_code=?, transformation_code=?, validation_profile_code=?,
+         security_policy_json=?, scope_json=?, lifecycle_constraints_json=?, version=version+1, status='DRAFT', approval_status='DRAFT',
+         owner_user_id=?, effective_from=?, effective_to=?, metadata_json=?, published_at=NULL, published_by=NULL, updated_by=?, updated_at=?
+       WHERE id=? AND tenant_id=?`,
+      [
+        input.name, input.description, input.format_code, input.format_version, input.direction, input.source_object_type,
+        input.target_object_type, toJson(input.source_schema, {}), input.mapping_code, input.transformation_code,
+        input.validation_profile_code, toJson(input.security_policy, {}), toJson(input.scope, {}), toJson(input.lifecycle_constraints, {}),
+        input.owner_user_id, input.effective_from, input.effective_to, toJson(input.metadata, {}), actor?.id ?? null, nowIso(), row.id, tenant,
+      ]
+    );
+  } else {
+    await runAsync(
+      db,
+      `UPDATE exchange_definitions SET name=?, description=?, format_code=?, format_version=?, direction=?, source_object_type=?,
+         target_object_type=?, source_schema_json=?, mapping_code=?, transformation_code=?, validation_profile_code=?,
+         security_policy_json=?, scope_json=?, lifecycle_constraints_json=?, status=?, approval_status=?, owner_user_id=?,
+         effective_from=?, effective_to=?, metadata_json=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?`,
+      [
+        input.name, input.description, input.format_code, input.format_version, input.direction, input.source_object_type,
+        input.target_object_type, toJson(input.source_schema, {}), input.mapping_code, input.transformation_code,
+        input.validation_profile_code, toJson(input.security_policy, {}), toJson(input.scope, {}), toJson(input.lifecycle_constraints, {}),
+        input.status, input.approval_status, input.owner_user_id, input.effective_from, input.effective_to, toJson(input.metadata, {}),
+        actor?.id ?? null, nowIso(), row.id, tenant,
+      ]
+    );
+  }
+  return publicDefinition(await queryOneAsync(db, "SELECT * FROM exchange_definitions WHERE id = ?", [row.id]));
+}
+
 export function publishDefinition(db, tenantId, ref, body = {}, actor = null) {
   const tenant = Number(tenantId);
   const row = requireDefinitionRow(db, tenant, ref);
@@ -179,6 +288,19 @@ export function publishDefinition(db, tenantId, ref, body = {}, actor = null) {
   return publicDefinition(queryOne(db, "SELECT * FROM exchange_definitions WHERE id = ?", [row.id]));
 }
 
+export async function publishDefinitionAsync(db, tenantId, ref, body = {}, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireDefinitionRowAsync(db, tenant, ref);
+  const ts = nowIso();
+  await insertDefinitionVersionAsync(db, tenant, row, { status: "ACTIVE", approvalStatus: "APPROVED", changeSummary: body.change_summary || body.changeSummary || "Published", actor, publishedAt: ts });
+  await runAsync(
+    db,
+    "UPDATE exchange_definitions SET status='ACTIVE', approval_status='APPROVED', published_at=?, published_by=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?",
+    [ts, actor?.id ?? null, actor?.id ?? null, ts, row.id, tenant]
+  );
+  return publicDefinition(await queryOneAsync(db, "SELECT * FROM exchange_definitions WHERE id = ?", [row.id]));
+}
+
 export function setDefinitionStatus(db, tenantId, ref, status, actor = null) {
   const tenant = Number(tenantId);
   const row = requireDefinitionRow(db, tenant, ref);
@@ -186,6 +308,15 @@ export function setDefinitionStatus(db, tenantId, ref, status, actor = null) {
   if (!DEFINITION_STATUSES.includes(next)) throw invalidDefinition(`Unsupported status: ${status}`);
   run(db, "UPDATE exchange_definitions SET status=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [next, actor?.id ?? null, nowIso(), row.id, tenant]);
   return publicDefinition(queryOne(db, "SELECT * FROM exchange_definitions WHERE id = ?", [row.id]));
+}
+
+export async function setDefinitionStatusAsync(db, tenantId, ref, status, actor = null) {
+  const tenant = Number(tenantId);
+  const row = await requireDefinitionRowAsync(db, tenant, ref);
+  const next = normalizeUpper(status);
+  if (!DEFINITION_STATUSES.includes(next)) throw invalidDefinition(`Unsupported status: ${status}`);
+  await runAsync(db, "UPDATE exchange_definitions SET status=?, updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [next, actor?.id ?? null, nowIso(), row.id, tenant]);
+  return publicDefinition(await queryOneAsync(db, "SELECT * FROM exchange_definitions WHERE id = ?", [row.id]));
 }
 
 export function deleteDefinition(db, tenantId, ref) {
@@ -196,6 +327,17 @@ export function deleteDefinition(db, tenantId, ref) {
     return { deleted: false, obsoleted: true, ref: row.definition_ref };
   }
   run(db, "DELETE FROM exchange_definitions WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
+  return { deleted: true, ref: row.definition_ref };
+}
+
+export async function deleteDefinitionAsync(db, tenantId, ref) {
+  const tenant = Number(tenantId);
+  const row = await requireDefinitionRowAsync(db, tenant, ref);
+  if (row.published_at) {
+    await runAsync(db, "UPDATE exchange_definitions SET status='OBSOLETE', updated_by=?, updated_at=? WHERE id=? AND tenant_id=?", [null, nowIso(), row.id, tenant]);
+    return { deleted: false, obsoleted: true, ref: row.definition_ref };
+  }
+  await runAsync(db, "DELETE FROM exchange_definitions WHERE id = ? AND tenant_id = ?", [row.id, tenant]);
   return { deleted: true, ref: row.definition_ref };
 }
 
@@ -227,10 +369,45 @@ export function listDefinitions(db, tenantId, query = {}) {
   return { items: rows.map(publicDefinition), total, page, pageSize };
 }
 
+export async function listDefinitionsAsync(db, tenantId, query = {}) {
+  const tenant = Number(tenantId);
+  const { page, pageSize, offset } = pageArgs(query);
+  const clauses = ["tenant_id = ?"];
+  const params = [tenant];
+  if (query.status) {
+    clauses.push("status = ?");
+    params.push(normalizeUpper(query.status));
+  }
+  if (query.direction) {
+    clauses.push("(direction = ? OR direction = 'BOTH')");
+    params.push(normalizeUpper(query.direction));
+  }
+  if (query.format_code) {
+    clauses.push("format_code = ?");
+    params.push(normalizeUpper(query.format_code));
+  }
+  if (query.q) {
+    clauses.push("(code ILIKE ? OR name ILIKE ? OR description ILIKE ?)");
+    const like = `%${query.q}%`;
+    params.push(like, like, like);
+  }
+  const where = clauses.join(" AND ");
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM exchange_definitions WHERE ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM exchange_definitions WHERE ${where} ORDER BY code ASC LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+  return { items: rows.map(publicDefinition), total, page, pageSize };
+}
+
 export function getDefinition(db, tenantId, ref) {
   const row = requireDefinitionRow(db, tenantId, ref);
   const output = publicDefinition(row);
   output.versions = listDefinitionVersions(db, tenantId, row.id).items;
+  return output;
+}
+
+export async function getDefinitionAsync(db, tenantId, ref) {
+  const row = await requireDefinitionRowAsync(db, tenantId, ref);
+  const output = publicDefinition(row);
+  output.versions = (await listDefinitionVersionsAsync(db, tenantId, row.id)).items;
   return output;
 }
 
@@ -240,9 +417,22 @@ export function listDefinitionVersions(db, tenantId, ref) {
   return { items: rows.map(publicDefinitionVersion), total: rows.length };
 }
 
+export async function listDefinitionVersionsAsync(db, tenantId, ref) {
+  const row = await requireDefinitionRowAsync(db, tenantId, ref);
+  const rows = await queryAllAsync(db, "SELECT * FROM exchange_definition_versions WHERE definition_id = ? ORDER BY version DESC", [row.id]);
+  return { items: rows.map(publicDefinitionVersion), total: rows.length };
+}
+
 export function getDefinitionVersion(db, tenantId, ref, version) {
   const row = requireDefinitionRow(db, tenantId, ref);
   const versionRow = queryOne(db, "SELECT * FROM exchange_definition_versions WHERE definition_id = ? AND version = ?", [row.id, Number(version)]);
+  if (!versionRow) throw definitionNotFound(`${ref}@${version}`);
+  return publicDefinitionVersion(versionRow);
+}
+
+export async function getDefinitionVersionAsync(db, tenantId, ref, version) {
+  const row = await requireDefinitionRowAsync(db, tenantId, ref);
+  const versionRow = await queryOneAsync(db, "SELECT * FROM exchange_definition_versions WHERE definition_id = ? AND version = ?", [row.id, Number(version)]);
   if (!versionRow) throw definitionNotFound(`${ref}@${version}`);
   return publicDefinitionVersion(versionRow);
 }
@@ -273,9 +463,47 @@ export function resolveDefinition(db, tenantId, { code = null, formatCode = null
   return publicDefinition(row);
 }
 
+export async function resolveDefinitionAsync(db, tenantId, { code = null, formatCode = null, direction = null, targetObjectType = null } = {}) {
+  if (code) {
+    const row = await getDefinitionRowAsync(db, tenantId, code);
+    if (row) return publicDefinition(row);
+  }
+  const clauses = ["tenant_id = ?", "status = 'ACTIVE'"];
+  const params = [Number(tenantId)];
+  if (formatCode) {
+    clauses.push("format_code = ?");
+    params.push(normalizeUpper(formatCode));
+  }
+  if (direction) {
+    clauses.push("(direction = ? OR direction = 'BOTH')");
+    params.push(normalizeUpper(direction));
+  }
+  if (targetObjectType) {
+    clauses.push("(target_object_type = ? OR target_object_type = '')");
+    params.push(String(targetObjectType));
+  }
+  const row = await queryOneAsync(db, `SELECT * FROM exchange_definitions WHERE ${clauses.join(" AND ")} ORDER BY published_at IS NULL ASC, version DESC LIMIT 1`, params);
+  if (!row) throw definitionNotFound(code || `${formatCode || "*"}/${direction || "*"}`);
+  return publicDefinition(row);
+}
+
 export function definitionSummary(db, tenantId) {
   const tenant = Number(tenantId);
   const rows = queryAll(db, "SELECT direction, status, COUNT(*) AS c FROM exchange_definitions WHERE tenant_id = ? GROUP BY direction, status", [tenant]);
+  const byDirection = {};
+  const byStatus = {};
+  let total = 0;
+  for (const row of rows) {
+    byDirection[row.direction] = (byDirection[row.direction] || 0) + Number(row.c);
+    byStatus[row.status] = (byStatus[row.status] || 0) + Number(row.c);
+    total += Number(row.c);
+  }
+  return { total, by_direction: byDirection, by_status: byStatus };
+}
+
+export async function definitionSummaryAsync(db, tenantId) {
+  const tenant = Number(tenantId);
+  const rows = await queryAllAsync(db, "SELECT direction, status, COUNT(*) AS c FROM exchange_definitions WHERE tenant_id = ? GROUP BY direction, status", [tenant]);
   const byDirection = {};
   const byStatus = {};
   let total = 0;

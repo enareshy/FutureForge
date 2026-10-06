@@ -6,7 +6,7 @@
 // conversion using the unit metadata stored on those governed reference items.
 // Values are normalized to the characteristic's base unit for search and
 // duplicate comparison.
-import { listItems, createItem } from "../reference/items.js";
+import { listItems, createItem, listItemsAsync } from "../reference/items.js";
 import { getDomainRow } from "../reference/domains.js";
 import { ensureReferenceDomains } from "../reference/seed.js";
 import { UNIT_DOMAIN_CODE } from "./constants.js";
@@ -70,6 +70,18 @@ export function listUnits(db, { tenantId = null, uomClass = null, q = null, limi
   let rows;
   try {
     rows = listItems(db, { domainCode: UNIT_DOMAIN_CODE, status: "active", q, limit, tenantId }).items;
+  } catch {
+    rows = [];
+  }
+  return rows
+    .map(publicUnit)
+    .filter((unit) => unit && (!uomClass || unit.uom_class === String(uomClass).toLowerCase()));
+}
+
+export async function listUnitsAsync(db, { tenantId = null, uomClass = null, q = null, limit = 1000 } = {}) {
+  let rows;
+  try {
+    rows = (await listItemsAsync(db, { domainCode: UNIT_DOMAIN_CODE, status: "active", q, limit, tenantId })).items;
   } catch {
     rows = [];
   }

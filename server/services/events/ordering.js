@@ -8,6 +8,7 @@
 // elapses, after which they are processed regardless and the gap is recorded.
 import { queryOne, queryAll, nowIso } from "../../db.js";
 import { queryOneAsync } from "../../db-async.js";
+import { queryAllAsync } from "../../db-async.js";
 import { addSecondsIso } from "./validation.js";
 
 // Allocates the next sequence number within a partition. Called when a
@@ -71,6 +72,22 @@ export function detectSequenceGaps(db, { partitionKey, limit = 100 } = {}) {
   return gaps;
 }
 
+// Async twin of `detectSequenceGaps`.
+export async function detectSequenceGapsAsync(db, { partitionKey, limit = 100 } = {}) {
+  if (!partitionKey) return [];
+  const rows = await queryAllAsync(
+    db,
+    `SELECT sequence_number FROM event_records WHERE partition_key = ? AND sequence_number IS NOT NULL ORDER BY sequence_number DESC LIMIT ?`,
+    [partitionKey, Number(limit)]
+  );
+  const numbers = rows.map((r) => Number(r.sequence_number)).sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < numbers.length; i += 1) {
+    if (numbers[i] !== numbers[i - 1] + 1) gaps.push({ from: numbers[i - 1], to: numbers[i] });
+  }
+  return gaps;
+}
+
 export function orderingState(db, { tenantId = null } = {}) {
   const clause = tenantId !== undefined && tenantId !== null ? "AND tenant_id = ?" : "";
   const params = tenantId !== undefined && tenantId !== null ? [Number(tenantId)] : [];
@@ -80,5 +97,18 @@ export function orderingState(db, { tenantId = null } = {}) {
     `SELECT COUNT(DISTINCT partition_key) AS c FROM event_deliveries WHERE partition_key IS NOT NULL ${clause}`,
     params
   ).c;
+  return { buffered, partitions };
+}
+
+// Async twin of `orderingState`.
+export async function orderingStateAsync(db, { tenantId = null } = {}) {
+  const clause = tenantId !== undefined && tenantId !== null ? "AND tenant_id = ?" : "";
+  const params = tenantId !== undefined && tenantId !== null ? [Number(tenantId)] : [];
+  const buffered = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM event_deliveries WHERE status = 'out_of_order' ${clause}`, params)).c;
+  const partitions = (await queryOneAsync(
+    db,
+    `SELECT COUNT(DISTINCT partition_key) AS c FROM event_deliveries WHERE partition_key IS NOT NULL ${clause}`,
+    params
+  )).c;
   return { buffered, partitions };
 }

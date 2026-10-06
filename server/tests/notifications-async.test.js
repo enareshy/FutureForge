@@ -2,7 +2,7 @@ import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
 import { migrate, openTestDatabase, queryOne, queryAll } from "../db.js";
 import { seedDatabase } from "../seed.js";
-import { createRule, publish, publishAsync } from "../services/notifications.js";
+import { createRule, publish, publishAsync, scheduleReminder, sweepRemindersAsync } from "../services/notifications.js";
 
 let database;
 let tenantId;
@@ -140,5 +140,21 @@ describe("async notification publish pipeline", () => {
     );
     assert.ok(reminder);
     assert.equal(reminder.status, "pending");
+  });
+
+  test("sweepRemindersAsync fires a due reminder on the async layer", async () => {
+    const reminderId = scheduleReminder(database, {
+      tenant_id: tenantId,
+      recipient_id: recipientId,
+      due_at: "2000-01-01 00:00:00",
+      details: { subject: "Async sweep", object_type: "object", object_id: "OBJ-SWEEP" },
+    });
+    const summary = await sweepRemindersAsync(database, { tenantId, limit: 50 });
+    assert.ok(summary.processed >= 1);
+    assert.ok(summary.fired >= 1);
+
+    const row = queryOne(database, "SELECT * FROM notification_reminders WHERE id = ?", [reminderId]);
+    assert.equal(row.status, "fired");
+    assert.ok(row.fired_at);
   });
 });

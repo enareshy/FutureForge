@@ -2,12 +2,12 @@ import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
 import { writeAudit, writeAuditAsync } from "../audit.js";
-import { publish as publishNotificationEvent } from "../notifications.js";
+import { publish as publishNotificationEvent, publishAsync as publishNotificationEventAsync } from "../notifications.js";
 import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable, writeTenantAsync, assertMutableAsync } from "../metadata/scope.js";
 import { ESCALATION_ACTIONS, TASK_PRIORITIES, safeParse } from "./validation.js";
-import { recordEvent } from "./events.js";
-import { usersForAssignee } from "./routing.js";
-import { dispatch } from "./notifications.js";
+import { recordEvent, recordEventAsync } from "./events.js";
+import { usersForAssignee, usersForAssigneeAsync } from "./routing.js";
+import { dispatch, dispatchAsync } from "./notifications.js";
 
 // Escalation rules and the sweep that applies them. The platform is
 // pull-based: an operator or cron calls `sweepEscalations`, which keeps the
@@ -278,6 +278,138 @@ export function sweepEscalations(db, { tenantId = null, now = nowIso(), limit = 
       continue;
     }
     results.push(applyEscalation(db, task, rule, {}));
+  }
+  return { swept: tasks.length, results, now };
+}
+
+async function matchRuleAsync(db, task, tenantId) {
+  const nodeKey = task.node_id
+    ? (await queryOneAsync(db, "SELECT node_key FROM workflow_nodes WHERE id = ?", [task.node_id]))?.node_key || ""
+    : "";
+  const rules = await queryAllAsync(
+    db,
+    `SELECT * FROM workflow_escalation_rules
+      WHERE status = 'active'
+        AND (definition_id IS NULL OR definition_id = ?)
+        AND (node_key = '' OR node_key = ?)
+        AND (tenant_id IS NULL OR tenant_id = ?)
+      ORDER BY after_minutes LIMIT 1`,
+    [task.definition_id ?? -1, nodeKey, Number(tenantId)]
+  );
+  return rules[0] || null;
+}
+
+// Async twin of applyEscalation. Mirrors the same statement sequence, using the
+// asynchronous notification/routing/event twins so the whole rewrite joins the
+// caller's transaction.
+export async function applyEscalationAsync(db, task, rule, { actor = null } = {}) {
+  const ts = nowIso();
+  const applied = { task_id: task.id, rule_id: rule.id, action: rule.action };
+  if (rule.action === "reassign") {
+    await runAsync(
+      db,
+      `UPDATE workflow_tasks SET assignee_type = ?, assignee_id = ?, assignee_ref = ?, status = CASE WHEN status = 'in_progress' THEN 'assigned' ELSE status END, escalated = 1, updated_at = ? WHERE id = ?`,
+      [rule.target_assignee_type || "user", rule.target_assignee_id ?? null, rule.target_assignee_ref || "", ts, task.id]
+    );
+    applied.assignee_type = rule.target_assignee_type || "user";
+    applied.assignee_id = rule.target_assignee_id ?? null;
+  } else if (rule.action === "raise_priority" || rule.action === "escalate") {
+    const priority = TASK_PRIORITIES.includes(rule.priority) ? rule.priority : "high";
+    await runAsync(db, "UPDATE workflow_tasks SET priority = ?, escalated = 1, updated_at = ? WHERE id = ?", [priority, ts, task.id]);
+    applied.priority = priority;
+  } else {
+    await runAsync(db, "UPDATE workflow_tasks SET escalated = 1, updated_at = ? WHERE id = ?", [ts, task.id]);
+  }
+
+  const instance = await queryOneAsync(db, "SELECT * FROM workflow_instances WHERE id = ?", [task.instance_id]);
+  const recipients = [];
+  if (rule.notify_user_id) {
+    const user = await queryOneAsync(db, "SELECT id, username, display_name FROM users WHERE id = ?", [Number(rule.notify_user_id)]);
+    if (user) recipients.push(user);
+  } else if (rule.target_assignee_type) {
+    recipients.push(
+      ...(await usersForAssigneeAsync(
+        db,
+        { assignee_type: rule.target_assignee_type, assignee_id: rule.target_assignee_id, assignee_ref: rule.target_assignee_ref },
+        task.tenant_id,
+        task.organization_id || 0
+      ))
+    );
+  } else if (task.claimed_by) {
+    const user = await queryOneAsync(db, "SELECT id, username, display_name FROM users WHERE id = ?", [task.claimed_by]);
+    if (user) recipients.push(user);
+  }
+  for (const recipient of recipients) {
+    await dispatchAsync(db, {
+      instance,
+      task,
+      channel: "in_app",
+      recipientType: "user",
+      recipientId: recipient.id,
+      recipientRef: recipient.username || "",
+      subject: `Task escalated: ${task.title}`,
+      body: `Task "${task.title}" was escalated by rule "${rule.code}" (${rule.action}).`,
+      payload: { task_id: task.id, instance_id: task.instance_id, rule: rule.code, action: rule.action },
+      tenantId: task.tenant_id,
+    });
+  }
+  await recordEventAsync(db, {
+    instanceId: task.instance_id,
+    taskId: task.id,
+    eventType: "task.escalated",
+    actorId: actor?.id ?? null,
+    message: `Task escalated via rule ${rule.code}`,
+    details: applied,
+    tenantId: task.tenant_id,
+  });
+  const assigneeId = task.assignee_type === "user" ? task.assignee_id ?? task.claimed_by ?? null : task.claimed_by ?? null;
+  if (assigneeId) {
+    await publishNotificationEventAsync(
+      db,
+      {
+        event_type: "task.overdue",
+        source_module: "workflow",
+        tenant_id: task.tenant_id,
+        object_type: "task",
+        object_id: task.code || String(task.id),
+        object_name: task.title,
+        payload: {
+          assignee_id: Number(assigneeId),
+          rule: rule.code,
+          action: rule.action,
+          due_date: task.due_at || task.due_date || "",
+          link: `/workflow/tasks/${task.id}`,
+        },
+        idempotency_key: `task-overdue:${task.id}:${rule.id}`,
+      },
+      { actor }
+    );
+  }
+  return applied;
+}
+
+// Async twin of sweepEscalations on the asynchronous pg layer.
+export async function sweepEscalationsAsync(db, { tenantId = null, now = nowIso(), limit = 100 } = {}) {
+  const where = [
+    `status IN ('unassigned','assigned','in_progress','blocked','awaiting_approval')`,
+    `escalated = 0`,
+    `((escalation_at IS NOT NULL AND escalation_at <= ?) OR (due_at IS NOT NULL AND due_at <= ?))`,
+  ];
+  const params = [now, now];
+  if (tenantId) {
+    where.push("tenant_id = ?");
+    params.push(Number(tenantId));
+  }
+  const tasks = await queryAllAsync(db, `SELECT * FROM workflow_tasks WHERE ${where.join(" AND ")} ORDER BY id LIMIT ?`, [...params, Number(limit)]);
+  const results = [];
+  for (const task of tasks) {
+    const rule = await matchRuleAsync(db, task, task.tenant_id);
+    if (!rule) {
+      await runAsync(db, "UPDATE workflow_tasks SET escalated = 1, updated_at = ? WHERE id = ?", [now, task.id]);
+      results.push({ task_id: task.id, action: "none" });
+      continue;
+    }
+    results.push(await applyEscalationAsync(db, task, rule, {}));
   }
   return { swept: tasks.length, results, now };
 }

@@ -6,6 +6,7 @@
 // It is derived from the transaction plus its findings and never mutates
 // enterprise data, so it is always safe to (re)run.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { reconciliationRef } from "./identifiers.js";
 import { publicReconciliation } from "./repository.js";
 import { RECONCILIATION_COUNTERS, MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from "./constants.js";
@@ -65,11 +66,54 @@ export function recordReconciliation(db, tenantId, { transactionRef = "", counts
   return publicReconciliation(queryOne(db, "SELECT * FROM exchange_reconciliations WHERE id = ?", [Number(result.lastInsertId)]));
 }
 
+export async function recordReconciliationAsync(db, tenantId, { transactionRef = "", counts = {}, details = {} } = {}) {
+  const normalized = normalizeCounts(counts);
+  const result = await runAsync(
+    db,
+    `INSERT INTO exchange_reconciliations
+       (reconciliation_ref, tenant_id, transaction_ref, records_read, records_validated, records_created, records_updated,
+        records_skipped, records_failed, relationships_created, relationships_failed, files_processed, warnings, errors, details_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      reconciliationRef(),
+      Number(tenantId),
+      String(transactionRef || ""),
+      normalized.records_read,
+      normalized.records_validated,
+      normalized.records_created,
+      normalized.records_updated,
+      normalized.records_skipped,
+      normalized.records_failed,
+      normalized.relationships_created,
+      normalized.relationships_failed,
+      normalized.files_processed,
+      normalized.warnings,
+      normalized.errors,
+      JSON.stringify(details || {}),
+      nowIso(),
+    ]
+  );
+  return publicReconciliation(await queryOneAsync(db, "SELECT * FROM exchange_reconciliations WHERE id = ?", [Number(result.lastInsertId)]));
+}
+
 export function getReconciliation(db, tenantId, ref) {
   const raw = String(ref ?? "");
   const row = /^\d+$/.test(raw)
     ? queryOne(db, "SELECT * FROM exchange_reconciliations WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
     : queryOne(db, "SELECT * FROM exchange_reconciliations WHERE tenant_id = ? AND (reconciliation_ref = ? OR transaction_ref = ?) ORDER BY id DESC LIMIT 1", [
+        Number(tenantId),
+        raw,
+        raw,
+      ]);
+  if (!row) throw transactionNotFound(ref);
+  return publicReconciliation(row);
+}
+
+export async function getReconciliationAsync(db, tenantId, ref) {
+  const raw = String(ref ?? "");
+  const row = /^\d+$/.test(raw)
+    ? await queryOneAsync(db, "SELECT * FROM exchange_reconciliations WHERE id = ? AND tenant_id = ?", [Number(raw), Number(tenantId)])
+    : await queryOneAsync(db, "SELECT * FROM exchange_reconciliations WHERE tenant_id = ? AND (reconciliation_ref = ? OR transaction_ref = ?) ORDER BY id DESC LIMIT 1", [
         Number(tenantId),
         raw,
         raw,
@@ -100,6 +144,28 @@ export function listReconciliations(db, tenantId, query = {}) {
   return { items: rows.map(publicReconciliation), total, page, pageSize };
 }
 
+export async function listReconciliationsAsync(db, tenantId, query = {}) {
+  const { page, pageSize, offset } = pageArgs(query);
+  const clauses = ["tenant_id = ?"];
+  const params = [Number(tenantId)];
+  if (query.transaction_ref || query.transactionRef) {
+    clauses.push("transaction_ref = ?");
+    params.push(String(query.transaction_ref || query.transactionRef));
+  }
+  if (query.from) {
+    clauses.push("created_at >= ?");
+    params.push(String(query.from));
+  }
+  if (query.to) {
+    clauses.push("created_at <= ?");
+    params.push(String(query.to));
+  }
+  const where = clauses.join(" AND ");
+  const total = Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM exchange_reconciliations WHERE ${where}`, params))?.c || 0);
+  const rows = await queryAllAsync(db, `SELECT * FROM exchange_reconciliations WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+  return { items: rows.map(publicReconciliation), total, page, pageSize };
+}
+
 // Derives and persists a reconciliation for an existing transaction. Re-running
 // is idempotent in effect: it appends a fresh reconciliation snapshot.
 export function reconcileTransaction(db, tenantId, transactionRef, { actor = null, ip = null, persist = true, details = {} } = {}) {
@@ -125,6 +191,36 @@ export function reconcileTransaction(db, tenantId, transactionRef, { actor = nul
     details: { operation: txn.operation, direction: txn.direction, status: txn.status, ...(details || {}) },
   });
   run(db, "UPDATE exchange_transactions SET reconciliation_json = ?, updated_at = ? WHERE id = ?", [
+    JSON.stringify({ reconciliation_ref: reconciliation.reconciliation_ref, counts, reconciled_at: nowIso() }),
+    nowIso(),
+    txn.id,
+  ]);
+  return { transaction_ref: txn.transaction_ref, reconciliation, counts, details };
+}
+
+export async function reconcileTransactionAsync(db, tenantId, transactionRef, { actor = null, ip = null, persist = true, details = {} } = {}) {
+  const txn = await queryOneAsync(db, "SELECT * FROM exchange_transactions WHERE tenant_id = ? AND (transaction_ref = ? OR id = ?)", [
+    Number(tenantId),
+    String(transactionRef),
+    Number(transactionRef) || -1,
+  ]);
+  if (!txn) throw transactionNotFound(transactionRef);
+  const counts = runtimeCounts(txn);
+  const errorRows = await queryAllAsync(db, "SELECT severity, status, COUNT(*) AS c FROM exchange_errors WHERE tenant_id = ? AND transaction_ref = ? GROUP BY severity, status", [
+    Number(tenantId),
+    txn.transaction_ref,
+  ]);
+  for (const row of errorRows) {
+    if (row.severity === "ERROR") counts.errors += Number(row.c);
+    else if (row.severity === "WARNING") counts.warnings += Number(row.c);
+  }
+  if (!persist) return { transaction_ref: txn.transaction_ref, counts, details };
+  const reconciliation = await recordReconciliationAsync(db, tenantId, {
+    transactionRef: txn.transaction_ref,
+    counts,
+    details: { operation: txn.operation, direction: txn.direction, status: txn.status, ...(details || {}) },
+  });
+  await runAsync(db, "UPDATE exchange_transactions SET reconciliation_json = ?, updated_at = ? WHERE id = ?", [
     JSON.stringify({ reconciliation_ref: reconciliation.reconciliation_ref, counts, reconciled_at: nowIso() }),
     nowIso(),
     txn.id,

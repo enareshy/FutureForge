@@ -1,5 +1,5 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { validatePolicyInput, normalizeVisibility } from "./validation.js";
 
@@ -396,6 +396,179 @@ export function validatePolicy(db, body = {}, { id = null } = {}) {
     }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     sampleMatches = queryOne(db, `SELECT COUNT(*) AS c FROM audit_logs ${where}`, params).c;
+  } catch {
+    sampleMatches = null;
+  }
+  return { valid: true, policy: input, warnings, sample_matches: sampleMatches };
+}
+
+// ── Async write twins ───────────────────────────────────────────────────────
+
+export async function createPolicyAsync(db, body, actor = null, tenantId = null) {
+  const input = validatePolicyInput(body, { partial: false });
+  const effectiveTenant =
+    body.tenant_id === null || body.tenantId === null
+      ? null
+      : (() => {
+          const raw = body.tenant_id ?? body.tenantId ?? tenantId;
+          return raw === null || raw === undefined || raw === "" ? null : Number(raw);
+        })();
+  const existing = await queryOneAsync(
+    db,
+    `SELECT id FROM audit_policies WHERE COALESCE(tenant_id, 0) = COALESCE(?, 0) AND object_type = ?`,
+    [effectiveTenant, input.object_type]
+  );
+  if (existing) throw new HttpError(409, "An audit policy already exists for this scope");
+  const ts = nowIso();
+  const result = await runAsync(
+    db,
+    `INSERT INTO audit_policies
+      (tenant_id, object_type, name, description, status, record_success, record_failure,
+       capture_reads, capture_views, capture_downloads, actions_json, categories_json,
+       track_attributes_json, masked_attributes_json, ignored_attributes_json, retention_days,
+       visibility, export_allowed, system_mandatory, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      effectiveTenant,
+      input.object_type,
+      input.name,
+      input.description || "",
+      input.status || "active",
+      input.record_success === false ? 0 : 1,
+      input.record_failure === false ? 0 : 1,
+      input.capture_reads ? 1 : 0,
+      input.capture_views ? 1 : 0,
+      input.capture_downloads === false ? 0 : 1,
+      JSON.stringify(input.actions || []),
+      JSON.stringify(input.categories || []),
+      JSON.stringify(input.track_attributes || []),
+      JSON.stringify(input.masked_attributes || []),
+      JSON.stringify(input.ignored_attributes || []),
+      input.retention_days ?? 2555,
+      normalizeVisibility(input.visibility || "admin"),
+      input.export_allowed === false ? 0 : 1,
+      body.system_mandatory ? 1 : 0,
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]
+  );
+  return getPolicyAsync(db, result.lastInsertId, null);
+}
+
+export async function updatePolicyAsync(db, id, body, tenantId = null) {
+  const row = await getPolicyRowAsync(db, id);
+  if (!row) throw new HttpError(404, "Audit policy not found");
+  if (tenantId != null && row.tenant_id != null && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Audit policy not found");
+  }
+  const input = validatePolicyInput(body, { partial: true });
+  const next = {
+    object_type: input.object_type ?? row.object_type,
+    name: input.name ?? row.name,
+    description: input.description ?? row.description,
+    status: input.status ?? row.status,
+    record_success: input.record_success === undefined ? row.record_success : input.record_success ? 1 : 0,
+    record_failure: input.record_failure === undefined ? row.record_failure : input.record_failure ? 1 : 0,
+    capture_reads: input.capture_reads === undefined ? row.capture_reads : input.capture_reads ? 1 : 0,
+    capture_views: input.capture_views === undefined ? row.capture_views : input.capture_views ? 1 : 0,
+    capture_downloads:
+      input.capture_downloads === undefined ? row.capture_downloads : input.capture_downloads ? 1 : 0,
+    actions_json: input.actions === undefined ? row.actions_json : JSON.stringify(input.actions),
+    categories_json: input.categories === undefined ? row.categories_json : JSON.stringify(input.categories),
+    track_attributes_json:
+      input.track_attributes === undefined ? row.track_attributes_json : JSON.stringify(input.track_attributes),
+    masked_attributes_json:
+      input.masked_attributes === undefined ? row.masked_attributes_json : JSON.stringify(input.masked_attributes),
+    ignored_attributes_json:
+      input.ignored_attributes === undefined ? row.ignored_attributes_json : JSON.stringify(input.ignored_attributes),
+    retention_days: input.retention_days ?? row.retention_days,
+    visibility: input.visibility ?? row.visibility,
+    export_allowed: input.export_allowed === undefined ? row.export_allowed : input.export_allowed ? 1 : 0,
+  };
+  if (row.system_mandatory === 1 && next.status !== "active") {
+    throw new HttpError(409, "System-mandatory audit policies cannot be disabled");
+  }
+  if (next.object_type !== row.object_type) {
+    const clash = await queryOneAsync(
+      db,
+      "SELECT id FROM audit_policies WHERE COALESCE(tenant_id, 0) = COALESCE(?, 0) AND object_type = ? AND id != ?",
+      [row.tenant_id, next.object_type, id]
+    );
+    if (clash) throw new HttpError(409, "An audit policy already exists for this scope");
+  }
+  await runAsync(
+    db,
+    `UPDATE audit_policies SET
+       object_type = ?, name = ?, description = ?, status = ?, record_success = ?, record_failure = ?,
+       capture_reads = ?, capture_views = ?, capture_downloads = ?, actions_json = ?, categories_json = ?,
+       track_attributes_json = ?, masked_attributes_json = ?, ignored_attributes_json = ?,
+       retention_days = ?, visibility = ?, export_allowed = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      next.object_type,
+      next.name,
+      next.description,
+      next.status,
+      next.record_success,
+      next.record_failure,
+      next.capture_reads,
+      next.capture_views,
+      next.capture_downloads,
+      next.actions_json,
+      next.categories_json,
+      next.track_attributes_json,
+      next.masked_attributes_json,
+      next.ignored_attributes_json,
+      next.retention_days,
+      next.visibility,
+      next.export_allowed,
+      nowIso(),
+      id,
+    ]
+  );
+  return getPolicyAsync(db, id, null);
+}
+
+export async function deletePolicyAsync(db, id, tenantId = null) {
+  const row = await getPolicyRowAsync(db, id);
+  if (!row) throw new HttpError(404, "Audit policy not found");
+  if (tenantId != null && row.tenant_id != null && Number(row.tenant_id) !== Number(tenantId)) {
+    throw new HttpError(404, "Audit policy not found");
+  }
+  if (row.system_mandatory === 1) {
+    throw new HttpError(409, "System-mandatory audit policies cannot be deleted");
+  }
+  await runAsync(db, "DELETE FROM audit_policies WHERE id = ?", [id]);
+  return { ok: true, id: Number(id) };
+}
+
+export async function validatePolicyAsync(db, body = {}, { id = null } = {}) {
+  const input = validatePolicyInput(body, { partial: id != null });
+  const warnings = [];
+  if (input.capture_views === true && input.capture_reads === false) {
+    warnings.push("capture_views is enabled without capture_reads; view events are recorded but read events are not.");
+  }
+  if (input.actions && input.actions.length && input.categories && input.categories.length) {
+    warnings.push("Both actions and categories are restricted; events must satisfy both filters to be captured.");
+  }
+  if (input.retention_days !== undefined && Number(input.retention_days) > 3650) {
+    warnings.push("retention_days exceeds 10 years; consider a dedicated retention policy instead.");
+  }
+  let sampleMatches = null;
+  try {
+    const clauses = [];
+    const params = [];
+    if (input.actions && input.actions.length) {
+      clauses.push(`action IN (${input.actions.map(() => "?").join(", ")})`);
+      params.push(...input.actions);
+    }
+    if (input.categories && input.categories.length) {
+      clauses.push(`category IN (${input.categories.map(() => "?").join(", ")})`);
+      params.push(...input.categories);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    sampleMatches = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM audit_logs ${where}`, params)).c;
   } catch {
     sampleMatches = null;
   }

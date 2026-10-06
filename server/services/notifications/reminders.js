@@ -1,10 +1,10 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
-import { resolveRecipients } from "./recipients.js";
+import { resolveRecipients, resolveRecipientsAsync } from "./recipients.js";
 import { buildRuleContext } from "./rules.js";
 import { safeParse } from "./validation.js";
-import { deliverDirect } from "./delivery.js";
+import { deliverDirect, deliverDirectAsync } from "./delivery.js";
 
 // Reminder and escalation service. Pull-based like the workflow escalation
 // sweeper: the scheduler endpoint calls `sweepReminders`, which fires due
@@ -234,6 +234,124 @@ export function sweepReminders(db, { tenantId = null, limit = 200, now = null, a
     );
   }
   return summary;
+}
+
+async function publishReminderEventAsync(db, reminderRow, details) {
+  const user = await queryOneAsync(db, "SELECT id, username, email, tenant_id FROM users WHERE id = ?", [reminderRow.recipient_id]);
+  if (!user) return null;
+  return deliverDirectAsync(db, {
+    user,
+    tenantId: reminderRow.tenant_id,
+    channel: "in_app",
+    subject: details.subject || "Reminder",
+    objectType: details.object_type || "",
+    objectId: details.object_id || "",
+    objectName: details.object_name || "",
+    deepLink: details.deep_link || details.link || "",
+    priority: "normal",
+    correlationId: details.correlation_id || "",
+    idempotencyKey: `reminder:${reminderRow.id}`,
+  });
+}
+
+// Async twin of sweepReminders on the asynchronous pg layer. Mirrors the same
+// statement sequence so the sweep can run on the async request path.
+export async function sweepRemindersAsync(db, { tenantId = null, limit = 200, now = null, actor = null, ip = null } = {}) {
+  const stamp = now || nowIso();
+  const params = [stamp];
+  let clause = "";
+  if (tenantId) {
+    clause = "AND tenant_id = ?";
+    params.push(Number(tenantId));
+  }
+  params.push(limit);
+  const due = await queryAllAsync(
+    db,
+    `SELECT * FROM notification_reminders WHERE status = 'pending' AND due_at <= ? ${clause} ORDER BY due_at, id LIMIT ?`,
+    params
+  );
+  const summary = { processed: 0, fired: 0, escalated: 0, rescheduled: 0, skipped: 0 };
+  for (const reminder of due) {
+    summary.processed += 1;
+    const details = safeParse(reminder.details_json, {});
+    if (details.escalate) {
+      summary.escalated += 1;
+      await fireEscalationAsync(db, reminder, details, { actor, ip });
+    } else {
+      summary.fired += 1;
+      const notificationId = await publishReminderEventAsync(db, reminder, details);
+      const repeat = Number(details.repeat_minutes || 0);
+      const maxRepeats = Number(details.max_repeats || 0);
+      if (repeat > 0 && Number(reminder.level) < maxRepeats) {
+        await insertReminderAsync(db, {
+          ruleId: reminder.rule_id,
+          eventId: reminder.event_id,
+          notificationId,
+          tenantId: reminder.tenant_id,
+          recipientId: reminder.recipient_id,
+          dueAt: addMinutes(stamp, repeat),
+          level: Number(reminder.level) + 1,
+          dedupeKey: `reminder:${reminder.rule_id}:${reminder.event_id}:${reminder.recipient_id}:${Number(reminder.level) + 1}`,
+          details,
+        });
+        summary.rescheduled += 1;
+      }
+    }
+    const escalation = details.escalation || {};
+    if (escalation.enabled && !details.escalate) {
+      const after = Number(escalation.after_minutes ?? escalation.afterMinutes ?? 0);
+      await insertReminderAsync(db, {
+        ruleId: reminder.rule_id,
+        eventId: reminder.event_id,
+        notificationId: reminder.notification_id,
+        tenantId: reminder.tenant_id,
+        recipientId: reminder.recipient_id,
+        dueAt: addMinutes(stamp, after),
+        level: Number(reminder.level) + 1,
+        dedupeKey: `escalation:${reminder.rule_id}:${reminder.event_id}:${Number(reminder.level) + 1}`,
+        details: { ...details, escalate: true },
+      });
+    }
+    await runAsync(
+      db,
+      "UPDATE notification_reminders SET status = 'fired', fired_at = ?, attempts = attempts + 1 WHERE id = ?",
+      [stamp, reminder.id]
+    );
+  }
+  return summary;
+}
+
+async function fireEscalationAsync(db, reminder, details, { actor = null, ip = null } = {}) {
+  const escalation = details.escalation || {};
+  const eventRow = reminder.event_id
+    ? await queryOneAsync(db, "SELECT * FROM notification_events WHERE id = ?", [reminder.event_id])
+    : { id: null, tenant_id: reminder.tenant_id, payload_json: "{}", related_json: "{}", event_type: details.event_type, source_module: details.source_module };
+  const context = buildRuleContext(eventRow);
+  const recipients = await resolveRecipientsAsync(
+    db,
+    escalation.recipient || { items: [{ type: "manager" }] },
+    context,
+    reminder.tenant_id
+  );
+  const created = [];
+  for (const recipient of recipients) {
+    const notificationId = await deliverDirectAsync(db, {
+      user: recipient,
+      tenantId: reminder.tenant_id,
+      channel: "in_app",
+      subject: escalation.subject || `Escalation: ${details.subject || eventRow.event_type || "notification"}`,
+      objectType: details.object_type || "",
+      objectId: details.object_id || "",
+      objectName: details.object_name || "",
+      deepLink: details.deep_link || details.link || "",
+      priority: "high",
+      idempotencyKey: `escalation:${reminder.id}:${recipient.id}`,
+    });
+    if (notificationId) created.push(notificationId);
+  }
+  void actor;
+  void ip;
+  return created;
 }
 
 function fireEscalation(db, reminder, details, { actor = null, ip = null } = {}) {
