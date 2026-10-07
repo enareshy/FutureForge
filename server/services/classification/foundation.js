@@ -6,14 +6,14 @@
 // search, reference data) and never duplicates them.
 import { queryAll, queryOne } from "../../db.js";
 import { queryAllAsync, queryOneAsync } from "../../db-async.js";
-import { tenantIds } from "../search/registry.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
-import { ensureClassificationUnits } from "./units.js";
-import { ensureClassificationEventTypes } from "./events.js";
-import { ensureClassificationJobTypes, registerClassificationHandlers } from "./jobs.js";
-import { ensureClassificationSearch, registerClassificationSources } from "./search.js";
+import { ensureClassificationUnits, ensureClassificationUnitsAsync } from "./units.js";
+import { ensureClassificationEventTypes, ensureClassificationEventTypesAsync } from "./events.js";
+import { ensureClassificationJobTypes, ensureClassificationJobTypesAsync, registerClassificationHandlers } from "./jobs.js";
+import { ensureClassificationSearch, ensureClassificationSearchAsync, registerClassificationSources } from "./search.js";
 import { registerClassificationDuplicateStrategies } from "./duplicates.js";
-import { ensureClassificationConfig } from "./configuration.js";
+import { ensureClassificationConfig, ensureClassificationConfigAsync } from "./configuration.js";
 
 export function ensureClassificationFoundation(db) {
   const units = ensureClassificationUnits(db);
@@ -33,6 +33,38 @@ export function ensureClassificationFoundation(db) {
   let configuration = 0;
   for (const tenantId of tenants) configuration += ensureClassificationConfig(db, tenantId).created || 0;
   const search = ensureClassificationSearch(db).created || 0;
+
+  return {
+    source_module: SOURCE_MODULE,
+    units,
+    event_types: eventTypes,
+    job_types: jobTypes.created,
+    handlers,
+    duplicate_strategies: duplicateStrategies,
+    configuration,
+    search,
+    tenants: tenants.length,
+  };
+}
+
+export async function ensureClassificationFoundationAsync(db) {
+  const units = await ensureClassificationUnitsAsync(db);
+  const eventTypes = await ensureClassificationEventTypesAsync(db);
+  const jobTypes = await ensureClassificationJobTypesAsync(db);
+  const handlers = registerClassificationHandlers();
+  registerClassificationSources();
+  const duplicateStrategies = registerClassificationDuplicateStrategies();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+
+  let configuration = 0;
+  for (const tenantId of tenants) configuration += (await ensureClassificationConfigAsync(db, tenantId)).created || 0;
+  const search = (await ensureClassificationSearchAsync(db)).created || 0;
 
   return {
     source_module: SOURCE_MODULE,

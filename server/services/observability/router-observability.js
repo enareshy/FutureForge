@@ -259,7 +259,7 @@ export function createObservabilityRouter({ express, db, auth, authAsync, can, c
   }));
 
   // ── Lifecycle (seed / foundation) ─────────────────────────────────────────
-  router.post("/seed", authAsync, canAdmin("execute"), wrap((req, res) => res.json(Seed.ensureObservabilitySeed(db, tenantOf(req)))));
+  router.post("/seed", authAsync, canAsync(R.admin, "execute"), wrap(async (req, res) => res.json(await Seed.ensureObservabilitySeedAsync(db, tenantOf(req)))));
 
   return router;
 }

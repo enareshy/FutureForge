@@ -5770,46 +5770,46 @@ export function createApp(db) {
   // ── Execution observability & control ──
   app.get(
     "/api/job-execution/status",
-    auth,
-    can("iam.jobs.execution", "read"),
-    wrap((_req, res) => {
-      res.json(jobExecution.engineStatus(db));
+    authAsync,
+    canAsync("iam.jobs.execution", "read"),
+    wrap(async (_req, res) => {
+      res.json(await jobExecution.engineStatusAsync(db));
     })
   );
 
   app.get(
     "/api/job-execution/metrics",
-    auth,
-    can("iam.jobs.execution", "read"),
-    wrap((req, res) => {
-      res.json(jobExecution.executionMetrics(db, execScope(req)));
+    authAsync,
+    canAsync("iam.jobs.execution", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.executionMetricsAsync(db, execScope(req)));
     })
   );
 
   app.get(
     "/api/job-execution/workers",
-    auth,
-    can("iam.jobs.execution", "read"),
-    wrap((req, res) => {
-      res.json(jobExecution.listWorkers(db, req.query));
+    authAsync,
+    canAsync("iam.jobs.execution", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.listWorkersAsync(db, req.query));
     })
   );
 
   app.get(
     "/api/job-execution/handlers",
-    auth,
-    can("iam.jobs.execution", "read"),
-    wrap((_req, res) => {
+    authAsync,
+    canAsync("iam.jobs.execution", "read"),
+    wrap(async (_req, res) => {
       res.json({ items: jobExecution.listHandlers() });
     })
   );
 
   app.get(
     "/api/job-execution/dead-letter",
-    auth,
-    can("iam.jobs.execution", "read"),
-    wrap((req, res) => {
-      res.json(jobExecution.listDeadLetters(db, req.query, execScope(req)));
+    authAsync,
+    canAsync("iam.jobs.execution", "read"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.listDeadLettersAsync(db, req.query, execScope(req)));
     })
   );
 
@@ -5824,10 +5824,10 @@ export function createApp(db) {
 
   app.post(
     "/api/job-execution/dead-letter/:id/discard",
-    auth,
-    can("iam.jobs.execution", "execute"),
-    wrap((req, res) => {
-      res.json(jobExecution.discardDeadLetter(db, req.params.id, { actor: req.actor, note: req.body?.note }));
+    authAsync,
+    canAsync("iam.jobs.execution", "execute"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.discardDeadLetterAsync(db, req.params.id, { actor: req.actor, note: req.body?.note }));
     })
   );
 
@@ -5866,10 +5866,10 @@ export function createApp(db) {
 
   app.get(
     "/api/job-execution/audit",
-    auth,
-    can("iam.jobs.execution", "read"),
-    wrap((req, res) => {
-      res.json({ items: jobExecution.listEngineAudit(db, { tenantId: execScope(req), limit: req.query.limit }) });
+    authAsync,
+    canAsync("iam.jobs.execution", "read"),
+    wrap(async (req, res) => {
+      res.json({ items: await jobExecution.listEngineAuditAsync(db, { tenantId: execScope(req), limit: req.query.limit }) });
     })
   );
 

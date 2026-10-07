@@ -12,6 +12,7 @@
 //    schedule runs prevent duplicate submissions.
 
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import {
   isTerminalStatus,
@@ -775,6 +776,24 @@ export function engineStatus(db) {
   const queued = queryOne(db, "SELECT COUNT(*) AS c FROM jobs WHERE status IN ('queued', 'scheduled', 'retrying')").c;
   const deadLetters = queryOne(db, "SELECT COUNT(*) AS c FROM job_dead_letters WHERE status = 'open'").c;
   const workers = queryOne(db, `SELECT COUNT(*) AS c FROM job_workers WHERE status NOT IN ('offline', 'stopped')`).c;
+  return {
+    queues: queues.map((row) => row.code),
+    running_jobs: running,
+    queued_jobs: queued,
+    open_dead_letters: deadLetters,
+    online_workers: workers,
+    handlers: listHandlers().map((handler) => handler.code),
+    checked_at: nowIso(),
+  };
+}
+
+// Async twin of engineStatus on the asynchronous pg layer.
+export async function engineStatusAsync(db) {
+  const queues = await queryAllAsync(db, "SELECT code FROM job_queues ORDER BY priority DESC");
+  const running = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM jobs WHERE status IN ('running', 'cancel_requested')")).c;
+  const queued = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM jobs WHERE status IN ('queued', 'scheduled', 'retrying')")).c;
+  const deadLetters = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM job_dead_letters WHERE status = 'open'")).c;
+  const workers = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM job_workers WHERE status NOT IN ('offline', 'stopped')`)).c;
   return {
     queues: queues.map((row) => row.code),
     running_jobs: running,

@@ -7,6 +7,7 @@
 // the losing statement's `WHERE` re-evaluation reports zero changed rows.
 
 import { queryOne, run, nowIso, randomUuid } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 import { parseSqlTime, sqlTimeAfterSeconds } from "./timezone.js";
 
 export function acquireLock(db, name, owner, { ttlSeconds = 60, purpose = "" } = {}) {
@@ -46,6 +47,20 @@ export function releaseLock(db, name, owner) {
 
 export function getLock(db, name) {
   const row = queryOne(db, "SELECT * FROM job_locks WHERE name = ?", [name]);
+  if (!row) return null;
+  return {
+    name: row.name,
+    owner: row.owner,
+    purpose: row.purpose || "",
+    acquired_at: row.acquired_at,
+    expires_at: row.expires_at,
+    expired: (parseSqlTime(row.expires_at)?.getTime() || 0) <= Date.now(),
+  };
+}
+
+// Async twin of getLock on the asynchronous pg layer.
+export async function getLockAsync(db, name) {
+  const row = await queryOneAsync(db, "SELECT * FROM job_locks WHERE name = ?", [name]);
   if (!row) return null;
   return {
     name: row.name,

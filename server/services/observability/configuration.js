@@ -174,6 +174,36 @@ export function ensureObservabilityConfig(db, tenantId) {
   return { created };
 }
 
+export async function ensureObservabilityConfigAsync(db, tenantId) {
+  let created = 0;
+  for (const [key, value] of Object.entries(CONFIG_DEFAULTS)) {
+    if (!(await getConfigRowAsync(db, tenantId, key))) {
+      await runAsync(db, "INSERT INTO observability_configuration (tenant_id, key, value_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", [
+        Number(tenantId),
+        key,
+        stringifyJson(value),
+        nowIso(),
+        nowIso(),
+      ]);
+      created += 1;
+    }
+  }
+  for (const policy of DEFAULT_RETENTION_POLICIES) {
+    const existing = await queryOneAsync(db, "SELECT id FROM observability_retention_policies WHERE tenant_id = ? AND tier = ?", [Number(tenantId), policy.tier]);
+    if (!existing) {
+      await runAsync(db, "INSERT INTO observability_retention_policies (tenant_id, tier, retain_days, status, created_at, updated_at) VALUES (?, ?, ?, 'ACTIVE', ?, ?)", [
+        Number(tenantId),
+        policy.tier,
+        policy.retain_days,
+        nowIso(),
+        nowIso(),
+      ]);
+      created += 1;
+    }
+  }
+  return { created };
+}
+
 export function listRetentionPolicies(db, tenantId) {
   return queryAll(db, "SELECT * FROM observability_retention_policies WHERE tenant_id = ? ORDER BY tier", [Number(tenantId)]).map((row) => ({
     id: row.id,

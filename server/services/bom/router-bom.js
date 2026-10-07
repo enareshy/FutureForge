@@ -145,16 +145,16 @@ export function createBomRouter({ express, db, auth, can, authAsync, canAsync, w
     canAsync(R.admin, "read"),
     wrap(async (req, res) => res.json(await Configuration.listConfigAsync(db, tenantOf(req))))
   );
-  const setConfig = wrap((req, res) => res.json(Configuration.setConfig(db, tenantOf(req), req.params.key, req.body?.value, req.actor, req.ip)));
-  router.put("/config/:key", auth, canAdmin("update"), setConfig);
-  router.patch("/config/:key", auth, canAdmin("update"), setConfig);
+  const setConfig = wrap(async (req, res) => res.json(await Configuration.setConfigAsync(db, tenantOf(req), req.params.key, req.body?.value, req.actor, req.ip)));
+  router.put("/config/:key", authAsync, canAsync(R.admin, "update"), setConfig);
+  router.patch("/config/:key", authAsync, canAsync(R.admin, "update"), setConfig);
 
   // ── Units (shared Reference Data domain) ──────────────────────────────────
   router.get(
     "/units",
-    auth,
-    canStructure("read"),
-    wrap((req, res) => res.json({ items: Units.listUnits(db, { tenantId: tenantOf(req), q: req.query.q || null, limit: req.query.limit }) }))
+    authAsync,
+    canStructureAsync("read"),
+    wrap(async (req, res) => res.json({ items: await Units.listUnitsAsync(db, { tenantId: tenantOf(req), q: req.query.q || null, limit: req.query.limit }) }))
   );
   router.get(
     "/units/convert",

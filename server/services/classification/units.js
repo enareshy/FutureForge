@@ -6,9 +6,9 @@
 // conversion using the unit metadata stored on those governed reference items.
 // Values are normalized to the characteristic's base unit for search and
 // duplicate comparison.
-import { listItems, createItem, listItemsAsync } from "../reference/items.js";
-import { getDomainRow } from "../reference/domains.js";
-import { ensureReferenceDomains } from "../reference/seed.js";
+import { listItems, createItem, listItemsAsync, createItemAsync } from "../reference/items.js";
+import { getDomainRow, getDomainRowAsync } from "../reference/domains.js";
+import { ensureReferenceDomains, ensureReferenceDomainsAsync } from "../reference/seed.js";
 import { UNIT_DOMAIN_CODE } from "./constants.js";
 import { normalizeText, normalizeUpper, parseObject } from "./validation.js";
 import { invalidUnit, incompatibleUnit } from "./errors.js";
@@ -119,6 +119,44 @@ export function ensureClassificationUnits(db) {
     if (existing) continue;
     try {
       createItem(
+        db,
+        {
+          domain_code: UNIT_DOMAIN_CODE,
+          code: unit.code,
+          name: unit.name,
+          description: `Classification unit: ${unit.name}`,
+          status: "active",
+          attributes: { uom_class: unit.uom_class, base_unit: unit.base_unit, factor: unit.factor, offset: unit.offset },
+          metadata: { system: true, source_module: "classification" },
+          is_system: true,
+        },
+        null,
+        null,
+        null
+      );
+      created += 1;
+    } catch {
+      // A unit may already exist from another module's registration; never block boot.
+    }
+  }
+  return { created, domain: UNIT_DOMAIN_CODE };
+}
+
+export async function ensureClassificationUnitsAsync(db) {
+  await ensureReferenceDomainsAsync(db, { tenantId: null });
+  const domain = await getDomainRowAsync(db, UNIT_DOMAIN_CODE);
+  if (!domain) return { created: 0, domain: UNIT_DOMAIN_CODE };
+  let created = 0;
+  for (const unit of DEFAULT_UNITS) {
+    let existing;
+    try {
+      existing = (await listItemsAsync(db, { domainCode: UNIT_DOMAIN_CODE, code: unit.code, limit: 1 })).items[0];
+    } catch {
+      existing = null;
+    }
+    if (existing) continue;
+    try {
+      await createItemAsync(
         db,
         {
           domain_code: UNIT_DOMAIN_CODE,

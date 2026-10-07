@@ -169,15 +169,22 @@ export const Classification = {
 };
 
 export const ensureClassificationFoundation = Foundation.ensureClassificationFoundation;
+export const ensureClassificationFoundationAsync = Foundation.ensureClassificationFoundationAsync;
 export const classificationHealth = Foundation.classificationHealth;
 export const classificationHealthAsync = Foundation.classificationHealthAsync;
 export const registerClassificationHandlers = Jobs.registerClassificationHandlers;
 export const ensureClassificationJobTypes = Jobs.ensureClassificationJobTypes;
+export const ensureClassificationJobTypesAsync = Jobs.ensureClassificationJobTypesAsync;
 export const runClassificationMaintenance = Jobs.runMaintenance;
 export const registerClassificationSources = Search.registerClassificationSources;
 export const ensureClassificationSearch = Search.ensureClassificationSearch;
+export const ensureClassificationSearchAsync = Search.ensureClassificationSearchAsync;
 export const registerClassificationDuplicateStrategies = Duplicates.registerClassificationDuplicateStrategies;
 export const ensureClassificationUnits = Units.ensureClassificationUnits;
+export const ensureClassificationUnitsAsync = Units.ensureClassificationUnitsAsync;
 export const ensureClassificationConfig = Configuration.ensureClassificationConfig;
+export const ensureClassificationConfigAsync = Configuration.ensureClassificationConfigAsync;
 export const seedClassification = Seed.seedClassification;
+export const seedClassificationAsync = Seed.seedClassificationAsync;
 export const ensureClassificationSeed = Seed.ensureClassificationSeed;
+export const ensureClassificationSeedAsync = Seed.ensureClassificationSeedAsync;

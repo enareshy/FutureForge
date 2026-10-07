@@ -1,9 +1,11 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { migrate, queryOne, openTestDatabase } from "../db.js";
+import { migrate, queryOne, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
+import * as jobs from "../services/jobs.js";
+import * as jobExecution from "../services/job-execution.js";
 
 function listen(app) {
   return new Promise((resolve) => {
@@ -204,6 +206,35 @@ describe("async job-execution administration", () => {
     assert.equal(runs.body.schedule.code, "ASYNC_SCHED");
   });
 
+  test("engine observability reads run on the async layer", async () => {
+    const status = await request(port, "GET", "/api/job-execution/status", { token: adminToken });
+    assert.equal(status.status, 200);
+    assert.ok(Array.isArray(status.body.handlers));
+    assert.ok(status.body.checked_at);
+
+    const metrics = await request(port, "GET", "/api/job-execution/metrics", { token: adminToken });
+    assert.equal(metrics.status, 200);
+    assert.ok(metrics.body.totals);
+    assert.ok(Array.isArray(metrics.body.queues));
+
+    const workers = await request(port, "GET", "/api/job-execution/workers", { token: adminToken });
+    assert.equal(workers.status, 200);
+    assert.ok(Array.isArray(workers.body.items));
+    assert.ok(workers.body.summary);
+
+    const handlers = await request(port, "GET", "/api/job-execution/handlers", { token: adminToken });
+    assert.equal(handlers.status, 200);
+    assert.ok(Array.isArray(handlers.body.items));
+
+    const deadLetter = await request(port, "GET", "/api/job-execution/dead-letter", { token: adminToken });
+    assert.equal(deadLetter.status, 200);
+    assert.ok(Array.isArray(deadLetter.body.items));
+
+    const audit = await request(port, "GET", "/api/job-execution/audit", { token: adminToken });
+    assert.equal(audit.status, 200);
+    assert.ok(Array.isArray(audit.body.items));
+  });
+
   test("read-only user cannot mutate queues or schedules", async () => {
     const readQueues = await request(port, "GET", "/api/job-queues", { token: userToken });
     assert.equal(readQueues.status, 200);
@@ -221,5 +252,60 @@ describe("async job-execution administration", () => {
       body: { code: "NOPE_ASYNC_SCHED", job_type_code: "REPORT_GENERATION" },
     });
     assert.equal(createSchedule.status, 403);
+  });
+});
+
+describe("async job-execution engine reads and dead-letter control", () => {
+  let database;
+  let tenantId;
+
+  before(() => {
+    database = openTestDatabase();
+    migrate(database);
+    seedDatabase(database);
+    tenantId = queryOne(database, "SELECT id FROM organizations WHERE code = 'helix'").id;
+  });
+
+  after(() => database?.close());
+
+  test("engineStatusAsync, executionMetricsAsync, listWorkersAsync and getLockAsync run on the async layer", async () => {
+    const status = await jobExecution.engineStatusAsync(database);
+    assert.ok(Array.isArray(status.handlers));
+    assert.ok(status.checked_at);
+
+    const metrics = await jobExecution.executionMetricsAsync(database, tenantId);
+    assert.ok(metrics.totals);
+    assert.ok(Array.isArray(metrics.queues));
+    const counts = await jobExecution.jobStatusCountsAsync(database, tenantId);
+    assert.equal(typeof counts, "object");
+
+    const workers = await jobExecution.listWorkersAsync(database, {});
+    assert.ok(Array.isArray(workers.items));
+    assert.ok(workers.summary);
+
+    assert.equal(await jobExecution.getLockAsync(database, "engine:scheduler"), null);
+  });
+
+  test("discardDeadLetterAsync resolves an open dead-letter entry", async () => {
+    const submitted = jobs.submitJob(
+      database,
+      { job_type_code: "REPORT_GENERATION", name: "Async dead letter", tenant_id: tenantId, queue: "REPORTING" },
+      { actor: null }
+    );
+    const jobRow = queryOne(database, "SELECT id FROM jobs WHERE job_ref = ?", [submitted.job_ref]);
+    const ts = "2026-01-01 00:00:00";
+    const inserted = run(
+      database,
+      `INSERT INTO job_dead_letters
+         (job_id, queue, job_type_code, tenant_id, reason, category, attempts, status, created_at, updated_at)
+       VALUES (?, 'REPORTING', 'REPORT_GENERATION', ?, 'async reason', 'PERMANENT', 1, 'open', ?, ?)`,
+      [jobRow.id, tenantId, ts, ts]
+    );
+    const deadLetterId = Number(inserted.lastInsertId);
+
+    const result = await jobExecution.discardDeadLetterAsync(database, deadLetterId, { actor: { id: 1 }, note: "async discard" });
+    assert.equal(result.discarded, true);
+    assert.equal(result.dead_letter.status, "discarded");
+    assert.equal(queryOne(database, "SELECT status FROM job_dead_letters WHERE id = ?", [deadLetterId]).status, "discarded");
   });
 });

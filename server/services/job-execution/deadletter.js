@@ -5,6 +5,7 @@
 // history) or discard with a note. Entries are never auto-deleted.
 
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
 import { truncate } from "../jobs/validation.js";
 import { retryJob, getJobRow } from "../jobs/jobs.js";
@@ -92,6 +93,17 @@ export function getDeadLetterRow(db, id) {
   return row;
 }
 
+export async function getDeadLetterRowAsync(db, id) {
+  const row = await queryOneAsync(
+    db,
+    `SELECT d.*, j.job_ref, j.status AS job_status FROM job_dead_letters d
+       LEFT JOIN jobs j ON j.id = d.job_id WHERE d.id = ?`,
+    [Number(id) || -1]
+  );
+  if (!row) throw new HttpError(404, "Dead-letter entry not found");
+  return row;
+}
+
 export function listDeadLetters(db, query = {}, tenantId = null) {
   const { page, pageSize, offset } = pagination(query);
   const where = [];
@@ -149,6 +161,68 @@ export function listDeadLetters(db, query = {}, tenantId = null) {
   return { items, total, page, pageSize, open_count: openCount, by_category: byCategory };
 }
 
+// Async twin of listDeadLetters on the asynchronous pg layer.
+export async function listDeadLettersAsync(db, query = {}, tenantId = null) {
+  const { page, pageSize, offset } = pagination(query);
+  const where = [];
+  const params = [];
+  const scoped = tenantId ?? (query.tenantId !== undefined && query.tenantId !== "" ? Number(query.tenantId) : null);
+  if (scoped !== null && scoped !== undefined) {
+    where.push("COALESCE(d.tenant_id, 0) = ?");
+    params.push(Number(scoped));
+  }
+  if (query.status) {
+    where.push("d.status = ?");
+    params.push(String(query.status));
+  }
+  if (query.queue) {
+    where.push("d.queue = ?");
+    params.push(String(query.queue));
+  }
+  if (query.category) {
+    where.push("d.category = ?");
+    params.push(String(query.category));
+  }
+  if (query.job_type_code || query.type) {
+    where.push("d.job_type_code = ?");
+    params.push(String(query.job_type_code || query.type).toUpperCase());
+  }
+  if (query.q) {
+    const like = `%${query.q}%`;
+    where.push("(j.job_ref ILIKE ? OR d.error_message ILIKE ? OR d.reason ILIKE ?)");
+    params.push(like, like, like);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM job_dead_letters d LEFT JOIN jobs j ON j.id = d.job_id ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(
+      db,
+      `SELECT d.*, j.job_ref, j.status AS job_status FROM job_dead_letters d
+         LEFT JOIN jobs j ON j.id = d.job_id
+         ${clause}
+         ORDER BY CASE d.status WHEN 'open' THEN 0 ELSE 1 END, d.created_at DESC, d.id DESC
+         LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    )
+  ).map(publicDeadLetter);
+
+  const byCategory = await queryAllAsync(
+    db,
+    `SELECT category, COUNT(*) AS c FROM job_dead_letters d
+       ${scoped !== null && scoped !== undefined ? "WHERE COALESCE(d.tenant_id, 0) = ?" : ""}
+       GROUP BY category ORDER BY c DESC`,
+    scoped !== null && scoped !== undefined ? [Number(scoped)] : []
+  );
+  const openCount = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM job_dead_letters d WHERE d.status = 'open' ${scoped !== null && scoped !== undefined ? "AND COALESCE(d.tenant_id, 0) = ?" : ""}`,
+      scoped !== null && scoped !== undefined ? [Number(scoped)] : []
+    )
+  ).c;
+  return { items, total, page, pageSize, open_count: openCount, by_category: byCategory };
+}
+
 export function requeueDeadLetter(db, id, { actor = null, ip = null, note = "" } = {}) {
   const row = getDeadLetterRow(db, id);
   if (row.status !== "open") {
@@ -190,6 +264,22 @@ export function discardDeadLetter(db, id, { actor = null, note = "" } = {}) {
     [actor?.id ?? null, ts, truncate(note, 1000), ts, row.id]
   );
   return { discarded: true, dead_letter: publicDeadLetter(getDeadLetterRow(db, row.id)) };
+}
+
+// Async twin of discardDeadLetter on the asynchronous pg layer.
+export async function discardDeadLetterAsync(db, id, { actor = null, note = "" } = {}) {
+  const row = await getDeadLetterRowAsync(db, id);
+  if (row.status !== "open") {
+    throw new HttpError(409, `Dead-letter entry is already ${row.status}`);
+  }
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `UPDATE job_dead_letters SET status = 'discarded', resolved_by = ?, resolved_at = ?, resolution_note = ?, updated_at = ?
+     WHERE id = ?`,
+    [actor?.id ?? null, ts, truncate(note, 1000), ts, row.id]
+  );
+  return { discarded: true, dead_letter: publicDeadLetter(await getDeadLetterRowAsync(db, row.id)) };
 }
 
 export function classifyForDeadLetter(error) {

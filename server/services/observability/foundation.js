@@ -7,12 +7,12 @@
 // curated definitions.
 import { queryOne } from "../../db.js";
 import { queryOneAsync } from "../../db-async.js";
-import { tenantIds } from "../search/registry.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
-import { ensureObservabilityEventTypes } from "./events.js";
-import { ensureObservabilityJobTypes, registerObservabilityHandlers } from "./jobs.js";
-import { ensureObservabilitySearch, registerObservabilitySources } from "./search.js";
-import { ensureObservabilityConfig } from "./configuration.js";
+import { ensureObservabilityEventTypes, ensureObservabilityEventTypesAsync } from "./events.js";
+import { ensureObservabilityJobTypes, ensureObservabilityJobTypesAsync, registerObservabilityHandlers } from "./jobs.js";
+import { ensureObservabilitySearch, ensureObservabilitySearchAsync, registerObservabilitySources } from "./search.js";
+import { ensureObservabilityConfig, ensureObservabilityConfigAsync } from "./configuration.js";
 import { listProviders } from "./providers.js";
 
 export function ensureObservabilityFoundation(db) {
@@ -33,6 +33,37 @@ export function ensureObservabilityFoundation(db) {
     configuration += ensureObservabilityConfig(db, tenantId).created || 0;
   }
   const search = ensureObservabilitySearch(db).created || 0;
+
+  return {
+    source_module: SOURCE_MODULE,
+    providers: listProviders().map((provider) => ({ code: provider.code, status: provider.status })),
+    event_types: eventTypes,
+    job_types: jobTypes.created,
+    handlers,
+    configuration,
+    search,
+    tenants: tenants.length,
+  };
+}
+
+export async function ensureObservabilityFoundationAsync(db) {
+  const eventTypes = await ensureObservabilityEventTypesAsync(db);
+  const jobTypes = await ensureObservabilityJobTypesAsync(db);
+  const handlers = registerObservabilityHandlers();
+  registerObservabilitySources();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+
+  let configuration = 0;
+  for (const tenantId of tenants) {
+    configuration += (await ensureObservabilityConfigAsync(db, tenantId)).created || 0;
+  }
+  const search = (await ensureObservabilitySearchAsync(db)).created || 0;
 
   return {
     source_module: SOURCE_MODULE,

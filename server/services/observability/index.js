@@ -189,6 +189,11 @@ export default Observability;
 
 // Convenience named exports parity with the other P2 modules.
 export const ensureObservabilityFoundation = Foundation.ensureObservabilityFoundation;
+export const ensureObservabilityFoundationAsync = Foundation.ensureObservabilityFoundationAsync;
 export const ensureObservabilitySeed = Seed.ensureObservabilitySeed;
+export const ensureObservabilitySeedAsync = Seed.ensureObservabilitySeedAsync;
+export const seedObservability = Seed.seedObservability;
+export const seedObservabilityAsync = Seed.seedObservabilityAsync;
 export const observabilityHealth = Foundation.observabilityHealth;
+export const observabilityHealthAsync = Foundation.observabilityHealthAsync;
 export const observabilityResourceCodes = Seed.observabilityResourceCodes;

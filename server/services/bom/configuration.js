@@ -2,8 +2,8 @@
 // rollup behaviour, bulk batch size, cache TTL, history retention) is data an
 // administrator can change without a deployment.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { queryAllAsync, queryOneAsync } from "../../db-async.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { CONFIG_DEFAULTS } from "./constants.js";
 import { assertConfigurationValue } from "./validation.js";
 import { invalidate } from "./cache.js";
@@ -98,4 +98,37 @@ export async function listConfigAsync(db, tenantId) {
     if (value !== undefined && value !== null) config[row.key] = value;
   }
   return config;
+}
+
+export async function setConfigAsync(db, tenantId, key, value, actor = null, ip = null) {
+  const normalized = assertConfigurationValue(key, value);
+  const ts = nowIso();
+  const existing = await getConfigRowAsync(db, tenantId, key);
+  if (existing) {
+    await runAsync(db, "UPDATE bom_configuration SET value_json = ?, updated_by = ?, updated_at = ? WHERE id = ?", [
+      JSON.stringify(normalized ?? null),
+      actor?.id ?? null,
+      ts,
+      existing.id,
+    ]);
+  } else {
+    await runAsync(db, "INSERT INTO bom_configuration (tenant_id, key, value_json, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", [
+      Number(tenantId),
+      key,
+      JSON.stringify(normalized ?? null),
+      actor?.id ?? null,
+      ts,
+      ts,
+    ]);
+  }
+  invalidate(tenantId);
+  await writeAuditAsync(db, {
+    actor,
+    action: "bom.configuration.set",
+    resourceType: "bom_configuration",
+    resourceId: key,
+    details: { key, value: normalized },
+    ip,
+  });
+  return normalized;
 }

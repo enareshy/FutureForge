@@ -1,11 +1,12 @@
 // Execution metrics + health aggregation for the engine dashboard.
 
 import { queryAll, queryOne, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { JOB_STATUSES, TERMINAL_STATUSES } from "../jobs/validation.js";
-import { queueLoad, publicQueue } from "./queues.js";
-import { listWorkers } from "./worker-registry.js";
+import { queueLoad, publicQueue, queueLoadAsync } from "./queues.js";
+import { listWorkers, listWorkersAsync } from "./worker-registry.js";
 import { listHandlers } from "./handlers.js";
-import { getLock } from "./locks.js";
+import { getLock, getLockAsync } from "./locks.js";
 
 function scopeClause(tenantId, column = "tenant_id") {
   if (tenantId === null || tenantId === undefined) return { clause: "", params: [] };
@@ -135,5 +136,141 @@ export function executionMetrics(db, tenantId = null) {
     schedules: { due_active: schedulesDue },
     handlers: listHandlers().map((handler) => handler.code),
     leader: getLock(db, "engine:scheduler"),
+  };
+}
+
+export async function jobStatusCountsAsync(db, tenantId = null) {
+  const { clause, params } = scopeClause(tenantId);
+  const rows = await queryAllAsync(db, `SELECT status, COUNT(*) AS c FROM jobs ${clause} GROUP BY status`, params);
+  const counts = Object.fromEntries(JOB_STATUSES.map((status) => [status, 0]));
+  for (const row of rows) counts[row.status] = row.c;
+  return counts;
+}
+
+// Async twin of executionMetrics on the asynchronous pg layer.
+export async function executionMetricsAsync(db, tenantId = null) {
+  const counts = await jobStatusCountsAsync(db, tenantId);
+  const load = await queueLoadAsync(db);
+
+  const queues = (await queryAllAsync(db, "SELECT * FROM job_queues ORDER BY priority DESC, code ASC")).map((row) =>
+    publicQueue(row, load.get(row.code))
+  );
+
+  const activeStatuses = ["queued", "scheduled", "retrying"];
+  const queued = activeStatuses.reduce((sum, status) => sum + (counts[status] || 0), 0);
+  const running = (counts.running || 0) + (counts.cancel_requested || 0);
+  const waiting = counts.waiting_for_dependency || 0;
+
+  const completedHour = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM jobs WHERE status = 'completed' AND completed_at >= to_char((now() at time zone 'utc') + interval '-1 hour','YYYY-MM-DD HH24:MI:SS') ${
+        tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
+      }`,
+      tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
+    )
+  ).c;
+  const failedHour = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM jobs WHERE status = 'failed' AND completed_at >= to_char((now() at time zone 'utc') + interval '-1 hour','YYYY-MM-DD HH24:MI:SS') ${
+        tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
+      }`,
+      tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
+    )
+  ).c;
+  const completedDay = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM jobs WHERE status = 'completed' AND completed_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') ${
+        tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
+      }`,
+      tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
+    )
+  ).c;
+  const failedDay = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM jobs WHERE status IN ('failed', 'timed_out') AND completed_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') ${
+        tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
+      }`,
+      tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
+    )
+  ).c;
+
+  const durationRow = await queryOneAsync(
+    db,
+    `SELECT AVG(e.duration_ms) AS avg_ms, COUNT(*) AS c
+       FROM job_executions e JOIN jobs j ON j.id = e.job_id
+      WHERE e.status = 'completed' AND e.finished_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') ${
+        tenantId === null || tenantId === undefined ? "" : "AND COALESCE(j.tenant_id, 0) = ?"
+      }`,
+    tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
+  );
+  const retryRow = await queryOneAsync(
+    db,
+    `SELECT COUNT(*) AS c FROM jobs WHERE retry_count > 0 AND created_at >= to_char((now() at time zone 'utc') + interval '-1 day','YYYY-MM-DD HH24:MI:SS') ${
+      tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
+    }`,
+    tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
+  );
+
+  const deadLetters = await queryAllAsync(
+    db,
+    `SELECT category, COUNT(*) AS c FROM job_dead_letters WHERE status = 'open' ${
+      tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
+    } GROUP BY category ORDER BY c DESC`,
+    tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
+  );
+  const openDeadLetters = deadLetters.reduce((sum, row) => sum + row.c, 0);
+
+  const schedulesDue = (
+    await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS c FROM job_schedules WHERE enabled = 1 AND status = 'active' AND next_run_at IS NOT NULL ${
+        tenantId === null || tenantId === undefined ? "" : "AND COALESCE(tenant_id, 0) = ?"
+      }`,
+      tenantId === null || tenantId === undefined ? [] : [Number(tenantId)]
+    )
+  ).c;
+
+  const totalFinished = completedDay + failedDay;
+  const workers = await listWorkersAsync(db);
+
+  const capacity = queues.reduce((sum, queue) => sum + (queue.enabled ? queue.max_concurrency : 0), 0);
+  const utilization = capacity > 0 ? Math.round((running / capacity) * 100) : 0;
+
+  return {
+    generated_at: nowIso(),
+    queues,
+    queue_count: queues.length,
+    totals: {
+      ...counts,
+      queued,
+      running,
+      waiting_for_dependency: waiting,
+      open_dead_letters: openDeadLetters,
+      active: queued + running + waiting,
+    },
+    throughput: {
+      completed_last_hour: completedHour,
+      failed_last_hour: failedHour,
+      completed_last_day: completedDay,
+      failed_last_day: failedDay,
+      retried_last_day: retryRow.c,
+      failure_rate: totalFinished > 0 ? Math.round((failedDay / totalFinished) * 100) : 0,
+    },
+    performance: {
+      average_duration_ms: Math.round(durationRow.avg_ms || 0),
+      completed_samples: durationRow.c,
+      capacity,
+      utilization,
+    },
+    workers: workers.summary,
+    worker_details: workers.items,
+    dead_letters: { open: openDeadLetters, by_category: deadLetters },
+    schedules: { due_active: schedulesDue },
+    handlers: listHandlers().map((handler) => handler.code),
+    leader: await getLockAsync(db, "engine:scheduler"),
   };
 }

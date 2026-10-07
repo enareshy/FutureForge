@@ -93,8 +93,10 @@ export {
   publicDeadLetter,
   getDeadLetterRow,
   listDeadLetters,
+  listDeadLettersAsync,
   requeueDeadLetter,
   discardDeadLetter,
+  discardDeadLetterAsync,
 } from "./job-execution/deadletter.js";
 
 export {
@@ -103,6 +105,7 @@ export {
   registerWorker,
   heartbeatWorker,
   listWorkers,
+  listWorkersAsync,
   reapStaleWorkers,
 } from "./job-execution/worker-registry.js";
 
@@ -130,19 +133,20 @@ export {
   requestManualRetry,
   engineMaintenance,
   engineStatus,
+  engineStatusAsync,
   tick,
   resolveEffectiveTimeout,
 } from "./job-execution/engine.js";
 
 export { createWorker, EngineWorker } from "./job-execution/worker.js";
 
-export { executionMetrics, jobStatusCounts } from "./job-execution/metrics.js";
+export { executionMetrics, executionMetricsAsync, jobStatusCounts, jobStatusCountsAsync } from "./job-execution/metrics.js";
 
 export { effectiveMaxRetries, computeRetryDelay, decideRetry } from "./job-execution/retry.js";
 
 export { computeNextRun, nextRunAt, describeSchedule } from "./job-execution/recurrence.js";
 
-export { acquireLock, releaseLock, renewLock, getLock, withLock, purgeExpiredLocks } from "./job-execution/locks.js";
+export { acquireLock, releaseLock, renewLock, getLock, getLockAsync, withLock, purgeExpiredLocks } from "./job-execution/locks.js";
 
 export { requestSignal, clearSignal, getSignal, isCancelled } from "./job-execution/signals.js";
 

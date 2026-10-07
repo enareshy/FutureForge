@@ -4,6 +4,7 @@
 // worker state without importing the loop, avoiding a circular dependency.
 
 import { queryAll, queryOne, run, nowIso, randomUuid } from "../../db.js";
+import { queryAllAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { parseSqlTime, sqlTime } from "./timezone.js";
 
@@ -137,6 +138,37 @@ export function listWorkers(db, query = {}) {
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const rows = queryAll(db, `SELECT * FROM job_workers ${clause} ORDER BY last_heartbeat DESC, id ASC LIMIT 200`, params);
+  const now = Date.now();
+  const items = rows.map((row) => publicWorker(row, { now }));
+  const online = items.filter((worker) => !["offline", "stopped"].includes(worker.status));
+  return {
+    items,
+    total: items.length,
+    summary: {
+      total: items.length,
+      online: online.length,
+      busy: online.filter((worker) => worker.status === "busy").length,
+      idle: online.filter((worker) => worker.status === "idle").length,
+      capacity: online.reduce((sum, worker) => sum + worker.concurrency, 0),
+      active_jobs: online.reduce((sum, worker) => sum + worker.active_jobs, 0),
+    },
+  };
+}
+
+// Async twin of listWorkers on the asynchronous pg layer.
+export async function listWorkersAsync(db, query = {}) {
+  const where = [];
+  const params = [];
+  if (query.status) {
+    where.push("status = ?");
+    params.push(String(query.status));
+  }
+  if (query.queue) {
+    where.push("queues_json ILIKE ?");
+    params.push(`%${String(query.queue)}%`);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const rows = await queryAllAsync(db, `SELECT * FROM job_workers ${clause} ORDER BY last_heartbeat DESC, id ASC LIMIT 200`, params);
   const now = Date.now();
   const items = rows.map((row) => publicWorker(row, { now }));
   const online = items.filter((worker) => !["offline", "stopped"].includes(worker.status));

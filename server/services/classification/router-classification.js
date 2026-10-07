@@ -4,8 +4,8 @@
 //
 // Every route is authorized against an IAM permission resource; the client is
 // never trusted to declare its own authorization. The DB-backed surface runs on
-// the asynchronous pool; only the pure vocabulary, unit conversion and seed
-// routes stay synchronous.
+// the asynchronous pool; only the pure vocabulary and metadata routes stay
+// synchronous.
 import {
   constants,
   Validation,
@@ -540,13 +540,13 @@ export function createClassificationRouter({ express, db, auth, can, authAsync, 
     "/units",
     authAsync,
     canCharacteristics("read"),
-    wrap((req, res) => res.json(Units.listUnits(db, { tenantId: tenantOf(req), uomClass: req.query.uom_class ?? null, q: req.query.q || null })))
+    wrap(async (req, res) => res.json(await Units.listUnitsAsync(db, { tenantId: tenantOf(req), uomClass: req.query.uom_class ?? null, q: req.query.q || null })))
   );
   router.post(
     "/units/convert",
     authAsync,
     canCharacteristics("read"),
-    wrap((req, res) => res.json(Units.convertValue(req.body?.value, req.body?.from_unit ?? req.body?.fromUnit, req.body?.to_unit ?? req.body?.toUnit, { units: Units.listUnits(db, { tenantId: tenantOf(req), limit: 2000 }) })))
+    wrap(async (req, res) => res.json(Units.convertValue(req.body?.value, req.body?.from_unit ?? req.body?.fromUnit, req.body?.to_unit ?? req.body?.toUnit, { units: await Units.listUnitsAsync(db, { tenantId: tenantOf(req), limit: 2000 }) })))
   );
 
   // ── History & lineage ─────────────────────────────────────────────────────
@@ -594,7 +594,7 @@ export function createClassificationRouter({ express, db, auth, can, authAsync, 
     "/seed",
     authAsync,
     canAdmin("create"),
-    wrap((req, res) => res.json(Seed.seedClassification(db, tenantOf(req))))
+    wrap(async (req, res) => res.json(await Seed.seedClassificationAsync(db, tenantOf(req))))
   );
 
   return router;

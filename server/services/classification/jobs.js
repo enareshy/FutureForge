@@ -7,7 +7,7 @@
 import { queryAll, run, nowIso } from "../../db.js";
 import { registerHandler } from "../job-execution/handlers.js";
 import { submitJob, submitJobAsync } from "../jobs/jobs.js";
-import { getJobTypeRow, createJobType } from "../jobs/types.js";
+import { getJobTypeRow, createJobType, getJobTypeRowAsync, createJobTypeAsync } from "../jobs/types.js";
 import { CLASSIFICATION_HANDLER_CODES, CLASSIFICATION_JOB_TYPES, MAX_BULK_OBJECTS } from "./constants.js";
 import { getConfig } from "./configuration.js";
 import { assignClass, unassign } from "./assignments.js";
@@ -22,6 +22,16 @@ export function ensureClassificationJobTypes(db) {
   for (const def of CLASSIFICATION_JOB_TYPES) {
     if (getJobTypeRow(db, def.code)) continue;
     createJobType(db, { ...def }, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
+export async function ensureClassificationJobTypesAsync(db) {
+  let created = 0;
+  for (const def of CLASSIFICATION_JOB_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    await createJobTypeAsync(db, { ...def }, null, null);
     created += 1;
   }
   return { created };

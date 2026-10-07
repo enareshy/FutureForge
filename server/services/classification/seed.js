@@ -3,13 +3,21 @@
 // characteristics, allowed values, inherited contract, a rule and a classified
 // object) so the capability is visible immediately after boot.
 import { queryOne } from "../../db.js";
-import { withEventSuppression } from "../events/emit.js";
-import { ensureClassificationFoundation } from "./foundation.js";
-import { createClassification, setClassificationStatus } from "./definitions.js";
-import { createClass, setClassStatus } from "./hierarchy.js";
-import { createCharacteristic, createAllowedValue, addClassCharacteristic } from "./characteristics.js";
-import { createRule } from "./rules.js";
-import { assignClass } from "./assignments.js";
+import { queryOneAsync } from "../../db-async.js";
+import { withEventSuppression, withEventSuppressionAsync } from "../events/emit.js";
+import { ensureClassificationFoundation, ensureClassificationFoundationAsync } from "./foundation.js";
+import { createClassification, createClassificationAsync, setClassificationStatus, setClassificationStatusAsync } from "./definitions.js";
+import { createClass, createClassAsync, setClassStatus, setClassStatusAsync } from "./hierarchy.js";
+import {
+  createCharacteristic,
+  createCharacteristicAsync,
+  createAllowedValue,
+  createAllowedValueAsync,
+  addClassCharacteristic,
+  addClassCharacteristicAsync,
+} from "./characteristics.js";
+import { createRule, createRuleAsync } from "./rules.js";
+import { assignClass, assignClassAsync } from "./assignments.js";
 
 const CHARACTERISTICS = [
   { code: "MATERIAL", name: "Material", data_type: "ENUMERATION", required: true, searchable: true },
@@ -142,6 +150,119 @@ export function seedClassification(db, tenantId) {
   });
 }
 
+export async function seedClassificationAsync(db, tenantId) {
+  return withEventSuppressionAsync(async () => {
+    const tenant = await resolveTenantIdAsync(db, tenantId);
+    const foundation = await ensureClassificationFoundationAsync(db);
+    const created = { classifications: 0, classes: 0, characteristics: 0, allowed_values: 0, rules: 0, assignments: 0 };
+    if (!tenant) return { foundation, created, seeded: false, reason: "no_tenant" };
+
+    let classification = await queryOneAsync(db, "SELECT * FROM cla_classifications WHERE tenant_id = ? AND code = 'MECH_COMPONENTS'", [tenant]);
+    if (!classification) {
+      classification = await createClassificationAsync(
+        db,
+        tenant,
+        {
+          code: "MECH_COMPONENTS",
+          name: "Mechanical components",
+          description: "Enterprise classification of mechanical components (pumps, valves, drives).",
+          status: "DRAFT",
+        },
+        null,
+        null
+      );
+      created.classifications += 1;
+    }
+    if (classification.status !== "ACTIVE") {
+      await setClassificationStatusAsync(db, tenant, classification.id, "ACTIVE", null, null);
+    }
+
+    const root = await ensureClassAsync(db, tenant, classification.id, { code: "MECH", name: "Mechanical" }, null);
+    const rotating = await ensureClassAsync(db, tenant, classification.id, { code: "ROTATING", name: "Rotating equipment" }, root.id);
+    const pump = await ensureClassAsync(db, tenant, classification.id, { code: "PUMP", name: "Pump" }, rotating.id);
+
+    const characteristics = {};
+    for (const def of CHARACTERISTICS) {
+      let row = await queryOneAsync(db, "SELECT * FROM cla_characteristics WHERE tenant_id = ? AND code = ?", [tenant, def.code]);
+      if (!row) {
+        row = await createCharacteristicAsync(db, tenant, def, null, null);
+        created.characteristics += 1;
+      }
+      characteristics[def.code] = row;
+    }
+
+    const material = characteristics.MATERIAL;
+    for (const value of MATERIAL_VALUES) {
+      const existing = await queryOneAsync(db, "SELECT id FROM cla_allowed_values WHERE characteristic_id = ? AND code = ?", [material.id, value.code]);
+      if (!existing) {
+        await createAllowedValueAsync(db, tenant, material.id, value, null, null);
+        created.allowed_values += 1;
+      }
+    }
+
+    // Root defines material (inherited everywhere); the pump adds the rest.
+    await ensureClassCharacteristicAsync(db, tenant, root.id, characteristics.MATERIAL.id, { required: true, sequence: 0 });
+    const pumpCharacteristics = ["FLOW_RATE", "PRESSURE", "WEIGHT", "SPEED", "POWER", "FINISH", "PORTABLE"];
+    for (let index = 0; index < pumpCharacteristics.length; index += 1) {
+      const code = pumpCharacteristics[index];
+      await ensureClassCharacteristicAsync(db, tenant, pump.id, characteristics[code].id, {
+        required: code === "FLOW_RATE" || code === "PRESSURE",
+        sequence: index,
+      });
+    }
+
+    if (!(await queryOneAsync(db, "SELECT id FROM cla_rules WHERE tenant_id = ? AND class_id = ? AND characteristic_id = ? AND rule_type = 'RANGE'", [tenant, pump.id, characteristics.PRESSURE.id]))) {
+      await createRuleAsync(
+        db,
+        tenant,
+        {
+          class_id: pump.id,
+          characteristic_id: characteristics.PRESSURE.id,
+          rule_type: "RANGE",
+          config: { min: 1, max: 400 },
+          severity: "ERROR",
+          message: "Pump operating pressure must be between 1 and 400 bar",
+        },
+        null,
+        null
+      );
+      created.rules += 1;
+    }
+
+    const existingAssignment = await queryOneAsync(
+      db,
+      "SELECT id FROM cla_assignments WHERE tenant_id = ? AND object_type = 'product' AND object_id = 'DEMO-PUMP-001' AND class_id = ?",
+      [tenant, pump.id]
+    );
+    if (!existingAssignment) {
+      await assignClassAsync(
+        db,
+        tenant,
+        {
+          object_type: "product",
+          object_id: "DEMO-PUMP-001",
+          class_id: pump.id,
+          values: {
+            MATERIAL: "STAINLESS_STEEL",
+            FLOW_RATE: { value: 120, unit: "L/MIN" },
+            PRESSURE: { value: 16, unit: "BAR" },
+            WEIGHT: { value: 42.5, unit: "KG" },
+            SPEED: { value: 2900, unit: "RPM" },
+            POWER: { value: 7.5, unit: "KW" },
+            FINISH: "Ra 3.2",
+            PORTABLE: false,
+          },
+        },
+        null,
+        null
+      );
+      created.assignments += 1;
+    }
+
+    return { foundation, created, seeded: true };
+  });
+}
+
 function ensureClass(db, tenant, classificationId, def, parentId) {
   let row = queryOne(db, "SELECT * FROM cla_classes WHERE tenant_id = ? AND classification_id = ? AND code = ?", [tenant, classificationId, def.code]);
   if (!row) {
@@ -164,6 +285,28 @@ function resolveTenantId(db, tenantId) {
   return helix?.id ?? null;
 }
 
+async function ensureClassAsync(db, tenant, classificationId, def, parentId) {
+  let row = await queryOneAsync(db, "SELECT * FROM cla_classes WHERE tenant_id = ? AND classification_id = ? AND code = ?", [tenant, classificationId, def.code]);
+  if (!row) {
+    row = await createClassAsync(db, tenant, { classification_id: classificationId, parent_class_id: parentId, code: def.code, name: def.name }, null, null);
+  }
+  if (row.status !== "ACTIVE") await setClassStatusAsync(db, tenant, row.id, "ACTIVE", null, null);
+  return queryOneAsync(db, "SELECT * FROM cla_classes WHERE id = ?", [row.id]);
+}
+
+async function ensureClassCharacteristicAsync(db, tenant, classId, characteristicId, options) {
+  const existing = await queryOneAsync(db, "SELECT id FROM cla_class_characteristics WHERE class_id = ? AND characteristic_id = ?", [classId, characteristicId]);
+  if (existing) return existing;
+  return addClassCharacteristicAsync(db, tenant, classId, { characteristic_id: characteristicId, ...options }, null, null);
+}
+
+async function resolveTenantIdAsync(db, tenantId) {
+  const explicit = Number(tenantId);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const helix = await queryOneAsync(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  return helix?.id ?? null;
+}
+
 export function ensureClassificationSeed(db, tenantId) {
   withEventSuppression(() => ensureClassificationFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
@@ -171,4 +314,13 @@ export function ensureClassificationSeed(db, tenantId) {
   const existing = queryOne(db, "SELECT id FROM cla_classifications WHERE tenant_id = ? AND code = 'MECH_COMPONENTS'", [tenant]);
   if (existing) return { seeded: false, reason: "already_present" };
   return seedClassification(db, tenant);
+}
+
+export async function ensureClassificationSeedAsync(db, tenantId) {
+  await withEventSuppressionAsync(() => ensureClassificationFoundationAsync(db));
+  const tenant = await resolveTenantIdAsync(db, tenantId);
+  if (!tenant) return { seeded: false, reason: "no_tenant" };
+  const existing = await queryOneAsync(db, "SELECT id FROM cla_classifications WHERE tenant_id = ? AND code = 'MECH_COMPONENTS'", [tenant]);
+  if (existing) return { seeded: false, reason: "already_present" };
+  return seedClassificationAsync(db, tenant);
 }
