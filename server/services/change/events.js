@@ -2,7 +2,7 @@
 // idempotent and safe on every boot; emission is best-effort through the
 // shared Event & Messaging Framework so an event hiccup never fails a write.
 import { emitDomainEvent, emitDomainEventAsync } from "../events/emit.js";
-import { createEventType, getEventTypeRow } from "../events/registry.js";
+import { createEventType, getEventTypeRow, createEventTypeAsync, getEventTypeRowAsync } from "../events/registry.js";
 import { CHANGE_EVENT_TYPES, SOURCE_MODULE } from "./constants.js";
 
 export function ensureChangeEventTypes(db) {
@@ -10,6 +10,30 @@ export function ensureChangeEventTypes(db) {
   for (const type of CHANGE_EVENT_TYPES) {
     if (getEventTypeRow(db, type.code)) continue;
     createEventType(
+      db,
+      {
+        code: type.code,
+        name: type.code,
+        description: type.description,
+        category: "change",
+        source_module: SOURCE_MODULE,
+        system: true,
+        status: "active",
+        enabled: true,
+      },
+      null,
+      null
+    );
+    created += 1;
+  }
+  return created;
+}
+
+export async function ensureChangeEventTypesAsync(db) {
+  let created = 0;
+  for (const type of CHANGE_EVENT_TYPES) {
+    if (await getEventTypeRowAsync(db, type.code)) continue;
+    await createEventTypeAsync(
       db,
       {
         code: type.code,

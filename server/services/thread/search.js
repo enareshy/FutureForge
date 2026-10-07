@@ -5,7 +5,7 @@
 // controlled projections are discoverable with the same facets, authorization
 // and saved searches as every other module.
 import { queryAll, queryOne } from "../../db.js";
-import { queryOneAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerObjectType, registerObjectTypeAsync, tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { getObjectType, getObjectTypeAsync, registerObjectType as registerSecurityObjectType, registerObjectTypeAsync as registerSecurityObjectTypeAsync } from "../security/repository.js";
@@ -94,6 +94,31 @@ export function registerThreadSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM thread_definitions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, code, name, description, thread_type, root_object_type, status, created_by FROM thread_definitions WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "thread_definition",
+        objectId: String(row.id),
+        code: row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.thread_type, row.root_object_type, row.status]),
+        status: row.status,
+        ownerId: row.created_by ?? null,
+        classification: "internal",
+        tags: [row.thread_type, row.status].filter(Boolean),
+        attributes: { thread_type: row.thread_type, root_object_type: row.root_object_type, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM thread_definitions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("thread_snapshot", {
@@ -124,6 +149,31 @@ export function registerThreadSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM thread_snapshots WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, snapshot_ref, name, description, definition_code, root_object_type, status, created_by, node_count, edge_count FROM thread_snapshots WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "thread_snapshot",
+        objectId: String(row.id),
+        code: row.snapshot_ref,
+        title: row.name || row.snapshot_ref,
+        subtitle: row.snapshot_ref,
+        summary: row.description || "",
+        searchableText: joinText([row.snapshot_ref, row.name, row.description, row.definition_code, row.root_object_type, row.status]),
+        status: row.status,
+        ownerId: row.created_by ?? null,
+        classification: "internal",
+        tags: [row.definition_code, row.status].filter(Boolean),
+        attributes: { definition_code: row.definition_code, root_object_type: row.root_object_type, node_count: row.node_count, edge_count: row.edge_count, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM thread_snapshots WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("thread_baseline", {
@@ -153,6 +203,31 @@ export function registerThreadSources() {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM thread_baselines WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, baseline_ref, name, description, definition_code, status, created_by, member_count FROM thread_baselines WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "thread_baseline",
+        objectId: String(row.id),
+        code: row.baseline_ref,
+        title: row.name || row.baseline_ref,
+        subtitle: row.baseline_ref,
+        summary: row.description || "",
+        searchableText: joinText([row.baseline_ref, row.name, row.description, row.definition_code, row.status]),
+        status: row.status,
+        ownerId: row.created_by ?? null,
+        classification: "internal",
+        tags: [row.definition_code, row.status].filter(Boolean),
+        attributes: { definition_code: row.definition_code, member_count: row.member_count, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM thread_baselines WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
   });
 

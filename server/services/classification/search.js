@@ -3,7 +3,7 @@
 // so classification content is discoverable with the same facets, authorization
 // and saved searches as every other module.
 import { queryAll, queryOne } from "../../db.js";
-import { queryOneAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerObjectType, registerObjectTypeAsync, tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import {
@@ -99,6 +99,31 @@ export function registerClassificationSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM cla_classifications WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM cla_classifications WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "classification",
+        objectId: String(row.id),
+        code: row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.status, row.approval_status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? null,
+        classification: "internal",
+        tags: [row.status, row.approval_status].filter(Boolean),
+        attributes: { code: row.code, status: row.status, approval_status: row.approval_status },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM cla_classifications WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("classification_class", {
@@ -128,6 +153,31 @@ export function registerClassificationSources() {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM cla_classes WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM cla_classes WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: null,
+        objectType: "classification_class",
+        objectId: String(row.id),
+        code: row.code,
+        title: row.name || row.code,
+        subtitle: row.path || row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.path, row.status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? null,
+        classification: "internal",
+        tags: [row.status, row.path].filter(Boolean),
+        attributes: { code: row.code, status: row.status, path: row.path, level: row.level, classification_id: row.classification_id, parent_class_id: row.parent_class_id },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM cla_classes WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
   });
 
@@ -159,6 +209,32 @@ export function registerClassificationSources() {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM cla_assignments WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM cla_assignments WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      const classRow = await queryOneAsync(db, "SELECT code, name, path FROM cla_classes WHERE id = ?", [row.class_id]);
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "classification_assignment",
+        objectId: String(row.id),
+        code: row.assignment_ref,
+        title: `${row.object_type}:${row.object_id}`,
+        subtitle: classRow ? classRow.code : "",
+        summary: classRow ? classRow.name : "",
+        searchableText: joinText([row.assignment_ref, row.object_type, row.object_id, row.status, classRow?.code, classRow?.name, classRow?.path]),
+        status: row.status,
+        ownerId: row.assigned_by ?? null,
+        classification: "internal",
+        tags: [row.object_type, row.status, classRow?.code].filter(Boolean),
+        attributes: { object_type: row.object_type, object_id: row.object_id, status: row.status, class_id: row.class_id, classification_id: row.classification_id },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM cla_assignments WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
   });
 

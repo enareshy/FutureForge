@@ -7,14 +7,14 @@
 // them.
 import { queryAll, queryOne } from "../../db.js";
 import { queryAllAsync, queryOneAsync } from "../../db-async.js";
-import { tenantIds } from "../search/registry.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
-import { ensureBomUnits } from "./units.js";
-import { ensureBomEventTypes } from "./events.js";
-import { ensureBomJobTypes, registerBomHandlers } from "./jobs.js";
-import { ensureBomSearch, registerBomSources } from "./search.js";
-import { ensureBomConfig } from "./configuration.js";
-import { ensureDefaultValidationRules } from "./validator.js";
+import { ensureBomUnits, ensureBomUnitsAsync } from "./units.js";
+import { ensureBomEventTypes, ensureBomEventTypesAsync } from "./events.js";
+import { ensureBomJobTypes, ensureBomJobTypesAsync, registerBomHandlers } from "./jobs.js";
+import { ensureBomSearch, ensureBomSearchAsync, registerBomSources } from "./search.js";
+import { ensureBomConfig, ensureBomConfigAsync } from "./configuration.js";
+import { ensureDefaultValidationRules, ensureDefaultValidationRulesAsync } from "./validator.js";
 
 export function ensureBomFoundation(db) {
   const units = ensureBomUnits(db);
@@ -37,6 +37,41 @@ export function ensureBomFoundation(db) {
     validationRules += ensureDefaultValidationRules(db, tenantId);
   }
   const search = ensureBomSearch(db).created || 0;
+
+  return {
+    source_module: SOURCE_MODULE,
+    units,
+    event_types: eventTypes,
+    job_types: jobTypes.created,
+    handlers,
+    configuration,
+    validation_rules: validationRules,
+    search,
+    tenants: tenants.length,
+  };
+}
+
+export async function ensureBomFoundationAsync(db) {
+  const units = await ensureBomUnitsAsync(db);
+  const eventTypes = await ensureBomEventTypesAsync(db);
+  const jobTypes = await ensureBomJobTypesAsync(db);
+  const handlers = registerBomHandlers();
+  registerBomSources();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+
+  let configuration = 0;
+  let validationRules = 0;
+  for (const tenantId of tenants) {
+    configuration += (await ensureBomConfigAsync(db, tenantId)).created || 0;
+    validationRules += await ensureDefaultValidationRulesAsync(db, tenantId);
+  }
+  const search = (await ensureBomSearchAsync(db)).created || 0;
 
   return {
     source_module: SOURCE_MODULE,

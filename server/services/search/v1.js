@@ -43,15 +43,21 @@ import {
 import { runSearch, runSearchAsync } from "./query.js";
 import {
   applyIndexChange,
+  applyIndexChangeAsync,
   indexingStatus,
   indexingStatusAsync,
   listIndexFailures,
   listIndexFailuresAsync,
   reindexObject,
+  reindexObjectAsync,
   reindexOrganization,
+  reindexOrganizationAsync,
   reindexTenant,
+  reindexTenantAsync,
   reindexType,
+  reindexTypeAsync,
   retryIndexFailures,
+  retryIndexFailuresAsync,
 } from "./indexing.js";
 import {
   createSavedSearch,
@@ -77,9 +83,11 @@ import {
 import { searchHealth, searchHealthAsync, searchMetrics, searchMetricsAsync } from "./metrics.js";
 import {
   deleteExtractedText,
+  deleteExtractedTextAsync,
   listExtractedText,
   listExtractedTextAsync,
   putExtractedText,
+  putExtractedTextAsync,
 } from "./extracted-text.js";
 import {
   EFFECTIVITY_CONTEXT_FIELDS,
@@ -547,6 +555,43 @@ export function indexDocuments(db, input = {}, actor, options = {}) {
   return { results, indexed: results.filter((r) => r.status === "indexed").length, failed: results.filter((r) => r.status === "failed").length };
 }
 
+export async function indexDocumentsAsync(db, input = {}, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  const documents = Array.isArray(input.documents)
+    ? input.documents
+    : input.objectType || input.object_type
+      ? [input]
+      : [];
+  if (!documents.length) {
+    throw new SearchError(SEARCH_ERROR_CODES.INVALID_QUERY, "At least one document is required");
+  }
+  const results = [];
+  for (const entry of documents) {
+    const objectType = entry.objectType ?? entry.object_type;
+    const objectId = entry.objectId ?? entry.object_id;
+    const operation = entry.operation === "delete" ? "delete" : "upsert";
+    if (!objectType || objectId === undefined || objectId === null) {
+      throw new SearchError(SEARCH_ERROR_CODES.INVALID_QUERY, "Each document needs objectType and objectId");
+    }
+    try {
+      const doc = await applyIndexChangeAsync(db, {
+        tenantId: entry.tenantId ?? entry.tenant_id ?? tenantId,
+        objectType,
+        objectId,
+        operation,
+        reason: entry.reason || "api",
+        actor,
+        ip: options.ip,
+        audit: true,
+      });
+      results.push({ objectType, objectId: String(objectId), operation, status: "indexed", document: doc });
+    } catch (err) {
+      results.push({ objectType, objectId: String(objectId), operation, status: "failed", error: err.message });
+    }
+  }
+  return { results, indexed: results.filter((r) => r.status === "indexed").length, failed: results.filter((r) => r.status === "failed").length };
+}
+
 export function rebuildIndex(db, input = {}, actor, options = {}) {
   const tenantId = tenantOf(actor, options);
   const scope = String(input.scope || input.mode || "").toLowerCase();
@@ -582,6 +627,41 @@ export function rebuildIndex(db, input = {}, actor, options = {}) {
   };
 }
 
+export async function rebuildIndexAsync(db, input = {}, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  const scope = String(input.scope || input.mode || "").toLowerCase();
+  const objectType = input.objectType ?? input.object_type ?? null;
+  const organizationId = input.organizationId ?? input.organization_id ?? null;
+  if (scope === "object" || (objectType && (input.objectId ?? input.object_id))) {
+    const objectId = input.objectId ?? input.object_id;
+    return {
+      scope: "object",
+      result: await reindexObjectAsync(db, { tenantId, objectType, objectId }, actor, options.ip),
+    };
+  }
+  if (scope === "type" || scope === "object_type" || objectType) {
+    return {
+      scope: "object_type",
+      result: await reindexTypeAsync(db, { tenantId, objectType, limit: input.limit }, actor, options.ip),
+    };
+  }
+  if (scope === "organization" || organizationId) {
+    return {
+      scope: "organization",
+      result: await reindexOrganizationAsync(
+        db,
+        { tenantId, organizationId, limit: input.limit },
+        actor,
+        options.ip
+      ),
+    };
+  }
+  return {
+    scope: "full",
+    result: await reindexTenantAsync(db, { tenantId, limit: input.limit }, actor, options.ip),
+  };
+}
+
 export function getIndexStatus(db, actor, options = {}) {
   const tenantId = tenantOf(actor, options);
   return {
@@ -607,6 +687,15 @@ export function retryFailedIndexing(db, actor, options = {}) {
   );
 }
 
+export function retryFailedIndexingAsync(db, actor, options = {}) {
+  return retryIndexFailuresAsync(
+    db,
+    { tenantId: tenantOf(actor, options), includeDeadLetter: options.includeDeadLetter === true },
+    actor,
+    options.ip
+  );
+}
+
 // ── Extracted text (content integration contract, §35/§36) ──────────────────
 export function putObjectExtractedText(db, input, actor, options = {}) {
   const tenantId = tenantOf(actor, options);
@@ -616,6 +705,26 @@ export function putObjectExtractedText(db, input, actor, options = {}) {
   let reindexed = null;
   try {
     reindexed = applyIndexChange(db, {
+      tenantId,
+      objectType,
+      objectId,
+      operation: "upsert",
+      reason: "extracted_text",
+    });
+  } catch {
+    reindexed = null;
+  }
+  return { extractedText: saved, reindexed: Boolean(reindexed) };
+}
+
+export async function putObjectExtractedTextAsync(db, input, actor, options = {}) {
+  const tenantId = tenantOf(actor, options);
+  const saved = await putExtractedTextAsync(db, input, actor, tenantId, options.ip);
+  const objectType = saved.objectType;
+  const objectId = saved.objectId;
+  let reindexed = null;
+  try {
+    reindexed = await applyIndexChangeAsync(db, {
       tenantId,
       objectType,
       objectId,
@@ -664,6 +773,32 @@ export function removeObjectExtractedText(db, input, actor, options = {}) {
   );
   try {
     applyIndexChange(db, {
+      tenantId: tenantOf(actor, options),
+      objectType: saved.object_type,
+      objectId: saved.object_id,
+      operation: "upsert",
+      reason: "extracted_text_removed",
+    });
+  } catch {
+    /* index catches up on the next maintenance pass */
+  }
+  return saved;
+}
+
+export async function removeObjectExtractedTextAsync(db, input, actor, options = {}) {
+  const saved = await deleteExtractedTextAsync(
+    db,
+    {
+      tenantId: tenantOf(actor, options),
+      objectType: input.objectType ?? input.object_type,
+      objectId: input.objectId ?? input.object_id,
+      contentId: input.contentId ?? input.content_id ?? null,
+    },
+    actor,
+    options.ip
+  );
+  try {
+    await applyIndexChangeAsync(db, {
       tenantId: tenantOf(actor, options),
       objectType: saved.object_type,
       objectId: saved.object_id,

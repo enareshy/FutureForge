@@ -84,6 +84,11 @@ export {
   removeSavedAsync,
   removeHistoryEntryAsync,
   clearHistoryAsync,
+  indexDocumentsAsync,
+  rebuildIndexAsync,
+  retryFailedIndexingAsync,
+  putObjectExtractedTextAsync,
+  removeObjectExtractedTextAsync,
 } from "./search/v1.js";
 export {
   SEARCH_ERROR_CODES,
@@ -133,8 +138,12 @@ export {
   extractedTextFor,
   deleteExtractedText,
   listExtractedTextAsync,
+  putExtractedTextAsync,
+  extractedTextForAsync,
+  deleteExtractedTextAsync,
+  purgeExtractedTextAsync,
 } from "./search/extracted-text.js";
-export { reindexOrganization } from "./search/indexing.js";
+export { reindexOrganization, reindexOrganizationAsync } from "./search/indexing.js";
 
 export {
   vocabulary,
@@ -201,6 +210,17 @@ export {
   getSourceResolver,
   indexingStatusAsync,
   listIndexFailuresAsync,
+  buildDocumentAsync,
+  upsertIndexRowAsync,
+  deleteIndexRowAsync,
+  indexRowAsync,
+  applyIndexChangeAsync,
+  drainIndexQueueAsync,
+  retryIndexFailuresAsync,
+  reindexObjectAsync,
+  reindexTypeAsync,
+  reindexTenantAsync,
+  pruneIndexAsync,
 } from "./search/indexing.js";
 
 export {

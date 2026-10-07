@@ -264,9 +264,78 @@ describe("async job-execution engine reads and dead-letter control", () => {
     migrate(database);
     seedDatabase(database);
     tenantId = queryOne(database, "SELECT id FROM organizations WHERE code = 'helix'").id;
+    jobs.createJobType(
+      database,
+      { code: "ASYNC_ENGINE_SUCCESS", name: "Async engine success", max_retries: 0, timeout_seconds: 0, queues: ["default"], source_module: "test" },
+      null
+    );
+    jobExecution.registerHandler("ASYNC_ENGINE_SUCCESS", (context) => {
+      context.reportProgress({ progress: 50, stage: "half" });
+      context.step("finalize", { message: "wrapping up" });
+      return { message: "done", result: { ok: true }, last_step: "finalize" };
+    });
   });
 
-  after(() => database?.close());
+  after(() => {
+    jobExecution.unregisterHandler("ASYNC_ENGINE_SUCCESS");
+    database?.close();
+  });
+
+  const submitAsyncEngineJob = (name) => {
+    const submitted = jobs.submitJob(
+      database,
+      { job_type_code: "ASYNC_ENGINE_SUCCESS", name, tenant_id: tenantId, queue: "default" },
+      { actor: null }
+    );
+    return queryOne(database, "SELECT * FROM jobs WHERE job_ref = ?", [submitted.job_ref]);
+  };
+
+  test("runJobNowAsync executes a queued job end-to-end on the async layer", async () => {
+    const jobRow = submitAsyncEngineJob("Async run now");
+    const outcome = await jobExecution.runJobNowAsync(database, jobRow.id, { workerId: "test-async" });
+    assert.equal(outcome.status, "completed");
+    assert.equal(queryOne(database, "SELECT status FROM jobs WHERE id = ?", [jobRow.id]).status, "completed");
+    const execution = queryOne(database, "SELECT * FROM job_executions WHERE job_id = ? ORDER BY id DESC LIMIT 1", [jobRow.id]);
+    assert.equal(execution.status, "completed");
+    assert.equal(execution.last_step, "finalize");
+  });
+
+  test("tickAsync runs maintenance and processes runnable jobs on the async layer", async () => {
+    const jobRow = submitAsyncEngineJob("Async tick");
+    const result = await jobExecution.tickAsync(database, { workerId: "test-tick", run: true, limit: 5, queueCodes: ["default"] });
+    assert.ok(result.maintenance);
+    assert.ok(result.processed.claimed >= 1);
+    assert.equal(queryOne(database, "SELECT status FROM jobs WHERE id = ?", [jobRow.id]).status, "completed");
+  });
+
+  test("engineMaintenanceAsync promotes dependency-free created jobs to queued", async () => {
+    const jobRow = submitAsyncEngineJob("Async maintain");
+    run(database, "UPDATE jobs SET status = 'created' WHERE id = ?", [jobRow.id]);
+    const summary = await jobExecution.engineMaintenanceAsync(database);
+    assert.ok(summary.promoted);
+    assert.ok(summary.promoted.promoted >= 1);
+    assert.equal(queryOne(database, "SELECT status FROM jobs WHERE id = ?", [jobRow.id]).status, "queued");
+  });
+
+  test("requeueDeadLetterAsync re-queues an open dead-letter entry", async () => {
+    const jobRow = submitAsyncEngineJob("Async requeue");
+    run(database, "UPDATE jobs SET status = 'failed', error_code = 'test' WHERE id = ?", [jobRow.id]);
+    const ts = "2026-01-01 00:00:00";
+    const inserted = run(
+      database,
+      `INSERT INTO job_dead_letters
+         (job_id, queue, job_type_code, tenant_id, reason, category, attempts, status, created_at, updated_at)
+       VALUES (?, 'default', 'ASYNC_ENGINE_SUCCESS', ?, 'async requeue reason', 'PERMANENT', 1, 'open', ?, ?)`,
+      [jobRow.id, tenantId, ts, ts]
+    );
+    const deadLetterId = Number(inserted.lastInsertId);
+
+    const result = await jobExecution.requeueDeadLetterAsync(database, deadLetterId, { actor: { id: 1 }, note: "async requeue" });
+    assert.equal(result.requeued, true);
+    assert.equal(result.dead_letter.status, "requeued");
+    assert.equal(queryOne(database, "SELECT status FROM job_dead_letters WHERE id = ?", [deadLetterId]).status, "requeued");
+    assert.equal(queryOne(database, "SELECT status FROM jobs WHERE id = ?", [jobRow.id]).status, "queued");
+  });
 
   test("engineStatusAsync, executionMetricsAsync, listWorkersAsync and getLockAsync run on the async layer", async () => {
     const status = await jobExecution.engineStatusAsync(database);

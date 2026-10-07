@@ -3,6 +3,7 @@
 // framework via source resolvers; the indexer never reaches into versioning
 // tables directly.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { registerObjectType, getObjectType } from "../search/registry.js";
 import { applyIndexChange } from "../search/indexing.js";
@@ -68,6 +69,62 @@ function revisionResolver() {
         [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
       );
     },
+    async resolveAsync(db, revisionId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, revision_ref, revision_code, object_type, object_id, name, description, status, lifecycle_state, effective_from, effective_to, revision_sequence, is_default, revision_metadata_json, updated_at FROM versioning_revisions WHERE id = ?", [Number(revisionId)]);
+      if (!row) return null;
+      if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
+      const metadata = safeParse(row.revision_metadata_json, {});
+      const searchableText = [
+        row.revision_code,
+        row.object_type,
+        row.object_id,
+        row.name,
+        row.description,
+        row.status,
+        row.lifecycle_state,
+        row.effective_from,
+        row.effective_to,
+      ]
+        .filter((part) => part !== undefined && part !== null && String(part).trim() !== "")
+        .join(" \n ")
+        .toLowerCase();
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id,
+        objectType: "versioning_revision",
+        objectId: String(row.id),
+        objectUuid: row.revision_ref,
+        code: row.revision_code,
+        title: `${row.object_type} ${row.object_id} rev ${row.revision_code}`,
+        subtitle: row.status,
+        summary: `Revision ${row.revision_code} (${row.status})`,
+        searchableText,
+        status: row.status,
+        lifecycleState: row.lifecycle_state,
+        classification: "internal",
+        tags: [row.object_type, row.status],
+        attributes: {
+          object_type: row.object_type,
+          object_id: row.object_id,
+          revision_code: row.revision_code,
+          revision_sequence: row.revision_sequence,
+          effective_from: row.effective_from,
+          effective_to: row.effective_to,
+          is_default: Boolean(row.is_default),
+          ...metadata,
+        },
+        relationships: [],
+        updated_at: row.updated_at,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(
+        db,
+        `SELECT id, tenant_id FROM versioning_revisions
+         WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
+        [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
+      );
+    },
   };
 }
 
@@ -116,6 +173,47 @@ function baselineResolver() {
         [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
       );
     },
+    async resolveAsync(db, baselineId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, baseline_ref, code, name, description, status, owner_name, object_count, locked, frozen_at, context_json, updated_at FROM versioning_baselines WHERE id = ?", [Number(baselineId)]);
+      if (!row) return null;
+      if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
+      const searchableText = [row.code, row.name, row.description, row.status, row.owner_name]
+        .filter((part) => part !== undefined && part !== null && String(part).trim() !== "")
+        .join(" \n ")
+        .toLowerCase();
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id,
+        objectType: "versioning_baseline",
+        objectId: String(row.id),
+        objectUuid: row.baseline_ref,
+        code: row.code,
+        title: row.name || row.code,
+        subtitle: row.status,
+        summary: `Baseline ${row.code} (${row.status})`,
+        searchableText,
+        status: row.status,
+        lifecycleState: row.status,
+        classification: "internal",
+        tags: [row.status],
+        attributes: {
+          code: row.code,
+          object_count: row.object_count,
+          locked: Boolean(row.locked),
+          frozen_at: row.frozen_at,
+          context: safeParse(row.context_json, {}),
+        },
+        relationships: [],
+        updated_at: row.updated_at,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(
+        db,
+        `SELECT id, tenant_id FROM versioning_baselines WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
+        [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
+      );
+    },
   };
 }
 
@@ -158,6 +256,46 @@ function snapshotResolver() {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(
+        db,
+        `SELECT id, tenant_id FROM versioning_snapshots WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
+        [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
+      );
+    },
+    async resolveAsync(db, snapshotId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, snapshot_ref, code, name, description, status, content_hash, object_count, context_json, created_at FROM versioning_snapshots WHERE id = ?", [Number(snapshotId)]);
+      if (!row) return null;
+      if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
+      const searchableText = [row.code, row.name, row.description, row.status, row.content_hash]
+        .filter((part) => part !== undefined && part !== null && String(part).trim() !== "")
+        .join(" \n ")
+        .toLowerCase();
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id,
+        objectType: "versioning_snapshot",
+        objectId: String(row.id),
+        objectUuid: row.snapshot_ref,
+        code: row.code,
+        title: row.name || row.code,
+        subtitle: row.status,
+        summary: `Snapshot ${row.code} (${row.status})`,
+        searchableText,
+        status: row.status,
+        lifecycleState: row.status,
+        classification: "internal",
+        tags: [row.status],
+        attributes: {
+          code: row.code,
+          object_count: row.object_count,
+          content_hash: row.content_hash,
+          context: safeParse(row.context_json, {}),
+        },
+        relationships: [],
+        updated_at: row.created_at,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(
         db,
         `SELECT id, tenant_id FROM versioning_snapshots WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? ORDER BY id LIMIT ?`,
         [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]

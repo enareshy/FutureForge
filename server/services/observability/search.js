@@ -5,7 +5,7 @@
 // knowledge is discoverable with the same facets, authorization and saved
 // searches as every other module.
 import { queryAll, queryOne } from "../../db.js";
-import { queryOneAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerObjectType, registerObjectTypeAsync, tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import {
@@ -112,6 +112,31 @@ export function registerObservabilitySources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM observability_metric_definitions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, metric_ref, code, name, description, category, provider_code, calculation, unit, status, owner_user_id, created_by FROM observability_metric_definitions WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "observability_metric",
+        objectId: String(row.id),
+        code: row.metric_ref || row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.category, row.provider_code, row.calculation, row.unit, row.status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? row.created_by ?? null,
+        classification: "internal",
+        tags: [row.category, row.provider_code, row.unit, row.status].filter(Boolean),
+        attributes: { category: row.category, provider_code: row.provider_code, calculation: row.calculation, unit: row.unit, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM observability_metric_definitions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("observability_alert", {
@@ -141,6 +166,31 @@ export function registerObservabilitySources() {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM observability_alerts WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, alert_ref, rule_code, metric_code, service_code, severity, status, message, created_by FROM observability_alerts WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: null,
+        objectType: "observability_alert",
+        objectId: String(row.id),
+        code: row.alert_ref,
+        title: row.message || row.metric_code,
+        subtitle: row.metric_code,
+        summary: row.message || "",
+        searchableText: joinText([row.alert_ref, row.rule_code, row.metric_code, row.service_code, row.severity, row.status, row.message]),
+        status: row.status,
+        ownerId: row.created_by ?? null,
+        classification: "internal",
+        tags: [row.severity, row.status, row.service_code, row.metric_code].filter(Boolean),
+        attributes: { severity: row.severity, status: row.status, service_code: row.service_code, metric_code: row.metric_code },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM observability_alerts WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
   });
 
@@ -172,6 +222,31 @@ export function registerObservabilitySources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM observability_incidents WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, incident_ref, title, description, severity, status, service_code, metric_code, owner_user_id, created_by FROM observability_incidents WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: null,
+        objectType: "observability_incident",
+        objectId: String(row.id),
+        code: row.incident_ref,
+        title: row.title,
+        subtitle: row.incident_ref,
+        summary: row.description || "",
+        searchableText: joinText([row.incident_ref, row.title, row.description, row.severity, row.status, row.service_code, row.metric_code]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? row.created_by ?? null,
+        classification: "internal",
+        tags: [row.severity, row.status, row.service_code].filter(Boolean),
+        attributes: { severity: row.severity, status: row.status, service_code: row.service_code },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM observability_incidents WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("observability_dashboard", {
@@ -201,6 +276,31 @@ export function registerObservabilitySources() {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM observability_dashboards WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, dashboard_ref, code, name, description, scope, status, owner_user_id, created_by FROM observability_dashboards WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "observability_dashboard",
+        objectId: String(row.id),
+        code: row.dashboard_ref || row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.scope, row.status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? row.created_by ?? null,
+        classification: "internal",
+        tags: [row.scope, row.status].filter(Boolean),
+        attributes: { scope: row.scope, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM observability_dashboards WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
   });
 

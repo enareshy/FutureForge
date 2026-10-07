@@ -66,6 +66,22 @@ export function ensureDefaultValidationRules(db, tenantId) {
   return created;
 }
 
+export async function ensureDefaultValidationRulesAsync(db, tenantId) {
+  const tenant = Number(tenantId);
+  let created = 0;
+  for (const rule of DEFAULT_VALIDATION_RULES) {
+    if (await queryOneAsync(db, "SELECT id FROM pdm_validation_rules WHERE tenant_id = ? AND code = ?", [tenant, rule.code])) continue;
+    await runAsync(
+      db,
+      `INSERT INTO pdm_validation_rules (rule_ref, tenant_id, code, name, description, rule_type, severity, config_json, status, sequence, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '{}', 'ACTIVE', ?, ?, ?)`,
+      [validationRef(rule.code), tenant, rule.code, rule.code, rule.description || "", assertRuleType(rule.rule_type), assertRuleSeverity(rule.severity), Number(rule.sequence || 0), nowIso(), nowIso()]
+    );
+    created += 1;
+  }
+  return created;
+}
+
 export function createValidationRule(db, tenantId, body = {}, actor = null, ip = null) {
   const tenant = Number(tenantId);
   const code = normalizeText(body.code, { max: 120 });

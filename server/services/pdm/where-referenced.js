@@ -5,8 +5,9 @@
 // "what references this object?" by reading that reverse index and grouping the
 // result by category. Reindexing rebuilds the index from the relationship graph.
 import { queryAll } from "../../db.js";
+import { queryAllAsync } from "../../db-async.js";
 import { publicReference } from "./repository.js";
-import { listReferences, recordReference, listReferencesAsync } from "./references.js";
+import { listReferences, recordReference, listReferencesAsync, recordReferenceAsync } from "./references.js";
 import { publishPdmEvent, publishPdmEventAsync, pdmEventCode } from "./events.js";
 import { paginate, normalizeText, normalizeUpper } from "./validation.js";
 import { SOURCE_MODULE, REFERENCE_CATEGORIES } from "./constants.js";
@@ -58,6 +59,35 @@ export function rebuildReferences(db, tenantId, { actor = null } = {}) {
       [tenant, String(link.id), link.target_type, link.target_id]
     ).length;
     recordReference(db, tenant, {
+      source_type: "RELATIONSHIP",
+      source_id: String(link.id),
+      source_ref: link.relationship_ref,
+      target_type: link.target_type,
+      target_id: link.target_id,
+      target_ref: "",
+      category: "RELATIONSHIP",
+      relationship_type: link.relationship_type,
+      organization_id: link.organization_id ?? null,
+    });
+    if (!before) added += 1;
+  }
+  void actor;
+  return { source_module: SOURCE_MODULE, relationships: relationships.length, added, rebuilt_at: new Date().toISOString() };
+}
+
+export async function rebuildReferencesAsync(db, tenantId, { actor = null } = {}) {
+  const tenant = Number(tenantId);
+  const relationships = await queryAllAsync(db, "SELECT * FROM pdm_relationships WHERE tenant_id = ?", [tenant]);
+  let added = 0;
+  for (const link of relationships) {
+    const before = (
+      await queryAllAsync(
+        db,
+        "SELECT id FROM pdm_references WHERE tenant_id = ? AND source_type = 'RELATIONSHIP' AND source_id = ? AND target_type = ? AND target_id = ? AND category = 'RELATIONSHIP' LIMIT 1",
+        [tenant, String(link.id), link.target_type, link.target_id]
+      )
+    ).length;
+    await recordReferenceAsync(db, tenant, {
       source_type: "RELATIONSHIP",
       source_id: String(link.id),
       source_ref: link.relationship_ref,

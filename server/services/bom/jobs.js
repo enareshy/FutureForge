@@ -4,11 +4,12 @@
 // run on the shared Job Scheduling & Execution Engine so they are durable,
 // resumable, observable and retryable. Handlers only drive the BOM core.
 import { queryAll, run, nowIso } from "../../db.js";
+import { queryAllAsync, runAsync } from "../../db-async.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
-import { getJobTypeRow, createJobType } from "../jobs/types.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
+import { getJobTypeRow, createJobType, getJobTypeRowAsync, createJobTypeAsync } from "../jobs/types.js";
 import { BOM_HANDLER_CODES, BOM_JOB_TYPES } from "./constants.js";
-import { getConfig } from "./configuration.js";
+import { getConfig, getConfigAsync } from "./configuration.js";
 import { rollup } from "./rollup.js";
 import { whereUsed, multiLevelWhereUsed } from "./where-used.js";
 import { transform } from "./transformation.js";
@@ -22,6 +23,16 @@ export function ensureBomJobTypes(db) {
   for (const def of BOM_JOB_TYPES) {
     if (getJobTypeRow(db, def.code)) continue;
     createJobType(db, { ...def }, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
+export async function ensureBomJobTypesAsync(db) {
+  let created = 0;
+  for (const def of BOM_JOB_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    await createJobTypeAsync(db, { ...def }, null, null);
     created += 1;
   }
   return { created };
@@ -42,28 +53,67 @@ function submit(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority 
   );
 }
 
+async function submitAsync(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority = "normal", queue = "bom", idempotencyKey = null }) {
+  return submitJobAsync(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      input: { tenant_id: Number(tenantId), ...handlerParams },
+      tenant_id: Number(tenantId),
+      priority,
+      queue,
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+}
+
 export function submitRollupJob(db, { tenantId, revisionId, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "BOM_ROLLUP", handlerParams: { revision_id: Number(revisionId), options }, actor, ip, idempotencyKey });
+}
+
+export async function submitRollupJobAsync(db, { tenantId, revisionId, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "BOM_ROLLUP", handlerParams: { revision_id: Number(revisionId), options }, actor, ip, idempotencyKey });
 }
 
 export function submitWhereUsedJob(db, { tenantId, objectId, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "BOM_WHERE_USED", handlerParams: { object_id: String(objectId), options }, actor, ip, idempotencyKey });
 }
 
+export async function submitWhereUsedJobAsync(db, { tenantId, objectId, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "BOM_WHERE_USED", handlerParams: { object_id: String(objectId), options }, actor, ip, idempotencyKey });
+}
+
 export function submitTransformJob(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "BOM_TRANSFORM", handlerParams: { body }, actor, ip, idempotencyKey });
+}
+
+export async function submitTransformJobAsync(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "BOM_TRANSFORM", handlerParams: { body }, actor, ip, idempotencyKey });
 }
 
 export function submitValidateJob(db, { tenantId, revisionId, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "BOM_VALIDATE", handlerParams: { revision_id: Number(revisionId), options }, actor, ip, idempotencyKey });
 }
 
+export async function submitValidateJobAsync(db, { tenantId, revisionId, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "BOM_VALIDATE", handlerParams: { revision_id: Number(revisionId), options }, actor, ip, idempotencyKey });
+}
+
 export function submitCompareJob(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "BOM_COMPARE", handlerParams: { body }, actor, ip, idempotencyKey });
 }
 
+export async function submitCompareJobAsync(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "BOM_COMPARE", handlerParams: { body }, actor, ip, idempotencyKey });
+}
+
 export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "BOM_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low", queue: "default", idempotencyKey });
+}
+
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "BOM_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low", queue: "default", idempotencyKey });
 }
 
 // ── Synchronous cores (also used by the handlers) ────────────────────────────
@@ -88,6 +138,34 @@ export function runBomMaintenance(db, { tenantId = null, limit = 5000 } = {}) {
       "DELETE FROM bom_substitutes WHERE tenant_id = ? AND bom_revision_id NOT IN (SELECT id FROM bom_revisions)",
       [tenant]
     ).changes || 0;
+    invalidate(tenant);
+    bumpEpoch(tenant);
+  }
+  summary.cache = cacheStats();
+  void limit;
+  return summary;
+}
+
+export async function runBomMaintenanceAsync(db, { tenantId = null, limit = 5000 } = {}) {
+  const tenantRows = tenantId
+    ? [{ tenant_id: Number(tenantId) }]
+    : await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM bom_headers WHERE tenant_id IS NOT NULL");
+  const summary = { tenants: tenantRows.length, history_pruned: 0, orphan_attributes_pruned: 0, orphan_substitutes_pruned: 0, ran_at: nowIso() };
+  for (const row of tenantRows) {
+    const tenant = Number(row.tenant_id);
+    const retentionDays = Number((await getConfigAsync(db, tenant, "history_retention_days")) || 365);
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    summary.history_pruned += (await runAsync(db, "DELETE FROM bom_change_history WHERE tenant_id = ? AND created_at < ?", [tenant, cutoff])).changes || 0;
+    summary.orphan_attributes_pruned += (await runAsync(
+      db,
+      "DELETE FROM bom_line_attributes WHERE tenant_id = ? AND line_id NOT IN (SELECT id FROM bom_lines)",
+      [tenant]
+    )).changes || 0;
+    summary.orphan_substitutes_pruned += (await runAsync(
+      db,
+      "DELETE FROM bom_substitutes WHERE tenant_id = ? AND bom_revision_id NOT IN (SELECT id FROM bom_revisions)",
+      [tenant]
+    )).changes || 0;
     invalidate(tenant);
     bumpEpoch(tenant);
   }

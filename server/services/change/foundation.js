@@ -11,21 +11,26 @@
 // own status field, so this never blocks boot and never blocks the feature.
 import { queryOne } from "../../db.js";
 import { queryOneAsync } from "../../db-async.js";
-import { tenantIds } from "../search/registry.js";
-import { createObjectType } from "../numbering/foundation.js";
-import { createScheme, setSchemeStatus } from "../numbering/schemes.js";
-import { getSchemeRow as getNumberingSchemeRow } from "../numbering/scopes.js";
-import { createType as createMetadataType, findType as findMetadataType } from "../metadata/types.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
+import { createObjectType, createObjectTypeAsync } from "../numbering/foundation.js";
+import { createScheme, setSchemeStatus, createSchemeAsync, setSchemeStatusAsync } from "../numbering/schemes.js";
+import { getSchemeRow as getNumberingSchemeRow, getSchemeRowAsync as getNumberingSchemeRowAsync } from "../numbering/scopes.js";
+import { createType as createMetadataType, findType as findMetadataType, createTypeAsync as createMetadataTypeAsync, findTypeAsync as findMetadataTypeAsync } from "../metadata/types.js";
 import {
   createDefinition as createLifecycleDefinition,
   createState as createLifecycleState,
   createTransition as createLifecycleTransition,
   publishDefinition as publishLifecycleDefinition,
   createAssignment as createLifecycleAssignment,
+  createDefinitionAsync as createLifecycleDefinitionAsync,
+  createStateAsync as createLifecycleStateAsync,
+  createTransitionAsync as createLifecycleTransitionAsync,
+  publishDefinitionAsync as publishLifecycleDefinitionAsync,
+  createAssignmentAsync as createLifecycleAssignmentAsync,
 } from "../lifecycle/definitions.js";
-import { createRule as createApprovalRule } from "../lifecycle/approvals.js";
-import { ensureChangeEventTypes } from "./events.js";
-import { ensureChangeConfig } from "./configuration.js";
+import { createRule as createApprovalRule, createRuleAsync as createApprovalRuleAsync } from "../lifecycle/approvals.js";
+import { ensureChangeEventTypes, ensureChangeEventTypesAsync } from "./events.js";
+import { ensureChangeConfig, ensureChangeConfigAsync } from "./configuration.js";
 import { SOURCE_MODULE, NUMBERING_OBJECT_TYPES, CHANGE_ORDER_OBJECT_TYPE } from "./constants.js";
 
 const NUMBERING_SCHEME_DEFAULTS = {
@@ -149,6 +154,121 @@ export function ensureChangeFoundation(db) {
   }
 
   const genericLifecycle = registerGenericLifecycle(db);
+
+  return {
+    source_module: SOURCE_MODULE,
+    event_types: eventTypes,
+    numbering,
+    configuration,
+    tenants: tenants.length,
+    generic_lifecycle: genericLifecycle,
+  };
+}
+
+async function ensureNumberingObjectTypeAsync(db, code) {
+  const existing = await queryOneAsync(db, "SELECT id FROM numbering_object_types WHERE code = ? AND tenant_id IS NULL", [code]);
+  if (existing) return false;
+  try {
+    await createObjectTypeAsync(db, { code, name: code, module: "change", status: "active" }, null, null, null);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureNumberingSchemesAsync(db) {
+  let created = 0;
+  for (const [objectTypeCode, config] of Object.entries(NUMBERING_SCHEME_DEFAULTS)) {
+    const existing = await getNumberingSchemeRowAsync(db, config.code);
+    if (existing) continue;
+    try {
+      const scheme = await createSchemeAsync(
+        db,
+        { code: config.code, name: `${objectTypeCode} default numbering`, object_type_code: objectTypeCode, pattern: config.pattern, padding: config.padding, scope_type: "global" },
+        null,
+        null,
+        null
+      );
+      await setSchemeStatusAsync(db, scheme.code, "active", null, null);
+      created += 1;
+    } catch {
+      // Idempotent by design; a concurrent boot may have already created it.
+    }
+  }
+  return created;
+}
+
+async function ensureNumberingFoundationAsync(db) {
+  let objectTypes = 0;
+  for (const code of Object.values(NUMBERING_OBJECT_TYPES)) {
+    if (await ensureNumberingObjectTypeAsync(db, code)) objectTypes += 1;
+  }
+  const schemes = await ensureNumberingSchemesAsync(db);
+  return { object_types: objectTypes, schemes };
+}
+
+async function registerGenericLifecycleAsync(db) {
+  try {
+    if (await findMetadataTypeAsync(db, CHANGE_ORDER_OBJECT_TYPE, null)) return { registered: false, reason: "already registered" };
+  } catch {
+    // Not found is expected on first boot; continue registering.
+  }
+  try {
+    const type = await createMetadataTypeAsync(db, { code: CHANGE_ORDER_OBJECT_TYPE, name: "Change Order", status: "active" }, null, null, null);
+
+    const { definition, version } = await createLifecycleDefinitionAsync(db, { code: "change-order-lifecycle", name: "Change Order Lifecycle", module: "change" }, null, null, null);
+    const draft = await createLifecycleStateAsync(db, { lifecycle_version_id: version.id, code: "draft", name: "Draft", is_initial: true, category: "draft" }, null, null, null);
+    const inReview = await createLifecycleStateAsync(db, { lifecycle_version_id: version.id, code: "in_review", name: "In Review", category: "in_review" }, null, null, null);
+    const approved = await createLifecycleStateAsync(db, { lifecycle_version_id: version.id, code: "approved", name: "Approved", category: "approved" }, null, null, null);
+    const released = await createLifecycleStateAsync(db, { lifecycle_version_id: version.id, code: "released", name: "Released", is_terminal: true, category: "released" }, null, null, null);
+
+    await createLifecycleTransitionAsync(db, { lifecycle_version_id: version.id, code: "submit", name: "Submit for review", from_state: draft.code, to_state: inReview.code }, null, null, null);
+    const approveTransition = await createLifecycleTransitionAsync(db, { lifecycle_version_id: version.id, code: "approve", name: "CCB approve", from_state: inReview.code, to_state: approved.code, requires_approval: true }, null, null, null);
+    await createLifecycleTransitionAsync(db, { lifecycle_version_id: version.id, code: "release", name: "Release", from_state: approved.code, to_state: released.code }, null, null, null);
+
+    await publishLifecycleDefinitionAsync(db, definition.id, {}, null, null, null);
+    await createLifecycleAssignmentAsync(db, { type: CHANGE_ORDER_OBJECT_TYPE, lifecycle: "change-order-lifecycle" }, null, null, null);
+
+    const approvalRule = await createApprovalRuleAsync(
+      db,
+      {
+        code: "change-order-ccb-approval",
+        name: "Change Order CCB Approval",
+        kind: "release",
+        module: "change",
+        transition_id: approveTransition.id,
+        min_approvals: 1,
+        steps: [{ code: "ccb", name: "CCB", sequence: 1, approver_type: "role", approval_mode: "min", min_approvals: 1 }],
+      },
+      null,
+      null,
+      null
+    );
+
+    return { registered: true, type_id: type.id, lifecycle_definition_id: definition.id, approval_rule_id: approvalRule.id };
+  } catch (err) {
+    console.warn(`[change] Generic lifecycle/approval onboarding skipped (Change Order still works via its own status field): ${err?.message || err}`);
+    return { registered: false, error: err?.message || String(err) };
+  }
+}
+
+export async function ensureChangeFoundationAsync(db) {
+  const eventTypes = await ensureChangeEventTypesAsync(db);
+  const numbering = await ensureNumberingFoundationAsync(db);
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+
+  let configuration = 0;
+  for (const tenantId of tenants) {
+    configuration += (await ensureChangeConfigAsync(db, tenantId)).created || 0;
+  }
+
+  const genericLifecycle = await registerGenericLifecycleAsync(db);
 
   return {
     source_module: SOURCE_MODULE,

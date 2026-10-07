@@ -114,9 +114,9 @@ export function createDeploymentRouter({ express, db, auth, authAsync, can, canA
 
   router.post(
     "/foundation/ensure",
-    auth,
-    can(R.profile, "execute"),
-    wrap((_req, res) => res.json(Foundation.ensureDeploymentFoundation(db)))
+    authAsync,
+    canProfileAsync("execute"),
+    wrap(async (_req, res) => res.json(await Foundation.ensureDeploymentFoundationAsync(db)))
   );
 
   return router;

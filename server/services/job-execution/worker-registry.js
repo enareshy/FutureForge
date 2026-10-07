@@ -4,7 +4,7 @@
 // worker state without importing the loop, avoiding a circular dependency.
 
 import { queryAll, queryOne, run, nowIso, randomUuid } from "../../db.js";
-import { queryAllAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { parseSqlTime, sqlTime } from "./timezone.js";
 
@@ -102,6 +102,35 @@ export function heartbeatWorker(db, id, { status, activeJobs, queues } = {}) {
 
 export function recordWorkerOutcome(db, id, { success = true } = {}) {
   run(
+    db,
+    `UPDATE job_workers SET processed_total = processed_total + 1,
+       failed_total = failed_total + ?, last_heartbeat = ?, updated_at = ? WHERE id = ?`,
+    [success ? 0 : 1, nowIso(), nowIso(), id]
+  );
+}
+
+export async function heartbeatWorkerAsync(db, id, { status, activeJobs, queues } = {}) {
+  const fields = ["last_heartbeat = ?", "updated_at = ?"];
+  const params = [nowIso(), nowIso()];
+  if (status !== undefined) {
+    fields.push("status = ?");
+    params.push(status);
+  }
+  if (activeJobs !== undefined) {
+    fields.push("active_jobs = ?");
+    params.push(Math.max(0, Number(activeJobs) || 0));
+  }
+  if (queues !== undefined) {
+    fields.push("queues_json = ?");
+    params.push(JSON.stringify(queues));
+  }
+  params.push(id);
+  await runAsync(db, `UPDATE job_workers SET ${fields.join(", ")} WHERE id = ?`, params);
+  return publicWorker(await queryOneAsync(db, "SELECT * FROM job_workers WHERE id = ?", [id]));
+}
+
+export async function recordWorkerOutcomeAsync(db, id, { success = true } = {}) {
+  await runAsync(
     db,
     `UPDATE job_workers SET processed_total = processed_total + 1,
        failed_total = failed_total + ?, last_heartbeat = ?, updated_at = ? WHERE id = ?`,

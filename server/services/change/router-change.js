@@ -3,9 +3,9 @@
 // Mounted at /api/change and /api/v1/change (mirrors server/services/pdm/router-pdm.js).
 //
 // Every route is entirely one data-access layer (per the async migration
-// rule): data routes use `authAsync`/`canAsync` + `*Async` service twins,
-// while pure-vocabulary (`/meta`) and bootstrap (`/foundation/ensure`, `/seed`)
-// stay on the sync `auth`/`can` + sync service.
+// rule): data routes and bootstrap (`/foundation/ensure`, `/seed`) use
+// `authAsync`/`canAsync` + `*Async` service twins, while the pure-vocabulary
+// `/meta` route stays on the sync `auth`/`can` path.
 import { Constants, Validation, Requests, Orders, Notices, AffectedItems, Relationships, Configuration, Foundation, Seed } from "./index.js";
 
 const R = Constants.CHANGE_RESOURCES;
@@ -49,8 +49,8 @@ export function createChangeRouter({ express, db, auth, can, authAsync, canAsync
   );
 
   // ── Bootstrap ───────────────────────────────────────────────────────────
-  router.post("/foundation/ensure", auth, canAdmin("execute"), wrap((_req, res) => res.json(Foundation.ensureChangeFoundation(db))));
-  router.post("/seed", auth, canAdmin("execute"), wrap((req, res) => res.json(Seed.seedChange(db, tenantOf(req)))));
+  router.post("/foundation/ensure", authAsync, canAdminAsync("execute"), wrap(async (_req, res) => res.json(await Foundation.ensureChangeFoundationAsync(db))));
+  router.post("/seed", authAsync, canAdminAsync("execute"), wrap(async (req, res) => res.json(await Seed.seedChangeAsync(db, tenantOf(req)))));
 
   // ── Change Requests (ECR) ───────────────────────────────────────────────
   router.get("/requests", authAsync, canRequestsAsync("read"), wrap(async (req, res) => res.json(await Requests.listRequestsAsync(db, { tenantId: tenantOf(req), ...req.query }))));

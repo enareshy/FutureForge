@@ -5,8 +5,8 @@
 // object through this module, and indexing merges it into the document's
 // searchable text. Binary payloads are never placed in the index.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
-import { queryAllAsync } from "../../db-async.js";
-import { writeAudit } from "../audit.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { SearchError, SEARCH_ERROR_CODES } from "./errors.js";
 
 const MAX_TEXT_LENGTH = 1_000_000;
@@ -101,6 +101,58 @@ export function putExtractedText(db, input = {}, actor, tenantId, ip) {
   );
 }
 
+export async function putExtractedTextAsync(db, input = {}, actor, tenantId, ip) {
+  const tenant = Number(tenantId ?? input.tenantId ?? input.tenant_id ?? 0);
+  const objectType = String(input.objectType ?? input.object_type ?? "").trim();
+  const objectId = String(input.objectId ?? input.object_id ?? "").trim();
+  if (!tenant) throw new SearchError(SEARCH_ERROR_CODES.INVALID_QUERY, "A tenant is required");
+  if (!objectType || !objectId) {
+    throw new SearchError(SEARCH_ERROR_CODES.INVALID_QUERY, "objectType and objectId are required");
+  }
+  const contentId = String(input.contentId ?? input.content_id ?? "");
+  const text = normalizeText(input.text);
+  const source = normalizedSource(input.source);
+  const language = String(input.language ?? "");
+  const checksum = String(input.checksum ?? "");
+  const ts = nowIso();
+  const existing = await queryOneAsync(
+    db,
+    "SELECT * FROM search_extracted_text WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND content_id = ?",
+    [tenant, objectType, objectId, contentId]
+  );
+  if (existing) {
+    await runAsync(
+      db,
+      `UPDATE search_extracted_text SET source = ?, language = ?, text = ?, text_length = ?, checksum = ?, updated_at = ?
+       WHERE id = ?`,
+      [source, language, text, text.length, checksum, ts, existing.id]
+    );
+  } else {
+    await runAsync(
+      db,
+      `INSERT INTO search_extracted_text
+         (tenant_id, object_type, object_id, content_id, source, language, text, text_length, checksum, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [tenant, objectType, objectId, contentId, source, language, text, text.length, checksum, ts, ts]
+    );
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: existing ? "search.extracted_text.update" : "search.extracted_text.create",
+    resourceType: "search_extracted_text",
+    resourceId: `${objectType}:${objectId}`,
+    details: { object_type: objectType, object_id: objectId, content_id: contentId, text_length: text.length },
+    ip,
+  });
+  return publicExtractedText(
+    await queryOneAsync(
+      db,
+      "SELECT * FROM search_extracted_text WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND content_id = ?",
+      [tenant, objectType, objectId, contentId]
+    )
+  );
+}
+
 export function publicExtractedText(row) {
   if (!row) return null;
   return {
@@ -178,6 +230,25 @@ export function extractedTextFor(db, tenantId, objectType, objectId) {
   return parts.join("\n");
 }
 
+export async function extractedTextForAsync(db, tenantId, objectType, objectId) {
+  const rows = await queryAllAsync(
+    db,
+    "SELECT text FROM search_extracted_text WHERE tenant_id = ? AND object_type = ? AND object_id = ? ORDER BY id",
+    [Number(tenantId), String(objectType), String(objectId)]
+  );
+  const seen = new Set();
+  const parts = [];
+  for (const row of rows) {
+    const text = String(row.text || "").trim();
+    if (!text) continue;
+    const key = text.slice(0, 400);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parts.push(text);
+  }
+  return parts.join("\n");
+}
+
 export function deleteExtractedText(db, { tenantId, objectType, objectId, contentId = null }, actor, ip) {
   const tenant = Number(tenantId);
   const type = String(objectType || "");
@@ -209,8 +280,47 @@ export function deleteExtractedText(db, { tenantId, objectType, objectId, conten
   return { deleted: true, object_type: type, object_id: id };
 }
 
+export async function deleteExtractedTextAsync(db, { tenantId, objectType, objectId, contentId = null }, actor, ip) {
+  const tenant = Number(tenantId);
+  const type = String(objectType || "");
+  const id = String(objectId || "");
+  if (!tenant || !type || !id) {
+    throw new SearchError(SEARCH_ERROR_CODES.INVALID_QUERY, "tenantId, objectType and objectId are required");
+  }
+  if (contentId !== null && contentId !== undefined) {
+    await runAsync(
+      db,
+      "DELETE FROM search_extracted_text WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND content_id = ?",
+      [tenant, type, id, String(contentId)]
+    );
+  } else {
+    await runAsync(db, "DELETE FROM search_extracted_text WHERE tenant_id = ? AND object_type = ? AND object_id = ?", [
+      tenant,
+      type,
+      id,
+    ]);
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "search.extracted_text.delete",
+    resourceType: "search_extracted_text",
+    resourceId: `${type}:${id}`,
+    details: { object_type: type, object_id: id, content_id: contentId },
+    ip,
+  });
+  return { deleted: true, object_type: type, object_id: id };
+}
+
 export function purgeExtractedText(db, tenantId, objectType, objectId) {
   run(db, "DELETE FROM search_extracted_text WHERE tenant_id = ? AND object_type = ? AND object_id = ?", [
+    Number(tenantId),
+    String(objectType),
+    String(objectId),
+  ]);
+}
+
+export async function purgeExtractedTextAsync(db, tenantId, objectType, objectId) {
+  await runAsync(db, "DELETE FROM search_extracted_text WHERE tenant_id = ? AND object_type = ? AND object_id = ?", [
     Number(tenantId),
     String(objectType),
     String(objectId),

@@ -3,7 +3,7 @@
 // Enterprise Search instead of a bespoke listing UI. Indexing, querying,
 // authorization and saved searches are all reused.
 import { queryAll, queryOne } from "../../db.js";
-import { queryOneAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerObjectType, registerObjectTypeAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { tenantIds, tenantIdsAsync } from "../search/registry.js";
@@ -99,6 +99,35 @@ export function registerDataExchangeSources() {
         [Number(tenantId), Number(afterId), Number(limit)]
       );
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM ie_import_definitions WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "data_exchange_import_definition",
+        objectId: String(row.id),
+        code: row.definition_ref || row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.target_object_type, row.source_type, row.status, row.mode]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? null,
+        classification: "internal",
+        tags: [row.source_type, row.target_object_type, row.status].filter(Boolean),
+        attributes: { code: row.code, source_type: row.source_type, target_object_type: row.target_object_type, status: row.status, mode: row.mode },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(
+        db,
+        "SELECT id, tenant_id FROM ie_import_definitions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?",
+        [Number(tenantId), Number(afterId), Number(limit)]
+      );
+    },
   });
 
   registerSourceResolver("data_exchange_export_definition", {
@@ -133,6 +162,35 @@ export function registerDataExchangeSources() {
         [Number(tenantId), Number(afterId), Number(limit)]
       );
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM ie_export_definitions WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "data_exchange_export_definition",
+        objectId: String(row.id),
+        code: row.definition_ref || row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.object_type, row.format, row.destination, row.status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? null,
+        classification: "internal",
+        tags: [row.format, row.destination, row.status].filter(Boolean),
+        attributes: { code: row.code, format: row.format, destination: row.destination, object_type: row.object_type, status: row.status },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(
+        db,
+        "SELECT id, tenant_id FROM ie_export_definitions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?",
+        [Number(tenantId), Number(afterId), Number(limit)]
+      );
+    },
   });
 
   registerSourceResolver("data_exchange_job", {
@@ -162,6 +220,35 @@ export function registerDataExchangeSources() {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(
+        db,
+        "SELECT id, tenant_id FROM ie_import_jobs WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?",
+        [Number(tenantId), Number(afterId), Number(limit)]
+      );
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM ie_import_jobs WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "data_exchange_job",
+        objectId: String(row.id),
+        code: row.job_ref,
+        title: row.job_ref,
+        subtitle: row.target_object_type || "",
+        summary: row.error_message || "",
+        searchableText: joinText([row.job_ref, row.mode, row.status, row.source_type, row.target_object_type, row.error_message]),
+        status: row.status,
+        ownerId: row.created_by ?? null,
+        classification: "internal",
+        tags: [row.mode, row.status, row.source_type].filter(Boolean),
+        attributes: { mode: row.mode, status: row.status, source_type: row.source_type, target_object_type: row.target_object_type },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(
         db,
         "SELECT id, tenant_id FROM ie_import_jobs WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?",
         [Number(tenantId), Number(afterId), Number(limit)]

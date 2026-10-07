@@ -79,6 +79,16 @@ export function ensurePdmConfig(db, tenantId) {
   return { created };
 }
 
+export async function ensurePdmConfigAsync(db, tenantId) {
+  let created = 0;
+  for (const [key, value] of Object.entries(CONFIG_DEFAULTS)) {
+    if (await getConfigRowAsync(db, tenantId, key)) continue;
+    await setConfigAsync(db, tenantId, key, value, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
 // ── Async twins (used by migrated read routes) ───────────────────────────────
 
 export async function getConfigRowAsync(db, tenantId, key) {

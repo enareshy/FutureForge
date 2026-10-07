@@ -4,7 +4,7 @@
 // through the shared Enterprise Search, so analytical assets are discoverable
 // with the same facets, authorization and saved searches as every other module.
 import { queryAll, queryOne } from "../../db.js";
-import { queryOneAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerObjectType, tenantIds, registerObjectTypeAsync, tenantIdsAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { getObjectType, registerObjectType as registerSecurityObjectType, getObjectTypeAsync, registerObjectTypeAsync as registerSecurityObjectTypeAsync } from "../security/repository.js";
@@ -93,6 +93,31 @@ export function registerReportingSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM reporting_reports WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, report_ref, code, name, description, report_type, data_source, entity, status, owner_user_id, created_by FROM reporting_reports WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "reporting_report",
+        objectId: String(row.id),
+        code: row.report_ref || row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.report_type, row.data_source, row.entity, row.status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? row.created_by ?? null,
+        classification: "internal",
+        tags: [row.report_type, row.data_source, row.entity, row.status].filter(Boolean),
+        attributes: { report_type: row.report_type, data_source: row.data_source, entity: row.entity, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM reporting_reports WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("reporting_dashboard", {
@@ -123,6 +148,31 @@ export function registerReportingSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM reporting_dashboards WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, dashboard_ref, code, name, description, dashboard_type, status, owner_user_id, created_by FROM reporting_dashboards WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "reporting_dashboard",
+        objectId: String(row.id),
+        code: row.dashboard_ref || row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.dashboard_type, row.status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? row.created_by ?? null,
+        classification: "internal",
+        tags: [row.dashboard_type, row.status].filter(Boolean),
+        attributes: { dashboard_type: row.dashboard_type, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM reporting_dashboards WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("reporting_kpi", {
@@ -152,6 +202,31 @@ export function registerReportingSources() {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM reporting_kpis WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, kpi_ref, code, name, description, metric_code, entity, aggregation, unit, status, owner_user_id, created_by FROM reporting_kpis WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "reporting_kpi",
+        objectId: String(row.id),
+        code: row.kpi_ref || row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.metric_code, row.entity, row.aggregation, row.unit, row.status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? row.created_by ?? null,
+        classification: "internal",
+        tags: [row.entity, row.aggregation, row.unit, row.status].filter(Boolean),
+        attributes: { entity: row.entity, aggregation: row.aggregation, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM reporting_kpis WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
   });
 

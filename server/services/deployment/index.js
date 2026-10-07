@@ -35,7 +35,9 @@ export const Deployment = {
 };
 
 export const ensureDeploymentFoundation = Foundation.ensureDeploymentFoundation;
+export const ensureDeploymentFoundationAsync = Foundation.ensureDeploymentFoundationAsync;
 export const deploymentHealth = Foundation.deploymentHealth;
+export const deploymentHealthAsync = Foundation.deploymentHealthAsync;
 
 // Named exports for the few consumers that need a single function (the
 // `requireFeature` middleware resolves entitlements directly).

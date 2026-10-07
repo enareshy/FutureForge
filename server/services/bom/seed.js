@@ -3,15 +3,16 @@
 // a substitute, a frozen baseline, an EBOM->MBOM transformation definition and a
 // validation run) so the capability is visible immediately after boot.
 import { queryOne } from "../../db.js";
-import { withEventSuppression } from "../events/emit.js";
-import { ensureBomFoundation } from "./foundation.js";
-import { createBom } from "./definitions.js";
-import { createRevision, setRevisionStatus } from "./revisions.js";
-import { addLine } from "./lines.js";
-import { addSubstitute } from "./substitutes.js";
-import { createBaseline, freezeBaseline } from "./baseline.js";
-import { createTransformationDefinition, createMapping } from "./transformation.js";
-import { validateRevision } from "./validator.js";
+import { queryOneAsync } from "../../db-async.js";
+import { withEventSuppression, withEventSuppressionAsync } from "../events/emit.js";
+import { ensureBomFoundation, ensureBomFoundationAsync } from "./foundation.js";
+import { createBom, createBomAsync } from "./definitions.js";
+import { createRevision, createRevisionAsync, setRevisionStatus, setRevisionStatusAsync } from "./revisions.js";
+import { addLine, addLineAsync } from "./lines.js";
+import { addSubstitute, addSubstituteAsync } from "./substitutes.js";
+import { createBaseline, createBaselineAsync, freezeBaseline, freezeBaselineAsync } from "./baseline.js";
+import { createTransformationDefinition, createTransformationDefinitionAsync, createMapping, createMappingAsync } from "./transformation.js";
+import { validateRevision, validateRevisionAsync } from "./validator.js";
 
 const LINES = [
   { child_object_id: "DEMO-HOUSING-001", child_object_type: "part", quantity: 1, uom: "EA", find_number: "10", usage: "DESIGN", reference_designator: "" },
@@ -104,10 +105,99 @@ export function seedBom(db, tenantId) {
   });
 }
 
+export async function seedBomAsync(db, tenantId) {
+  return withEventSuppressionAsync(async () => {
+    const tenant = await resolveTenantIdAsync(db, tenantId);
+    const foundation = await ensureBomFoundationAsync(db);
+    const created = { boms: 0, revisions: 0, lines: 0, substitutes: 0, baselines: 0, transformations: 0, validations: 0 };
+    if (!tenant) return { foundation, created, seeded: false, reason: "no_tenant" };
+
+    let bom = await queryOneAsync(db, "SELECT * FROM bom_headers WHERE tenant_id = ? AND bom_number = 'DEMO-EBOM-PUMP'", [tenant]);
+    if (!bom) {
+      bom = await createBomAsync(db, tenant, {
+        bom_number: "DEMO-EBOM-PUMP",
+        name: "Demonstration pump assembly (EBOM)",
+        description: "Multi-level engineering BOM seeded to showcase the BOM Engine.",
+        bom_type: "EBOM",
+        owner_object_id: null,
+      }, null, null);
+      created.boms += 1;
+    }
+
+    let revision = await queryOneAsync(db, "SELECT * FROM bom_revisions WHERE tenant_id = ? AND bom_id = ? AND revision_number = 'A1'", [tenant, bom.id]);
+    if (!revision) {
+      revision = await createRevisionAsync(db, tenant, bom.id, { revision_number: "A1", valid_from: null, valid_to: null }, null, null);
+      created.revisions += 1;
+    }
+
+    const lineCount = Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM bom_lines WHERE bom_revision_id = ?", [revision.id]))?.c || 0);
+    if (lineCount === 0) {
+      for (const line of LINES) {
+        await addLineAsync(db, tenant, revision.id, line, null, null);
+        created.lines += 1;
+      }
+    }
+
+    if (!(await queryOneAsync(db, "SELECT id FROM bom_substitutes WHERE tenant_id = ? AND bom_revision_id = ? AND substitute_object_id = 'DEMO-SEAL-ALT'", [tenant, revision.id]))) {
+      await addSubstituteAsync(db, tenant, revision.id, { substitute_object_id: "DEMO-SEAL-ALT", substitute_object_type: "part", substitute_group: "SEAL", priority: 1, ratio: 1 }, null, null);
+      created.substitutes += 1;
+    }
+
+    let baseline = await queryOneAsync(db, "SELECT * FROM bom_baselines WHERE tenant_id = ? AND bom_id = ? AND baseline_number = 'DEMO-EBOM-PUMP-BL-A'", [tenant, bom.id]);
+    if (!baseline) {
+      baseline = await createBaselineAsync(db, tenant, { bom_id: bom.id, revision_id: revision.id, baseline_number: "DEMO-EBOM-PUMP-BL-A", name: "Pump EBOM revision A baseline", status: "DRAFT" }, null, null);
+      created.baselines += 1;
+    }
+    if (baseline.status !== "FROZEN") {
+      baseline = await freezeBaselineAsync(db, tenant, baseline.id, null, null);
+    }
+
+    let definition = await queryOneAsync(db, "SELECT * FROM bom_transformation_definitions WHERE tenant_id = ? AND code = 'EBOM_TO_MBOM_DEMO'", [tenant]);
+    if (!definition) {
+      definition = await createTransformationDefinitionAsync(db, tenant, {
+        code: "EBOM_TO_MBOM_DEMO",
+        name: "EBOM to MBOM (demonstration)",
+        description: "Maps design usage to manufacturing usage and scales bulk fasteners.",
+        source_bom_type: "EBOM",
+        target_bom_type: "MBOM",
+        status: "ACTIVE",
+        config: { usage_map: { DESIGN: "MANUFACTURING" } },
+      }, null, null);
+      await createMappingAsync(db, tenant, definition.id, { mapping_type: "CONSTANT", target_path: "plant", default_value: "PLANT-01", sequence: 10 }, null, null);
+      await createMappingAsync(db, tenant, definition.id, { mapping_type: "LINE", source_path: "DESIGN", target_path: "usage", sequence: 20 }, null, null);
+      created.transformations += 1;
+    }
+
+    const validation = await queryOneAsync(db, "SELECT id FROM bom_validation_results WHERE tenant_id = ? AND revision_id = ?", [tenant, revision.id]);
+    if (!validation) {
+      await validateRevisionAsync(db, tenant, revision.id, { scope: "REVISION", actor: null });
+      created.validations += 1;
+    }
+
+    if (revision.status === "DRAFT") {
+      try {
+        await setRevisionStatusAsync(db, tenant, revision.id, "IN_REVIEW", null, null);
+        await setRevisionStatusAsync(db, tenant, revision.id, "RELEASED", null, null);
+      } catch {
+        // A partially released revision is still a valid demo state.
+      }
+    }
+
+    return { foundation, created, seeded: true };
+  });
+}
+
 function resolveTenantId(db, tenantId) {
   const explicit = Number(tenantId);
   if (Number.isInteger(explicit) && explicit > 0) return explicit;
   const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  return helix?.id ?? null;
+}
+
+async function resolveTenantIdAsync(db, tenantId) {
+  const explicit = Number(tenantId);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const helix = await queryOneAsync(db, "SELECT id FROM organizations WHERE code = 'helix'");
   return helix?.id ?? null;
 }
 
@@ -118,4 +208,13 @@ export function ensureBomSeed(db, tenantId) {
   const existing = queryOne(db, "SELECT id FROM bom_headers WHERE tenant_id = ? AND bom_number = 'DEMO-EBOM-PUMP'", [tenant]);
   if (existing) return { seeded: false, reason: "already_present" };
   return seedBom(db, tenant);
+}
+
+export async function ensureBomSeedAsync(db, tenantId) {
+  await withEventSuppressionAsync(() => ensureBomFoundationAsync(db));
+  const tenant = await resolveTenantIdAsync(db, tenantId);
+  if (!tenant) return { seeded: false, reason: "no_tenant" };
+  const existing = await queryOneAsync(db, "SELECT id FROM bom_headers WHERE tenant_id = ? AND bom_number = 'DEMO-EBOM-PUMP'", [tenant]);
+  if (existing) return { seeded: false, reason: "already_present" };
+  return seedBomAsync(db, tenant);
 }

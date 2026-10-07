@@ -2,6 +2,7 @@
 // through the platform Search framework via a source resolver; the indexer
 // never reaches into numbering tables directly.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { registerObjectType, getObjectType } from "../search/registry.js";
 import { applyIndexChange } from "../search/indexing.js";
@@ -88,6 +89,83 @@ export const NUMBERING_ALLOCATION_SOURCE = {
   },
   listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
     return queryAll(
+      db,
+      `SELECT id, tenant_id FROM numbering_allocations
+       WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ?
+       ORDER BY id LIMIT ?`,
+      [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
+    );
+  },
+  async resolveAsync(db, allocationId, { tenantId } = {}) {
+    const row = await queryOneAsync(db, "SELECT * FROM numbering_allocations WHERE id = ?", [Number(allocationId)]);
+    if (!row) return null;
+    if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
+    const scheme = row.scheme_id
+      ? await queryOneAsync(db, "SELECT code, name, object_type_code FROM numbering_schemes WHERE id = ?", [row.scheme_id])
+      : null;
+    const metadata = safeParse(row.metadata_json, {});
+    const searchableText = [
+      row.number,
+      row.object_type_code,
+      row.object_id,
+      row.object_ref,
+      row.allocation_ref,
+      row.status,
+      row.scope_key,
+      scheme?.code,
+      scheme?.name,
+      row.requested_by_name,
+      row.correlation_id,
+    ]
+      .filter((part) => part !== undefined && part !== null && String(part).trim() !== "")
+      .join(" \n ")
+      .toLowerCase();
+    return {
+      tenantId: row.tenant_id,
+      organizationId: row.organization_id ?? null,
+      objectType: NUMBERING_ALLOCATION_SOURCE.code,
+      objectId: String(row.id),
+      objectUuid: row.allocation_ref,
+      code: row.number,
+      title: row.number,
+      subtitle: row.object_type_code,
+      summary: `${row.object_type_code} identifier ${row.number} (${row.status})`,
+      searchableText,
+      status: row.status,
+      lifecycleState: row.status,
+      ownerId: row.requested_by ?? null,
+      ownerName: row.requested_by_name || "",
+      classification: "internal",
+      tags: [row.object_type_code, row.status],
+      attributes: {
+        number: row.number,
+        object_type: row.object_type_code,
+        object_id: row.object_id,
+        scheme: scheme?.code ?? "",
+        scheme_version: row.scheme_version,
+        sequence_value: row.sequence_value,
+        scope: row.scope_key,
+        reusable: Boolean(row.reusable),
+        is_manual: Boolean(row.is_manual),
+        ...metadata,
+      },
+      relationships: row.object_id
+        ? [
+            {
+              direction: "out",
+              type: "consumes",
+              target_type: row.object_type_code,
+              target_id: row.object_id,
+              title: row.object_ref || row.object_id,
+              code: "",
+            },
+          ]
+        : [],
+      updated_at: row.updated_at,
+    };
+  },
+  async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+    return queryAllAsync(
       db,
       `SELECT id, tenant_id FROM numbering_allocations
        WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ?

@@ -4,7 +4,7 @@
 // in the centralized Search & Discovery engine as read-only object types.
 // Indexing, querying, authorization and saved searches are reused, not rebuilt.
 import { queryAll, queryOne } from "../../db.js";
-import { queryOneAsync } from "../../db-async.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerObjectType, tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { getObjectType, getObjectTypeAsync, registerObjectType as registerSecurityObjectType, registerObjectTypeAsync } from "../security/repository.js";
@@ -92,6 +92,19 @@ function makeResolver(def, mapper) {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, `SELECT id, tenant_id FROM ${def.source_table} WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?`, [
+        Number(tenantId),
+        Number(afterId),
+        Number(limit),
+      ]);
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, `SELECT * FROM ${def.source_table} WHERE id = ?`, [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return mapper(row);
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, `SELECT id, tenant_id FROM ${def.source_table} WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?`, [
         Number(tenantId),
         Number(afterId),
         Number(limit),

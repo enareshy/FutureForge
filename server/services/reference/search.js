@@ -2,6 +2,7 @@
 // become searchable through the platform Search framework via a source
 // resolver; the indexer never reaches into reference tables directly.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { registerObjectType, getObjectType } from "../search/registry.js";
 import { applyIndexChange } from "../search/indexing.js";
@@ -80,6 +81,75 @@ export const REFERENCE_ITEM_SOURCE = {
   },
   listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
     return queryAll(
+      db,
+      `SELECT id, tenant_id FROM reference_data_items
+       WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ?
+       ORDER BY id LIMIT ?`,
+      [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
+    );
+  },
+  async resolveAsync(db, itemId, { tenantId } = {}) {
+    const row = await queryOneAsync(db, "SELECT id, tenant_id, organization_id, item_ref, code, name, description, attributes_json, scope_key, scope_type, status, owner_user_id, owner_label, domain_id, current_version_number, effective_from, effective_to, is_default, updated_at FROM reference_data_items WHERE id = ?", [Number(itemId)]);
+    if (!row) return null;
+    if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
+    const domain = await queryOneAsync(db, "SELECT code, name, category FROM reference_domains WHERE id = ?", [row.domain_id]);
+    const codes = await queryAllAsync(db, "SELECT code, code_type FROM reference_codes WHERE item_id = ?", [row.id]);
+    const aliases = await queryAllAsync(db, "SELECT alias FROM reference_aliases WHERE item_id = ? AND status = 'active'", [row.id]);
+    const translations = await queryAllAsync(db, "SELECT language, name FROM reference_translations WHERE item_id = ?", [row.id]);
+    const attributes = safeParse(row.attributes_json, {});
+    const searchableText = [
+      row.code,
+      row.name,
+      row.description,
+      domain?.code,
+      domain?.name,
+      domain?.category,
+      row.scope_key,
+      row.status,
+      ...codes.map((c) => c.code),
+      ...aliases.map((a) => a.alias),
+      ...translations.map((t) => t.name),
+    ]
+      .filter((part) => part !== undefined && part !== null && String(part).trim() !== "")
+      .join(" \n ")
+      .toLowerCase();
+    return {
+      tenantId: row.tenant_id,
+      organizationId: row.organization_id ?? null,
+      objectType: REFERENCE_ITEM_SOURCE.code,
+      objectId: String(row.id),
+      objectUuid: row.item_ref,
+      code: row.code,
+      title: `${domain?.code ?? "REF"}:${row.code}`,
+      subtitle: row.name,
+      summary: `${row.name || row.code} (${row.status})`,
+      searchableText,
+      status: row.status,
+      lifecycleState: row.status,
+      ownerId: row.owner_user_id ?? null,
+      ownerName: row.owner_label || "",
+      classification: "internal",
+      tags: [domain?.code, row.scope_key, row.status].filter(Boolean),
+      attributes: {
+        domain_id: row.domain_id,
+        domain_code: domain?.code ?? "",
+        scope_type: row.scope_type,
+        scope_key: row.scope_key,
+        version: row.current_version_number,
+        effective_from: row.effective_from,
+        effective_to: row.effective_to,
+        is_default: Boolean(row.is_default),
+        ...attributes,
+      },
+      relationships: [
+        ...codes.map((c) => ({ direction: "out", type: "code", target_type: "reference_code", target_id: c.code, title: c.code, code: c.code })),
+        ...aliases.map((a) => ({ direction: "out", type: "alias", target_type: "reference_alias", target_id: a.alias, title: a.alias, code: "" })),
+      ],
+      updated_at: row.updated_at,
+    };
+  },
+  async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+    return queryAllAsync(
       db,
       `SELECT id, tenant_id FROM reference_data_items
        WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ?

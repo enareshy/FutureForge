@@ -2,6 +2,7 @@
 // platform Search & Discovery framework; the indexer never reads content tables
 // directly and full binary payloads are never placed in the index.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { registerObjectType, getObjectType, refreshState } from "../search/registry.js";
 import { applyIndexChange } from "../search/indexing.js";
@@ -96,6 +97,91 @@ export const CONTENT_SOURCE = {
   },
   listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
     return queryAll(
+      db,
+      `SELECT id, tenant_id FROM content
+       WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? AND deleted_at IS NULL
+       ORDER BY id LIMIT ?`,
+      [tenantId ?? null, tenantId ?? null, Number(afterId), Number(limit)]
+    );
+  },
+  async resolveAsync(db, id, { tenantId } = {}) {
+    const row = await queryOneAsync(db, "SELECT * FROM content WHERE id = ?", [Number(id)]);
+    if (!row) return null;
+    if (tenantId && row.tenant_id && Number(row.tenant_id) !== Number(tenantId)) return null;
+    const associations = await queryAllAsync(
+      db,
+      "SELECT object_type, object_id, content_role, is_primary FROM content_associations WHERE content_id = ? AND deleted_at IS NULL AND status = 'active'",
+      [row.id]
+    );
+    const metadata = safeParse(row.metadata_json, {});
+    const searchableText = [
+      row.file_name,
+      row.original_file_name,
+      row.mime_type,
+      row.file_extension,
+      row.content_role,
+      row.content_key,
+      row.content_id,
+      row.object_type,
+      row.object_id,
+      row.status,
+      row.security_status,
+      row.checksum,
+      ...associations.map((a) => `${a.object_type}:${a.object_id}`),
+      ...Object.values(metadata).filter((v) => typeof v === "string"),
+    ]
+      .filter((part) => part !== undefined && part !== null && String(part).trim() !== "")
+      .join(" \n ")
+      .toLowerCase();
+    return {
+      tenantId: row.tenant_id,
+      organizationId: row.organization_id ?? null,
+      objectType: CONTENT_SOURCE.code,
+      objectId: String(row.id),
+      objectUuid: row.content_id,
+      code: row.content_key,
+      title: row.file_name,
+      subtitle: `${row.content_role} · ${row.mime_type}`,
+      summary: `${row.file_name} (${row.status}, ${row.file_size} bytes)`,
+      searchableText,
+      status: row.status,
+      lifecycleState: row.status,
+      ownerId: row.created_by ?? null,
+      classification: row.security_classification || "internal",
+      tags: [row.content_role, row.mime_type, row.status, row.security_status].filter(Boolean),
+      attributes: {
+        content_id: row.content_id,
+        content_key: row.content_key,
+        object_type: row.object_type,
+        object_id: row.object_id,
+        revision_id: row.versioning_revision_id,
+        version_id: row.version_id,
+        content_role: row.content_role,
+        mime_type: row.mime_type,
+        extension: row.file_extension,
+        file_size: row.file_size,
+        checksum: row.checksum,
+        security_status: row.security_status,
+        processing_status: row.processing_status,
+        version_count: row.version_count,
+        is_primary: Boolean(row.is_primary),
+        created_by: row.created_by,
+        created_at: row.created_at,
+        ...metadata,
+      },
+      relationships: associations.map((a) => ({
+        direction: "out",
+        type: a.content_role,
+        target_type: a.object_type,
+        target_id: a.object_id,
+        title: `${a.object_type} ${a.object_id}`,
+        code: "",
+      })),
+      updated_at: row.updated_at,
+    };
+  },
+  async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+    return queryAllAsync(
       db,
       `SELECT id, tenant_id FROM content
        WHERE (?::bigint IS NULL OR tenant_id = ?) AND id > ? AND deleted_at IS NULL

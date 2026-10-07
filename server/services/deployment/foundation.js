@@ -6,9 +6,9 @@
 // catalog. Operator overrides (`enabled`, `notes`) are never overwritten, so a
 // deployment can upgrade the platform without losing its entitlement choices.
 import { queryOne, run, nowIso } from "../../db.js";
-import { queryOneAsync } from "../../db-async.js";
-import { ensureProfileRow, getProfile, getProfileAsync, publicProfile } from "./profile.js";
-import { featureRow, listFeatures, listFeaturesAsync, resolveCapabilities, resolveCapabilitiesAsync } from "./features.js";
+import { queryOneAsync, runAsync } from "../../db-async.js";
+import { ensureProfileRow, getProfile, getProfileAsync, publicProfile, ensureProfileRowAsync } from "./profile.js";
+import { featureRow, listFeatures, listFeaturesAsync, resolveCapabilities, resolveCapabilitiesAsync, featureRowAsync } from "./features.js";
 import { invalidateCapabilities } from "./cache.js";
 import { SOURCE_MODULE, FEATURE_CATALOG, findEdition } from "./constants.js";
 
@@ -75,6 +75,70 @@ export function ensureFeatureDefaults(db) {
 export function ensureDeploymentFoundation(db) {
   const profileCreated = ensureProfileRow(db);
   const features = ensureFeatureDefaults(db);
+  invalidateCapabilities(db);
+  return {
+    source_module: SOURCE_MODULE,
+    profile_created: profileCreated,
+    features_created: features.created,
+    features_updated: features.updated,
+    features_total: features.total,
+  };
+}
+
+async function refreshFeatureContractAsync(db, row, spec) {
+  const patch = {};
+  if (row.name !== spec.name) patch.name = spec.name;
+  if (row.category !== spec.category) patch.category = spec.category;
+  if ((row.description || "") !== (spec.description || "")) patch.description = spec.description || "";
+  if (row.min_edition !== spec.min_edition) patch.min_edition = spec.min_edition;
+  if (normalizeModes(row.allowed_modes) !== normalizeModes(spec.allowed_modes)) {
+    patch.allowed_modes = spec.allowed_modes || "";
+  }
+  if (Number(row.sort_order) !== Number(spec.sort_order)) patch.sort_order = spec.sort_order;
+  const columns = Object.keys(patch);
+  if (!columns.length) return false;
+  await runAsync(
+    db,
+    `UPDATE deployment_features SET ${columns.map((c) => `${c} = ?`).join(", ")}, updated_at = ? WHERE feature_code = ?`,
+    [...columns.map((c) => patch[c]), nowIso(), row.feature_code]
+  );
+  return true;
+}
+
+export async function ensureFeatureDefaultsAsync(db) {
+  let created = 0;
+  let updated = 0;
+  for (const spec of FEATURE_CATALOG) {
+    const row = await featureRowAsync(db, spec.feature_code);
+    if (!row) {
+      await runAsync(
+        db,
+        `INSERT INTO deployment_features
+           (feature_code, name, category, description, enabled, min_edition, allowed_modes, notes, sort_order, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?, '', ?, ?, ?)`,
+        [
+          spec.feature_code,
+          spec.name,
+          spec.category,
+          spec.description || "",
+          spec.min_edition,
+          spec.allowed_modes || "",
+          spec.sort_order,
+          nowIso(),
+          nowIso(),
+        ]
+      );
+      created += 1;
+    } else if (await refreshFeatureContractAsync(db, row, spec)) {
+      updated += 1;
+    }
+  }
+  return { created, updated, total: FEATURE_CATALOG.length };
+}
+
+export async function ensureDeploymentFoundationAsync(db) {
+  const profileCreated = await ensureProfileRowAsync(db);
+  const features = await ensureFeatureDefaultsAsync(db);
   invalidateCapabilities(db);
   return {
     source_module: SOURCE_MODULE,

@@ -509,6 +509,65 @@ export async function getQueueAsync(db, ref) {
   return publicQueue(row, loadFor(await queueLoadAsync(db), row.code));
 }
 
+export async function resolveQueuePolicyAsync(db, code) {
+  const canonical = canonicalQueue(code);
+  const row = await queryOneAsync(db, "SELECT * FROM job_queues WHERE code = ?", [canonical]);
+  if (row) return row;
+  const fallback = DEFAULT_QUEUES.find((queue) => queue.code === canonical) || DEFAULT_QUEUES[0];
+  return {
+    id: null,
+    code: fallback.code,
+    ...fallback,
+    enabled: 1,
+    paused: 0,
+    is_system: 1,
+    config_json: "{}",
+  };
+}
+
+export async function orderQueuesForClaimAsync(db, codes = null) {
+  const load = await queueLoadAsync(db);
+  const restrict = Array.isArray(codes) && codes.length > 0;
+  let policies;
+  if (restrict) {
+    const wanted = [...new Set(codes.map((code) => canonicalQueue(code)))];
+    policies = await queryAllAsync(
+      db,
+      `SELECT * FROM job_queues WHERE code IN (${wanted.map(() => "?").join(", ")})`,
+      wanted
+    );
+    const known = new Set(policies.map((row) => row.code));
+    for (const code of wanted) {
+      if (!known.has(code)) policies.push(await resolveQueuePolicyAsync(db, code));
+    }
+  } else {
+    policies = await queryAllAsync(db, "SELECT * FROM job_queues WHERE is_system = 1 OR id IS NOT NULL");
+    const known = new Set(policies.map((row) => row.code));
+    for (const code of LOGICAL_QUEUES) {
+      if (!known.has(code)) policies.push(await resolveQueuePolicyAsync(db, code));
+    }
+  }
+  const now = Date.now();
+  const scored = policies
+    .filter((row) => row.enabled === 1 && row.paused !== 1)
+    .map((row) => {
+      const entry = loadFor(load, row.code);
+      const idleSeconds = row.last_claimed_at
+        ? Math.max(0, (now - new Date(row.last_claimed_at.replace(" ", "T") + "Z").getTime()) / 1000)
+        : entry.oldest_age_seconds || 0;
+      const aging = Math.min(60, Math.floor(idleSeconds / 10));
+      return {
+        policy: row,
+        canonical: canonicalQueue(row.code),
+        effective_priority: (Number(row.priority) || 0) + aging,
+        aging_bonus: aging,
+        load: entry,
+      };
+    })
+    .sort((a, b) => b.effective_priority - a.effective_priority || b.policy.priority - a.policy.priority || a.canonical.localeCompare(b.canonical));
+  return { scored, load };
+}
+
 export async function listQueuesAsync(db, query = {}, tenantId = null) {
   const { page, pageSize, offset } = pagination(query);
   const where = [];

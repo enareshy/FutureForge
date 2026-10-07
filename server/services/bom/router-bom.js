@@ -6,11 +6,10 @@
 // never trusted to declare its own authorization.
 //
 // Read and write routes run on the asynchronous data path
-// (`authAsync`/`*Async`). The shared Reference Data unit reads
-// (`requireUnit`/`getUnit`), the configuration writes, and the
-// foundation/seed/background-job submission routes stay on the synchronous
-// worker path. A single route never mixes the two layers except for those
-// documented cross-module unit reads.
+// (`authAsync`/`*Async`). The shared Reference Data unit conversion helper and
+// the search-meta route stay on the synchronous worker path. A single route
+// never mixes the two layers except for those documented cross-module unit
+// reads.
 import {
   Constants,
   Validation,
@@ -73,6 +72,8 @@ export function createBomRouter({ express, db, auth, can, authAsync, canAsync, w
   const canBaselineAsync = (a) => canAsync(R.baseline, a);
   const canAuditAsync = (a) => canAsync(R.auditTrail, a);
   const canMetricsAsync = (a) => canAsync(R.metrics, a);
+  const canSearchAsync = (a) => canAsync(R.search, a);
+  const canAdminAsync = (a) => canAsync(R.admin, a);
 
   // ── Meta, health, metrics ─────────────────────────────────────────────────
   router.get(
@@ -351,17 +352,17 @@ export function createBomRouter({ express, db, auth, can, authAsync, canAsync, w
   router.get("/history/:objectType/:objectId", authAsync, canAuditAsync("read"), wrap(async (req, res) => res.json({ items: await History.objectLineageAsync(db, tenantOf(req), req.params.objectType, req.params.objectId) })));
 
   // ── Background jobs ───────────────────────────────────────────────────────
-  router.post("/jobs/rollup", auth, canRollup("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitRollupJob(db, { tenantId: tenantOf(req), revisionId: req.body?.revision_id ?? req.body?.revisionId ?? req.body?.revision, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/where-used", auth, canWhereUsed("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitWhereUsedJob(db, { tenantId: tenantOf(req), objectId: req.body?.object_id ?? req.body?.objectId, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/transform", auth, canTransformation("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitTransformJob(db, { tenantId: tenantOf(req), body: req.body || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/validate", auth, canValidation("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitValidateJob(db, { tenantId: tenantOf(req), revisionId: req.body?.revision_id ?? req.body?.revisionId ?? req.body?.revision, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/compare", auth, canCompare("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitCompareJob(db, { tenantId: tenantOf(req), body: req.body || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/maintenance", auth, canAdmin("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitMaintenanceJob(db, { tenantId: tenantOf(req), actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/rollup", authAsync, canRollupAsync("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitRollupJobAsync(db, { tenantId: tenantOf(req), revisionId: req.body?.revision_id ?? req.body?.revisionId ?? req.body?.revision, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/where-used", authAsync, canWhereUsedAsync("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitWhereUsedJobAsync(db, { tenantId: tenantOf(req), objectId: req.body?.object_id ?? req.body?.objectId, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/transform", authAsync, canTransformationAsync("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitTransformJobAsync(db, { tenantId: tenantOf(req), body: req.body || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/validate", authAsync, canValidationAsync("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitValidateJobAsync(db, { tenantId: tenantOf(req), revisionId: req.body?.revision_id ?? req.body?.revisionId ?? req.body?.revision, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/compare", authAsync, canCompareAsync("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitCompareJobAsync(db, { tenantId: tenantOf(req), body: req.body || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/maintenance", authAsync, canAdminAsync("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitMaintenanceJobAsync(db, { tenantId: tenantOf(req), actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
 
   // ── Foundation & demo seed ────────────────────────────────────────────────
-  router.post("/foundation/ensure", auth, canAdmin("execute"), wrap((_req, res) => res.json(Foundation.ensureBomFoundation(db))));
-  router.post("/seed", auth, canAdmin("execute"), wrap((req, res) => res.json(Seed.seedBom(db, tenantOf(req)))));
-  router.post("/search/reindex", auth, canSearch("execute"), wrap((_req, res) => res.json({ registered: Search.registerBomSources() })));
+  router.post("/foundation/ensure", authAsync, canAdminAsync("execute"), wrap(async (_req, res) => res.json(await Foundation.ensureBomFoundationAsync(db))));
+  router.post("/seed", authAsync, canAdminAsync("execute"), wrap(async (req, res) => res.json(await Seed.seedBomAsync(db, tenantOf(req)))));
+  router.post("/search/reindex", authAsync, canSearchAsync("execute"), wrap((_req, res) => res.json({ registered: Search.registerBomSources() })));
   router.get("/search-meta", auth, canSearch("read"), wrap((_req, res) => res.json({ object_types: Constants.SEARCH_OBJECT_TYPES })));
 
   return router;

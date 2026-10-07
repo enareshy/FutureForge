@@ -58,3 +58,7 @@ export function normalizeQuantityValue(db, { value, uom, baseUom }) {
 export function ensureBomUnits(db) {
   return ClassificationUnits.ensureClassificationUnits(db);
 }
+
+export function ensureBomUnitsAsync(db) {
+  return ClassificationUnits.ensureClassificationUnitsAsync(db);
+}

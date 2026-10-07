@@ -132,3 +132,13 @@ export async function setConfigAsync(db, tenantId, key, value, actor = null, ip 
   });
   return normalized;
 }
+
+export async function ensureBomConfigAsync(db, tenantId) {
+  let created = 0;
+  for (const [key, value] of Object.entries(CONFIG_DEFAULTS)) {
+    if (await getConfigRowAsync(db, tenantId, key)) continue;
+    await setConfigAsync(db, tenantId, key, value, null, null);
+    created += 1;
+  }
+  return { created };
+}

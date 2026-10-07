@@ -6,13 +6,13 @@
 // jobs, search, reference data) and never duplicates them.
 import { queryAll, queryOne } from "../../db.js";
 import { queryAllAsync, queryOneAsync } from "../../db-async.js";
-import { tenantIds } from "../search/registry.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
-import { ensurePdmEventTypes } from "./events.js";
-import { ensurePdmJobTypes, registerPdmHandlers } from "./jobs.js";
-import { ensurePdmSearch, registerPdmSources } from "./search.js";
-import { ensurePdmConfig } from "./configuration.js";
-import { ensureDefaultValidationRules } from "./validator.js";
+import { ensurePdmEventTypes, ensurePdmEventTypesAsync } from "./events.js";
+import { ensurePdmJobTypes, ensurePdmJobTypesAsync, registerPdmHandlers } from "./jobs.js";
+import { ensurePdmSearch, ensurePdmSearchAsync, registerPdmSources } from "./search.js";
+import { ensurePdmConfig, ensurePdmConfigAsync } from "./configuration.js";
+import { ensureDefaultValidationRules, ensureDefaultValidationRulesAsync } from "./validator.js";
 
 export function ensurePdmFoundation(db) {
   const eventTypes = ensurePdmEventTypes(db);
@@ -34,6 +34,39 @@ export function ensurePdmFoundation(db) {
     validationRules += ensureDefaultValidationRules(db, tenantId);
   }
   const search = ensurePdmSearch(db).created || 0;
+
+  return {
+    source_module: SOURCE_MODULE,
+    event_types: eventTypes,
+    job_types: jobTypes.created,
+    handlers,
+    configuration,
+    validation_rules: validationRules,
+    search,
+    tenants: tenants.length,
+  };
+}
+
+export async function ensurePdmFoundationAsync(db) {
+  const eventTypes = await ensurePdmEventTypesAsync(db);
+  const jobTypes = await ensurePdmJobTypesAsync(db);
+  const handlers = registerPdmHandlers();
+  registerPdmSources();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+
+  let configuration = 0;
+  let validationRules = 0;
+  for (const tenantId of tenants) {
+    configuration += (await ensurePdmConfigAsync(db, tenantId)).created || 0;
+    validationRules += await ensureDefaultValidationRulesAsync(db, tenantId);
+  }
+  const search = (await ensurePdmSearchAsync(db)).created || 0;
 
   return {
     source_module: SOURCE_MODULE,

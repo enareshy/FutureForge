@@ -5815,10 +5815,10 @@ export function createApp(db) {
 
   app.post(
     "/api/job-execution/dead-letter/:id/retry",
-    auth,
-    can("iam.jobs.execution", "execute"),
-    wrap((req, res) => {
-      res.json(jobExecution.requeueDeadLetter(db, req.params.id, { actor: req.actor, note: req.body?.note, ip: clientIp(req) }));
+    authAsync,
+    canAsync("iam.jobs.execution", "execute"),
+    wrap(async (req, res) => {
+      res.json(await jobExecution.requeueDeadLetterAsync(db, req.params.id, { actor: req.actor, note: req.body?.note, ip: clientIp(req) }));
     })
   );
 
@@ -5833,10 +5833,10 @@ export function createApp(db) {
 
   app.post(
     "/api/job-execution/tick",
-    auth,
-    can("iam.jobs.execution", "execute"),
+    authAsync,
+    canAsync("iam.jobs.execution", "execute"),
     wrap(async (req, res) => {
-      const result = await jobExecution.tick(db, {
+      const result = await jobExecution.tickAsync(db, {
         workerId: "api-tick",
         run: req.body?.run !== false,
         limit: Number(req.body?.limit) || 10,
@@ -5848,19 +5848,19 @@ export function createApp(db) {
 
   app.post(
     "/api/job-execution/jobs/:id/execute",
-    auth,
-    can("iam.jobs.execution", "execute"),
+    authAsync,
+    canAsync("iam.jobs.execution", "execute"),
     wrap(async (req, res) => {
-      res.json(await jobExecution.runJobNow(db, req.params.id, { workerId: "api-run-now" }));
+      res.json(await jobExecution.runJobNowAsync(db, req.params.id, { workerId: "api-run-now" }));
     })
   );
 
   app.post(
     "/api/job-execution/maintenance",
-    auth,
-    can("iam.jobs.execution", "execute"),
-    wrap((_req, res) => {
-      res.json(jobExecution.engineMaintenance(db));
+    authAsync,
+    canAsync("iam.jobs.execution", "execute"),
+    wrap(async (_req, res) => {
+      res.json(await jobExecution.engineMaintenanceAsync(db));
     })
   );
 
@@ -6951,11 +6951,11 @@ export function createApp(db) {
 
   app.post(
     "/api/search/indexes/retry",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
       res.json(
-        search.retryIndexFailures(
+        await search.retryIndexFailuresAsync(
           db,
           { tenantId: searchTenant(req), includeDeadLetter: req.body?.include_dead_letter === true },
           req.actor,
@@ -6967,22 +6967,22 @@ export function createApp(db) {
 
   app.post(
     "/api/search/indexes/drain",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
-      res.json(search.drainIndexQueue(db, { tenantId: searchTenant(req), limit: req.body?.limit }));
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
+      res.json(await search.drainIndexQueueAsync(db, { tenantId: searchTenant(req), limit: req.body?.limit }));
     })
   );
 
   app.post(
     "/api/search/indexes/reindex",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       const objectType = body.object_type || body.objectType || null;
       if (body.async === true) {
-        const job = jobs.submitJob(
+        const job = await jobs.submitJobAsync(
           db,
           {
             job_type_code: "SEARCH_REINDEX",
@@ -6997,20 +6997,20 @@ export function createApp(db) {
       }
       if (objectType) {
         return res.json(
-          search.reindexType(db, { tenantId: searchTenant(req), objectType, limit: body.limit }, req.actor, clientIp(req))
+          await search.reindexTypeAsync(db, { tenantId: searchTenant(req), objectType, limit: body.limit }, req.actor, clientIp(req))
         );
       }
-      return res.json(search.reindexTenant(db, { tenantId: searchTenant(req), limit: body.limit }, req.actor, clientIp(req)));
+      return res.json(await search.reindexTenantAsync(db, { tenantId: searchTenant(req), limit: body.limit }, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/search/indexes/reindex/:objectType/:objectId",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
       res.json(
-        search.reindexObject(
+        await search.reindexObjectAsync(
           db,
           { tenantId: searchTenant(req), objectType: req.params.objectType, objectId: req.params.objectId },
           req.actor,
@@ -7022,19 +7022,19 @@ export function createApp(db) {
 
   app.post(
     "/api/search/indexes/prune",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
-      res.json(search.pruneIndex(db, { tenantId: searchTenant(req) }, req.actor, clientIp(req)));
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
+      res.json(await search.pruneIndexAsync(db, { tenantId: searchTenant(req) }, req.actor, clientIp(req)));
     })
   );
 
   app.post(
     "/api/search/indexes/jobs",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
-      const job = jobs.submitJob(
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
+      const job = await jobs.submitJobAsync(
         db,
         {
           job_type_code: "SEARCH_INDEX",
@@ -7293,11 +7293,11 @@ export function createApp(db) {
 
   app.post(
     "/api/v1/search/index",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
       res.json(
-        search.indexDocuments(db, req.body || {}, req.actor, {
+        await search.indexDocumentsAsync(db, req.body || {}, req.actor, {
           tenantId: v1SearchTenant(req),
           ip: clientIp(req),
         })
@@ -7307,12 +7307,12 @@ export function createApp(db) {
 
   app.post(
     "/api/v1/search/index/rebuild",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
       const body = req.body || {};
       if (body.async === true) {
-        const job = jobs.submitJob(
+        const job = await jobs.submitJobAsync(
           db,
           {
             job_type_code: "SEARCH_REINDEX",
@@ -7333,7 +7333,7 @@ export function createApp(db) {
         return res.status(202).json({ queued: true, job_ref: job.job_ref, job });
       }
       res.json(
-        search.rebuildIndex(db, body, req.actor, {
+        await search.rebuildIndexAsync(db, body, req.actor, {
           tenantId: v1SearchTenant(req),
           ip: clientIp(req),
         })
@@ -7357,11 +7357,11 @@ export function createApp(db) {
 
   app.get(
     "/api/v1/search/index/jobs",
-    auth,
-    can("iam.search.indexes", "read"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "read"),
+    wrap(async (req, res) => {
       res.json(
-        jobs.listJobs(
+        await jobs.listJobsAsync(
           db,
           { job_type_code: "SEARCH_REINDEX", status: req.query.status, limit: req.query.limit },
           v1SearchTenant(req)
@@ -7372,11 +7372,11 @@ export function createApp(db) {
 
   app.post(
     "/api/v1/search/index/retry-failed",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
       res.json(
-        search.retryFailedIndexing(db, req.actor, {
+        await search.retryFailedIndexingAsync(db, req.actor, {
           tenantId: v1SearchTenant(req),
           includeDeadLetter: req.body?.include_dead_letter === true,
           ip: clientIp(req),
@@ -7431,13 +7431,13 @@ export function createApp(db) {
 
   app.post(
     "/api/v1/search/content-text",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
       res
         .status(201)
         .json(
-          search.putObjectExtractedText(db, req.body || {}, req.actor, {
+          await search.putObjectExtractedTextAsync(db, req.body || {}, req.actor, {
             tenantId: v1SearchTenant(req),
             ip: clientIp(req),
           })
@@ -7463,11 +7463,11 @@ export function createApp(db) {
 
   app.delete(
     "/api/v1/search/content-text",
-    auth,
-    can("iam.search.indexes", "execute"),
-    wrap((req, res) => {
+    authAsync,
+    canAsync("iam.search.indexes", "execute"),
+    wrap(async (req, res) => {
       res.json(
-        search.removeObjectExtractedText(db, req.body || {}, req.actor, {
+        await search.removeObjectExtractedTextAsync(db, req.body || {}, req.actor, {
           tenantId: v1SearchTenant(req),
           ip: clientIp(req),
         })

@@ -4,19 +4,20 @@
 // rule and configuration rule, a released baseline and a validation run) so the
 // capability is visible immediately after boot.
 import { queryOne } from "../../db.js";
-import { withEventSuppression } from "../events/emit.js";
-import { ensurePdmFoundation } from "./foundation.js";
-import { createItem } from "./items.js";
-import { createRevision, setRevisionStatus } from "./revisions.js";
-import { createDataset, linkDatasetContent } from "./datasets.js";
-import { createRepresentation } from "./representations.js";
-import { createDesignData } from "./design-data.js";
-import { createCadAssociation } from "./cad.js";
-import { createRelationship } from "./relationships.js";
-import { createRevisionRule, activateRevisionRule } from "./revision-rules.js";
-import { createConfigurationRule, activateConfigurationRule } from "./configuration-rules.js";
-import { createBaseline, releaseBaseline, addBaselineMember } from "./baselines.js";
-import { validateTenant } from "./validator.js";
+import { queryOneAsync } from "../../db-async.js";
+import { withEventSuppression, withEventSuppressionAsync } from "../events/emit.js";
+import { ensurePdmFoundation, ensurePdmFoundationAsync } from "./foundation.js";
+import { createItem, createItemAsync } from "./items.js";
+import { createRevision, createRevisionAsync, setRevisionStatus, setRevisionStatusAsync } from "./revisions.js";
+import { createDataset, createDatasetAsync, linkDatasetContent, linkDatasetContentAsync } from "./datasets.js";
+import { createRepresentation, createRepresentationAsync } from "./representations.js";
+import { createDesignData, createDesignDataAsync } from "./design-data.js";
+import { createCadAssociation, createCadAssociationAsync } from "./cad.js";
+import { createRelationship, createRelationshipAsync } from "./relationships.js";
+import { createRevisionRule, createRevisionRuleAsync, activateRevisionRule, activateRevisionRuleAsync } from "./revision-rules.js";
+import { createConfigurationRule, createConfigurationRuleAsync, activateConfigurationRule, activateConfigurationRuleAsync } from "./configuration-rules.js";
+import { createBaseline, createBaselineAsync, releaseBaseline, releaseBaselineAsync, addBaselineMember, addBaselineMemberAsync } from "./baselines.js";
+import { validateTenant, validateTenantAsync } from "./validator.js";
 
 const PARTS = [
   { item_number: "DEMO-HOUSING-001", name: "Pump housing", item_type: "PART" },
@@ -219,4 +220,202 @@ export function ensurePdmSeed(db, tenantId) {
   const existing = queryOne(db, "SELECT id FROM pdm_items WHERE tenant_id = ? AND item_number = 'DEMO-PUMP-ASSY'", [tenant]);
   if (existing) return { seeded: false, reason: "already_present" };
   return seedPdm(db, tenant);
+}
+
+export async function seedPdmAsync(db, tenantId) {
+  return withEventSuppressionAsync(async () => {
+    const tenant = await resolveTenantIdAsync(db, tenantId);
+    const foundation = await ensurePdmFoundationAsync(db);
+    const created = { items: 0, revisions: 0, datasets: 0, representations: 0, design_data: 0, cad: 0, relationships: 0, revision_rules: 0, configuration_rules: 0, baselines: 0, validations: 0 };
+    if (!tenant) return { foundation, created, seeded: false, reason: "no_tenant" };
+
+    const product = await ensureItemAsync(db, tenant, created, {
+      item_number: "DEMO-PUMP-ASSY",
+      name: "Demonstration pump assembly",
+      description: "Product assembly seeded to showcase the PDM domain.",
+      item_type: "PRODUCT",
+      classification_code: "PUMP",
+    });
+
+    const partRows = [];
+    for (const part of PARTS) partRows.push(await ensureItemAsync(db, tenant, created, { ...part, description: `Seeded ${part.name}.` }));
+
+    const productRevision = await ensureRevisionAsync(db, tenant, created, product.id, "A1", "Initial release");
+    const partRevisions = [];
+    for (const part of partRows) partRevisions.push(await ensureRevisionAsync(db, tenant, created, part.id, "A1", "Initial release"));
+
+    for (let i = 0; i < partRows.length; i += 1) {
+      await ensureRelationshipAsync(db, tenant, created, {
+        relationship_type: "PRODUCT_HAS_PART",
+        source_type: "ITEM",
+        source_id: String(product.id),
+        target_type: "ITEM",
+        target_id: String(partRows[i].id),
+        attributes: { quantity: i === 3 ? 2 : 1, find_number: String((i + 1) * 10) },
+      });
+    }
+
+    const cadDataset = await ensureDatasetAsync(db, tenant, created, {
+      dataset_number: "DEMO-PUMP-CAD",
+      name: "Pump assembly CAD",
+      description: "Native CAD dataset for the demonstration pump.",
+      dataset_type: "CAD_MODEL",
+      item_id: product.id,
+      revision_id: productRevision.id,
+    });
+    await linkDatasetContentAsync(db, tenant, cadDataset.id, { content_id: "demo-pump-cad", content_type: "application/x-step", content_reference: "demo://pump-assembly.step" }, null, null);
+
+    await ensureRepresentationAsync(db, tenant, created, {
+      name: "Pump assembly 3D",
+      representation_type: "3D",
+      item_id: product.id,
+      revision_id: productRevision.id,
+      dataset_id: cadDataset.id,
+    });
+
+    await ensureDesignDataAsync(db, tenant, created, {
+      code: "DEMO-PUMP-BOM",
+      name: "Pump design BOM data",
+      data_type: "DRAWING",
+      item_id: product.id,
+      revision_id: productRevision.id,
+    });
+
+    await ensureCadAsync(db, tenant, created, {
+      item_id: product.id,
+      source_revision_id: productRevision.id,
+      source_object_id: "DEMO-PUMP-ASSY:A1",
+      dataset_id: cadDataset.id,
+      cad_type: "NATIVE",
+      association_type: "MASTER",
+      is_primary: true,
+      application: "DemoCAD",
+    });
+
+    let revisionRule = await queryOneAsync(db, "SELECT * FROM pdm_revision_rules WHERE tenant_id = ? AND code = 'DEMO-LATEST-RELEASED'", [tenant]);
+    if (!revisionRule) {
+      revisionRule = await createRevisionRuleAsync(db, tenant, { code: "DEMO-LATEST-RELEASED", name: "Latest released", description: "Selects the latest released revision.", rule_type: "LATEST_RELEASED", status: "ACTIVE", is_default: true }, null, null);
+      created.revision_rules += 1;
+    }
+    if (revisionRule.status !== "ACTIVE") await activateRevisionRuleAsync(db, tenant, revisionRule.id, null, null);
+
+    let configurationRule = await queryOneAsync(db, "SELECT * FROM pdm_configuration_rules WHERE tenant_id = ? AND code = 'DEMO-VARIANT'", [tenant]);
+    if (!configurationRule) {
+      configurationRule = await createConfigurationRuleAsync(db, tenant, {
+        code: "DEMO-VARIANT",
+        name: "Variant selection",
+        description: "Matches the standard product variant.",
+        rule_type: "VARIANT",
+        status: "ACTIVE",
+        is_default: true,
+        config: { match: "ALL", conditions: [{ field: "variant_code", operator: "EQUALS", value: "STANDARD" }] },
+      }, null, null);
+      created.configuration_rules += 1;
+    }
+    if (configurationRule.status !== "ACTIVE") await activateConfigurationRuleAsync(db, tenant, configurationRule.id, null, null);
+
+    let baseline = await queryOneAsync(db, "SELECT * FROM pdm_baselines WHERE tenant_id = ? AND baseline_number = 'DEMO-PUMP-BL-A'", [tenant]);
+    if (!baseline) {
+      baseline = await createBaselineAsync(db, tenant, { baseline_number: "DEMO-PUMP-BL-A", name: "Pump assembly baseline A", item_id: product.id, baseline_date: null }, null, null);
+      created.baselines += 1;
+    }
+    const baselineMembers = Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM pdm_baseline_members WHERE baseline_id = ?", [baseline.id]))?.c || 0);
+    if (baselineMembers === 0) {
+      await addBaselineMemberAsync(db, tenant, baseline.id, { member_type: "ITEM", member_id: product.id, item_id: product.id, member_ref: "DEMO-PUMP-ASSY", level: 0, path: "0" }, null, null);
+      await addBaselineMemberAsync(db, tenant, baseline.id, { member_type: "REVISION", member_id: productRevision.id, item_id: product.id, revision_id: productRevision.id, member_ref: "DEMO-PUMP-ASSY:A1", level: 1, path: "0.0" }, null, null);
+      for (let i = 0; i < partRows.length; i += 1) {
+        await addBaselineMemberAsync(db, tenant, baseline.id, { member_type: "REVISION", member_id: partRevisions[i].id, item_id: partRows[i].id, revision_id: partRevisions[i].id, member_ref: `${partRows[i].item_number}:A1`, level: 2, path: `0.${i + 1}` }, null, null);
+      }
+    }
+    if (baseline.status === "DRAFT") await releaseBaselineAsync(db, tenant, baseline.id, null, null);
+
+    if (productRevision.status === "DRAFT") {
+      try {
+        await setRevisionStatusAsync(db, tenant, productRevision.id, "IN_WORK", null, null);
+        await setRevisionStatusAsync(db, tenant, productRevision.id, "IN_REVIEW", null, null);
+        await setRevisionStatusAsync(db, tenant, productRevision.id, "RELEASED", null, null);
+      } catch {
+        // A partially released revision is still a valid demo state.
+      }
+    }
+
+    const validation = await queryOneAsync(db, "SELECT id FROM pdm_validation_results WHERE tenant_id = ? AND scope = 'TENANT'", [tenant]);
+    if (!validation) {
+      await validateTenantAsync(db, tenant, { actor: null });
+      created.validations += 1;
+    }
+
+    return { foundation, created, seeded: true };
+  });
+}
+
+async function ensureItemAsync(db, tenant, created, body) {
+  let row = await queryOneAsync(db, "SELECT * FROM pdm_items WHERE tenant_id = ? AND item_number = ?", [tenant, body.item_number]);
+  if (!row) {
+    row = await createItemAsync(db, tenant, body, null, null);
+    created.items += 1;
+  }
+  return row;
+}
+
+async function ensureRevisionAsync(db, tenant, created, itemId, revisionNumber, description) {
+  let row = await queryOneAsync(db, "SELECT * FROM pdm_item_revisions WHERE tenant_id = ? AND item_id = ? AND revision_number = ?", [tenant, itemId, revisionNumber]);
+  if (!row) {
+    row = await createRevisionAsync(db, tenant, itemId, { revision_number: revisionNumber, description }, null, null);
+    created.revisions += 1;
+  }
+  return row;
+}
+
+async function ensureDatasetAsync(db, tenant, created, body) {
+  let row = await queryOneAsync(db, "SELECT * FROM pdm_datasets WHERE tenant_id = ? AND dataset_number = ?", [tenant, body.dataset_number]);
+  if (!row) {
+    row = await createDatasetAsync(db, tenant, body, null, null);
+    created.datasets += 1;
+  }
+  return row;
+}
+
+async function ensureRepresentationAsync(db, tenant, created, body) {
+  const existing = await queryOneAsync(db, "SELECT id FROM pdm_representations WHERE tenant_id = ? AND revision_id = ? AND representation_type = ?", [tenant, body.revision_id, body.representation_type]);
+  if (existing) return existing;
+  created.representations += 1;
+  return createRepresentationAsync(db, tenant, body, null, null);
+}
+
+async function ensureDesignDataAsync(db, tenant, created, body) {
+  const existing = await queryOneAsync(db, "SELECT id FROM pdm_design_data WHERE tenant_id = ? AND revision_id = ? AND code = ?", [tenant, body.revision_id, body.code]);
+  if (existing) return existing;
+  created.design_data += 1;
+  return createDesignDataAsync(db, tenant, body, null, null);
+}
+
+async function ensureCadAsync(db, tenant, created, body) {
+  const existing = await queryOneAsync(db, "SELECT id FROM pdm_cad_associations WHERE tenant_id = ? AND source_revision_id = ? AND dataset_id = ?", [tenant, body.source_revision_id, body.dataset_id]);
+  if (existing) return existing;
+  created.cad += 1;
+  return createCadAssociationAsync(db, tenant, body, null, null);
+}
+
+async function ensureRelationshipAsync(db, tenant, created, body) {
+  const existing = await queryOneAsync(db, "SELECT id FROM pdm_relationships WHERE tenant_id = ? AND relationship_type = ? AND source_type = ? AND source_id = ? AND target_type = ? AND target_id = ?", [tenant, body.relationship_type, body.source_type, body.source_id, body.target_type, body.target_id]);
+  if (existing) return existing;
+  created.relationships += 1;
+  return createRelationshipAsync(db, tenant, body, null, null);
+}
+
+async function resolveTenantIdAsync(db, tenantId) {
+  const explicit = Number(tenantId);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const helix = await queryOneAsync(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  return helix?.id ?? null;
+}
+
+export async function ensurePdmSeedAsync(db, tenantId) {
+  await withEventSuppressionAsync(() => ensurePdmFoundationAsync(db));
+  const tenant = await resolveTenantIdAsync(db, tenantId);
+  if (!tenant) return { seeded: false, reason: "no_tenant" };
+  const existing = await queryOneAsync(db, "SELECT id FROM pdm_items WHERE tenant_id = ? AND item_number = 'DEMO-PUMP-ASSY'", [tenant]);
+  if (existing) return { seeded: false, reason: "already_present" };
+  return seedPdmAsync(db, tenant);
 }

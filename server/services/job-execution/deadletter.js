@@ -8,9 +8,9 @@ import { queryAll, queryOne, run, nowIso } from "../../db.js";
 import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, pagination } from "../../validation.js";
 import { truncate } from "../jobs/validation.js";
-import { retryJob, getJobRow } from "../jobs/jobs.js";
+import { retryJob, getJobRow, retryJobAsync, getJobRowAsync } from "../jobs/jobs.js";
 import { classifyError, categoryLabel } from "./errors.js";
-import { recordHistory } from "../jobs/history.js";
+import { recordHistory, recordHistoryAsync } from "../jobs/history.js";
 
 export function recordDeadLetter(db, { job, queue, category, reason, errorCode = "", errorMessage = "", payload = null }) {
   const existing = queryOne(db, "SELECT id FROM job_dead_letters WHERE job_id = ? AND status = 'open'", [job.id]);
@@ -44,6 +44,41 @@ export function recordDeadLetter(db, { job, queue, category, reason, errorCode =
     ]
   );
   run(db, "UPDATE jobs SET dead_lettered_at = ?, updated_at = ? WHERE id = ?", [ts, ts, job.id]);
+  return Number(result.lastInsertId);
+}
+
+export async function recordDeadLetterAsync(db, { job, queue, category, reason, errorCode = "", errorMessage = "", payload = null }) {
+  const existing = await queryOneAsync(db, "SELECT id FROM job_dead_letters WHERE job_id = ? AND status = 'open'", [job.id]);
+  const ts = nowIso();
+  if (existing) {
+    await runAsync(
+      db,
+      "UPDATE job_dead_letters SET reason = ?, category = ?, attempts = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ?",
+      [truncate(reason, 500), category, Number(job.attempts) || 0, errorCode, truncate(errorMessage, 2000), ts, existing.id]
+    );
+    return existing.id;
+  }
+  const result = await runAsync(
+    db,
+    `INSERT INTO job_dead_letters
+       (job_id, queue, job_type_code, tenant_id, reason, category, attempts, error_code, error_message, payload_json, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+    [
+      job.id,
+      job.queue || "",
+      job.job_type_code || "",
+      job.tenant_id ?? null,
+      truncate(reason, 500),
+      category,
+      Number(job.attempts) || 0,
+      truncate(errorCode, 100),
+      truncate(errorMessage, 2000),
+      JSON.stringify(payload ?? { input: job.input_json ? safeJson(job.input_json) : {} }),
+      ts,
+      ts,
+    ]
+  );
+  await runAsync(db, "UPDATE jobs SET dead_lettered_at = ?, updated_at = ? WHERE id = ?", [ts, ts, job.id]);
   return Number(result.lastInsertId);
 }
 
@@ -249,6 +284,35 @@ export function requeueDeadLetter(db, id, { actor = null, ip = null, note = "" }
     source: "platform",
   });
   return { requeued: true, dead_letter: publicDeadLetter(getDeadLetterRow(db, row.id)), job: result.job };
+}
+
+// Async twin of requeueDeadLetter on the asynchronous pg layer.
+export async function requeueDeadLetterAsync(db, id, { actor = null, ip = null, note = "" } = {}) {
+  const row = await getDeadLetterRowAsync(db, id);
+  if (row.status !== "open") {
+    throw new HttpError(409, `Dead-letter entry is already ${row.status}`);
+  }
+  const jobRow = await getJobRowAsync(db, row.job_id);
+  const result = await retryJobAsync(db, jobRow.id, { actor, ip });
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `UPDATE job_dead_letters SET status = 'requeued', requeued_job_id = ?, resolved_by = ?, resolved_at = ?,
+       resolution_note = ?, updated_at = ? WHERE id = ?`,
+    [result.job?.id ?? jobRow.id, actor?.id ?? null, ts, truncate(note, 1000), ts, row.id]
+  );
+  await runAsync(db, "UPDATE jobs SET dead_lettered_at = NULL, updated_at = ? WHERE id = ?", [ts, jobRow.id]);
+  await recordHistoryAsync(db, jobRow.id, {
+    event_type: "retry",
+    from_status: jobRow.status,
+    to_status: "queued",
+    message: note || "Requeued from dead-letter queue",
+    detail: { dead_letter_id: row.id, actor_id: actor?.id ?? null },
+    actor_id: actor?.id ?? null,
+    actor_type: actor ? "user" : "engine",
+    source: "platform",
+  });
+  return { requeued: true, dead_letter: publicDeadLetter(await getDeadLetterRowAsync(db, row.id)), job: result.job };
 }
 
 export function discardDeadLetter(db, id, { actor = null, note = "" } = {}) {
