@@ -27,7 +27,7 @@ const SCHEMA_SQL =
   readFileSync(join(__dirname, "schema-search-indexes.sql"), "utf8");
 
 // Bumped whenever the schema changes so `migrate()` can skip a full re-apply.
-const SCHEMA_VERSION = "postgres_005";
+const SCHEMA_VERSION = "postgres_006";
 
 const MIGRATIONS = [
   "001_iam_core", "002_authz", "003_orgs_sites", "004_org_hierarchy",

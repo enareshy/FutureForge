@@ -2435,6 +2435,82 @@ export const change = {
   relationships: (qs) => api(`/api/v1/change/relationships${qs || ""}`),
 };
 
+// Requirements Manager: requirements, revisions, hierarchy, traceability,
+// baselines and validation built on the shared platform frameworks.
+export const requirements = {
+  meta: () => api("/api/v1/requirements/meta"),
+  health: () => api("/api/v1/requirements/health"),
+  configuration: () => api("/api/v1/requirements/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/requirements/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/requirements/foundation/ensure", { method: "POST" }),
+  seed: () => api("/api/v1/requirements/seed", { method: "POST" }),
+
+  types: (qs) => api(`/api/v1/requirements/types${qs || ""}`),
+  type: (code) => api(`/api/v1/requirements/types/${encodeURIComponent(code)}`),
+  createType: (body) => api("/api/v1/requirements/types", { method: "POST", body }),
+  updateType: (code, body) =>
+    api(`/api/v1/requirements/types/${encodeURIComponent(code)}`, { method: "PUT", body }),
+  setTypeStatus: (code, status) =>
+    api(`/api/v1/requirements/types/${encodeURIComponent(code)}/status`, { method: "POST", body: { status } }),
+
+  list: (qs) => api(`/api/v1/requirements/requirements${qs || ""}`),
+  get: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}`),
+  create: (body) => api("/api/v1/requirements/requirements", { method: "POST", body }),
+  update: (ref, body) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  remove: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  transition: (ref, status, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, reason } }),
+  submit: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/submit`, { method: "POST", body: { reason } }),
+  approve: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/approve`, { method: "POST", body: { reason } }),
+  reject: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/reject`, { method: "POST", body: { reason } }),
+  release: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/release`, { method: "POST", body: { reason } }),
+  obsolete: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/obsolete`, { method: "POST", body: { reason } }),
+  setVerification: (ref, status) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/verification`, { method: "POST", body: { status } }),
+  revise: (ref, body) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/revise`, { method: "POST", body }),
+  revisions: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/revisions`),
+  compareRevisions: (ref, from, to) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/revisions/compare?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+  history: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/history`),
+  children: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/children`),
+  requirementRelationships: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/relationships`),
+  validateRequirement: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/validate`),
+
+  relationships: (qs) => api(`/api/v1/requirements/relationships${qs || ""}`),
+  relationship: (ref) => api(`/api/v1/requirements/relationships/${encodeURIComponent(ref)}`),
+  createRelationship: (body) => api("/api/v1/requirements/relationships", { method: "POST", body }),
+  deleteRelationship: (ref) => api(`/api/v1/requirements/relationships/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  hierarchy: (ref, maxDepth) =>
+    api(`/api/v1/requirements/hierarchy/${encodeURIComponent(ref)}${maxDepth ? `?maxDepth=${maxDepth}` : ""}`),
+
+  baselines: (qs) => api(`/api/v1/requirements/baselines${qs || ""}`),
+  baseline: (ref) => api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}`),
+  createBaseline: (body) => api("/api/v1/requirements/baselines", { method: "POST", body }),
+  baselineMembers: (ref) => api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/members`),
+  addBaselineMember: (ref, body) =>
+    api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/members`, { method: "POST", body }),
+  removeBaselineMember: (ref, memberRef) =>
+    api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/members/${encodeURIComponent(memberRef)}`, { method: "DELETE" }),
+  releaseBaseline: (ref) => api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/release`, { method: "POST" }),
+  compareBaseline: (ref) => api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/compare`),
+
+  validationRules: (qs) => api(`/api/v1/requirements/validation-rules${qs || ""}`),
+  validationRule: (ref) => api(`/api/v1/requirements/validation-rules/${encodeURIComponent(ref)}`),
+  createValidationRule: (body) => api("/api/v1/requirements/validation-rules", { method: "POST", body }),
+  updateValidationRule: (ref, body) =>
+    api(`/api/v1/requirements/validation-rules/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  deleteValidationRule: (ref) => api(`/api/v1/requirements/validation-rules/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  runValidation: (body) => api("/api/v1/requirements/validation/run", { method: "POST", body: body || {} }),
+};
+
 // P1 Digital Thread: end-to-end Requirement -> Service traceability built on the
 // existing object, PDM and BOM engines.
 export const digitalThread = {
@@ -2539,6 +2615,42 @@ export const digitalThread = {
 
   ensureFoundation: () => api("/api/v1/digital-thread/foundation/ensure", { method: "POST" }),
   seed: () => api("/api/v1/digital-thread/seed", { method: "POST" }),
+};
+
+// Generic Traceability Engine: a thin, reusable composition layer over the
+// Object & Relationship Framework and the Digital Thread. Nothing here is
+// specific to Requirement/Product/EBOM — object types and rules are data.
+export const traceability = {
+  meta: () => api("/api/v1/traceability/meta"),
+  health: () => api("/api/v1/traceability/health"),
+  configuration: () => api("/api/v1/traceability/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/traceability/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  links: (qs) => api(`/api/v1/traceability/links${qs || ""}`),
+  link: (id) => api(`/api/v1/traceability/links/${encodeURIComponent(id)}`),
+  createLink: (body) => api("/api/v1/traceability/links", { method: "POST", body }),
+  updateLink: (id, body) => api(`/api/v1/traceability/links/${encodeURIComponent(id)}`, { method: "PUT", body }),
+  deleteLink: (id) => api(`/api/v1/traceability/links/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  graph: (qs) => api(`/api/v1/traceability/graph${qs || ""}`),
+  path: (qs) => api(`/api/v1/traceability/path${qs || ""}`),
+  impact: (body) => api("/api/v1/traceability/impact-analysis", { method: "POST", body }),
+  matrix: (qs) => api(`/api/v1/traceability/matrix${qs || ""}`),
+  coverage: (qs) => api(`/api/v1/traceability/coverage${qs || ""}`),
+  orphans: (qs) => api(`/api/v1/traceability/orphans${qs || ""}`),
+  brokenLinks: (qs) => api(`/api/v1/traceability/broken-links${qs || ""}`),
+
+  objectLinks: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/links${qs || ""}`),
+  forward: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/forward${qs || ""}`),
+  backward: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/backward${qs || ""}`),
+  children: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/children${qs || ""}`),
+  parents: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/parents${qs || ""}`),
 };
 
 // P2 Standards & Exchange: standards-based import/export built on the shared

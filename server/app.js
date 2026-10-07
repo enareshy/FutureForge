@@ -65,10 +65,13 @@ import * as pdm from "./services/pdm/index.js";
 import { createPdmRouter } from "./services/pdm/router-pdm.js";
 import * as change from "./services/change/index.js";
 import { createChangeRouter } from "./services/change/router-change.js";
+import * as requirements from "./services/requirements/index.js";
+import { createRequirementsRouter } from "./services/requirements/router-requirements.js";
 import * as deployment from "./services/deployment/index.js";
 import { createDeploymentRouter } from "./services/deployment/router-deployment.js";
 import * as thread from "./services/thread/index.js";
 import { createThreadRouter } from "./services/thread/router-thread.js";
+import { createTraceabilityRouter } from "./services/traceability/router-traceability.js";
 import * as exchange from "./services/exchange/index.js";
 import { createExchangeRouter } from "./services/exchange/router-exchange.js";
 import * as reporting from "./services/reporting/index.js";
@@ -356,6 +359,11 @@ export function createApp(db) {
     change.ensureChangeFoundation(db);
   } catch {
     /* Change Management foundation is idempotent and must never block application boot */
+  }
+  try {
+    requirements.ensureRequirementsFoundation(db);
+  } catch {
+    /* Requirements Manager foundation is idempotent and must never block application boot */
   }
   try {
     thread.ensureThreadFoundation(db);
@@ -10378,10 +10386,21 @@ export function createApp(db) {
   app.use("/api/change", changeRouter);
   app.use("/api/v1/change", changeRouter);
 
+  // ── Requirements Manager ────────────────────────────────────────────────────
+  const requirementsRouter = createRequirementsRouter({ express, db, auth, can, authAsync, canAsync, wrap });
+  app.use("/api/requirements", requirementsRouter);
+  app.use("/api/v1/requirements", requirementsRouter);
+
   // ── P1 Digital Thread ─────────────────────────────────────────────────────
   const threadRouter = createThreadRouter({ express, db, auth, can, authAsync, canAsync, wrap });
   app.use("/api/digital-thread", threadRouter);
   app.use("/api/v1/digital-thread", threadRouter);
+
+  // ── Generic Traceability Engine (reuses the Object & Relationship framework
+  //    and the Digital Thread engine; no new tables, IAM or event bus) ───────
+  const traceabilityRouter = createTraceabilityRouter({ express, db, auth, can, authAsync, canAsync, wrap });
+  app.use("/api/traceability", traceabilityRouter);
+  app.use("/api/v1/traceability", traceabilityRouter);
 
   // ── P2 Standards & Exchange ───────────────────────────────────────────────
   const exchangeRouter = createExchangeRouter({ express, db, auth, authAsync, can, canAsync, wrap });

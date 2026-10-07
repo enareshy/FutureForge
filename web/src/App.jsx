@@ -28,7 +28,9 @@ const ClassificationPage = React.lazy(() => import("./pages/ClassificationPage.j
 const BomPage = React.lazy(() => import("./pages/BomPage.jsx"));
 const PdmPage = React.lazy(() => import("./pages/PdmPage.jsx"));
 const ChangeManagementPage = React.lazy(() => import("./pages/ChangeManagementPage.jsx"));
+const RequirementsPage = React.lazy(() => import("./pages/RequirementsPage.jsx"));
 const DigitalThreadPage = React.lazy(() => import("./pages/DigitalThreadPage.jsx"));
+const TraceabilityPage = React.lazy(() => import("./pages/TraceabilityPage.jsx"));
 const StandardsExchangePage = React.lazy(() => import("./pages/StandardsExchangePage.jsx"));
 const ReportingAnalyticsPage = React.lazy(() => import("./pages/ReportingAnalyticsPage.jsx"));
 const DataObservabilityPage = React.lazy(() => import("./pages/DataObservabilityPage.jsx"));
@@ -204,10 +206,12 @@ const NAV_SECTIONS = [
     label: "Engineering",
     items: [
       { to: "/pdm", label: "Product data (PDM)", feature: "pdm" },
+      { to: "/requirements", label: "Requirements manager" },
       { to: "/bom", label: "Bill of materials", feature: "bom" },
       { to: "/change", label: "Change management (ECR/ECO/ECN)", feature: "change_management" },
       { to: "/classification", label: "Classification", feature: "classification" },
       { to: "/digital-thread", label: "Digital thread", feature: "digital_thread" },
+      { to: "/traceability", label: "Traceability engine", feature: "digital_thread" },
       { to: "/standards-exchange", label: "Standards & exchange", feature: "standards_exchange" },
     ],
   },
@@ -550,7 +554,9 @@ export default function App() {
         <Route path="/bom" element={<BomPage />} />
         <Route path="/pdm" element={<PdmPage />} />
         <Route path="/change" element={<ChangeManagementPage />} />
+        <Route path="/requirements" element={<RequirementsPage />} />
         <Route path="/digital-thread" element={<DigitalThreadPage />} />
+        <Route path="/traceability" element={<TraceabilityPage />} />
         <Route path="/standards-exchange" element={<StandardsExchangePage />} />
         <Route path="/reporting" element={<ReportingAnalyticsPage />} />
         <Route path="/observability" element={<DataObservabilityPage />} />

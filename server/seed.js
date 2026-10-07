@@ -1119,6 +1119,15 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.change.affected-items", name: "Change order affected items", parentCode: "iam.change" },
     { applicationCode: "iam", code: "iam.change.ccb", name: "CCB screening, approval & decisions", parentCode: "iam.change" },
     { applicationCode: "iam", code: "iam.change.admin", name: "Change Management administration & configuration", parentCode: "iam.change" },
+    { applicationCode: "iam", code: "iam.requirements", name: "Requirements Manager service", kind: "module" },
+    { applicationCode: "iam", code: "iam.requirements.overview", name: "Requirements overview & registry", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.items", name: "Requirements items & revisions", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.types", name: "Requirement types & configuration", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.relationships", name: "Requirement relationships & traceability", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.hierarchy", name: "Requirement hierarchy", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.baselines", name: "Requirement baselines", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.reviews", name: "Requirement reviews & validation", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.admin", name: "Requirements administration & configuration", parentCode: "iam.requirements" },
     { applicationCode: "iam", code: "iam.thread", name: "Digital Thread service", kind: "module" },
     { applicationCode: "iam", code: "iam.thread.overview", name: "Digital Thread overview & registry", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.explorer", name: "Digital Thread explorer & traversal", parentCode: "iam.thread" },
@@ -1562,6 +1571,17 @@ function seedMissingCatalog(db) {
     "iam.change.ccb",
     "iam.change.admin",
   ];
+  const requirementsResourceCodes = [
+    "iam.requirements",
+    "iam.requirements.overview",
+    "iam.requirements.items",
+    "iam.requirements.types",
+    "iam.requirements.relationships",
+    "iam.requirements.hierarchy",
+    "iam.requirements.baselines",
+    "iam.requirements.reviews",
+    "iam.requirements.admin",
+  ];
   const threadResourceCodes = [
     "iam.thread",
     "iam.thread.overview",
@@ -1639,7 +1659,7 @@ function seedMissingCatalog(db) {
     "iam.observability.audit",
     "iam.observability.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
