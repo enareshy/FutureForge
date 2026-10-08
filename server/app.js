@@ -67,6 +67,8 @@ import * as change from "./services/change/index.js";
 import { createChangeRouter } from "./services/change/router-change.js";
 import * as requirements from "./services/requirements/index.js";
 import { createRequirementsRouter } from "./services/requirements/router-requirements.js";
+import * as requirementPdm from "./services/requirement-pdm/index.js";
+import { createRequirementPdmRouter } from "./services/requirement-pdm/router-requirement-pdm.js";
 import * as deployment from "./services/deployment/index.js";
 import { createDeploymentRouter } from "./services/deployment/router-deployment.js";
 import * as thread from "./services/thread/index.js";
@@ -364,6 +366,11 @@ export function createApp(db) {
     requirements.ensureRequirementsFoundation(db);
   } catch {
     /* Requirements Manager foundation is idempotent and must never block application boot */
+  }
+  try {
+    requirementPdm.ensureRequirementPdmFoundation(db);
+  } catch {
+    /* Requirement -> PDM integration foundation is idempotent and must never block application boot */
   }
   try {
     thread.ensureThreadFoundation(db);
@@ -10390,6 +10397,11 @@ export function createApp(db) {
   const requirementsRouter = createRequirementsRouter({ express, db, auth, can, authAsync, canAsync, wrap });
   app.use("/api/requirements", requirementsRouter);
   app.use("/api/v1/requirements", requirementsRouter);
+
+  // ── Requirement -> PDM integration ──────────────────────────────────────────
+  const requirementPdmRouter = createRequirementPdmRouter({ express, db, auth, can, authAsync, canAsync, wrap });
+  app.use("/api/requirement-pdm", requirementPdmRouter);
+  app.use("/api/v1/requirement-pdm", requirementPdmRouter);
 
   // ── P1 Digital Thread ─────────────────────────────────────────────────────
   const threadRouter = createThreadRouter({ express, db, auth, can, authAsync, canAsync, wrap });

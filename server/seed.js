@@ -1128,6 +1128,15 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.requirements.baselines", name: "Requirement baselines", parentCode: "iam.requirements" },
     { applicationCode: "iam", code: "iam.requirements.reviews", name: "Requirement reviews & validation", parentCode: "iam.requirements" },
     { applicationCode: "iam", code: "iam.requirements.admin", name: "Requirements administration & configuration", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirement-pdm", name: "Requirement & PDM integration service", kind: "module" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.overview", name: "Requirement & PDM integration overview", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.allocations", name: "Requirement to PDM allocations", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.coverage", name: "Requirement allocation coverage", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.compatibility", name: "Requirement/PDM compatibility & effectivity", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.impact", name: "Requirement/PDM impact analysis", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.synchronization", name: "Requirement/PDM change synchronization", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.metrics", name: "Requirement/PDM metrics & health", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.admin", name: "Requirement & PDM integration administration", parentCode: "iam.requirement-pdm" },
     { applicationCode: "iam", code: "iam.thread", name: "Digital Thread service", kind: "module" },
     { applicationCode: "iam", code: "iam.thread.overview", name: "Digital Thread overview & registry", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.explorer", name: "Digital Thread explorer & traversal", parentCode: "iam.thread" },
@@ -1582,6 +1591,17 @@ function seedMissingCatalog(db) {
     "iam.requirements.reviews",
     "iam.requirements.admin",
   ];
+  const requirementPdmResourceCodes = [
+    "iam.requirement-pdm",
+    "iam.requirement-pdm.overview",
+    "iam.requirement-pdm.allocations",
+    "iam.requirement-pdm.coverage",
+    "iam.requirement-pdm.compatibility",
+    "iam.requirement-pdm.impact",
+    "iam.requirement-pdm.synchronization",
+    "iam.requirement-pdm.metrics",
+    "iam.requirement-pdm.admin",
+  ];
   const threadResourceCodes = [
     "iam.thread",
     "iam.thread.overview",
@@ -1659,7 +1679,7 @@ function seedMissingCatalog(db) {
     "iam.observability.audit",
     "iam.observability.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...requirementPdmResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);

@@ -29,6 +29,7 @@ const BomPage = React.lazy(() => import("./pages/BomPage.jsx"));
 const PdmPage = React.lazy(() => import("./pages/PdmPage.jsx"));
 const ChangeManagementPage = React.lazy(() => import("./pages/ChangeManagementPage.jsx"));
 const RequirementsPage = React.lazy(() => import("./pages/RequirementsPage.jsx"));
+const RequirementPdmPage = React.lazy(() => import("./pages/RequirementPdmPage.jsx"));
 const DigitalThreadPage = React.lazy(() => import("./pages/DigitalThreadPage.jsx"));
 const TraceabilityPage = React.lazy(() => import("./pages/TraceabilityPage.jsx"));
 const StandardsExchangePage = React.lazy(() => import("./pages/StandardsExchangePage.jsx"));
@@ -207,6 +208,7 @@ const NAV_SECTIONS = [
     items: [
       { to: "/pdm", label: "Product data (PDM)", feature: "pdm" },
       { to: "/requirements", label: "Requirements manager" },
+      { to: "/requirement-pdm", label: "Requirement / PDM" },
       { to: "/bom", label: "Bill of materials", feature: "bom" },
       { to: "/change", label: "Change management (ECR/ECO/ECN)", feature: "change_management" },
       { to: "/classification", label: "Classification", feature: "classification" },
@@ -555,6 +557,7 @@ export default function App() {
         <Route path="/pdm" element={<PdmPage />} />
         <Route path="/change" element={<ChangeManagementPage />} />
         <Route path="/requirements" element={<RequirementsPage />} />
+        <Route path="/requirement-pdm" element={<RequirementPdmPage />} />
         <Route path="/digital-thread" element={<DigitalThreadPage />} />
         <Route path="/traceability" element={<TraceabilityPage />} />
         <Route path="/standards-exchange" element={<StandardsExchangePage />} />

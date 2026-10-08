@@ -130,8 +130,23 @@ export const RELATIONSHIP_TYPES = [
   "VERIFIED_BY",
   "VALIDATED_BY",
   "IMPLEMENTED_BY",
+  "REALIZED_BY",
+  "REPRESENTED_BY",
+  "SATISFIED_BY",
   "AFFECTS",
 ];
+
+// Cross-domain allocation vocabulary used by the Requirement -> PDM integration.
+// These preserve the same generic edge table so a Requirement can be traced to
+// a PDM product/item, item revision, dataset or engineering BOM without a
+// second relationship model.
+export const PDM_ALLOCATION_RELATIONSHIPS = Object.freeze([
+  "ALLOCATED_TO",
+  "IMPLEMENTED_BY",
+  "REALIZED_BY",
+  "REPRESENTED_BY",
+  "SATISFIED_BY",
+]);
 
 // PARENT_OF / CHILD_OF are the hierarchy relationships and get cycle checks.
 export const HIERARCHY_RELATIONSHIPS = Object.freeze({

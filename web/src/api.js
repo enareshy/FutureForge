@@ -2511,6 +2511,46 @@ export const requirements = {
   runValidation: (body) => api("/api/v1/requirements/validation/run", { method: "POST", body: body || {} }),
 };
 
+// Requirement -> PDM integration: allocations, coverage, compatibility,
+// impact analysis and change synchronization across the digital thread.
+export const requirementPdm = {
+  meta: () => api("/api/v1/requirement-pdm/meta"),
+  health: () => api("/api/v1/requirement-pdm/health"),
+  configuration: () => api("/api/v1/requirement-pdm/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/requirement-pdm/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/requirement-pdm/foundation/ensure", { method: "POST" }),
+
+  targets: () => api("/api/v1/requirement-pdm/targets"),
+  resolveTarget: (targetType, targetId) =>
+    api(`/api/v1/requirement-pdm/targets/resolve?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`),
+
+  allocations: (qs) => api(`/api/v1/requirement-pdm/allocations${qs || ""}`),
+  allocation: (ref) => api(`/api/v1/requirement-pdm/allocations/${encodeURIComponent(ref)}`),
+  createAllocation: (body) => api("/api/v1/requirement-pdm/allocations", { method: "POST", body }),
+  removeAllocation: (ref) => api(`/api/v1/requirement-pdm/allocations/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  checkAllocation: (ref, body) =>
+    api(`/api/v1/requirement-pdm/allocations/${encodeURIComponent(ref)}/check`, { method: "POST", body: body || {} }),
+  synchronizeAllocation: (ref, body) =>
+    api(`/api/v1/requirement-pdm/allocations/${encodeURIComponent(ref)}/synchronize`, { method: "POST", body: body || {} }),
+
+  requirementAllocations: (ref) => api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/allocations`),
+  requirementCoverage: (ref) => api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/coverage`),
+  requirementCompatibilities: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/compatibilities${qs || ""}`),
+  coverage: (requirementId) => api(`/api/v1/requirement-pdm/coverage?requirement_id=${encodeURIComponent(requirementId)}`),
+
+  impact: (qs) => api(`/api/v1/requirement-pdm/impact${qs || ""}`),
+  impactedAllocations: (qs) => api(`/api/v1/requirement-pdm/impact/allocations${qs || ""}`),
+  synchronize: (body) => api("/api/v1/requirement-pdm/synchronize", { method: "POST", body: body || {} }),
+  submitSynchronization: (body) => api("/api/v1/requirement-pdm/synchronize/job", { method: "POST", body: body || {} }),
+  submitImpactSweep: (body) => api("/api/v1/requirement-pdm/impact/sweep", { method: "POST", body: body || {} }),
+  enqueueSynchronization: (body) => api("/api/v1/requirement-pdm/synchronize/enqueue", { method: "POST", body: body || {} }),
+
+  integrationSummary: () => api("/api/v1/requirement-pdm/integration/summary"),
+  metrics: () => api("/api/v1/requirement-pdm/metrics"),
+};
+
 // P1 Digital Thread: end-to-end Requirement -> Service traceability built on the
 // existing object, PDM and BOM engines.
 export const digitalThread = {
