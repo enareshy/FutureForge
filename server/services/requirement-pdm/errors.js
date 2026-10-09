@@ -21,6 +21,13 @@ export const REQUIREMENT_PDM_ERROR_CODES = Object.freeze({
   IMPACT_FAILED: "REQUIREMENT_PDM_IMPACT_FAILED",
   SYNCHRONIZATION_FAILED: "REQUIREMENT_PDM_SYNCHRONIZATION_FAILED",
   INVALID_CONFIGURATION: "REQUIREMENT_PDM_INVALID_CONFIGURATION",
+  CHANGE_NOT_FOUND: "REQUIREMENT_PDM_CHANGE_NOT_FOUND",
+  INVALID_CHANGE: "REQUIREMENT_PDM_INVALID_CHANGE",
+  CHANGE_CONFLICT: "REQUIREMENT_PDM_CHANGE_CONFLICT",
+  CHANGE_RULE_BLOCKED: "REQUIREMENT_PDM_CHANGE_RULE_BLOCKED",
+  CHANGE_INITIATION_FAILED: "REQUIREMENT_PDM_CHANGE_INITIATION_FAILED",
+  PLM_NODE_INVALID: "REQUIREMENT_PDM_PLM_NODE_INVALID",
+  PLM_SYNC_FAILED: "REQUIREMENT_PDM_PLM_SYNC_FAILED",
   FORBIDDEN: "REQUIREMENT_PDM_FORBIDDEN",
 });
 
@@ -67,5 +74,19 @@ export const synchronizationFailed = (message, details = null) =>
 
 export const invalidConfiguration = (message, details = null) =>
   new RequirementPdmError(400, message, REQUIREMENT_PDM_ERROR_CODES.INVALID_CONFIGURATION, details);
+export const changeNotFound = (changeType, ref) =>
+  new RequirementPdmError(404, `${changeType} not found: ${ref}`, REQUIREMENT_PDM_ERROR_CODES.CHANGE_NOT_FOUND, { change_type: changeType, ref });
+export const invalidChange = (message, details = null) =>
+  new RequirementPdmError(400, message, REQUIREMENT_PDM_ERROR_CODES.INVALID_CHANGE, details);
+export const changeConflict = (message, details = null) =>
+  new RequirementPdmError(409, message, REQUIREMENT_PDM_ERROR_CODES.CHANGE_CONFLICT, details);
+export const changeRuleBlocked = (message, details = null) =>
+  new RequirementPdmError(409, message, REQUIREMENT_PDM_ERROR_CODES.CHANGE_RULE_BLOCKED, details);
+export const changeInitiationFailed = (message, details = null) =>
+  new RequirementPdmError(409, message, REQUIREMENT_PDM_ERROR_CODES.CHANGE_INITIATION_FAILED, details);
+export const invalidPlmNode = (nodeType, details = null) =>
+  new RequirementPdmError(400, `Unsupported PLM node type or id: ${nodeType}`, REQUIREMENT_PDM_ERROR_CODES.PLM_NODE_INVALID, { node_type: nodeType, ...(details || {}) });
+export const plmSyncFailed = (message, details = null) =>
+  new RequirementPdmError(409, message, REQUIREMENT_PDM_ERROR_CODES.PLM_SYNC_FAILED, details);
 export const forbidden = (message, details = null) =>
   new RequirementPdmError(403, message, REQUIREMENT_PDM_ERROR_CODES.FORBIDDEN, details);

@@ -1136,6 +1136,10 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.requirement-pdm.impact", name: "Requirement/PDM impact analysis", parentCode: "iam.requirement-pdm" },
     { applicationCode: "iam", code: "iam.requirement-pdm.synchronization", name: "Requirement/PDM change synchronization", parentCode: "iam.requirement-pdm" },
     { applicationCode: "iam", code: "iam.requirement-pdm.metrics", name: "Requirement/PDM metrics & health", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.plm", name: "Requirement PLM workspace (product, EBOM, MBOM, BOP, lifecycle)", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.changes", name: "Requirement linked change requests & orders", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.change-initiation", name: "Requirement change initiation", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.documents", name: "Requirement linked documents", parentCode: "iam.requirement-pdm" },
     { applicationCode: "iam", code: "iam.requirement-pdm.admin", name: "Requirement & PDM integration administration", parentCode: "iam.requirement-pdm" },
     { applicationCode: "iam", code: "iam.thread", name: "Digital Thread service", kind: "module" },
     { applicationCode: "iam", code: "iam.thread.overview", name: "Digital Thread overview & registry", parentCode: "iam.thread" },
@@ -1600,6 +1604,10 @@ function seedMissingCatalog(db) {
     "iam.requirement-pdm.impact",
     "iam.requirement-pdm.synchronization",
     "iam.requirement-pdm.metrics",
+    "iam.requirement-pdm.plm",
+    "iam.requirement-pdm.changes",
+    "iam.requirement-pdm.change-initiation",
+    "iam.requirement-pdm.documents",
     "iam.requirement-pdm.admin",
   ];
   const threadResourceCodes = [

@@ -14,7 +14,8 @@ import { objectProvider } from "../thread/provider-object.js";
 import { pdmProvider } from "../thread/provider-pdm.js";
 import { bomProvider } from "../thread/provider-bom.js";
 import { PROVIDERS } from "../thread/constants.js";
-import { ALLOCATION_CODES, REQUIREMENT_SOURCE_TYPE, TARGET_NODE_TYPES } from "./constants.js";
+import { ALLOCATION_CODES, REQUIREMENT_SOURCE_TYPE, TARGET_NODE_TYPES, PLM_LINK_CODES } from "./constants.js";
+import { isChangeType, resolveChangeNodes, resolveChangeNodesAsync, changeDomains } from "./change-nodes.js";
 
 function parseJson(raw, fallback) {
   if (!raw) return fallback;
@@ -26,13 +27,15 @@ function parseJson(raw, fallback) {
 }
 
 const TARGET_TYPE_SET = new Set(TARGET_NODE_TYPES);
+const LINK_CODES = Object.freeze([...ALLOCATION_CODES, ...PLM_LINK_CODES]);
 
 function marks(count) {
   return count.map(() => "?").join(",");
 }
 
 function isTargetType(type) {
-  return TARGET_TYPE_SET.has(String(type || "").toLowerCase());
+  const value = String(type || "").toLowerCase();
+  return TARGET_TYPE_SET.has(value) || isChangeType(value);
 }
 
 function itemDomain(itemType) {
@@ -102,6 +105,7 @@ function targetDomains(db, tenantId, relationships) {
     );
     for (const row of rows) domains.set(`bom_revision:${row.id}`, bomDomain(row.bom_type));
   }
+  for (const [key, value] of changeDomains(db, tenantId, relationships)) domains.set(key, value);
   return domains;
 }
 
@@ -130,34 +134,41 @@ async function targetDomainsAsync(db, tenantId, relationships) {
     );
     for (const row of rows) domains.set(`bom_revision:${row.id}`, bomDomain(row.bom_type));
   }
+  for (const [key, value] of changeDomains(db, tenantId, relationships)) domains.set(key, value);
   return domains;
 }
 
-function forwardRelationships(db, tenantId, requirementIds) {
-  if (!requirementIds.length) return [];
-  const typeMarks = ALLOCATION_CODES.map(() => "?").join(",");
+// `objectIds` are requirement OBJECT ids (the Digital Thread node identity).
+// Allocation rows store the requirement ROW id in `source_id`, so the join back
+// through `requirements.object_id` is required: matching `source_id` directly
+// against object ids only works when the two id sequences happen to coincide.
+function forwardRelationships(db, tenantId, objectIds) {
+  if (!objectIds.length) return [];
+  const typeMarks = LINK_CODES.map(() => "?").join(",");
   return queryAll(
     db,
-    `SELECT * FROM requirement_relationships
-       WHERE tenant_id = ? AND status = 'ACTIVE' AND source_type = ?
-         AND relationship_type IN (${typeMarks})
-         AND source_id IN (${marks(requirementIds)})
-       LIMIT 20000`,
-    [Number(tenantId), REQUIREMENT_SOURCE_TYPE, ...ALLOCATION_CODES, ...requirementIds]
+    `SELECT rr.* FROM requirement_relationships rr
+       JOIN requirements r ON r.tenant_id = rr.tenant_id AND r.id::text = rr.source_id
+      WHERE rr.tenant_id = ? AND rr.status = 'ACTIVE' AND rr.source_type = ?
+        AND rr.relationship_type IN (${typeMarks})
+        AND r.object_id IN (${marks(objectIds)})
+      LIMIT 20000`,
+    [Number(tenantId), REQUIREMENT_SOURCE_TYPE, ...LINK_CODES, ...objectIds]
   );
 }
 
-async function forwardRelationshipsAsync(db, tenantId, requirementIds) {
-  if (!requirementIds.length) return [];
-  const typeMarks = ALLOCATION_CODES.map(() => "?").join(",");
+async function forwardRelationshipsAsync(db, tenantId, objectIds) {
+  if (!objectIds.length) return [];
+  const typeMarks = LINK_CODES.map(() => "?").join(",");
   return queryAllAsync(
     db,
-    `SELECT * FROM requirement_relationships
-       WHERE tenant_id = ? AND status = 'ACTIVE' AND source_type = ?
-         AND relationship_type IN (${typeMarks})
-         AND source_id IN (${marks(requirementIds)})
-       LIMIT 20000`,
-    [Number(tenantId), REQUIREMENT_SOURCE_TYPE, ...ALLOCATION_CODES, ...requirementIds]
+    `SELECT rr.* FROM requirement_relationships rr
+       JOIN requirements r ON r.tenant_id = rr.tenant_id AND r.id::text = rr.source_id
+      WHERE rr.tenant_id = ? AND rr.status = 'ACTIVE' AND rr.source_type = ?
+        AND rr.relationship_type IN (${typeMarks})
+        AND r.object_id IN (${marks(objectIds)})
+      LIMIT 20000`,
+    [Number(tenantId), REQUIREMENT_SOURCE_TYPE, ...LINK_CODES, ...objectIds]
   );
 }
 
@@ -183,28 +194,28 @@ function reverseQueryParts(refs) {
 function reverseRelationships(db, tenantId, refs) {
   const parts = reverseQueryParts(refs);
   if (!parts) return [];
-  const typeMarks = ALLOCATION_CODES.map(() => "?").join(",");
+  const typeMarks = LINK_CODES.map(() => "?").join(",");
   return queryAll(
     db,
     `SELECT * FROM requirement_relationships
        WHERE tenant_id = ? AND status = 'ACTIVE' AND relationship_type IN (${typeMarks})
          AND (${parts.clause})
        LIMIT 20000`,
-    [Number(tenantId), ...ALLOCATION_CODES, ...parts.params]
+    [Number(tenantId), ...LINK_CODES, ...parts.params]
   );
 }
 
 async function reverseRelationshipsAsync(db, tenantId, refs) {
   const parts = reverseQueryParts(refs);
   if (!parts) return [];
-  const typeMarks = ALLOCATION_CODES.map(() => "?").join(",");
+  const typeMarks = LINK_CODES.map(() => "?").join(",");
   return queryAllAsync(
     db,
     `SELECT * FROM requirement_relationships
        WHERE tenant_id = ? AND status = 'ACTIVE' AND relationship_type IN (${typeMarks})
          AND (${parts.clause})
        LIMIT 20000`,
-    [Number(tenantId), ...ALLOCATION_CODES, ...parts.params]
+    [Number(tenantId), ...LINK_CODES, ...parts.params]
   );
 }
 
@@ -338,10 +349,11 @@ function requirementIdsFromRelationships(relationships) {
 }
 
 function groupResolvableRefs(refs) {
-  const groups = { object: [], pdm: [], bom: [], dataset: [] };
+  const groups = { object: [], pdm: [], bom: [], dataset: [], change: [] };
   for (const ref of refs) {
     const type = String(ref.objectType || "").toLowerCase();
-    if (type === REQUIREMENT_SOURCE_TYPE) groups.object.push(ref);
+    if (isChangeType(type)) groups.change.push(ref);
+    else if (type === REQUIREMENT_SOURCE_TYPE) groups.object.push(ref);
     else if (type === "pdm_dataset") groups.dataset.push(ref);
     else if (type.startsWith("pdm_")) groups.pdm.push(ref);
     else if (type.startsWith("bom_")) groups.bom.push(ref);
@@ -364,6 +376,7 @@ export const requirementPdmProvider = {
       ...(groups.object.length ? objectProvider.resolveMany(db, tenantId, groups.object, context) : []),
       ...(groups.pdm.length ? pdmProvider.resolveMany(db, tenantId, groups.pdm, context) : []),
       ...(groups.bom.length ? bomProvider.resolveMany(db, tenantId, groups.bom, context) : []),
+      ...(groups.change.length ? resolveChangeNodes(db, tenantId, groups.change) : []),
       ...resolveDatasetNodes(db, tenantId, groups.dataset),
     ];
   },
@@ -376,6 +389,7 @@ export const requirementPdmProvider = {
       ...(groups.object.length ? await objectProvider.resolveManyAsync(db, tenantId, groups.object, context) : []),
       ...(groups.pdm.length ? await pdmProvider.resolveManyAsync(db, tenantId, groups.pdm, context) : []),
       ...(groups.bom.length ? await bomProvider.resolveManyAsync(db, tenantId, groups.bom, context) : []),
+      ...(groups.change.length ? await resolveChangeNodesAsync(db, tenantId, groups.change) : []),
       ...(await resolveDatasetNodesAsync(db, tenantId, groups.dataset)),
     ];
   },

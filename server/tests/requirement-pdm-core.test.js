@@ -8,6 +8,7 @@ import { ensureNumberingFoundation } from "../services/numbering.js";
 import { ensureRequirementsFoundation, Requirements } from "../services/requirements/index.js";
 import { ensurePdmFoundation, Items, Revisions, RevisionRules } from "../services/pdm/index.js";
 import { ensureBomFoundation, Definitions as BomDefinitions, Revisions as BomRevisions } from "../services/bom/index.js";
+import { ensureChangeFoundation } from "../services/change/index.js";
 import * as RPDM from "../services/requirement-pdm/index.js";
 import * as Thread from "../services/thread/index.js";
 import { listProviders } from "../services/thread/providers.js";
@@ -46,6 +47,7 @@ describe("Requirement -> PDM integration core", () => {
     ensureRequirementsFoundation(db);
     ensurePdmFoundation(db);
     ensureBomFoundation(db);
+    ensureChangeFoundation(db);
     RPDM.ensureRequirementPdmFoundation(db);
 
     requirement = Requirements.createRequirement(db, tenant, { title: "Braking force", requirement_type: "product_requirement" }, actor, null);
@@ -65,9 +67,39 @@ describe("Requirement -> PDM integration core", () => {
   test("registers the Digital Thread provider, events, jobs and subscriptions", () => {
     assert.ok(listProviders().some((provider) => provider.code === "requirement-pdm"));
     const subs = db.prepare("SELECT COUNT(*) AS c FROM event_subscriptions WHERE consumer_group = 'requirement-pdm'").get().c;
-    assert.equal(Number(subs), 11);
+    assert.equal(Number(subs), 22);
+    const changeSubs = db
+      .prepare("SELECT COUNT(*) AS c FROM event_subscriptions WHERE consumer_group = 'requirement-pdm' AND handler = 'requirement-pdm.requirement-change'")
+      .get().c;
+    assert.equal(Number(changeSubs), 3);
+    const plmSubs = db
+      .prepare("SELECT COUNT(*) AS c FROM event_subscriptions WHERE consumer_group = 'requirement-pdm' AND handler = 'requirement-pdm.plm-change'")
+      .get().c;
+    assert.equal(Number(plmSubs), 8);
     const jobs = db.prepare("SELECT COUNT(*) AS c FROM job_types WHERE source_module = 'requirement-pdm'").get().c;
-    assert.equal(Number(jobs), 2);
+    assert.equal(Number(jobs), 5);
+  });
+
+  test("exposes the Requirement -> PLM vocabulary through meta and configuration", () => {
+    const meta = RPDM.requirementPdmMeta();
+    assert.equal(meta.plm.node_types.PRODUCT, "pdm_item");
+    assert.equal(meta.plm.node_types.PRODUCT_REVISION, "pdm_revision");
+    assert.equal(meta.plm.node_types.EBOM, "bom_revision");
+    assert.equal(meta.plm.node_types.MBOM, "bom_revision");
+    assert.equal(meta.plm.node_types.BOP, "bom_revision");
+    assert.equal(meta.plm.change_node_types.REQUEST, "change_request");
+    assert.deepEqual(meta.plm.link_codes, ["CHANGED_BY"]);
+    assert.ok(meta.plm.impact_categories.includes("PROCESS"));
+    assert.ok(meta.plm.change_initiation_statuses.includes("EXISTING"));
+
+    const config = RPDM.listConfig(db, tenant);
+    assert.equal(config.auto_change_request, false);
+    assert.equal(config.auto_change_request_severities, "CRITICAL,HIGH");
+    assert.equal(config.auto_change_request_require_released, true);
+    assert.equal(config.change_request_category, "DESIGN");
+    assert.equal(config.change_link_auto, true);
+    assert.equal(RPDM.getConfig(db, tenant, "auto_change_request"), false);
+    assert.equal(RPDM.getConfig(db, tenant, "requirement_pdm.notify_on_impact"), true);
   });
 
   test("creates allocations idempotently with reverse navigation and coverage", () => {

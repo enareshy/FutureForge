@@ -6,7 +6,7 @@
 // Every data route and bootstrap use `authAsync`/`canAsync` + `*Async` service
 // twins, while the pure-vocabulary `/meta` route stays on the sync `auth`/`can`
 // path. A route uses either the sync or the async layer, never both.
-import { Constants, Foundation, Configuration, Targets, Allocations, Compatibility, Synchronization, Jobs, Integration } from "./index.js";
+import { Constants, Foundation, Configuration, Targets, Allocations, Changes, ChangeInitiation, Products, BomProjection, Documents, Compatibility, Impact, PlmSync, PlmMetrics, Synchronization, Jobs, Integration } from "./index.js";
 
 const R = Constants.REQUIREMENT_PDM_RESOURCES;
 
@@ -20,6 +20,10 @@ export function createRequirementPdmRouter({ express, db, auth, can, authAsync, 
   const canCompatibilityAsync = (a) => canAsync(R.compatibility, a);
   const canImpactAsync = (a) => canAsync(R.impact, a);
   const canSynchronizationAsync = (a) => canAsync(R.synchronization, a);
+  const canPlmAsync = (a) => canAsync(R.plm, a);
+  const canChangesAsync = (a) => canAsync(R.changes, a);
+  const canChangeInitiationAsync = (a) => canAsync(R.changeInitiation, a);
+  const canDocumentsAsync = (a) => canAsync(R.documents, a);
   const canMetricsAsync = (a) => canAsync(R.metrics, a);
   const canAdminAsync = (a) => canAsync(R.admin, a);
   const canAdmin = (a) => can(R.admin, a);
@@ -101,6 +105,210 @@ export function createRequirementPdmRouter({ express, db, auth, can, authAsync, 
   router.get("/requirements/:ref/coverage", authAsync, canCoverageAsync("read"), wrap(async (req, res) => res.json(await Allocations.allocationCoverageAsync(db, tenantOf(req), req.params.ref))));
   router.get("/requirements/:ref/compatibilities", authAsync, canCompatibilityAsync("read"), wrap(async (req, res) => res.json(await Compatibility.checkRequirementCompatibilitiesAsync(db, tenantOf(req), req.params.ref, req.query, req.actor, req.ip))));
 
+  // ── Requirement -> Product / Lifecycle projections ──────────────────────
+  router.get(
+    "/requirements/:ref/products",
+    authAsync,
+    canAllocationsAsync("read"),
+    wrap(async (req, res) =>
+      res.json(await Products.listRequirementProductsAsync(db, tenantOf(req), req.params.ref, { status: req.query.status }))
+    )
+  );
+  router.get(
+    "/products/:ref/lifecycle",
+    authAsync,
+    canPlmAsync("read"),
+    wrap(async (req, res) => res.json(await Products.productLifecycleAsync(db, tenantOf(req), req.params.ref)))
+  );
+  router.get(
+    "/products/:ref/requirements",
+    authAsync,
+    canPlmAsync("read"),
+    wrap(async (req, res) =>
+      res.json(await Products.listProductRequirementsAsync(db, tenantOf(req), req.params.ref, { status: req.query.status }))
+    )
+  );
+
+  // ── Requirement -> EBOM / MBOM / BOP structures ─────────────────────────
+  router.get(
+    "/requirements/:ref/structures",
+    authAsync,
+    canPlmAsync("read"),
+    wrap(async (req, res) =>
+      res.json(
+        await BomProjection.listRequirementStructuresAsync(db, tenantOf(req), req.params.ref, {
+          status: req.query.status,
+          asOf: req.query.as_of ?? req.query.asOf,
+          variant: req.query.variant ?? req.query.variant_code ?? req.query.variantCode,
+          configuration: req.query.configuration ?? req.query.configuration_context ?? req.query.configurationContext,
+          includeStructure: req.query.include_structure !== "false",
+        })
+      )
+    )
+  );
+  router.get(
+    "/requirements/:ref/structure-coverage",
+    authAsync,
+    canPlmAsync("read"),
+    wrap(async (req, res) =>
+      res.json(
+        await BomProjection.structureCoverageAsync(db, tenantOf(req), req.params.ref, {
+          asOf: req.query.as_of ?? req.query.asOf,
+          variant: req.query.variant ?? req.query.variant_code ?? req.query.variantCode,
+          configuration: req.query.configuration ?? req.query.configuration_context ?? req.query.configurationContext,
+        })
+      )
+    )
+  );
+  router.get(
+    "/structures/:ref/trace",
+    authAsync,
+    canPlmAsync("read"),
+    wrap(async (req, res) =>
+      res.json(
+        await BomProjection.bomRevisionStructureAsync(db, tenantOf(req), req.params.ref, {
+          asOf: req.query.as_of ?? req.query.asOf,
+          variant: req.query.variant ?? req.query.variant_code ?? req.query.variantCode,
+          configuration: req.query.configuration ?? req.query.configuration_context ?? req.query.configurationContext,
+        })
+      )
+    )
+  );
+  router.get(
+    "/structures/:ref/requirements",
+    authAsync,
+    canPlmAsync("read"),
+    wrap(async (req, res) =>
+      res.json(await BomProjection.listStructureRequirementsAsync(db, tenantOf(req), req.params.ref, { status: req.query.status }))
+    )
+  );
+
+  // ── Requirement -> PLM documents ────────────────────────────────────────
+  router.get(
+    "/requirements/:ref/documents",
+    authAsync,
+    canDocumentsAsync("read"),
+    wrap(async (req, res) =>
+      res.json(
+        await Documents.requirementDocumentsAsync(db, tenantOf(req), req.params.ref, {
+          category: req.query.category,
+          page: req.query.page,
+          pageSize: req.query.page_size ?? req.query.pageSize,
+        })
+      )
+    )
+  );
+
+  // ── Requirement -> PLM impact analysis ──────────────────────────────────
+  router.post(
+    "/requirements/:ref/impact-analysis",
+    authAsync,
+    canImpactAsync("execute"),
+    wrap(async (req, res) => res.json(await Impact.analyzeRequirementImpactAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)))
+  );
+  router.get(
+    "/requirements/:ref/impact-analysis",
+    authAsync,
+    canImpactAsync("read"),
+    wrap(async (req, res) =>
+      res.json(
+        await Impact.analyzeRequirementImpactAsync(
+          db,
+          tenantOf(req),
+          req.params.ref,
+          { maxDepth: req.query.max_depth ?? req.query.maxDepth, asOf: req.query.as_of ?? req.query.asOf },
+          req.actor,
+          req.ip
+        )
+      )
+    )
+  );
+  router.post(
+    "/requirements/:ref/impact-analysis/job",
+    authAsync,
+    canImpactAsync("execute"),
+    wrap(async (req, res) => res.status(202).json(await Jobs.submitImpactAnalysisAsync(db, tenantOf(req), { ...(req.body || {}), requirement_id: req.params.ref }, req.actor, req.ip)))
+  );
+
+  // ── Requirement <-> Change Management links ─────────────────────────────
+  router.get(
+    "/requirements/:ref/changes",
+    authAsync,
+    canChangesAsync("read"),
+    wrap(async (req, res) =>
+      res.json(
+        await Changes.listRequirementChangesAsync(db, tenantOf(req), req.params.ref, {
+          change_type: req.query.change_type ?? req.query.changeType,
+          page: req.query.page,
+          pageSize: req.query.pageSize ?? req.query.page_size,
+        })
+      )
+    )
+  );
+  router.post(
+    "/requirements/:ref/changes",
+    authAsync,
+    canChangesAsync("create"),
+    wrap(async (req, res) => {
+      const result = await Changes.linkChangeAsync(db, tenantOf(req), { ...req.body, requirement_id: req.params.ref }, req.actor, req.ip);
+      res.status(result.created ? 201 : 200).json({ ...result.link, created: result.created, reactivated: result.reactivated });
+    })
+  );
+  router.get("/changes/:type/:id", authAsync, canChangesAsync("read"), wrap(async (req, res) => res.json(await Changes.requireChangeAsync(db, tenantOf(req), req.params.type, req.params.id))));
+  router.get(
+    "/changes/:type/:id/requirements",
+    authAsync,
+    canChangesAsync("read"),
+    wrap(async (req, res) =>
+      res.json(
+        await Changes.listChangeRequirementsAsync(db, tenantOf(req), req.params.type, req.params.id, {
+          page: req.query.page,
+          pageSize: req.query.pageSize ?? req.query.page_size,
+        })
+      )
+    )
+  );
+  router.delete("/change-links/:ref", authAsync, canChangesAsync("delete"), wrap(async (req, res) => res.json(await Changes.unlinkChangeAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
+
+  // ── Requirement -> automatic change initiation ──────────────────────────
+  router.get(
+    "/requirements/:ref/change-initiation",
+    authAsync,
+    canChangeInitiationAsync("read"),
+    wrap(async (req, res) =>
+      res.json(
+        await ChangeInitiation.evaluateRequirementChangeInitiationAsync(db, tenantOf(req), req.params.ref, {
+          maxDepth: req.query.max_depth ?? req.query.maxDepth,
+          asOf: req.query.as_of ?? req.query.asOf,
+          severity: req.query.severity,
+        }, req.actor, req.ip)
+      )
+    )
+  );
+  router.post(
+    "/requirements/:ref/change-initiation",
+    authAsync,
+    canChangeInitiationAsync("execute"),
+    wrap(async (req, res) => {
+      const result = await ChangeInitiation.initiateChangeRequestAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip);
+      res.status(result.created ? 201 : 200).json(result);
+    })
+  );
+  router.post(
+    "/requirements/:ref/change-initiation/job",
+    authAsync,
+    canChangeInitiationAsync("execute"),
+    wrap(async (req, res) =>
+      res.status(202).json(await Jobs.submitChangeInitiationAsync(db, tenantOf(req), { ...(req.body || {}), requirement_id: req.params.ref }, req.actor, req.ip))
+    )
+  );
+  router.get(
+    "/requirements/:ref/change-chain",
+    authAsync,
+    canChangeInitiationAsync("read"),
+    wrap(async (req, res) => res.json(await ChangeInitiation.requirementChangeChainAsync(db, tenantOf(req), req.params.ref)))
+  );
+
   // ── Coverage ────────────────────────────────────────────────────────────
   router.get(
     "/coverage",
@@ -172,8 +380,46 @@ export function createRequirementPdmRouter({ express, db, auth, can, authAsync, 
   router.post("/impact/sweep", authAsync, canImpactAsync("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitImpactSweepAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
   router.post("/synchronize/enqueue", authAsync, canSynchronizationAsync("execute"), wrap(async (req, res) => res.status(202).json(await Integration.enqueueSynchronizationAsync(db, tenantOf(req), req.body || {}, req.actor))));
 
+  // ── PLM -> Requirement reverse navigation & synchronization ─────────────
+  router.get(
+    "/plm-nodes/:type/:id/requirements",
+    authAsync,
+    canPlmAsync("read"),
+    wrap(async (req, res) =>
+      res.json(await PlmSync.requirementsForPlmNodeAsync(db, tenantOf(req), req.params.type, req.params.id))
+    )
+  );
+  router.post(
+    "/plm-sync",
+    authAsync,
+    canSynchronizationAsync("execute"),
+    wrap(async (req, res) =>
+      res.json(
+        await PlmSync.synchronizeFromPlmAsync(
+          db,
+          tenantOf(req),
+          {
+            nodeType: req.body?.node_type ?? req.body?.nodeType,
+            nodeId: req.body?.node_id ?? req.body?.nodeId,
+            eventType: req.body?.event_type ?? req.body?.eventType,
+            analyze: req.body?.analyze,
+            notify: req.body?.notify,
+            maxDepth: req.body?.max_depth ?? req.body?.maxDepth,
+            correlationId: req.body?.correlation_id ?? req.body?.correlationId,
+          },
+          req.actor,
+          req.ip
+        )
+      )
+    )
+  );
+  router.post("/plm-sync/job", authAsync, canSynchronizationAsync("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitPlmSynchronizationAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
+  router.post("/plm-sync/enqueue", authAsync, canSynchronizationAsync("execute"), wrap(async (req, res) => res.status(202).json(await Integration.enqueuePlmSynchronizationAsync(db, tenantOf(req), req.body || {}, req.actor))));
+
   // ── Metrics ─────────────────────────────────────────────────────────────
   router.get("/integration/summary", authAsync, canMetricsAsync("read"), wrap(async (req, res) => res.json(await Integration.integrationSummaryAsync(db, tenantOf(req)))));
+  router.get("/plm-metrics", authAsync, canMetricsAsync("read"), wrap(async (req, res) => res.json(await PlmMetrics.plmMetricsAsync(db, tenantOf(req)))));
+  router.get("/metrics/plm", authAsync, canMetricsAsync("read"), wrap(async (req, res) => res.json(await PlmMetrics.plmMetricsAsync(db, tenantOf(req)))));
   router.get("/metrics", authAsync, canMetricsAsync("read"), wrap(async (req, res) => res.json(await Integration.integrationSummaryAsync(db, tenantOf(req)))));
 
   return router;

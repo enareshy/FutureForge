@@ -11,6 +11,8 @@ import { registerIntegrationHandler, getIntegrationHandler } from "../integratio
 import { enqueueMessage, enqueueMessageAsync, markFailed, markFailedAsync } from "../integration/messages.js";
 import { createDeadLetter, createDeadLetterAsync } from "../integration/deadletter.js";
 import { synchronize, synchronizeAsync } from "./synchronization.js";
+import { initiateChangeRequestAsync } from "./change-initiation.js";
+import { synchronizeFromPlmAsync } from "./plm-sync.js";
 import { REQUIREMENT_PDM_INTEGRATION } from "./constants.js";
 
 function messageTenant(message, payload) {
@@ -44,6 +46,59 @@ export function registerRequirementPdmIntegrationHandlers() {
       return { delivered: true, status: summary.status, evaluated: summary.evaluated, changed: summary.changed, failed: summary.failed };
     },
     { description: "Synchronize requirement allocations with PDM changes", module: "requirement-pdm" }
+  );
+  registerIntegrationHandler(
+    REQUIREMENT_PDM_INTEGRATION.changeHandler,
+    async (db, { message, payload }) => {
+      const tenantId = messageTenant(message, payload);
+      if (!tenantId) throw new Error("A tenant is required to initiate a change from a requirement change");
+      const requirementRef = payload.requirement_id ?? payload.requirementId ?? payload.requirement_ref ?? payload.requirementRef;
+      if (requirementRef === undefined || requirementRef === null || String(requirementRef).trim() === "") {
+        return { skipped: true, reason: "missing_requirement" };
+      }
+      const result = await initiateChangeRequestAsync(
+        db,
+        tenantId,
+        requirementRef,
+        {
+          force: payload.force,
+          severity: payload.severity,
+          idempotency_key: payload.idempotency_key ?? payload.idempotencyKey,
+          max_depth: payload.max_depth ?? payload.maxDepth,
+        },
+        null,
+        null
+      );
+      return { delivered: true, status: result.status, change_request_id: result.change?.id ?? null, existing: result.existing || null };
+    },
+    { description: "Initiate an existing Change Management request from a requirement change", module: "requirement-pdm" }
+  );
+  registerIntegrationHandler(
+    REQUIREMENT_PDM_INTEGRATION.plmSyncHandler,
+    async (db, { message, payload }) => {
+      const tenantId = messageTenant(message, payload);
+      if (!tenantId) throw new Error("A tenant is required to propagate a PLM change to requirements");
+      const nodeType = payload.node_type ?? payload.nodeType;
+      const nodeId = payload.node_id ?? payload.nodeId;
+      if (!nodeType || nodeId === undefined || nodeId === null) return { skipped: true, reason: "missing_node" };
+      const result = await synchronizeFromPlmAsync(
+        db,
+        tenantId,
+        {
+          nodeType,
+          nodeId,
+          eventType: payload.event_type ?? payload.eventType,
+          correlationId: payload.correlation_id ?? payload.correlationId,
+          analyze: payload.analyze,
+          notify: payload.notify,
+          maxDepth: payload.max_depth ?? payload.maxDepth,
+        },
+        null,
+        null
+      );
+      return { delivered: true, status: result.status, requirement_count: result.requirement_count, impacted_count: result.impacted_count };
+    },
+    { description: "Propagate a Product/EBOM/MBOM/BOP/Document/Change change to the linked requirements", module: "requirement-pdm" }
   );
   return REQUIREMENT_PDM_INTEGRATION.handler;
 }
@@ -84,11 +139,88 @@ export async function enqueueSynchronizationAsync(db, tenantId, payload = {}, ac
   );
 }
 
+// Enqueues a change-initiation message. The deterministic idempotency key (per
+// tenant + requirement + explicit key) keeps a repeated event from producing a
+// duplicate change request.
+export function enqueueChangeInitiation(db, tenantId, payload = {}, actor = null) {
+  const normalized = { tenant_id: Number(tenantId), ...payload };
+  const keyParts = [REQUIREMENT_PDM_INTEGRATION.changeMessageType, Number(tenantId), payload.requirement_id ?? payload.requirement_ref ?? "", payload.idempotency_key ?? ""];
+  return enqueueMessage(
+    db,
+    {
+      message_type: REQUIREMENT_PDM_INTEGRATION.changeHandler,
+      direction: "inbound",
+      queue: REQUIREMENT_PDM_INTEGRATION.queue,
+      tenant_id: Number(tenantId),
+      idempotency_key: keyParts.join(":"),
+      payload: normalized,
+      correlation_id: payload.correlation_id || null,
+    },
+    actor
+  );
+}
+
+export async function enqueueChangeInitiationAsync(db, tenantId, payload = {}, actor = null) {
+  const normalized = { tenant_id: Number(tenantId), ...payload };
+  const keyParts = [REQUIREMENT_PDM_INTEGRATION.changeMessageType, Number(tenantId), payload.requirement_id ?? payload.requirement_ref ?? "", payload.idempotency_key ?? ""];
+  return enqueueMessageAsync(
+    db,
+    {
+      message_type: REQUIREMENT_PDM_INTEGRATION.changeHandler,
+      direction: "inbound",
+      queue: REQUIREMENT_PDM_INTEGRATION.queue,
+      tenant_id: Number(tenantId),
+      idempotency_key: keyParts.join(":"),
+      payload: normalized,
+      correlation_id: payload.correlation_id || null,
+    },
+    actor
+  );
+}
+
+// Enqueues a PLM -> Requirement synchronization message. The deterministic
+// idempotency key keeps a repeated PLM event from producing duplicate work for
+// the same node.
+export function enqueuePlmSynchronization(db, tenantId, payload = {}, actor = null) {
+  const normalized = { tenant_id: Number(tenantId), ...payload };
+  const keyParts = [REQUIREMENT_PDM_INTEGRATION.plmMessageType, Number(tenantId), payload.node_type ?? payload.nodeType ?? "", payload.node_id ?? payload.nodeId ?? ""];
+  return enqueueMessage(
+    db,
+    {
+      message_type: REQUIREMENT_PDM_INTEGRATION.plmSyncHandler,
+      direction: "inbound",
+      queue: REQUIREMENT_PDM_INTEGRATION.queue,
+      tenant_id: Number(tenantId),
+      idempotency_key: keyParts.join(":"),
+      payload: normalized,
+      correlation_id: payload.correlation_id || null,
+    },
+    actor
+  );
+}
+
+export async function enqueuePlmSynchronizationAsync(db, tenantId, payload = {}, actor = null) {
+  const normalized = { tenant_id: Number(tenantId), ...payload };
+  const keyParts = [REQUIREMENT_PDM_INTEGRATION.plmMessageType, Number(tenantId), payload.node_type ?? payload.nodeType ?? "", payload.node_id ?? payload.nodeId ?? ""];
+  return enqueueMessageAsync(
+    db,
+    {
+      message_type: REQUIREMENT_PDM_INTEGRATION.plmSyncHandler,
+      direction: "inbound",
+      queue: REQUIREMENT_PDM_INTEGRATION.queue,
+      tenant_id: Number(tenantId),
+      idempotency_key: keyParts.join(":"),
+      payload: normalized,
+      correlation_id: payload.correlation_id || null,
+    },
+    actor
+  );
+}
+
 // Records a failed synchronization as a retryable integration failure and, when
 // retries are exhausted, a dead letter. Best-effort: monitoring must never fail
 // the caller.
-export function recordSynchronizationFailure(db, messageRef, error, actor = null) {
-  try {
+export function recordSynchronizationFailure(db, messageRef, error, actor = null) {  try {
     const message = markFailed(db, messageRef, error, { actor });
     if (!message.retry) {
       createDeadLetter(db, {

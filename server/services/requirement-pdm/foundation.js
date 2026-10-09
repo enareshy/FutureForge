@@ -12,7 +12,9 @@ import { ensureRequirementPdmConfig, ensureRequirementPdmConfigAsync } from "./c
 import { registerRequirementPdmProvider } from "./provider.js";
 import { ensureRequirementPdmJobTypes, ensureRequirementPdmJobTypesAsync, registerRequirementPdmHandlers } from "./jobs.js";
 import { registerRequirementPdmIntegrationHandlers } from "./integration.js";
-import { registerRequirementPdmEventHandler, ensureRequirementPdmSubscriptions, ensureRequirementPdmSubscriptionsAsync } from "./subscriptions.js";
+import { registerRequirementPdmEventHandler, ensureRequirementPdmSubscriptions, ensureRequirementPdmSubscriptionsAsync, registerRequirementPdmChangeEventHandler, ensureRequirementPdmChangeSubscriptions, ensureRequirementPdmChangeSubscriptionsAsync } from "./subscriptions.js";
+import { registerRequirementPdmPlmSyncHandler, ensureRequirementPdmPlmSubscriptions, ensureRequirementPdmPlmSubscriptionsAsync } from "./subscriptions.js";
+import { ensurePlmNotificationRules, ensurePlmNotificationRulesAsync } from "./plm-notifications.js";
 import {
   SOURCE_MODULE,
   ALLOCATION_TYPES,
@@ -25,6 +27,20 @@ import {
   COVERAGE_STATUSES,
   COMPATIBILITY_STATUSES,
   REQUIREMENT_SOURCE_TYPE,
+  PLM_NODE_TYPES,
+  CHANGE_NODE_TYPES,
+  CHANGE_NODE_CODES,
+  CHANGE_TARGET_SOURCES,
+  PLM_LINK_TYPES,
+  PLM_LINK_CODES,
+  IMPACT_CATEGORIES,
+  CHANGE_INITIATION_STATUSES,
+  CHANGE_SEVERITIES,
+  CHANGE_INITIATION_RULES,
+  PLM_SYNC_DIRECTIONS,
+  PLM_DOCUMENT_CATEGORIES,
+  INTEGRATION_STATUSES,
+  PLM_NOTIFICATION_RULES,
 } from "./constants.js";
 
 function placeholders(values) {
@@ -66,9 +82,14 @@ export function ensureRequirementPdmFoundation(db) {
   registerRequirementPdmHandlers();
   registerRequirementPdmIntegrationHandlers();
   registerRequirementPdmEventHandler();
+  registerRequirementPdmChangeEventHandler();
+  registerRequirementPdmPlmSyncHandler();
   const subscriptions = ensureRequirementPdmSubscriptions(db);
+  const changeSubscriptions = ensureRequirementPdmChangeSubscriptions(db);
+  const plmSubscriptions = ensureRequirementPdmPlmSubscriptions(db);
+  const notificationRules = ensurePlmNotificationRules(db);
   const threadProvider = registerRequirementPdmProvider();
-  return { source_module: SOURCE_MODULE, event_types: eventTypes, configuration, job_types: jobTypes, subscriptions, thread_provider: threadProvider };
+  return { source_module: SOURCE_MODULE, event_types: eventTypes, configuration, job_types: jobTypes, subscriptions, change_subscriptions: changeSubscriptions, plm_subscriptions: plmSubscriptions, notification_rules: notificationRules, thread_provider: threadProvider };
 }
 
 export async function ensureRequirementPdmFoundationAsync(db) {
@@ -78,9 +99,14 @@ export async function ensureRequirementPdmFoundationAsync(db) {
   registerRequirementPdmHandlers();
   registerRequirementPdmIntegrationHandlers();
   registerRequirementPdmEventHandler();
+  registerRequirementPdmChangeEventHandler();
+  registerRequirementPdmPlmSyncHandler();
   const subscriptions = await ensureRequirementPdmSubscriptionsAsync(db);
+  const changeSubscriptions = await ensureRequirementPdmChangeSubscriptionsAsync(db);
+  const plmSubscriptions = await ensureRequirementPdmPlmSubscriptionsAsync(db);
+  const notificationRules = await ensurePlmNotificationRulesAsync(db);
   const threadProvider = registerRequirementPdmProvider();
-  return { source_module: SOURCE_MODULE, event_types: eventTypes, configuration, job_types: jobTypes, subscriptions, thread_provider: threadProvider };
+  return { source_module: SOURCE_MODULE, event_types: eventTypes, configuration, job_types: jobTypes, subscriptions, change_subscriptions: changeSubscriptions, plm_subscriptions: plmSubscriptions, notification_rules: notificationRules, thread_provider: threadProvider };
 }
 
 export function requirementPdmHealth(db, tenantId = null) {
@@ -132,5 +158,32 @@ export function requirementPdmMeta() {
     config_defaults: { ...CONFIG_DEFAULTS },
     config_bounds: { ...CONFIG_BOUNDS },
     thread_provider: "requirement-pdm",
+    plm: {
+      node_types: { ...PLM_NODE_TYPES },
+      change_node_types: { ...CHANGE_NODE_TYPES },
+      change_node_codes: [...CHANGE_NODE_CODES],
+      change_sources: Object.fromEntries(
+        Object.entries(CHANGE_TARGET_SOURCES).map(([code, source]) => [
+          code,
+          { table: source.table, label: source.label, status_column: source.status_column, parent_column: source.parent_column },
+        ])
+      ),
+      link_types: PLM_LINK_TYPES.map((entry) => ({
+        code: entry.code,
+        name: entry.name,
+        description: entry.description,
+        target_types: entry.target_types,
+        direction: entry.direction,
+      })),
+      link_codes: [...PLM_LINK_CODES],
+      impact_categories: [...IMPACT_CATEGORIES],
+      change_initiation_statuses: [...CHANGE_INITIATION_STATUSES],
+      change_severities: [...CHANGE_SEVERITIES],
+      change_initiation_rules: [...CHANGE_INITIATION_RULES],
+      sync_directions: Object.values(PLM_SYNC_DIRECTIONS),
+      document_categories: [...PLM_DOCUMENT_CATEGORIES],
+      integration_statuses: [...INTEGRATION_STATUSES],
+      notification_rules: PLM_NOTIFICATION_RULES.map((rule) => ({ code: rule.code, event_type: rule.event_type, name: rule.name })),
+    },
   };
 }

@@ -6,8 +6,21 @@ const TABS = [
   { key: "allocations", label: "Allocations" },
   { key: "coverage", label: "Coverage & compatibility" },
   { key: "impact", label: "Impact & synchronization" },
+  { key: "plmProduct", label: "Product & lifecycle" },
+  { key: "plmStructures", label: "EBOM / MBOM / BOP" },
+  { key: "plmDocuments", label: "Documents" },
+  { key: "plmChanges", label: "Change requests" },
+  { key: "plmImpact", label: "PLM impact" },
   { key: "configuration", label: "Configuration" },
 ];
+
+const PLM_TABS = ["plmProduct", "plmStructures", "plmDocuments", "plmChanges", "plmImpact"];
+
+const CHANGE_TYPE_LABELS = {
+  change_request: "Change request",
+  change_order: "Change order",
+  change_notice: "Change notice",
+};
 
 const TARGET_LOADERS = {
   pdm_item: () => pdm.items("?page_size=200"),
@@ -65,6 +78,20 @@ export default function RequirementPdmPage() {
   const [impactForm, setImpactForm] = useState({ target_type: "pdm_item", target_id: "" });
   const [impact, setImpact] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
+
+  const [plmRef, setPlmRef] = useState("");
+  const [plmProducts, setPlmProducts] = useState(null);
+  const [plmLifecycle, setPlmLifecycle] = useState(null);
+  const [plmStructures, setPlmStructures] = useState(null);
+  const [plmDocuments, setPlmDocuments] = useState(null);
+  const [plmChanges, setPlmChanges] = useState(null);
+  const [plmChain, setPlmChain] = useState(null);
+  const [plmImpact, setPlmImpact] = useState(null);
+  const [plmImpactDepth, setPlmImpactDepth] = useState(6);
+  const [plmDecision, setPlmDecision] = useState(null);
+  const [plmMetrics, setPlmMetrics] = useState(null);
+  const [docCategory, setDocCategory] = useState("");
+  const [plmTrace, setPlmTrace] = useState(null);
 
   async function refresh() {
     setError("");
@@ -208,6 +235,77 @@ export default function RequirementPdmPage() {
     if (result) setSyncResult(result);
   }
 
+  async function loadPlm(ref) {
+    setPlmRef(ref);
+    if (!ref) return;
+    await run(async () => {
+      const [products, lifecycle, structures, documents, changes] = await Promise.all([
+        requirementPdm.requirementProducts(ref),
+        requirementPdm.productLifecycle(ref),
+        requirementPdm.requirementStructures(ref, "?include_structure=true"),
+        requirementPdm.requirementDocuments(ref),
+        requirementPdm.requirementChanges(ref),
+      ]);
+      setPlmProducts(products);
+      setPlmLifecycle(lifecycle);
+      setPlmStructures(structures);
+      setPlmDocuments(documents);
+      setPlmChanges(changes);
+    });
+  }
+
+  async function refreshPlm() {
+    if (plmRef) await loadPlm(plmRef);
+  }
+
+  async function runPlmImpact() {
+    const result = await run(() => requirementPdm.requirementImpactAnalysis(plmRef, { max_depth: Number(plmImpactDepth) || 6 }));
+    if (result) setPlmImpact(result);
+  }
+
+  async function evaluatePlmChange() {
+    const result = await run(() => requirementPdm.requirementChangeInitiation(plmRef));
+    if (result) {
+      setPlmDecision(result);
+      const chain = await run(() => requirementPdm.requirementChangeChain(plmRef));
+      if (chain) setPlmChain(chain);
+    }
+  }
+
+  async function initiatePlmChange() {
+    const result = await run(() => requirementPdm.initiateRequirementChange(plmRef, {}), "Change request initiated.");
+    if (result) {
+      setPlmDecision(result);
+      await refreshPlm();
+      const chain = await run(() => requirementPdm.requirementChangeChain(plmRef));
+      if (chain) setPlmChain(chain);
+    }
+  }
+
+  async function unlinkPlmChange(linkRef) {
+    await run(() => requirementPdm.unlinkChange(linkRef), "Change link removed.");
+    await refreshPlm();
+  }
+
+  async function loadPlmMetrics() {
+    const result = await run(() => requirementPdm.plmMetrics());
+    if (result) setPlmMetrics(result);
+  }
+
+  async function loadFilteredDocuments(category) {
+    setDocCategory(category);
+    if (!plmRef) return;
+    const result = await run(() =>
+      requirementPdm.requirementDocuments(plmRef, category ? `?category=${encodeURIComponent(category)}` : "")
+    );
+    if (result) setPlmDocuments(result);
+  }
+
+  async function loadStructureTrace(ref) {
+    const result = await run(() => requirementPdm.structureTrace(ref));
+    if (result) setPlmTrace(result);
+  }
+
   async function saveConfig(key, value) {
     let parsed = value;
     try {
@@ -245,6 +343,40 @@ export default function RequirementPdmPage() {
 
       {error ? <div className="error">{error}</div> : null}
       {notice ? <div className="notice">{notice}</div> : null}
+
+      {PLM_TABS.includes(tab) ? (
+        <div className="panel">
+          <div className="stack-row" style={{ justifyContent: "space-between" }}>
+            <h3>Requirement PLM workspace</h3>
+            <label className="field">
+              <span>Requirement</span>
+              <select value={plmRef} onChange={(event) => loadPlm(event.target.value)}>
+                <option value="">Select a requirement…</option>
+                {reqItems.map((entry) => (
+                  <option key={entry.id} value={entry.requirement_ref}>{entry.requirement_number} — {entry.title}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="subtle">
+            Product, EBOM/MBOM/BOP, document and change projections for the selected requirement, projected onto the
+            shared PLM lifecycle, BOM and Change Management engines.
+          </p>
+          <div className="stack-row">
+            <button className="btn ghost" disabled={busy || !plmRef} onClick={loadPlmMetrics}>Refresh PLM metrics</button>
+          </div>
+          {plmMetrics ? (
+            <div className="stack-row" style={{ flexWrap: "wrap" }}>
+              <Badge tone="ok">status {plmMetrics.status}</Badge>
+              <span className="subtle">allocations {plmMetrics.allocations?.total ?? 0}</span>
+              <span className="subtle">change links {plmMetrics.change_links?.total ?? 0}</span>
+              <span className="subtle">change requests {plmMetrics.change_requests?.total ?? 0}</span>
+              <span className="subtle">orders {plmMetrics.change_orders?.total ?? 0}</span>
+              <span className="subtle">notices {plmMetrics.change_notices?.total ?? 0}</span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {tab === "overview" ? (
         <>
@@ -476,6 +608,306 @@ export default function RequirementPdmPage() {
                 </table>
               ) : null}
             </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {tab === "plmProduct" ? (
+        <>
+          {plmProducts ? (
+            <div className="panel">
+              <div className="stack-row" style={{ flexWrap: "wrap" }}>
+                <Badge tone="ok">realization {plmProducts.realization?.stage}</Badge>
+                <span className="subtle">products {plmProducts.product_count}</span>
+                <span className="subtle">released {plmProducts.realization?.released_count ?? 0}</span>
+                <span className="subtle">superseded {plmProducts.realization?.superseded_count ?? 0}</span>
+                <span className="subtle">implemented {String(plmProducts.realization?.implemented ?? false)}</span>
+              </div>
+              <table className="table">
+                <thead><tr><th>Number</th><th>Name</th><th>Revision</th><th>Status</th><th>Realization</th><th>Released</th><th>Revisions</th></tr></thead>
+                <tbody>
+                  {(plmProducts.products || []).map((product) => (
+                    <tr key={`${product.target_type}:${product.target_id}`}>
+                      <td className="mono">{product.number || product.ref}</td>
+                      <td>{product.name}</td>
+                      <td className="mono">{product.revision_number || "-"}</td>
+                      <td className="mono">{product.status}</td>
+                      <td className="mono">{product.realization_stage}</td>
+                      <td>{product.is_released ? <Badge tone="ok">yes</Badge> : <span className="subtle">no</span>}</td>
+                      <td className="mono">{(product.revisions || []).length}</td>
+                    </tr>
+                  ))}
+                  {!(plmProducts.products || []).length ? (
+                    <tr><td colSpan={7} className="subtle">No product allocations for this requirement.</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          ) : <p className="subtle">Select a requirement to project its products and realization stage.</p>}
+
+          {plmLifecycle ? (
+            <div className="panel">
+              <h3>Lifecycle — {plmLifecycle.product?.number || plmLifecycle.product?.ref}</h3>
+              <div className="stack-row" style={{ flexWrap: "wrap" }}>
+                <Badge tone="ok">category {plmLifecycle.lifecycle_category}</Badge>
+                <span className="subtle">stage {plmLifecycle.realization_stage}</span>
+                <span className="subtle">definition {plmLifecycle.lifecycle?.lifecycle?.code || plmLifecycle.lifecycle?.lifecycle?.name || "-"}</span>
+                <span className="subtle">version {plmLifecycle.lifecycle?.version?.version ?? "-"}</span>
+                <span className="subtle">state {plmLifecycle.lifecycle?.state?.name || plmLifecycle.product?.lifecycle_state || "-"}</span>
+                <span className="subtle">status {plmLifecycle.lifecycle?.status?.code || "-"}</span>
+                {plmLifecycle.lifecycle?.state?.is_terminal ? <Badge tone="ok">terminal</Badge> : null}
+              </div>
+              {(plmLifecycle.lifecycle?.transitions || []).length ? (
+                <table className="table">
+                  <thead><tr><th>Transition</th><th>Name</th><th>Approval</th></tr></thead>
+                  <tbody>
+                    {plmLifecycle.lifecycle.transitions.map((transition) => (
+                      <tr key={transition.code || transition.id}>
+                        <td className="mono">{transition.code}</td>
+                        <td>{transition.name || "-"}</td>
+                        <td className="mono">{transition.requires_approval ? "required" : "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : <p className="subtle">No lifecycle transitions available.</p>}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {tab === "plmStructures" ? (
+        <>
+          {plmStructures ? (
+            <div className="panel">
+              <div className="stack-row" style={{ flexWrap: "wrap" }}>
+                <span className="subtle">structures {plmStructures.total ?? 0}</span>
+                <span className="subtle">covered {(plmStructures.coverage?.covered_types || []).join(", ") || "none"}</span>
+                <span className="subtle">missing {(plmStructures.coverage?.missing_types || []).join(", ") || "none"}</span>
+                {plmStructures.coverage?.released ? <Badge tone="ok">EBOM/MBOM/BOP released</Badge> : <Badge tone="warn">not fully released</Badge>}
+              </div>
+              <table className="table">
+                <thead><tr><th>Type</th><th>Number</th><th>Revision</th><th>Status</th><th>Released</th><th>Lines</th><th></th></tr></thead>
+                <tbody>
+                  {(plmStructures.structures || []).map((item) => (
+                    <tr key={`${item.target_type}:${item.target_id}`}>
+                      <td className="mono">{item.bom_type}</td>
+                      <td className="mono">{item.number || item.ref}</td>
+                      <td className="mono">{item.revision_number || "-"}</td>
+                      <td className="mono">{item.status}</td>
+                      <td>{item.is_released ? <Badge tone="ok">yes</Badge> : <span className="subtle">no</span>}</td>
+                      <td className="mono">{item.structure?.line_count ?? "-"}</td>
+                      <td><button className="btn ghost" disabled={busy} onClick={() => loadStructureTrace(item.target_id)}>Trace</button></td>
+                    </tr>
+                  ))}
+                  {!(plmStructures.structures || []).length ? (
+                    <tr><td colSpan={7} className="subtle">No EBOM/MBOM/BOP revisions allocated.</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          ) : <p className="subtle">Select a requirement to project its engineering, manufacturing and process structures.</p>}
+
+          {plmTrace ? (
+            <div className="panel">
+              <h3>Structure trace — {plmTrace.structure?.number || plmTrace.structure?.ref} ({plmTrace.structure?.bom_type})</h3>
+              <p className="subtle">
+                lines {plmTrace.structure?.structure?.line_count ?? plmTrace.nodes?.length ?? 0},
+                roots {plmTrace.structure?.structure?.root_count ?? "-"},
+                depth {plmTrace.structure?.structure?.max_depth ?? "-"}
+              </p>
+              <table className="table">
+                <thead><tr><th>Level</th><th>Child</th><th>Qty</th><th>UoM</th><th>Ref designators</th></tr></thead>
+                <tbody>
+                  {(plmTrace.nodes || []).map((node, index) => (
+                    <tr key={node.line?.line_ref || index}>
+                      <td className="mono">{node.level}</td>
+                      <td className="mono" style={{ paddingLeft: `${Number(node.level || 1) * 12}px` }}>{node.line?.child_object_id ?? "-"}</td>
+                      <td className="mono">{node.line?.quantity ?? "-"}</td>
+                      <td className="mono">{node.line?.uom || "-"}</td>
+                      <td className="mono">{(node.line?.reference_designators || []).join(", ") || "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {tab === "plmDocuments" ? (
+        <div className="panel">
+          <div className="stack-row" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
+            <h3>Documents {plmDocuments ? <span className="subtle">({plmDocuments.total} across {plmDocuments.source_count} sources)</span> : null}</h3>
+            <label className="field">
+              <span>Category</span>
+              <select value={docCategory} onChange={(event) => loadFilteredDocuments(event.target.value)}>
+                <option value="">All</option>
+                <option value="REQUIREMENT">Requirement</option>
+                <option value="PRODUCT">Product</option>
+                <option value="STRUCTURE">Structure</option>
+                <option value="CHANGE">Change</option>
+              </select>
+            </label>
+          </div>
+          {plmDocuments ? (
+            <table className="table">
+              <thead><tr><th>File</th><th>Category</th><th>Source</th><th>Role</th><th>Status</th><th>Classification</th></tr></thead>
+              <tbody>
+                {(plmDocuments.documents || []).map((document) => (
+                  <tr key={document.association_ref || document.content_id}>
+                    <td className="mono">{document.file_name}</td>
+                    <td className="mono">{document.source?.category}</td>
+                    <td className="mono">{document.source?.number || document.source?.ref || `${document.source?.object_type}:${document.source?.object_id}`}</td>
+                    <td className="mono">{document.document_role || "-"}</td>
+                    <td className="mono">{document.status}</td>
+                    <td className="mono">{document.security_classification || "-"}</td>
+                  </tr>
+                ))}
+                {!(plmDocuments.documents || []).length ? (
+                  <tr><td colSpan={6} className="subtle">No documents associated with this requirement's PLM scope.</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          ) : <p className="subtle">Select a requirement to project its documents.</p>}
+        </div>
+      ) : null}
+
+      {tab === "plmChanges" ? (
+        <>
+          <div className="panel">
+            <div className="stack-row" style={{ flexWrap: "wrap" }}>
+              <button className="btn" disabled={busy || !plmRef} onClick={evaluatePlmChange}>Evaluate change initiation</button>
+              <button className="btn secondary" disabled={busy || !plmRef} onClick={initiatePlmChange}>Initiate change request</button>
+            </div>
+            {plmDecision ? (
+              <div className="stack-row" style={{ flexWrap: "wrap" }}>
+                <Badge tone={plmDecision.status === "CREATED" ? "ok" : undefined}>{plmDecision.status || plmDecision.decision?.status}</Badge>
+                <span className="subtle">severity {plmDecision.decision?.severity || plmDecision.severity || "-"}</span>
+                <span className="subtle">impacted {plmDecision.decision?.impact_summary?.impacted_count ?? plmDecision.impact_summary?.impacted_count ?? "-"}</span>
+                <span className="subtle">released {plmDecision.decision?.impact_summary?.released_count ?? plmDecision.impact_summary?.released_count ?? "-"}</span>
+                {plmDecision.decision?.blocked_by || plmDecision.blocked_by ? (
+                  <span className="subtle">blocked: {plmDecision.decision?.blocked_by || plmDecision.blocked_by}</span>
+                ) : null}
+                {(plmDecision.decision?.matched_rules || plmDecision.matched_rules || []).length ? (
+                  <span className="subtle">rules {(plmDecision.decision?.matched_rules || plmDecision.matched_rules).join(", ")}</span>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+
+          {plmChanges ? (
+            <div className="panel">
+              <h3>Linked change records ({plmChanges.total})</h3>
+              <table className="table">
+                <thead><tr><th>Type</th><th>Number</th><th>Title</th><th>Status</th><th>Link status</th><th>Reason</th><th></th></tr></thead>
+                <tbody>
+                  {(plmChanges.items || []).map((link) => (
+                    <tr key={link.link_ref}>
+                      <td className="mono">{CHANGE_TYPE_LABELS[link.change_type] || link.change_type}</td>
+                      <td className="mono">{link.change?.number || link.change_id}</td>
+                      <td>{link.change?.title || "-"}</td>
+                      <td className="mono">{link.change?.status || "-"}</td>
+                      <td><Badge tone={link.status === "ACTIVE" ? "ok" : undefined}>{link.status}</Badge></td>
+                      <td className="subtle">{link.reason || "-"}</td>
+                      <td><button className="btn ghost" disabled={busy} onClick={() => unlinkPlmChange(link.link_ref)}>Unlink</button></td>
+                    </tr>
+                  ))}
+                  {!(plmChanges.items || []).length ? (
+                    <tr><td colSpan={7} className="subtle">No change records linked to this requirement.</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          {plmChain ? (
+            <div className="panel">
+              <h3>Change chain — {plmChain.change_request_count} request(s), {plmChain.order_count} order(s)</h3>
+              {(plmChain.items || []).map((entry) => (
+                <div key={entry.link_ref} style={{ marginBottom: "1rem" }}>
+                  <div className="stack-row">
+                    <Badge tone="ok">CR {entry.change_request?.number || entry.change_request?.ref}</Badge>
+                    <span className="subtle">{entry.change_request?.title || "-"}</span>
+                    <span className="subtle">status {entry.change_request?.status || "-"}</span>
+                    <span className="subtle">orders {entry.order_count}</span>
+                  </div>
+                  {(entry.orders || []).length ? (
+                    <table className="table">
+                      <thead><tr><th>Order</th><th>Title</th><th>Status</th><th>Affected</th><th>Notices</th></tr></thead>
+                      <tbody>
+                        {entry.orders.map((order) => (
+                          <tr key={order.order_ref || order.id}>
+                            <td className="mono">{order.number || order.order_ref}</td>
+                            <td>{order.title || "-"}</td>
+                            <td className="mono">{order.status}</td>
+                            <td className="mono">{order.affected_item_count}</td>
+                            <td className="mono">{(order.notices || []).map((notice) => notice.number || notice.notice_ref).join(", ") || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : <p className="subtle">No change orders yet.</p>}
+                </div>
+              ))}
+              {!(plmChain.items || []).length ? <p className="subtle">No change chain for this requirement.</p> : null}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {tab === "plmImpact" ? (
+        <>
+          <div className="panel">
+            <h3>PLM impact analysis</h3>
+            <p className="subtle">Traverse the digital thread from the requirement through allocated products, structures and change records.</p>
+            <div className="stack-row">
+              <label className="field"><span>Max depth</span>
+                <input type="number" min="1" max="20" value={plmImpactDepth} onChange={(event) => setPlmImpactDepth(event.target.value)} />
+              </label>
+              <button className="btn" disabled={busy || !plmRef} onClick={runPlmImpact}>Analyze PLM impact</button>
+            </div>
+          </div>
+
+          {plmImpact ? (
+            <>
+              <div className="panel">
+                <div className="stack-row" style={{ flexWrap: "wrap" }}>
+                  <Badge tone={plmImpact.released_impacted ? "danger" : "ok"}>impacted {plmImpact.impacted_count}</Badge>
+                  <span className="subtle">nodes {plmImpact.node_count}</span>
+                  <span className="subtle">edges {plmImpact.edge_count}</span>
+                  <span className="subtle">depth {plmImpact.depth_reached}</span>
+                  <span className="subtle">released {plmImpact.released_count}</span>
+                  {plmImpact.truncated ? <Badge tone="warn">truncated</Badge> : null}
+                  {plmImpact.recommendation?.change_candidate ? <Badge tone="warn">change candidate</Badge> : null}
+                </div>
+                <div className="stack-row" style={{ flexWrap: "wrap" }}>
+                  {Object.entries(plmImpact.category_totals || {}).map(([category, count]) => (
+                    <span key={category} className="subtle">{category} {count}</span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="panel">
+                <h3>Impacted objects ({plmImpact.items?.length ?? 0})</h3>
+                <table className="table">
+                  <thead><tr><th>Type</th><th>Name</th><th>Domain</th><th>Depth</th><th>Category</th><th>Lifecycle</th><th>Released</th></tr></thead>
+                  <tbody>
+                    {(plmImpact.items || []).map((item) => (
+                      <tr key={item.node_ref}>
+                        <td className="mono">{item.object_type}</td>
+                        <td>{item.display_name || item.node_ref}</td>
+                        <td className="mono">{item.domain}</td>
+                        <td className="mono">{item.depth}</td>
+                        <td className="mono">{item.category}</td>
+                        <td className="mono">{item.lifecycle_state || "-"}</td>
+                        <td>{item.released ? <Badge tone="ok">yes</Badge> : <span className="subtle">no</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           ) : null}
         </>
       ) : null}

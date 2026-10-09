@@ -134,7 +134,14 @@ export const RELATIONSHIP_TYPES = [
   "REPRESENTED_BY",
   "SATISFIED_BY",
   "AFFECTS",
+  "CHANGED_BY",
 ];
+
+// Cross-domain Change Management link vocabulary used by the Requirement -> PLM
+// integration. Stored in the same generic requirement_relationships edge table
+// so a Requirement is traced to an existing change request/order/notice without
+// a RequirementChangeMapping table.
+export const CHANGE_RELATIONSHIPS = Object.freeze(["CHANGED_BY"]);
 
 // Cross-domain allocation vocabulary used by the Requirement -> PDM integration.
 // These preserve the same generic edge table so a Requirement can be traced to

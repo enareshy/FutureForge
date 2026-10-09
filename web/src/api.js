@@ -2549,6 +2549,53 @@ export const requirementPdm = {
 
   integrationSummary: () => api("/api/v1/requirement-pdm/integration/summary"),
   metrics: () => api("/api/v1/requirement-pdm/metrics"),
+
+  // Prompt 4 — Requirement / PLM workspace
+  requirementProducts: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/products${qs || ""}`),
+  productLifecycle: (ref) => api(`/api/v1/requirement-pdm/products/${encodeURIComponent(ref)}/lifecycle`),
+  productRequirements: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/products/${encodeURIComponent(ref)}/requirements${qs || ""}`),
+
+  requirementStructures: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/structures${qs || ""}`),
+  requirementStructureCoverage: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/structure-coverage${qs || ""}`),
+  structureTrace: (ref, qs) => api(`/api/v1/requirement-pdm/structures/${encodeURIComponent(ref)}/trace${qs || ""}`),
+  structureRequirements: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/structures/${encodeURIComponent(ref)}/requirements${qs || ""}`),
+
+  requirementDocuments: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/documents${qs || ""}`),
+
+  requirementChanges: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/changes${qs || ""}`),
+  change: (type, id) => api(`/api/v1/requirement-pdm/changes/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
+  changeRequirements: (type, id, qs) =>
+    api(`/api/v1/requirement-pdm/changes/${encodeURIComponent(type)}/${encodeURIComponent(id)}/requirements${qs || ""}`),
+  unlinkChange: (ref) => api(`/api/v1/requirement-pdm/change-links/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  requirementChangeChain: (ref) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/change-chain`),
+
+  requirementImpactAnalysis: (ref, body) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/impact-analysis`, { method: "POST", body: body || {} }),
+  requirementImpactReport: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/impact-analysis${qs || ""}`),
+  submitRequirementImpactAnalysis: (ref, body) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/impact-analysis/job`, { method: "POST", body: body || {} }),
+
+  requirementChangeInitiation: (ref) => api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/change-initiation`),
+  initiateRequirementChange: (ref, body) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/change-initiation`, { method: "POST", body: body || {} }),
+  submitRequirementChangeInitiation: (ref, body) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/change-initiation/job`, { method: "POST", body: body || {} }),
+
+  plmNodeRequirements: (type, id) =>
+    api(`/api/v1/requirement-pdm/plm-nodes/${encodeURIComponent(type)}/${encodeURIComponent(id)}/requirements`),
+  synchronizeFromPlm: (body) => api("/api/v1/requirement-pdm/plm-sync", { method: "POST", body: body || {} }),
+  submitPlmSynchronization: (body) => api("/api/v1/requirement-pdm/plm-sync/job", { method: "POST", body: body || {} }),
+  enqueuePlmSynchronization: (body) => api("/api/v1/requirement-pdm/plm-sync/enqueue", { method: "POST", body: body || {} }),
+  plmMetrics: () => api("/api/v1/requirement-pdm/plm-metrics"),
 };
 
 // P1 Digital Thread: end-to-end Requirement -> Service traceability built on the

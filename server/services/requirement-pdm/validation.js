@@ -17,12 +17,15 @@ import {
   ALLOCATION_STATUSES,
   TARGET_NODE_TYPES,
   PDM_NODE_TYPES,
+  PLM_LINK_CODES,
+  CHANGE_NODE_CODES,
   MAX_PAGE_SIZE,
   DEFAULT_PAGE_SIZE,
 } from "./constants.js";
 import {
   invalidRelationship,
   invalidTarget,
+  invalidChange,
   statusInvalid,
 } from "./errors.js";
 
@@ -116,4 +119,43 @@ export function normalizeSyncInput(body = {}) {
 
 export function paginateAllocations(opts = {}) {
   return paginate({ page: opts.page, pageSize: opts.pageSize }, { defaultPageSize: DEFAULT_PAGE_SIZE, maxPageSize: MAX_PAGE_SIZE });
+}
+
+// ── Requirement <-> Change link validation ───────────────────────────────────
+
+export const assertChangeNodeType = (value) =>
+  assertEnum(String(value || "").toLowerCase(), CHANGE_NODE_CODES, "Change node type", invalidChange);
+
+export const assertChangeLinkType = (value) =>
+  assertEnum(normalizeUpper(value), PLM_LINK_CODES, "Change link relationship", invalidChange);
+
+export function normalizeChangeLinkInput(body = {}) {
+  const rawChangeType = body.change_type ?? body.changeType ?? body.target_type ?? body.targetType;
+  if (!rawChangeType) throw invalidChange("change_type is required");
+  const changeType = assertChangeNodeType(rawChangeType);
+
+  const changeId = body.change_id ?? body.changeId ?? body.target_id ?? body.targetId;
+  if (changeId === undefined || changeId === null || String(changeId).trim() === "") {
+    throw invalidChange("change_id is required");
+  }
+
+  const requirementId = body.requirement_id ?? body.requirementId ?? body.requirement ?? body.requirement_ref ?? body.requirementRef;
+  if (requirementId === undefined || requirementId === null || String(requirementId).trim() === "") {
+    throw invalidChange("requirement_id is required");
+  }
+
+  const relationshipType = body.relationship_type ?? body.relationshipType ? assertChangeLinkType(body.relationship_type ?? body.relationshipType) : "CHANGED_BY";
+  if (relationshipType !== "CHANGED_BY") throw invalidChange(`${relationshipType} is not supported for requirement/change links`);
+
+  return {
+    requirement_id: normalizeText(requirementId, { max: 120 }),
+    change_type: changeType,
+    change_id: normalizeText(changeId, { max: 120 }),
+    relationship_type: relationshipType,
+    status: body.status ? assertAllocationStatus(body.status) : "ACTIVE",
+    reason: normalizeText(body.reason ?? "", { max: 2000 }),
+    effectivity_from: body.effectivity_from ?? body.effectivityFrom ?? null,
+    effectivity_to: body.effectivity_to ?? body.effectivityTo ?? null,
+    attributes: parseObject(body.attributes ?? {}, {}),
+  };
 }
