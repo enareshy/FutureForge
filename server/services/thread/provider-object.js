@@ -14,6 +14,11 @@ import { domainForType } from "./domains.js";
 import { PROVIDERS } from "./constants.js";
 
 const NON_OBJECT_PREFIXES = ["pdm_", "bom_"];
+// Domain types that own their own tables and are deliberately NOT stamped into
+// the generic `objects` table, so the Object provider must not attempt to
+// resolve them. Classification characteristics and Content documents expose
+// their own Digital Thread provider instead.
+const NON_OBJECT_CODES = new Set(["characteristic", "content"]);
 
 function parseJson(raw, fallback) {
   if (!raw) return fallback;
@@ -26,6 +31,7 @@ function parseJson(raw, fallback) {
 
 function isObjectType(type) {
   const code = String(type || "").toLowerCase();
+  if (NON_OBJECT_CODES.has(code)) return false;
   return !NON_OBJECT_PREFIXES.some((prefix) => code.startsWith(prefix));
 }
 

@@ -337,4 +337,5 @@ export const PROVIDERS = Object.freeze({
   PDM: "pdm",
   BOM: "bom",
   REQUIREMENT_PDM: "requirement-pdm",
+  REQUIREMENT_MANUFACTURING: "requirement-manufacturing",
 });

@@ -131,8 +131,30 @@ describe("BOM Engine analytical services", () => {
     assert.equal(targetLines.total, 6);
     assert.equal(targetLines.items[0].usage, "MANUFACTURING");
 
+    // Provenance is persisted into target line attributes by default so the
+    // Requirement -> Manufacturing layer can project EBOM -> MBOM mappings
+    // without a second mapping store.
+    assert.ok(targetLines.items.every((line) => line.attributes.source_line_ref), "expected source_line_ref provenance on every transformed line");
+    assert.ok(targetLines.items.every((line) => String(line.attributes.source_object_id || "") !== ""), "expected source_object_id provenance on every transformed line");
+
     const runs = Transformation.listTransformationRuns(db, { tenantId: tenant, definitionId: seededDefinition.id });
     assert.ok(runs.total >= 2);
+  });
+
+  test("omits provenance when persist_provenance is disabled", () => {
+    const definition = Transformation.createTransformationDefinition(db, tenant, {
+      code: "NO-PROV-TRANSFORM",
+      name: "No provenance",
+      source_bom_type: "EBOM",
+      target_bom_type: "MBOM",
+      status: "ACTIVE",
+      config: { usage_map: { DESIGN: "MANUFACTURING" }, persist_provenance: false },
+    });
+    const executed = Transformation.transform(db, tenant, { definition_id: definition.id, source_revision_id: seededRevision.id, mode: "EXECUTE" });
+    assert.equal(executed.run.status, "COMPLETED");
+    const targetLines = Lines.listLines(db, { tenantId: tenant, revisionId: executed.run.target_revision_id });
+    assert.ok(targetLines.total >= 1);
+    assert.ok(targetLines.items.every((line) => line.attributes.source_line_ref === undefined), "provenance must be absent when disabled");
   });
 
   test("captures and compares frozen baselines immutably", () => {

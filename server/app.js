@@ -69,6 +69,8 @@ import * as requirements from "./services/requirements/index.js";
 import { createRequirementsRouter } from "./services/requirements/router-requirements.js";
 import * as requirementPdm from "./services/requirement-pdm/index.js";
 import { createRequirementPdmRouter } from "./services/requirement-pdm/router-requirement-pdm.js";
+import * as requirementManufacturing from "./services/requirement-manufacturing/index.js";
+import { createRequirementManufacturingRouter } from "./services/requirement-manufacturing/router-requirement-manufacturing.js";
 import * as deployment from "./services/deployment/index.js";
 import { createDeploymentRouter } from "./services/deployment/router-deployment.js";
 import * as thread from "./services/thread/index.js";
@@ -371,6 +373,11 @@ export function createApp(db) {
     requirementPdm.ensureRequirementPdmFoundation(db);
   } catch {
     /* Requirement -> PDM integration foundation is idempotent and must never block application boot */
+  }
+  try {
+    requirementManufacturing.ensureRequirementManufacturingFoundation(db);
+  } catch {
+    /* Requirement -> Manufacturing traceability foundation is idempotent and must never block application boot */
   }
   try {
     thread.ensureThreadFoundation(db);
@@ -10402,6 +10409,11 @@ export function createApp(db) {
   const requirementPdmRouter = createRequirementPdmRouter({ express, db, auth, can, authAsync, canAsync, wrap });
   app.use("/api/requirement-pdm", requirementPdmRouter);
   app.use("/api/v1/requirement-pdm", requirementPdmRouter);
+
+  // ── Requirement -> Manufacturing traceability ──────────────────────────────
+  const requirementManufacturingRouter = createRequirementManufacturingRouter({ express, db, auth, can, authAsync, canAsync, wrap });
+  app.use("/api/requirement-manufacturing", requirementManufacturingRouter);
+  app.use("/api/v1/requirement-manufacturing", requirementManufacturingRouter);
 
   // ── P1 Digital Thread ─────────────────────────────────────────────────────
   const threadRouter = createThreadRouter({ express, db, auth, can, authAsync, canAsync, wrap });

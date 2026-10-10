@@ -1141,6 +1141,20 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.requirement-pdm.change-initiation", name: "Requirement change initiation", parentCode: "iam.requirement-pdm" },
     { applicationCode: "iam", code: "iam.requirement-pdm.documents", name: "Requirement linked documents", parentCode: "iam.requirement-pdm" },
     { applicationCode: "iam", code: "iam.requirement-pdm.admin", name: "Requirement & PDM integration administration", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing", name: "Requirement & Manufacturing traceability service", kind: "module" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.overview", name: "Requirement & Manufacturing overview", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.allocations", name: "Requirement to manufacturing allocations", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.coverage", name: "Manufacturing coverage & gap analysis", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.traceability", name: "Manufacturing traceability & matrix", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.transformations", name: "EBOM to MBOM transformation traceability", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.operations", name: "BOP & operation linkage", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.characteristics", name: "Manufacturing characteristics & process constraints", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.ctq", name: "Critical-to-quality traceability", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.work-centers", name: "Work-center association", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.impact", name: "Requirement/Manufacturing impact analysis", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.changes", name: "Requirement linked changes & CTQ controls", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.metrics", name: "Requirement/Manufacturing metrics & health", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.admin", name: "Requirement & Manufacturing administration", parentCode: "iam.requirement-manufacturing" },
     { applicationCode: "iam", code: "iam.thread", name: "Digital Thread service", kind: "module" },
     { applicationCode: "iam", code: "iam.thread.overview", name: "Digital Thread overview & registry", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.explorer", name: "Digital Thread explorer & traversal", parentCode: "iam.thread" },
@@ -1610,6 +1624,22 @@ function seedMissingCatalog(db) {
     "iam.requirement-pdm.documents",
     "iam.requirement-pdm.admin",
   ];
+  const requirementManufacturingResourceCodes = [
+    "iam.requirement-manufacturing",
+    "iam.requirement-manufacturing.overview",
+    "iam.requirement-manufacturing.allocations",
+    "iam.requirement-manufacturing.coverage",
+    "iam.requirement-manufacturing.traceability",
+    "iam.requirement-manufacturing.transformations",
+    "iam.requirement-manufacturing.operations",
+    "iam.requirement-manufacturing.characteristics",
+    "iam.requirement-manufacturing.ctq",
+    "iam.requirement-manufacturing.work-centers",
+    "iam.requirement-manufacturing.impact",
+    "iam.requirement-manufacturing.changes",
+    "iam.requirement-manufacturing.metrics",
+    "iam.requirement-manufacturing.admin",
+  ];
   const threadResourceCodes = [
     "iam.thread",
     "iam.thread.overview",
@@ -1687,7 +1717,7 @@ function seedMissingCatalog(db) {
     "iam.observability.audit",
     "iam.observability.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...requirementPdmResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...requirementPdmResourceCodes, ...requirementManufacturingResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);

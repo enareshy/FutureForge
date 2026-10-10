@@ -261,6 +261,21 @@ function applyMappings(sourceLine, targetObjectId, mappings) {
   return { child_object_id: childId, quantity, usage, uom, attributes, applied };
 }
 
+// Persist per-line source provenance so the transformed (for example MBOM) line
+// can be traced back to the exact source (for example EBOM) line/object without a
+// second mapping store. Additive and controlled by the definition's
+// `persist_provenance` config flag (default on); the requirement-manufacturing
+// layer reads these attributes to project EBOM->MBOM mappings.
+function provenanceAttributes(item, enabled) {
+  if (!enabled) return item.attributes;
+  return {
+    ...item.attributes,
+    source_line_ref: item.source_line_ref,
+    source_object_id: item.source_child_object_id != null ? String(item.source_child_object_id) : "",
+    source_object_type: item.source_child_object_type || "",
+  };
+}
+
 export function transform(db, tenantId, body = {}, actor = null, ip = null) {
   const tenant = Number(tenantId);
   const definition = requireTransformationDefinition(db, tenant, body.definition_id ?? body.definitionId ?? body.definition ?? body.code);
@@ -271,6 +286,7 @@ export function transform(db, tenantId, body = {}, actor = null, ip = null) {
   const sourceLines = flatStructure(db, tenant, sourceRevision.id, { includeInactive: true });
   const config = parseObject(definition.config_json, {});
   const usageMap = parseObject(config.usage_map ?? config.usageMap, { DESIGN: "MANUFACTURING" });
+  const persistProvenance = toBool(config.persist_provenance ?? config.persistProvenance, true);
 
   const preview = [];
   const warnings = [];
@@ -291,6 +307,8 @@ export function transform(db, tenantId, body = {}, actor = null, ip = null) {
     const usage = usageMap[result.usage] ?? result.usage ?? config.default_usage ?? "MANUFACTURING";
     preview.push({
       source_line_ref: line.line_ref,
+      source_child_object_id: line.child_object_id,
+      source_child_object_type: line.child_object_type,
       child_object_id: result.child_object_id,
       child_object_type: line.child_object_type,
       child_revision: line.child_revision,
@@ -346,7 +364,7 @@ export function transform(db, tenantId, body = {}, actor = null, ip = null) {
           find_number: item.find_number,
           reference_designator: item.reference_designator,
           optional: item.optional,
-          attributes: item.attributes,
+          attributes: provenanceAttributes(item, persistProvenance),
         }, actor, ip);
       }
       status = "COMPLETED";
@@ -612,6 +630,7 @@ export async function transformAsync(db, tenantId, body = {}, actor = null, ip =
   const sourceLines = await flatStructureAsync(db, tenant, sourceRevision.id, { includeInactive: true });
   const config = parseObject(definition.config_json, {});
   const usageMap = parseObject(config.usage_map ?? config.usageMap, { DESIGN: "MANUFACTURING" });
+  const persistProvenance = toBool(config.persist_provenance ?? config.persistProvenance, true);
 
   const preview = [];
   const warnings = [];
@@ -632,6 +651,8 @@ export async function transformAsync(db, tenantId, body = {}, actor = null, ip =
     const usage = usageMap[result.usage] ?? result.usage ?? config.default_usage ?? "MANUFACTURING";
     preview.push({
       source_line_ref: line.line_ref,
+      source_child_object_id: line.child_object_id,
+      source_child_object_type: line.child_object_type,
       child_object_id: result.child_object_id,
       child_object_type: line.child_object_type,
       child_revision: line.child_revision,
@@ -687,7 +708,7 @@ export async function transformAsync(db, tenantId, body = {}, actor = null, ip =
           find_number: item.find_number,
           reference_designator: item.reference_designator,
           optional: item.optional,
-          attributes: item.attributes,
+          attributes: provenanceAttributes(item, persistProvenance),
         }, actor, ip);
       }
       status = "COMPLETED";

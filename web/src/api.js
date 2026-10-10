@@ -2598,6 +2598,73 @@ export const requirementPdm = {
   plmMetrics: () => api("/api/v1/requirement-pdm/plm-metrics"),
 };
 
+// Requirement -> Manufacturing traceability: allocations, EBOM->MBOM trace,
+// BOP/operation/work-center linkage, characteristics/CTQ, matrix/gaps/trace and
+// change impact. Reuses the shared PDM/BOM/Object/Traceability engines.
+export const requirementManufacturing = {
+  meta: () => api("/api/v1/requirement-manufacturing/meta"),
+  health: () => api("/api/v1/requirement-manufacturing/health"),
+  configuration: () => api("/api/v1/requirement-manufacturing/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/requirement-manufacturing/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/requirement-manufacturing/foundation/ensure", { method: "POST" }),
+
+  targets: () => api("/api/v1/requirement-manufacturing/targets"),
+  resolveTarget: (targetType, targetId) =>
+    api(`/api/v1/requirement-manufacturing/targets/resolve?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`),
+
+  allocations: (qs) => api(`/api/v1/requirement-manufacturing/allocations${qs || ""}`),
+  allocation: (ref) => api(`/api/v1/requirement-manufacturing/allocations/${encodeURIComponent(ref)}`),
+  createAllocation: (body) => api("/api/v1/requirement-manufacturing/allocations", { method: "POST", body }),
+  createAllocations: (body) => api("/api/v1/requirement-manufacturing/allocations/batch", { method: "POST", body }),
+  removeAllocation: (ref) => api(`/api/v1/requirement-manufacturing/allocations/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  requirementAllocations: (ref) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/allocations`),
+  requirementCoverage: (ref) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/coverage`),
+  targetRequirements: (targetType, targetId) =>
+    api(`/api/v1/requirement-manufacturing/targets/requirements?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`),
+
+  ebomMbomMappings: (ref, qs) => api(`/api/v1/requirement-manufacturing/ebom/${encodeURIComponent(ref)}/mbom-mappings${qs || ""}`),
+  mbomEbomSources: (ref, qs) => api(`/api/v1/requirement-manufacturing/mbom/${encodeURIComponent(ref)}/ebom-sources${qs || ""}`),
+  bomTransformations: (ref) => api(`/api/v1/requirement-manufacturing/bom-revisions/${encodeURIComponent(ref)}/transformations`),
+
+  bopOperations: (ref, qs) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/operations${qs || ""}`),
+  bopSequence: (ref, qs) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/sequence${qs || ""}`),
+  bopCoverage: (ref) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/coverage`),
+  bopMboms: (ref, qs) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/mboms${qs || ""}`),
+  addOperationToBop: (ref, body) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/operations`, { method: "POST", body }),
+  mbomBops: (ref, qs) => api(`/api/v1/requirement-manufacturing/mbom/${encodeURIComponent(ref)}/bops${qs || ""}`),
+  mbomProcessCoverage: (ref, qs) => api(`/api/v1/requirement-manufacturing/mbom/${encodeURIComponent(ref)}/process-coverage${qs || ""}`),
+  operationWorkCenters: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/work-centers${qs || ""}`),
+  linkOperationWorkCenter: (ref, body) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/work-centers`, { method: "POST", body }),
+  operationMbomItems: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/mbom-items${qs || ""}`),
+  linkOperationMbomItem: (ref, body) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/mbom-items`, { method: "POST", body }),
+  operationPredecessors: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/predecessors${qs || ""}`),
+  linkOperationPrecedence: (ref, body) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/predecessors`, { method: "POST", body }),
+  workCenterOperations: (ref, qs) => api(`/api/v1/requirement-manufacturing/work-centers/${encodeURIComponent(ref)}/operations${qs || ""}`),
+  mbomItemOperations: (ref, qs) => api(`/api/v1/requirement-manufacturing/mbom-items/${encodeURIComponent(ref)}/operations${qs || ""}`),
+
+  operationCharacteristics: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/characteristics${qs || ""}`),
+  operationConstraints: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/constraints${qs || ""}`),
+  characteristicOperations: (ref, qs) => api(`/api/v1/requirement-manufacturing/characteristics/${encodeURIComponent(ref)}/operations${qs || ""}`),
+  characteristicRequirements: (ref) => api(`/api/v1/requirement-manufacturing/characteristics/${encodeURIComponent(ref)}/requirements`),
+  validateCharacteristic: (ref, body) => api(`/api/v1/requirement-manufacturing/characteristics/${encodeURIComponent(ref)}/validate`, { method: "POST", body: body || {} }),
+  requirementCtqs: (ref, qs) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/ctq${qs || ""}`),
+  ctqCoverage: (qs) => api(`/api/v1/requirement-manufacturing/ctq/coverage${qs || ""}`),
+
+  matrix: (qs) => api(`/api/v1/requirement-manufacturing/matrix${qs || ""}`),
+  coverage: () => api("/api/v1/requirement-manufacturing/coverage"),
+  gaps: (qs) => api(`/api/v1/requirement-manufacturing/gaps${qs || ""}`),
+  trace: (qs) => api(`/api/v1/requirement-manufacturing/trace${qs || ""}`),
+  traceMatrix: (qs) => api(`/api/v1/requirement-manufacturing/trace/matrix${qs || ""}`),
+
+  impactAnalysis: (body) => api("/api/v1/requirement-manufacturing/impact-analysis", { method: "POST", body: body || {} }),
+  requirementImpact: (ref, qs) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/impact${qs || ""}`),
+  nodeImpact: (body) => api("/api/v1/requirement-manufacturing/node-impact", { method: "POST", body: body || {} }),
+  submitImpactJob: (body) => api("/api/v1/requirement-manufacturing/impact-analysis/jobs", { method: "POST", body: body || {} }),
+  requirementGaps: (ref, qs) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/gaps${qs || ""}`),
+  submitGapSweep: (body) => api("/api/v1/requirement-manufacturing/gaps/sweep", { method: "POST", body: body || {} }),
+};
+
 // P1 Digital Thread: end-to-end Requirement -> Service traceability built on the
 // existing object, PDM and BOM engines.
 export const digitalThread = {
