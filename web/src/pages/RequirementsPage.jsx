@@ -268,7 +268,6 @@ export default function RequirementsPage() {
             platform.
           </p>
         </div>
-        <div className="stack-row">{meta?.source_module ? <Badge tone="ok">{meta.source_module}</Badge> : null}</div>
       </div>
 
       <div className="tabs">

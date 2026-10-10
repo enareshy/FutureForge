@@ -330,7 +330,6 @@ export default function RequirementPdmPage() {
             the shared digital thread — reusing the existing PDM, BOM, Object and Traceability engines.
           </p>
         </div>
-        <div className="stack-row">{meta?.thread_provider ? <Badge tone="ok">{meta.thread_provider}</Badge> : null}</div>
       </div>
 
       <div className="tabs">

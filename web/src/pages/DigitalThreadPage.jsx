@@ -307,10 +307,6 @@ export default function DigitalThreadPage() {
           <h1>Digital thread</h1>
           <p className="subtle">End-to-end traceability from requirement through system, design, part, BOM, manufacturing and quality to service, with impact, dependency, snapshots, baselines and completeness.</p>
         </div>
-        <div className="stack-row">
-          {meta?.source_module ? <Badge tone="ok">{meta.source_module}</Badge> : null}
-          {health?.status ? <Badge tone={toneFor(health.status)}>{health.status}</Badge> : null}
-        </div>
       </div>
 
       <div className="tabs">

@@ -249,9 +249,6 @@ export default function ChangeManagementPage() {
           <h1>Change management</h1>
           <p className="subtle">Engineering change control: Change Request (ECR) → Change Order (ECO) → Change Notice (ECN). Release creates a real effectivity assignment and a frozen baseline for every affected item, via the platform's Versioning kernel.</p>
         </div>
-        <div className="stack-row">
-          {meta?.source_module ? <Badge tone="ok">{meta.source_module}</Badge> : null}
-        </div>
       </div>
 
       <div className="tabs">

@@ -256,10 +256,6 @@ export default function PdmPage() {
           <h1>Product data management</h1>
           <p className="subtle">PDM domain: items and revisions, parts/products, datasets, representations, design data, CAD associations, revision and configuration rules, baselines, where-used and validation.</p>
         </div>
-        <div className="stack-row">
-          {meta?.source_module ? <Badge tone="ok">{meta.source_module}</Badge> : null}
-          {health?.status ? <Badge tone={toneFor(health.status)}>{health.status}</Badge> : null}
-        </div>
       </div>
 
       <div className="tabs">
