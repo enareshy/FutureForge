@@ -1155,6 +1155,20 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.requirement-manufacturing.changes", name: "Requirement linked changes & CTQ controls", parentCode: "iam.requirement-manufacturing" },
     { applicationCode: "iam", code: "iam.requirement-manufacturing.metrics", name: "Requirement/Manufacturing metrics & health", parentCode: "iam.requirement-manufacturing" },
     { applicationCode: "iam", code: "iam.requirement-manufacturing.admin", name: "Requirement & Manufacturing administration", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.verification-validation", name: "Verification & Validation service", kind: "module" },
+    { applicationCode: "iam", code: "iam.verification-validation.overview", name: "Verification & Validation overview", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.test-cases", name: "V&V test cases", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.procedures", name: "V&V test procedures", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.executions", name: "V&V test executions", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.results", name: "V&V test results", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.evidence", name: "V&V evidence", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.coverage", name: "V&V requirement coverage", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.waivers", name: "V&V waivers & exceptions", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.traceability", name: "V&V traceability", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.impact", name: "V&V impact analysis", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.quality", name: "V&V quality integration", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.metrics", name: "V&V metrics & health", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.admin", name: "Verification & Validation administration", parentCode: "iam.verification-validation" },
     { applicationCode: "iam", code: "iam.thread", name: "Digital Thread service", kind: "module" },
     { applicationCode: "iam", code: "iam.thread.overview", name: "Digital Thread overview & registry", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.explorer", name: "Digital Thread explorer & traversal", parentCode: "iam.thread" },
@@ -1640,6 +1654,22 @@ function seedMissingCatalog(db) {
     "iam.requirement-manufacturing.metrics",
     "iam.requirement-manufacturing.admin",
   ];
+  const verificationValidationResourceCodes = [
+    "iam.verification-validation",
+    "iam.verification-validation.overview",
+    "iam.verification-validation.test-cases",
+    "iam.verification-validation.procedures",
+    "iam.verification-validation.executions",
+    "iam.verification-validation.results",
+    "iam.verification-validation.evidence",
+    "iam.verification-validation.coverage",
+    "iam.verification-validation.waivers",
+    "iam.verification-validation.traceability",
+    "iam.verification-validation.impact",
+    "iam.verification-validation.quality",
+    "iam.verification-validation.metrics",
+    "iam.verification-validation.admin",
+  ];
   const threadResourceCodes = [
     "iam.thread",
     "iam.thread.overview",
@@ -1717,7 +1747,7 @@ function seedMissingCatalog(db) {
     "iam.observability.audit",
     "iam.observability.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...requirementPdmResourceCodes, ...requirementManufacturingResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...requirementPdmResourceCodes, ...requirementManufacturingResourceCodes, ...verificationValidationResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);

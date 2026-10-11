@@ -901,6 +901,30 @@ export async function setVerificationStatusAsync(db, tenantId, ref, status, acto
   return publicRequirement(updated);
 }
 
+export function setValidationStatus(db, tenantId, ref, status, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = requireRequirementRow(db, tenant, ref);
+  const target = normalizeText(status, { max: 30 }).toUpperCase();
+  const patch = { validation_status: target, version: bumpVersion(row), updated_by: actor?.id ?? null };
+  updateRow(db, "requirements", row.id, patch, { columns: ["validation_status", "version", "updated_by"] });
+  const updated = queryOne(db, "SELECT * FROM requirements WHERE id = ?", [row.id]);
+  recordRequirementHistory(db, { tenantId: tenant, organizationId: row.organization_id, entityType: "REQUIREMENT", entityId: row.id, entityRef: row.requirement_ref, action: "VALIDATION_UPDATED", version: updated.version, status: updated.status, before: { validation_status: row.validation_status }, after: { validation_status: target }, actor, ip });
+  if (target === "VALIDATED") publishRequirementEvent(db, { eventType: "RequirementValidated", objectId: row.id, tenantId: tenant, organizationId: row.organization_id, payload: { requirement_ref: row.requirement_ref } }, actor);
+  return publicRequirement(updated);
+}
+
+export async function setValidationStatusAsync(db, tenantId, ref, status, actor = null, ip = null) {
+  const tenant = Number(tenantId);
+  const row = await requireRequirementRowAsync(db, tenant, ref);
+  const target = normalizeText(status, { max: 30 }).toUpperCase();
+  const patch = { validation_status: target, version: bumpVersion(row), updated_by: actor?.id ?? null };
+  await updateRowAsync(db, "requirements", row.id, patch, { columns: ["validation_status", "version", "updated_by"] });
+  const updated = await queryOneAsync(db, "SELECT * FROM requirements WHERE id = ?", [row.id]);
+  await recordRequirementHistoryAsync(db, { tenantId: tenant, organizationId: row.organization_id, entityType: "REQUIREMENT", entityId: row.id, entityRef: row.requirement_ref, action: "VALIDATION_UPDATED", version: updated.version, status: updated.status, before: { validation_status: row.validation_status }, after: { validation_status: target }, actor, ip });
+  if (target === "VALIDATED") await publishRequirementEventAsync(db, { eventType: "RequirementValidated", objectId: row.id, tenantId: tenant, organizationId: row.organization_id, payload: { requirement_ref: row.requirement_ref } }, actor);
+  return publicRequirement(updated);
+}
+
 export function listRequirementHistory(db, tenantId, ref) {
   const requirement = requireRequirementRow(db, tenantId, ref);
   return listHistory(db, { tenantId, entityId: requirement.id });

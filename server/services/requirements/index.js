@@ -65,6 +65,7 @@ export const RequirementsManager = {
   releaseRequirement: Requirements.releaseRequirement,
   obsoleteRequirement: Requirements.obsoleteRequirement,
   setVerificationStatus: Requirements.setVerificationStatus,
+  setValidationStatus: Requirements.setValidationStatus,
   // Revisions
   reviseRequirement: Requirements.reviseRequirement,
   listRevisions: Requirements.listRevisions,
@@ -123,6 +124,7 @@ export const RequirementsManagerAsync = {
   releaseRequirement: Requirements.releaseRequirementAsync,
   obsoleteRequirement: Requirements.obsoleteRequirementAsync,
   setVerificationStatus: Requirements.setVerificationStatusAsync,
+  setValidationStatus: Requirements.setValidationStatusAsync,
   reviseRequirement: Requirements.reviseRequirementAsync,
   listRevisions: Requirements.listRevisionsAsync,
   compareRevisions: Requirements.compareRevisionsAsync,

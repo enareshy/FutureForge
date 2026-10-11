@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { requirements } from "../api.js";
 
 const TABS = [
@@ -406,6 +407,7 @@ export default function RequirementsPage() {
                 <div className="stack-row">
                   <Badge tone={toneFor(selected.status)}>{selected.status}</Badge>
                   <Badge>{`rev ${selected.revision}`}</Badge>
+                  <Link className="btn secondary" to={`/verification-validation?requirement=${encodeURIComponent(selected.requirement_ref)}`}>V&amp;V coverage</Link>
                   <button className="btn secondary" disabled={busy} onClick={revise}>New revision</button>
                 </div>
               </div>

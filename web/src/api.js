@@ -3221,3 +3221,131 @@ export const observability = {
   ensureFoundation: () => api("/api/v1/observability/seed", { method: "POST" }),
   seed: () => api("/api/v1/observability/seed", { method: "POST" }),
 };
+
+// P1 Verification & Validation: Requirement -> Method -> Test Case -> Procedure
+// -> Execution -> Result -> Evidence -> Requirement Status on the shared
+// Digital Thread, reusing Content / Classification / Lifecycle / Workflow /
+// Events / Jobs / Audit.
+export const verificationValidation = {
+  meta: () => api("/api/v1/verification-validation/meta"),
+  health: () => api("/api/v1/verification-validation/health"),
+  audit: (qs) => api(`/api/v1/verification-validation/audit${qs || ""}`),
+  subscriptions: () => api("/api/v1/verification-validation/subscriptions"),
+  config: () => api("/api/v1/verification-validation/config"),
+  setConfig: (key, value) =>
+    api(`/api/v1/verification-validation/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/verification-validation/foundation/ensure", { method: "POST" }),
+
+  methods: (qs) => api(`/api/v1/verification-validation/methods${qs || ""}`),
+  method: (ref) => api(`/api/v1/verification-validation/methods/${encodeURIComponent(ref)}`),
+  createMethod: (body) => api("/api/v1/verification-validation/methods", { method: "POST", body }),
+  updateMethod: (ref, body) =>
+    api(`/api/v1/verification-validation/methods/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+
+  testCases: (qs) => api(`/api/v1/verification-validation/test-cases${qs || ""}`),
+  testCase: (ref) => api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}`),
+  createTestCase: (body) => api("/api/v1/verification-validation/test-cases", { method: "POST", body }),
+  updateTestCase: (ref, body) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  transitionTestCase: (ref, status, reason) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, reason } }),
+  reviseTestCase: (ref, body) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/revise`, { method: "POST", body }),
+  testCaseRequirements: (ref, qs) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/requirements${qs || ""}`),
+  linkRequirement: (ref, body) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/requirements`, { method: "POST", body }),
+  unlinkRequirement: (ref, relationshipRef) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/requirements/${encodeURIComponent(relationshipRef)}`, { method: "DELETE" }),
+
+  procedures: (qs) => api(`/api/v1/verification-validation/procedures${qs || ""}`),
+  testCaseProcedures: (ref, qs) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/procedures${qs || ""}`),
+  createProcedure: (ref, body) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/procedures`, { method: "POST", body }),
+  procedure: (ref) => api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}`),
+  updateProcedure: (ref, body) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  transitionProcedure: (ref, status, reason) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, reason } }),
+  procedureSteps: (ref) => api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/steps`),
+  addProcedureStep: (ref, body) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/steps`, { method: "POST", body }),
+  updateProcedureStep: (ref, stepRef, body) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/steps/${encodeURIComponent(stepRef)}`, { method: "PUT", body }),
+  removeProcedureStep: (ref, stepRef) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/steps/${encodeURIComponent(stepRef)}`, { method: "DELETE" }),
+
+  executions: (qs) => api(`/api/v1/verification-validation/executions${qs || ""}`),
+  execution: (ref) => api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}`),
+  createExecution: (body) => api("/api/v1/verification-validation/executions", { method: "POST", body }),
+  updateExecution: (ref, body) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  transitionExecution: (ref, status, reason) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, reason } }),
+  requestRetest: (ref, body) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/retest`, { method: "POST", body }),
+  executionRequirements: (ref) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/requirements`),
+  evaluateExecution: (ref, body) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/evaluate`, { method: "POST", body: body || {} }),
+
+  results: (qs) => api(`/api/v1/verification-validation/results${qs || ""}`),
+  result: (ref) => api(`/api/v1/verification-validation/results/${encodeURIComponent(ref)}`),
+  recordResult: (executionRef, body) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(executionRef)}/results`, { method: "POST", body }),
+  updateResult: (ref, body) =>
+    api(`/api/v1/verification-validation/results/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  evaluateResult: (ref, body) =>
+    api(`/api/v1/verification-validation/results/${encodeURIComponent(ref)}/evaluate`, { method: "POST", body: body || {} }),
+
+  evidence: (qs) => api(`/api/v1/verification-validation/evidence${qs || ""}`),
+  attachEvidence: (body) => api("/api/v1/verification-validation/evidence", { method: "POST", body }),
+  detachEvidence: (ref) =>
+    api(`/api/v1/verification-validation/evidence/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  coverageRequirements: (qs) => api(`/api/v1/verification-validation/coverage/requirements${qs || ""}`),
+  coverageSummary: () => api("/api/v1/verification-validation/coverage/summary"),
+  requirementCoverage: (ref, qs) =>
+    api(`/api/v1/verification-validation/requirements/${encodeURIComponent(ref)}/coverage${qs || ""}`),
+  recalculateRequirement: (ref) =>
+    api(`/api/v1/verification-validation/requirements/${encodeURIComponent(ref)}/coverage/recalculate`, { method: "POST" }),
+  submitCoverageJob: (body) =>
+    api("/api/v1/verification-validation/coverage/recalculate/job", { method: "POST", body: body || {} }),
+
+  waivers: (qs) => api(`/api/v1/verification-validation/waivers${qs || ""}`),
+  waiverSummary: () => api("/api/v1/verification-validation/waivers/summary"),
+  expireOverdueWaivers: () => api("/api/v1/verification-validation/waivers/expire-overdue", { method: "POST" }),
+  createWaiver: (body) => api("/api/v1/verification-validation/waivers", { method: "POST", body }),
+  waiver: (ref) => api(`/api/v1/verification-validation/waivers/${encodeURIComponent(ref)}`),
+  updateWaiver: (ref, body) =>
+    api(`/api/v1/verification-validation/waivers/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  transitionWaiver: (ref, status, body) =>
+    api(`/api/v1/verification-validation/waivers/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, ...(body || {}) } }),
+
+  retestChain: (ref) => api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/retest-chain`),
+  retestPlan: (ref, qs) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/retest-plan${qs || ""}`),
+
+  failures: (qs) => api(`/api/v1/verification-validation/failures${qs || ""}`),
+  failureSummary: () => api("/api/v1/verification-validation/failures/summary"),
+  raiseQualityException: (body) =>
+    api("/api/v1/verification-validation/quality-exceptions", { method: "POST", body }),
+  linkFailureRecords: (body) =>
+    api("/api/v1/verification-validation/failures/link-records", { method: "POST", body }),
+
+  executionApplicability: (ref) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/applicability`),
+  flagStaleExecution: (ref, reason) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/flag-stale`, { method: "POST", body: { reason } }),
+  staleEvidence: (qs) => api(`/api/v1/verification-validation/stale-evidence${qs || ""}`),
+  scanStaleEvidence: (body) =>
+    api("/api/v1/verification-validation/stale-evidence/scan", { method: "POST", body: body || {} }),
+  submitStaleScanJob: (body) =>
+    api("/api/v1/verification-validation/stale-evidence/scan/job", { method: "POST", body: body || {} }),
+
+  requirementImpact: (ref, qs) =>
+    api(`/api/v1/verification-validation/requirements/${encodeURIComponent(ref)}/impact${qs || ""}`),
+  requirementTrace: (ref, qs) =>
+    api(`/api/v1/verification-validation/requirements/${encodeURIComponent(ref)}/trace${qs || ""}`),
+};
