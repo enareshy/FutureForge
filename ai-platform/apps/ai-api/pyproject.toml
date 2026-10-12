@@ -1,0 +1,33 @@
+[project]
+name = "ai-api"
+version = "0.1.0"
+description = "Enterprise AI Platform — AI service layer (FastAPI)"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "Proprietary" }
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["ai_api"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ai_api"]

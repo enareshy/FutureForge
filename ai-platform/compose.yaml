@@ -1,0 +1,300 @@
+# Enterprise AI Platform — local development infrastructure.
+#
+# The application (FastAPI + React) and the enterprise Node backend are run
+# outside Compose for fast iteration; this file provides the supporting
+# services they depend on.
+#
+# PostgreSQL is NOT containerised here: the platform reuses the enterprise
+# PostgreSQL instance (with pgvector) that already runs on the host. See
+# docs/installation.md for the optional standalone pgvector service.
+#
+# Profiles:
+#   (default)      redis, objectstore      lean, fits the 1 GiB headroom
+#   search         opensearch              ~1.5 GiB RAM
+#   events         kafka                   ~1 GiB RAM
+#   mlops          mlflow                  light
+#   observability  otel-collector, prometheus, grafana
+#   llmops         langfuse + deps         heavy, requires >= 4 GiB RAM
+#
+# Usage:
+#   docker compose up -d                     # lean profile
+#   docker compose --profile observability up -d
+#   docker compose --profile search --profile events up -d
+
+name: enterprise-ai-platform
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &restart unless-stopped
+
+services:
+  # --- Cache / ephemeral state (never the authoritative store) ----------
+  redis:
+    image: redis:7.2.16-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 192mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    mem_limit: 256m
+    restart: *restart
+    logging: *default-logging
+
+  # --- S3-compatible object storage (SeaweedFS, Apache-2.0) -------------
+  objectstore:
+    image: chrislusf/seaweedfs:3.80
+    command: ["server", "-s3", "-dir=/data"]
+    ports:
+      - "127.0.0.1:${SEAWEEDFS_S3_PORT:-8333}:8333"
+      - "127.0.0.1:${SEAWEEDFS_MASTER_PORT:-9333}:9333"
+    volumes:
+      - objectstore-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9333/cluster/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: 256m
+    restart: *restart
+    logging: *default-logging
+
+  # --- Enterprise full-text / hybrid search -----------------------------
+  opensearch:
+    image: opensearchproject/opensearch:2.19.6
+    profiles: ["search"]
+    environment:
+      discovery.type: single-node
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "127.0.0.1:${OPENSEARCH_PORT:-9200}:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+    mem_limit: 1536m
+    restart: *restart
+    logging: *default-logging
+
+  # --- Event streaming --------------------------------------------------
+  kafka:
+    image: apache/kafka:3.9.2
+    profiles: ["events"]
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://127.0.0.1:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@127.0.0.1:9093"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "127.0.0.1:${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 40s
+    mem_limit: 1024m
+    restart: *restart
+    logging: *default-logging
+
+  # --- Model / experiment lifecycle -------------------------------------
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.8.1
+    profiles: ["mlops"]
+    command:
+      - /bin/sh
+      - -c
+      - >
+        pip install --quiet psycopg2-binary boto3 &&
+        mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri sqlite:////mlflow/mlflow.db
+        --default-artifact-root /mlflow/artifacts
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+    mem_limit: 768m
+    restart: *restart
+    logging: *default-logging
+
+  # --- Observability ----------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    profiles: ["observability"]
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./infrastructure/monitoring/otel/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "127.0.0.1:${OTEL_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${OTEL_HTTP_PORT:-4318}:4318"
+    mem_limit: 256m
+    restart: *restart
+    logging: *default-logging
+
+  prometheus:
+    image: prom/prometheus:v2.53.5
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./infrastructure/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    mem_limit: 384m
+    restart: *restart
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_HTTP_PORT: "3000"
+    volumes:
+      - ./infrastructure/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3100}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    mem_limit: 384m
+    restart: *restart
+    logging: *default-logging
+
+  # --- LLM tracing & evaluation (heavy; scaffolded) ---------------------
+  langfuse-db:
+    image: postgres:16.9-alpine
+    profiles: ["llmops"]
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse}
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 512m
+    restart: *restart
+    logging: *default-logging
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.8.9
+    profiles: ["llmops"]
+    environment:
+      CLICKHOUSE_DB: langfuse
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse}
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8123/ping || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1024m
+    restart: *restart
+    logging: *default-logging
+
+  langfuse:
+    image: langfuse/langfuse:4.56.0
+    profiles: ["llmops"]
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse}
+      CLICKHOUSE_DB: langfuse
+      NEXTAUTH_URL: http://localhost:${LANGFUSE_WEB_PORT:-3300}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-dev-only-change-me}
+      SALT: ${LANGFUSE_SALT:-dev-only-change-me}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+    ports:
+      - "127.0.0.1:${LANGFUSE_WEB_PORT:-3300}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/public/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+    mem_limit: 1024m
+    restart: *restart
+    logging: *default-logging
+
+volumes:
+  redis-data:
+  objectstore-data:
+  opensearch-data:
+  kafka-data:
+  mlflow-data:
+  prometheus-data:
+  grafana-data:
+  langfuse-db-data:
+  langfuse-clickhouse-data:

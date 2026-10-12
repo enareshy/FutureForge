@@ -1,0 +1,83 @@
+:root {
+  color-scheme: light dark;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  line-height: 1.5;
+}
+
+body {
+  margin: 0;
+  background: #0b1120;
+  color: #e2e8f0;
+}
+
+.app {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #1e293b;
+  padding-bottom: 1rem;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.app-header nav a {
+  color: #93c5fd;
+  text-decoration: none;
+}
+
+.app-main {
+  padding-top: 1.5rem;
+}
+
+.muted {
+  color: #94a3b8;
+}
+
+.error {
+  color: #fca5a5;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.status-grid div {
+  background: #111827;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.status-grid dt {
+  color: #94a3b8;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.status-grid dd {
+  margin: 0.25rem 0 0;
+  font-size: 1.1rem;
+}
+
+code {
+  background: #1e293b;
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+}
