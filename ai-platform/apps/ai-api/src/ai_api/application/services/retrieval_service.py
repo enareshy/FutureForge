@@ -51,30 +51,39 @@ class RetrievalService:
     events: EventPublisher | None = None
 
     async def search(self, principal: Principal, payload: Any) -> dict[str, Any]:
-        tenant_id = require_tenant(principal)
-        policy = await self.governance.policy_for(tenant_id)
-        vector = await self._embed_query(payload.query)
-        candidates = await self.repository.vector_search(
-            tenant_id, vector, limit=max(payload.limit * 4, payload.limit)
+        results = await self.authorized_search(
+            principal, payload.query, limit=payload.limit
         )
-        results = self._authorize(principal, policy, candidates)[: payload.limit]
         return {
             "query": payload.query,
             "count": len(results),
-            "results": [self._serialize_result(item) for item in results],
+            "results": [self.serialize_result(item) for item in results],
         }
+
+    async def authorized_search(
+        self, principal: Principal, query: str, *, limit: int
+    ) -> list[dict[str, Any]]:
+        """Return ranked, ACL- and classification-filtered knowledge candidates.
+
+        Authorization and the classification ceiling are applied server-side
+        before any content is used; similarity scores never grant access. Shared
+        by the retrieval endpoint, RAG query and the knowledge agent tool.
+        """
+        tenant_id = require_tenant(principal)
+        policy = await self.governance.policy_for(tenant_id)
+        vector = await self._embed_query(query)
+        candidates = await self.repository.vector_search(
+            tenant_id, vector, limit=max(limit * 4, limit)
+        )
+        return self._authorize(principal, policy, candidates)[:limit]
 
     async def rag_query(self, principal: Principal, payload: Any) -> dict[str, Any]:
         tenant_id = require_tenant(principal)
         model = payload.model or default_chat_model(self.settings)
-        policy = await self.governance.enforce(
+        await self.governance.enforce(
             principal, operation="rag", model=model, prompt_text=payload.query, feature="rag_query"
         )
-        vector = await self._embed_query(payload.query)
-        candidates = await self.repository.vector_search(
-            tenant_id, vector, limit=max(payload.limit * 4, payload.limit)
-        )
-        ranked = self._authorize(principal, policy, candidates)[: payload.limit]
+        ranked = await self.authorized_search(principal, payload.query, limit=payload.limit)
         best_score = ranked[0]["score"] if ranked else 0.0
 
         if not ranked or best_score < self.settings.ai_rag_min_score:
@@ -99,7 +108,7 @@ class RetrievalService:
                 "request_id": request_id_var.get(),
             }
 
-        context = self._build_context(ranked)
+        context = self.build_context(ranked)
         guard = PromptGuard()
         messages = (
             Message(role=Role.system, content=guard.harden_system_prompt(RAG_SYSTEM_PROMPT)),
@@ -111,7 +120,7 @@ class RetrievalService:
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
 
-        citations = [self._citation(index, item) for index, item in enumerate(ranked, start=1)]
+        citations = [self.citation(index, item) for index, item in enumerate(ranked, start=1)]
         await self._record_conversation(
             principal, model, payload.query, answered=True, citations=len(citations),
             response=response, latency_ms=latency_ms,
@@ -163,7 +172,7 @@ class RetrievalService:
         allowed.sort(key=lambda item: item["score"], reverse=True)
         return allowed
 
-    def _build_context(self, items: list[dict[str, Any]]) -> str:
+    def build_context(self, items: list[dict[str, Any]]) -> str:
         budget = self.settings.ai_rag_max_context_chars
         blocks: list[str] = []
         used = 0
@@ -178,7 +187,7 @@ class RetrievalService:
         return "\n\n".join(blocks)
 
     @staticmethod
-    def _serialize_result(item: dict[str, Any]) -> dict[str, Any]:
+    def serialize_result(item: dict[str, Any]) -> dict[str, Any]:
         return {
             "chunk_id": item["chunk_id"],
             "document_id": item["document_id"],
@@ -191,7 +200,7 @@ class RetrievalService:
         }
 
     @staticmethod
-    def _citation(rank: int, item: dict[str, Any]) -> dict[str, Any]:
+    def citation(rank: int, item: dict[str, Any]) -> dict[str, Any]:
         snippet = item["content"][:280]
         return {
             "rank": rank,

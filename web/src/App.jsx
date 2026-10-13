@@ -78,6 +78,17 @@ const EventsPage = React.lazy(() => import("./pages/EventsPage.jsx"));
 const NumberingPage = React.lazy(() => import("./pages/NumberingPage.jsx"));
 const VersioningPage = React.lazy(() => import("./pages/VersioningPage.jsx"));
 const ReferenceDataPage = React.lazy(() => import("./pages/ReferenceDataPage.jsx"));
+const AiDashboardPage = React.lazy(() => import("./pages/AiDashboardPage.jsx"));
+const AiChatPage = React.lazy(() => import("./pages/AiChatPage.jsx"));
+const AiKnowledgePage = React.lazy(() => import("./pages/AiKnowledgePage.jsx"));
+const AiJobsPage = React.lazy(() => import("./pages/AiJobsPage.jsx"));
+const AiAgentsPage = React.lazy(() => import("./pages/AiAgentsPage.jsx"));
+const AiModelsPage = React.lazy(() => import("./pages/AiModelsPage.jsx"));
+const AiEvaluationsPage = React.lazy(() => import("./pages/AiEvaluationsPage.jsx"));
+const AiExperimentsPage = React.lazy(() => import("./pages/AiExperimentsPage.jsx"));
+const AiUsagePage = React.lazy(() => import("./pages/AiUsagePage.jsx"));
+const AiEventsPage = React.lazy(() => import("./pages/AiEventsPage.jsx"));
+const AiAuditPage = React.lazy(() => import("./pages/AiAuditPage.jsx"));
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -228,6 +239,23 @@ const NAV_SECTIONS = [
       { to: "/search", label: "Search & discovery", end: true },
       { to: "/search/foundation", label: "Enterprise search" },
       { to: "/reporting", label: "Reporting & analytics", feature: "reporting" },
+    ],
+  },
+  {
+    key: "ai",
+    label: "AI Platform",
+    items: [
+      { to: "/ai", label: "AI dashboard", end: true },
+      { to: "/ai/chat", label: "Enterprise Copilot" },
+      { to: "/ai/knowledge", label: "Knowledge sources" },
+      { to: "/ai/jobs", label: "Indexing jobs" },
+      { to: "/ai/agents", label: "Agents" },
+      { to: "/ai/models", label: "Models & providers" },
+      { to: "/ai/experiments", label: "Experiments & models" },
+      { to: "/ai/evaluations", label: "Evaluation & feedback" },
+      { to: "/ai/usage", label: "Usage & cost" },
+      { to: "/ai/events", label: "Events & observability", platformOrAdmin: true },
+      { to: "/ai/audit", label: "AI audit log", platformOrAdmin: true },
     ],
   },
   {
@@ -601,6 +629,17 @@ export default function App() {
         <Route path="/numbering" element={<NumberingPage />} />
         <Route path="/versioning" element={<VersioningPage />} />
         <Route path="/reference-data" element={<ReferenceDataPage />} />
+        <Route path="/ai" element={<AiDashboardPage />} />
+        <Route path="/ai/chat" element={<AiChatPage />} />
+        <Route path="/ai/knowledge" element={<AiKnowledgePage />} />
+        <Route path="/ai/jobs" element={<AiJobsPage />} />
+        <Route path="/ai/agents" element={<AiAgentsPage />} />
+        <Route path="/ai/models" element={<AiModelsPage />} />
+        <Route path="/ai/experiments" element={<AiExperimentsPage />} />
+        <Route path="/ai/evaluations" element={<AiEvaluationsPage />} />
+        <Route path="/ai/usage" element={<AiUsagePage />} />
+        <Route path="/ai/events" element={<AiEventsPage />} />
+        <Route path="/ai/audit" element={<AiAuditPage />} />
         <Route path="/jobs" element={<JobsDashboardPage />} />
         <Route path="/jobs/list" element={<JobsPage />} />
         <Route path="/jobs/execution" element={<JobExecutionPage />} />

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 
 from ai_api.api.deps import (
     IndexingServiceDep,
@@ -71,6 +71,26 @@ async def request_index(
     payload: KnowledgeIndexRequest, principal: PrincipalDep, service: KnowledgeServiceDep
 ) -> JobOut:
     return JobOut(**await service.request_index(principal, payload))
+
+
+@router.get(
+    "/knowledge/jobs",
+    response_model=Page[JobOut],
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_READ))],
+)
+async def list_jobs(
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+    pagination: PaginationDep,
+    status: str | None = Query(default=None, max_length=32),
+) -> Page[JobOut]:
+    items, total = await service.list_jobs(
+        principal, status=status, limit=pagination.limit, offset=pagination.offset
+    )
+    return Page[JobOut](
+        items=[JobOut(**item) for item in items],
+        meta=PageMeta(total=total, limit=pagination.limit, offset=pagination.offset),
+    )
 
 
 @router.get(

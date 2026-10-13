@@ -6,6 +6,7 @@ import math
 from datetime import UTC, datetime
 from itertools import count
 from typing import Any
+from uuid import uuid4
 
 
 class InMemoryAiRepository:
@@ -15,11 +16,19 @@ class InMemoryAiRepository:
         self._executions: list[dict[str, Any]] = []
         self._usage: list[dict[str, Any]] = []
         self._audit: list[dict[str, Any]] = []
+        self._feedback: list[dict[str, Any]] = []
         self._agents: list[dict[str, Any]] = []
+        self._agent_versions: list[dict[str, Any]] = []
         self._governance: dict[int, dict[str, Any]] = {}
         self._documents: list[dict[str, Any]] = []
         self._chunks: list[dict[str, Any]] = []
         self._embeddings: list[dict[str, Any]] = []
+        self._experiments: list[dict[str, Any]] = []
+        self._runs: list[dict[str, Any]] = []
+        self._ml_models: list[dict[str, Any]] = []
+        self._ml_versions: list[dict[str, Any]] = []
+        self._evaluations: list[dict[str, Any]] = []
+        self._evaluation_results: list[dict[str, Any]] = []
         self._ids: dict[str, count] = {}
 
     def _next_id(self, table: str) -> int:
@@ -233,6 +242,137 @@ class InMemoryAiRepository:
             if agent["tenant_id"] == tenant_id and agent["id"] == agent_id:
                 return agent
         return None
+
+    async def create_agent_if_absent(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        for agent in self._agents:
+            if agent["tenant_id"] == tenant_id and agent["code"] == data["code"]:
+                return agent
+        return self.add_agent(tenant_id, **data)
+
+    async def create_agent_version_if_absent(
+        self, tenant_id: int, agent_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        for version in self._agent_versions:
+            if version["agent_id"] == agent_id and version["version"] == data["version"]:
+                return version
+        record = {
+            "tenant_id": tenant_id,
+            "id": self._next_id("agent_version"),
+            "agent_id": agent_id,
+            "version": data["version"],
+            "definition": data.get("definition", {}),
+            "status": data.get("status", "active"),
+            "created_at": self._now(),
+        }
+        self._agent_versions.append(record)
+        return record
+
+    async def list_agent_versions(
+        self, tenant_id: int, agent_id: int
+    ) -> list[dict[str, Any]]:
+        versions = [
+            v
+            for v in self._agent_versions
+            if v["tenant_id"] == tenant_id and v["agent_id"] == agent_id
+        ]
+        return sorted(versions, key=lambda v: v["version"], reverse=True)
+
+    async def get_active_agent_version(
+        self, tenant_id: int, agent_id: int
+    ) -> dict[str, Any] | None:
+        versions = [
+            v
+            for v in self._agent_versions
+            if v["tenant_id"] == tenant_id
+            and v["agent_id"] == agent_id
+            and v["status"] == "active"
+        ]
+        if not versions:
+            return None
+        return max(versions, key=lambda v: v["version"])
+
+    async def list_executions(
+        self,
+        tenant_id: int,
+        *,
+        agent_id: int | None,
+        operation: str | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        rows = [r for r in self._executions if r["tenant_id"] == tenant_id]
+        if agent_id is not None:
+            rows = [r for r in rows if r.get("agent_id") == agent_id]
+        if operation is not None:
+            rows = [r for r in rows if r.get("operation") == operation]
+        total = len(rows)
+        page = sorted(
+            rows, key=lambda r: r.get("created_at") or self._now(), reverse=True
+        )[offset : offset + limit]
+        return [self._public_execution(r) for r in page], total
+
+    async def get_execution(
+        self, tenant_id: int, execution_id: int
+    ) -> dict[str, Any] | None:
+        for row in self._executions:
+            if row["tenant_id"] == tenant_id and row["id"] == execution_id:
+                return self._public_execution(row)
+        return None
+
+    @staticmethod
+    def _public_execution(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "request_id": str(row.get("request_id")) if row.get("request_id") else None,
+            "actor_id": row.get("actor_id"),
+            "agent_id": row.get("agent_id"),
+            "operation": row.get("operation"),
+            "status": row.get("status"),
+            "latency_ms": row.get("latency_ms"),
+            "token_usage": row.get("token_usage") or {},
+            "created_at": row.get("created_at"),
+        }
+
+    async def record_feedback(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        record = {
+            "tenant_id": tenant_id,
+            "id": self._next_id("feedback"),
+            "created_at": self._now(),
+            **data,
+        }
+        self._feedback.append(record)
+        return record
+
+    async def list_feedback(
+        self,
+        tenant_id: int,
+        *,
+        execution_id: int | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        rows = [r for r in self._feedback if r["tenant_id"] == tenant_id]
+        if execution_id is not None:
+            rows = [r for r in rows if r.get("execution_id") == execution_id]
+        total = len(rows)
+        page = sorted(rows, key=lambda r: r["created_at"], reverse=True)[
+            offset : offset + limit
+        ]
+        return [
+            {
+                "id": r["id"],
+                "execution_id": r.get("execution_id"),
+                "actor_id": r.get("actor_id"),
+                "rating": r.get("rating"),
+                "comment": r.get("comment"),
+                "created_at": r["created_at"],
+            }
+            for r in page
+        ], total
 
     async def get_governance_policy(self, tenant_id: int) -> dict[str, Any] | None:
         return self._governance.get(tenant_id)
@@ -448,6 +588,18 @@ class InMemoryAiRepository:
         jobs.sort(key=lambda j: j["id"])
         return jobs[:limit]
 
+    async def list_jobs(
+        self, tenant_id: int, *, status: str | None, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        jobs = [
+            self._public_job(j)
+            for j in self._jobs
+            if j["tenant_id"] == tenant_id and (status is None or j["status"] == status)
+        ]
+        jobs.sort(key=lambda j: j["id"], reverse=True)
+        total = len(jobs)
+        return jobs[offset : offset + limit], total
+
     async def delete_source(self, tenant_id: int, source_id: int) -> bool:
         before = len(self._sources)
         self._sources = [
@@ -466,6 +618,288 @@ class InMemoryAiRepository:
         self._chunks = [c for c in self._chunks if c["id"] not in doomed_chunks]
         self._embeddings = [e for e in self._embeddings if e["chunk_id"] not in doomed_chunks]
         return removed
+
+    # --- ML experiment tracking and model registry (Phase 11) ------------
+    async def create_experiment_if_absent(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        for record in self._experiments:
+            if record["tenant_id"] == tenant_id and record["code"] == data["code"]:
+                return dict(record)
+        now = self._now()
+        record = {
+            "tenant_id": tenant_id,
+            "id": self._next_id("experiment"),
+            "code": data["code"],
+            "name": data["name"],
+            "description": data.get("description"),
+            "problem_type": data.get("problem_type", "classification"),
+            "tracking_backend": data.get("tracking_backend", "local"),
+            "external_experiment_id": data.get("external_experiment_id"),
+            "tags": data.get("tags", {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._experiments.append(record)
+        return dict(record)
+
+    async def list_experiments(
+        self, tenant_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        items = [dict(e) for e in self._experiments if e["tenant_id"] == tenant_id]
+        items.sort(key=lambda e: e["created_at"], reverse=True)
+        return items[offset : offset + limit], len(items)
+
+    async def get_experiment(
+        self, tenant_id: int, experiment_id: int
+    ) -> dict[str, Any] | None:
+        for record in self._experiments:
+            if record["tenant_id"] == tenant_id and record["id"] == experiment_id:
+                return dict(record)
+        return None
+
+    async def update_experiment_tracking(
+        self,
+        tenant_id: int,
+        experiment_id: int,
+        *,
+        tracking_backend: str,
+        external_experiment_id: str | None,
+    ) -> dict[str, Any] | None:
+        for record in self._experiments:
+            if record["tenant_id"] == tenant_id and record["id"] == experiment_id:
+                record["tracking_backend"] = tracking_backend
+                record["external_experiment_id"] = external_experiment_id
+                record["updated_at"] = self._now()
+                return dict(record)
+        return None
+
+    async def create_experiment_run(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        now = self._now()
+        record = {
+            "tenant_id": tenant_id,
+            "id": self._next_id("experiment_run"),
+            "experiment_id": data["experiment_id"],
+            "run_uuid": str(uuid4()),
+            "run_name": data.get("run_name"),
+            "status": data.get("status", "running"),
+            "external_run_id": data.get("external_run_id"),
+            "artifact_uri": data.get("artifact_uri"),
+            "params": data.get("params", {}),
+            "metrics": data.get("metrics", {}),
+            "training_config": data.get("training_config", {}),
+            "dataset_ref": data.get("dataset_ref", {}),
+            "code_version": data.get("code_version"),
+            "logged_by": data.get("logged_by"),
+            "created_at": now,
+            "finished_at": None,
+        }
+        self._runs.append(record)
+        return dict(record)
+
+    async def list_experiment_runs(
+        self,
+        tenant_id: int,
+        *,
+        experiment_id: int | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        items = [
+            dict(r)
+            for r in self._runs
+            if r["tenant_id"] == tenant_id
+            and (experiment_id is None or r["experiment_id"] == experiment_id)
+        ]
+        items.sort(key=lambda r: r["created_at"], reverse=True)
+        return items[offset : offset + limit], len(items)
+
+    async def get_experiment_run(
+        self, tenant_id: int, run_id: int
+    ) -> dict[str, Any] | None:
+        for record in self._runs:
+            if record["tenant_id"] == tenant_id and record["id"] == run_id:
+                return dict(record)
+        return None
+
+    async def update_experiment_run(
+        self, tenant_id: int, run_id: int, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        for record in self._runs:
+            if record["tenant_id"] == tenant_id and record["id"] == run_id:
+                record.update(fields)
+                return dict(record)
+        return None
+
+    async def create_ml_model_if_absent(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        for record in self._ml_models:
+            if record["tenant_id"] == tenant_id and record["code"] == data["code"]:
+                return dict(record)
+        now = self._now()
+        record = {
+            "tenant_id": tenant_id,
+            "id": self._next_id("ml_model"),
+            "code": data["code"],
+            "name": data["name"],
+            "description": data.get("description"),
+            "problem_type": data.get("problem_type", "classification"),
+            "framework": data.get("framework", "scikit-learn"),
+            "task": data.get("task"),
+            "stage": data.get("stage", "none"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._ml_models.append(record)
+        return dict(record)
+
+    async def list_ml_models(
+        self, tenant_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        items = [dict(m) for m in self._ml_models if m["tenant_id"] == tenant_id]
+        items.sort(key=lambda m: m["created_at"], reverse=True)
+        return items[offset : offset + limit], len(items)
+
+    async def get_ml_model(self, tenant_id: int, model_id: int) -> dict[str, Any] | None:
+        for record in self._ml_models:
+            if record["tenant_id"] == tenant_id and record["id"] == model_id:
+                return dict(record)
+        return None
+
+    async def set_ml_model_stage(
+        self, tenant_id: int, model_id: int, stage: str
+    ) -> dict[str, Any] | None:
+        for record in self._ml_models:
+            if record["tenant_id"] == tenant_id and record["id"] == model_id:
+                record["stage"] = stage
+                record["updated_at"] = self._now()
+                return dict(record)
+        return None
+
+    async def create_ml_model_version(
+        self, tenant_id: int, model_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        existing = [
+            v
+            for v in self._ml_versions
+            if v["tenant_id"] == tenant_id and v["ml_model_id"] == model_id
+        ]
+        version = max((v["version"] for v in existing), default=0) + 1
+        record = {
+            "tenant_id": tenant_id,
+            "id": self._next_id("ml_model_version"),
+            "ml_model_id": model_id,
+            "version": version,
+            "run_id": data.get("run_id"),
+            "status": data.get("status", "staging"),
+            "framework": data.get("framework"),
+            "metrics": data.get("metrics", {}),
+            "parameters": data.get("parameters", {}),
+            "validation": data.get("validation", {}),
+            "artifact_uri": data.get("artifact_uri"),
+            "external_model_version": data.get("external_model_version"),
+            "created_at": self._now(),
+        }
+        self._ml_versions.append(record)
+        return dict(record)
+
+    async def list_ml_model_versions(
+        self, tenant_id: int, model_id: int
+    ) -> list[dict[str, Any]]:
+        items = [
+            dict(v)
+            for v in self._ml_versions
+            if v["tenant_id"] == tenant_id and v["ml_model_id"] == model_id
+        ]
+        items.sort(key=lambda v: v["version"], reverse=True)
+        return items
+
+    async def get_ml_model_version(
+        self, tenant_id: int, model_id: int, version: int
+    ) -> dict[str, Any] | None:
+        for record in self._ml_versions:
+            if (
+                record["tenant_id"] == tenant_id
+                and record["ml_model_id"] == model_id
+                and record["version"] == version
+            ):
+                return dict(record)
+        return None
+
+    async def update_ml_model_version(
+        self, tenant_id: int, model_id: int, version: int, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        for record in self._ml_versions:
+            if (
+                record["tenant_id"] == tenant_id
+                and record["ml_model_id"] == model_id
+                and record["version"] == version
+            ):
+                record.update(fields)
+                return dict(record)
+        return None
+
+    async def create_evaluation_if_absent(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        for record in self._evaluations:
+            if record["tenant_id"] == tenant_id and record["code"] == data["code"]:
+                return dict(record)
+        record = {
+            "tenant_id": tenant_id,
+            "id": self._next_id("evaluation"),
+            "code": data["code"],
+            "name": data["name"],
+            "kind": data.get("kind", "retrieval"),
+            "config": data.get("config", {}),
+            "created_at": self._now(),
+        }
+        self._evaluations.append(record)
+        return dict(record)
+
+    async def list_evaluations(
+        self, tenant_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        items = [dict(e) for e in self._evaluations if e["tenant_id"] == tenant_id]
+        items.sort(key=lambda e: e["created_at"], reverse=True)
+        return items[offset : offset + limit], len(items)
+
+    async def get_evaluation(
+        self, tenant_id: int, evaluation_id: int
+    ) -> dict[str, Any] | None:
+        for record in self._evaluations:
+            if record["tenant_id"] == tenant_id and record["id"] == evaluation_id:
+                return dict(record)
+        return None
+
+    async def record_evaluation_result(
+        self, tenant_id: int, evaluation_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        record = {
+            "tenant_id": tenant_id,
+            "id": self._next_id("evaluation_result"),
+            "evaluation_id": evaluation_id,
+            "case_id": data["case_id"],
+            "metrics": data.get("metrics", {}),
+            "passed": data.get("passed"),
+            "created_at": self._now(),
+        }
+        self._evaluation_results.append(record)
+        return dict(record)
+
+    async def list_evaluation_results(
+        self, tenant_id: int, evaluation_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        items = [
+            dict(r)
+            for r in self._evaluation_results
+            if r["tenant_id"] == tenant_id and r["evaluation_id"] == evaluation_id
+        ]
+        items.sort(key=lambda r: r["created_at"], reverse=True)
+        return items[offset : offset + limit], len(items)
 
 
 def _cosine(left: list[float], right: list[float]) -> float:

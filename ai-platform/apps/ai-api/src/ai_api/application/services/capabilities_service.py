@@ -19,7 +19,12 @@ FEATURES: dict[str, str] = {
     "rag_query": "available",
     "knowledge_index": "available",
     "knowledge_ingest": "available",
-    "agents_execute": "planned:phase9",
+    "agents_execute": "available",
+    "experiment_tracking": "available",
+    "model_registry": "available",
+    "evaluations": "available",
+    "model_training": "external",
+    "model_serving": "not_enabled",
 }
 
 
@@ -61,3 +66,43 @@ class CapabilitiesService:
             ],
             "features": FEATURES,
         }
+
+    async def describe_providers(self) -> dict[str, Any]:
+        """Read-only provider registry joined with model capabilities.
+
+        Surfaces only configuration-derived facts (provider codes, availability,
+        mock labelling and model capabilities). No credentials or secrets.
+        """
+        health = await self.gateway.health()
+        models = [_serialize_model(spec) for spec in self.gateway.list_models()]
+        by_provider: dict[str, list[dict[str, Any]]] = {}
+        for model in models:
+            by_provider.setdefault(model["provider"], []).append(model)
+
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in health:
+            provider_models = by_provider.get(entry.provider, [])
+            items.append(
+                {
+                    "provider": entry.provider,
+                    "available": entry.available,
+                    "is_mock": all(m["is_mock"] for m in provider_models)
+                    if provider_models
+                    else False,
+                    "models": provider_models,
+                }
+            )
+            seen.add(entry.provider)
+        for code, provider_models in by_provider.items():
+            if code in seen:
+                continue
+            items.append(
+                {
+                    "provider": code,
+                    "available": False,
+                    "is_mock": all(m["is_mock"] for m in provider_models),
+                    "models": provider_models,
+                }
+            )
+        return {"items": items}

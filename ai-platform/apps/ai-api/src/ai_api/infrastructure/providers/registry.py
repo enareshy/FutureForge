@@ -97,6 +97,7 @@ def build_default_registry(settings: Settings) -> ProviderRegistry:
                 kind=ProviderKind.llm,
                 context_window=8192,
                 max_output_tokens=2048,
+                supports_streaming=True,
                 supports_json_mode=True,
             ),
             is_mock=True,

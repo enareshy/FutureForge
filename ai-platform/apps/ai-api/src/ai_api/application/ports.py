@@ -52,6 +52,145 @@ class AiRepository(Protocol):
 
     async def get_agent(self, tenant_id: int, agent_id: int) -> dict[str, Any] | None: ...
 
+    # --- Agent framework (Phase 9) --------------------------------------
+    async def create_agent_if_absent(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def create_agent_version_if_absent(
+        self, tenant_id: int, agent_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_agent_versions(
+        self, tenant_id: int, agent_id: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def get_active_agent_version(
+        self, tenant_id: int, agent_id: int
+    ) -> dict[str, Any] | None: ...
+
+    async def list_executions(
+        self,
+        tenant_id: int,
+        *,
+        agent_id: int | None,
+        operation: str | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    async def get_execution(
+        self, tenant_id: int, execution_id: int
+    ) -> dict[str, Any] | None: ...
+
+    # --- Feedback (Phase 10) --------------------------------------------
+    async def record_feedback(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_feedback(
+        self,
+        tenant_id: int,
+        *,
+        execution_id: int | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    # --- ML experiment tracking and model registry (Phase 11) ------------
+    async def create_experiment_if_absent(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_experiments(
+        self, tenant_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    async def get_experiment(
+        self, tenant_id: int, experiment_id: int
+    ) -> dict[str, Any] | None: ...
+
+    async def update_experiment_tracking(
+        self,
+        tenant_id: int,
+        experiment_id: int,
+        *,
+        tracking_backend: str,
+        external_experiment_id: str | None,
+    ) -> dict[str, Any] | None: ...
+
+    async def create_experiment_run(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_experiment_runs(
+        self,
+        tenant_id: int,
+        *,
+        experiment_id: int | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    async def get_experiment_run(
+        self, tenant_id: int, run_id: int
+    ) -> dict[str, Any] | None: ...
+
+    async def update_experiment_run(
+        self, tenant_id: int, run_id: int, fields: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    async def create_ml_model_if_absent(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_ml_models(
+        self, tenant_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    async def get_ml_model(self, tenant_id: int, model_id: int) -> dict[str, Any] | None: ...
+
+    async def set_ml_model_stage(
+        self, tenant_id: int, model_id: int, stage: str
+    ) -> dict[str, Any] | None: ...
+
+    async def create_ml_model_version(
+        self, tenant_id: int, model_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_ml_model_versions(
+        self, tenant_id: int, model_id: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def get_ml_model_version(
+        self, tenant_id: int, model_id: int, version: int
+    ) -> dict[str, Any] | None: ...
+
+    async def update_ml_model_version(
+        self, tenant_id: int, model_id: int, version: int, fields: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    # --- Evaluation definitions and results (Phase 11) -------------------
+    async def create_evaluation_if_absent(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_evaluations(
+        self, tenant_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    async def get_evaluation(
+        self, tenant_id: int, evaluation_id: int
+    ) -> dict[str, Any] | None: ...
+
+    async def record_evaluation_result(
+        self, tenant_id: int, evaluation_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_evaluation_results(
+        self, tenant_id: int, evaluation_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
     async def get_governance_policy(self, tenant_id: int) -> dict[str, Any] | None: ...
 
     async def upsert_governance_policy(
@@ -90,6 +229,10 @@ class AiRepository(Protocol):
     async def list_jobs_by_status(
         self, status: str, *, limit: int
     ) -> list[dict[str, Any]]: ...
+
+    async def list_jobs(
+        self, tenant_id: int, *, status: str | None, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]: ...
 
     async def delete_source(self, tenant_id: int, source_id: int) -> bool: ...
 
@@ -135,3 +278,60 @@ class EventStore(Protocol):
     async def replay(self, event_id: str, consumer_group: str) -> bool: ...
 
     async def delivery_stats(self, consumer_group: str) -> dict[str, int]: ...
+
+
+@runtime_checkable
+class TrackingBackend(Protocol):
+    """Optional external experiment-tracking backend (MLflow or local).
+
+    The platform repository is always the authorization-metadata authority; a
+    tracking backend only mirrors runs and artifacts externally. Implementations
+    must degrade honestly: `status()` reports whether external tracking is
+    actually available, and methods raise `ProviderError` when it is not so the
+    caller can record the run locally without failing the request.
+    """
+
+    backend: str
+
+    @property
+    def external(self) -> bool: ...
+
+    async def status(self) -> dict[str, Any]: ...
+
+    async def ensure_experiment(
+        self,
+        *,
+        code: str,
+        name: str,
+        description: str | None,
+        tags: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    async def start_run(
+        self,
+        *,
+        external_experiment_id: str | None,
+        run_name: str | None,
+        params: dict[str, Any],
+        tags: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    async def log_batch(
+        self,
+        *,
+        external_run_id: str,
+        params: dict[str, Any],
+        metrics: dict[str, Any],
+        tags: dict[str, Any],
+    ) -> None: ...
+
+    async def end_run(self, *, external_run_id: str, status: str) -> None: ...
+
+    async def register_model_version(
+        self,
+        *,
+        name: str,
+        source_uri: str,
+        external_run_id: str | None,
+        tags: dict[str, Any],
+    ) -> dict[str, Any]: ...

@@ -125,6 +125,15 @@ def test_knowledge_source_lifecycle(client: TestClient) -> None:
     assert fetched.status_code == 200
     assert fetched.json()["id"] == job["id"]
 
+    jobs = client.get("/api/v1/ai/knowledge/jobs")
+    assert jobs.status_code == 200
+    assert jobs.json()["meta"]["total"] == 1
+    assert jobs.json()["items"][0]["id"] == job["id"]
+
+    queued = client.get("/api/v1/ai/knowledge/jobs?status=queued")
+    assert queued.json()["meta"]["total"] == 1
+    assert client.get("/api/v1/ai/knowledge/jobs?status=running").json()["meta"]["total"] == 0
+
     missing = client.post("/api/v1/ai/knowledge/index", json={"source_id": 999})
     assert missing.status_code == 404
 
@@ -144,23 +153,19 @@ def test_index_idempotency(client: TestClient) -> None:
     assert first["id"] == second["id"]
 
 
-def test_agents_list_and_execute_unavailable(
-    client: TestClient, repository: InMemoryAiRepository
-) -> None:
-    repository.add_agent(
-        TENANT, code="knowledge-assistant", name="Knowledge Assistant", kind="knowledge_assistant"
-    )
-
+def test_agents_list_and_execute(client: TestClient) -> None:
     listing = client.get("/api/v1/ai/agents")
     assert listing.status_code == 200
-    agent = listing.json()[0]
-    assert agent["code"] == "knowledge-assistant"
+    agent = next(a for a in listing.json() if a["code"] == "knowledge-assistant")
 
     execute = client.post(
-        f"/api/v1/ai/agents/{agent['id']}/execute", json={"input": "What is the policy?"}
+        f"/api/v1/ai/agents/{agent['id']}/execute",
+        json={"input": "What is the policy?"},
     )
-    assert execute.status_code == 503
-    assert execute.json()["error"]["code"] == "feature_unavailable"
+    assert execute.status_code == 200
+    body = execute.json()
+    assert body["insufficient_evidence"] is True
+    assert body["citations"] == []
 
     missing = client.get("/api/v1/ai/agents/9999")
     assert missing.status_code == 404

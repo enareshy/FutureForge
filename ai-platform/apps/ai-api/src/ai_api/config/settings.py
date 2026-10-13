@@ -79,6 +79,18 @@ class Settings(BaseSettings):
     ai_worker_batch_size: int = Field(default=10, ge=1, le=1000)
     ai_worker_poll_seconds: float = Field(default=5.0, gt=0)
 
+    # Agent framework (Phase 9).
+    ai_agent_default_code: str = "knowledge-assistant"
+    ai_agent_default_version: int = Field(default=1, ge=1)
+    ai_agent_timeout_seconds: float = Field(default=30.0, gt=0)
+    ai_agent_max_iterations: int = Field(default=6, ge=1, le=50)
+    ai_agent_max_tool_calls: int = Field(default=6, ge=1, le=50)
+    ai_agent_trace_max_events: int = Field(default=40, ge=1, le=500)
+    # When true, every tool marked `requires_approval` needs an explicit
+    # approval token before it may run (human-in-the-loop checkpoint). Read-only
+    # V1 tools never require approval; the control exists for future tools.
+    ai_agent_require_approval: bool = False
+
     search_provider: str = "postgres"
     opensearch_url: str = "http://127.0.0.1:9200"
     opensearch_username: str = ""
@@ -96,6 +108,19 @@ class Settings(BaseSettings):
     ai_event_replay_max_age_days: int = Field(default=7, ge=1, le=365)
 
     mlflow_tracking_uri: str = "http://127.0.0.1:5000"
+
+    # Experiment tracking and classical-ML model registry (Phase 11).
+    # Backend for tracking runs: "auto" (mlflow if configured, else local),
+    # "mlflow" (require the MLflow tracking server), or "local" (the platform
+    # records metadata only; no external tracking/artifacts).
+    ml_tracking_backend: str = "auto"
+    # Register model versions with the MLflow model registry when the tracking
+    # backend is MLflow and the registry is available.
+    ml_enable_registration: bool = True
+    ml_request_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Default framework label recorded for models when the caller omits one.
+    ml_default_framework: str = "scikit-learn"
+    ml_sample_seed: int = Field(default=1729, ge=0)
 
     otel_enabled: bool = False
     otel_exporter_otlp_endpoint: str = "http://127.0.0.1:4317"

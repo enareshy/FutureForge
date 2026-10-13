@@ -8,8 +8,10 @@ from ai_api.api.v1.routes import (
     capabilities,
     chat,
     events,
+    feedback,
     health,
     knowledge,
+    ml,
     retrieval,
     usage,
 )
@@ -23,6 +25,8 @@ api_router.include_router(retrieval.router)
 api_router.include_router(usage.router)
 api_router.include_router(audit.router)
 api_router.include_router(agents.router)
+api_router.include_router(feedback.router)
 api_router.include_router(events.router)
+api_router.include_router(ml.router)
 
 __all__ = ["api_router"]

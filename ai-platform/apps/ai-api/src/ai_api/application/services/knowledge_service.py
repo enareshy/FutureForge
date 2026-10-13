@@ -108,6 +108,14 @@ class KnowledgeService:
             raise NotFoundError("job not found", details={"job_id": job_id})
         return job
 
+    async def list_jobs(
+        self, principal: Principal, *, status: str | None, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        tenant_id = require_tenant(principal)
+        return await self.repository.list_jobs(
+            tenant_id, status=status, limit=limit, offset=offset
+        )
+
     async def list_documents(
         self, principal: Principal, source_id: int, *, limit: int, offset: int
     ) -> tuple[list[dict[str, Any]], int]:

@@ -70,10 +70,26 @@ store only references in source control.
 | `AI_EVENT_POLL_SECONDS` | `5` | consumer poll interval |
 | `AI_EVENT_REPLAY_MAX_AGE_DAYS` | `7` | replay window |
 
-### Model lifecycle
+### Agents (Phase 9)
 | Variable | Default | Description |
 |---|---|---|
-| `MLFLOW_TRACKING_URI` | `http://127.0.0.1:5000` | |
+| `AI_AGENT_DEFAULT_CODE` | `knowledge-assistant` | built-in agent code |
+| `AI_AGENT_DEFAULT_VERSION` | `1` | active definition version |
+| `AI_AGENT_TIMEOUT_SECONDS` | `30` | wall-clock execution timeout |
+| `AI_AGENT_MAX_ITERATIONS` | `6` | bounded graph iteration |
+| `AI_AGENT_MAX_TOOL_CALLS` | `6` | tool-call budget per run |
+| `AI_AGENT_TRACE_MAX_EVENTS` | `40` | max trace events retained |
+| `AI_AGENT_REQUIRE_APPROVAL` | `false` | require approval for all tools |
+
+### Model lifecycle (Phase 11)
+| Variable | Default | Description |
+|---|---|---|
+| `MLFLOW_TRACKING_URI` | `http://127.0.0.1:5000` | External MLflow tracking server |
+| `ML_TRACKING_BACKEND` | `auto` | `auto` \| `mlflow` \| `local` |
+| `ML_ENABLE_REGISTRATION` | `true` | Register versions with the MLflow model registry |
+| `ML_REQUEST_TIMEOUT_SECONDS` | `10` | Per-request timeout for MLflow calls |
+| `ML_DEFAULT_FRAMEWORK` | `scikit-learn` | Default framework label |
+| `ML_SAMPLE_SEED` | `1729` | Seed for the reference pipeline |
 
 ### Observability
 | Variable | Default | Description |

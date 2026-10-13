@@ -9,6 +9,12 @@ export default defineConfig({
     port: 5173,
     allowedHosts: [".monkeycode-ai.live"],
     proxy: {
+      // AI Platform (FastAPI) is a separate service. Route the more specific
+      // prefix first so it wins over the catch-all "/api" rule below.
+      "/api/v1/ai": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
       "/api": {
         target: "http://127.0.0.1:3001",
         changeOrigin: true,

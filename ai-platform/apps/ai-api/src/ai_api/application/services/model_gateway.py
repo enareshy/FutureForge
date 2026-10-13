@@ -90,6 +90,27 @@ class ModelGateway:
             results.append(ProviderHealth(provider=code, available=available))
         return sorted(results, key=lambda item: item.provider)
 
+    def supports_streaming(self, model: str) -> bool:
+        """True when the model's provider can stream token chunks (SSE path)."""
+        try:
+            provider, spec = self._registry.llm(model)
+        except Exception:  # noqa: BLE001 - unknown/non-chat models are not streamable
+            return False
+        return bool(spec.capability.supports_streaming and hasattr(provider, "stream"))
+
+    async def stream_chat(self, request: ChatRequest):
+        """Yield content chunks from a streaming-capable chat provider."""
+        provider, spec = self._registry.llm(request.model)
+        self._validate_chat_request(spec, request)
+        if not self.supports_streaming(request.model):
+            raise ValidationError(
+                "the selected model does not support streaming",
+                details={"model": spec.code},
+            )
+        await self._rate_limiter.acquire()
+        async for chunk in provider.stream(spec, request):  # type: ignore[attr-defined]
+            yield chunk
+
     async def chat(self, request: ChatRequest) -> ChatResponse:
         provider, spec = self._registry.llm(request.model)
         self._validate_chat_request(spec, request)

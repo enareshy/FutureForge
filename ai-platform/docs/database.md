@@ -62,6 +62,35 @@ vectors never remain after deletion or re-indexing.
 | `ai.event_deliveries` | Per-consumer-group status/attempts for each event |
 | `ai.event_dead_letters` | Events that exhausted `AI_EVENT_MAX_ATTEMPTS` |
 
+### Agents (existing 0002 / 0004 tables)
+
+Phase 9 introduces no new migration: agent definitions reuse `ai.agents` plus
+`ai.agent_versions` (configuration, 0002) and agent runs are recorded in
+`ai.executions` with `operation = 'agent'` and the `agent_id` foreign key
+(runtime, 0004).
+
+| Table | Purpose |
+|---|---|
+| `ai.agents` | Registered agents (unique per tenant by `code`) |
+| `ai.agent_versions` | Immutable versioned `definition` JSON with `status` (`draft`/`active`/`archived`) |
+| `ai.executions` | Agent runs (`operation='agent'`) with status, latency, token usage and trace in `output` |
+
+### Experiment tracking & model registry (0007)
+
+Phase 11 adds the machine-learning tables. All are tenant-scoped; the `ai`
+schema is the authorization-metadata authority and an external tracker (MLflow)
+is only an optional mirror referenced by `external_*` columns.
+
+| Table | Purpose |
+|---|---|
+| `ai.experiments` | Experiment definitions (unique per tenant by `code`) |
+| `ai.experiment_runs` | Runs with `run_uuid`, `status`, params/metrics, dataset ref and tracker refs |
+| `ai.ml_models` | Registered classical-ML models with `stage` |
+| `ai.ml_model_versions` | Immutable versions (unique `(ml_model_id, version)`) tied to a run |
+
+Evaluation definitions (`ai.evaluations`) and per-case results
+(`ai.evaluation_results`) already exist from 0004 and are reused as-is.
+
 ## Embedding dimensions and similarity
 
 - Embedding models in V1 are the 1536-dimension class

@@ -86,15 +86,23 @@ The existing enterprise backend keeps running on 3001 (API) and 5173 (web).
 
 - `docs/installation.md` — prerequisites and installation
 - `docs/configuration.md` — environment variables and secrets
-- `docs/PHASE7_KNOWLEDGE_RAG.md` — knowledge ingestion, retrieval and RAG
-- `docs/PHASE8_EVENTS.md` — durable event streaming and background processing
-- `migrations/README.md` — database migration conventions
-- `../docs/ai-platform/PHASE0_DISCOVERY.md` — Phase 0 assessment and plan
+ - `docs/PHASE7_KNOWLEDGE_RAG.md` — knowledge ingestion, retrieval and RAG
+ - `docs/PHASE8_EVENTS.md` — durable event streaming and background processing
+ - `docs/PHASE9_AGENTS.md` — agent framework and the Enterprise Knowledge Assistant
+  - `docs/PHASE10_FRONTEND.md` — enterprise console integration, feedback, providers and SSE chat
+  - `docs/PHASE11_ML.md` — experiment tracking, model registry and evaluation foundation
+  - `migrations/README.md` — database migration conventions
+  - `../docs/ai-platform/PHASE0_DISCOVERY.md` — Phase 0 assessment and plan
 
 ## Status
 
-Phases 0-8 complete: infrastructure, application skeleton, provider gateway,
-the AI API (capabilities/chat/summarize/knowledge/usage/audit/agents),
-enterprise security and governance, knowledge ingestion + authorized RAG, and
-durable event streaming with a background consumer.
+Phases 0-11 complete: infrastructure, application skeleton, provider gateway,
+the AI API (capabilities/chat/summarize/knowledge/usage/audit/agents), enterprise
+security and governance, knowledge ingestion + authorized RAG, durable event
+streaming with a background consumer, a LangGraph-based read-only agent
+framework with the Enterprise Knowledge Assistant, integration of the AI
+surface into the existing enterprise console (feedback capture, read-only
+provider view and SSE chat streaming), and an experiment-tracking / model-registry
+/ evaluation foundation with an optional MLflow backend and a synthetic reference
+pipeline (training, evaluation, and inference kept separate; no serving).
 Do not treat any demo, mock or synthetic value as production data.

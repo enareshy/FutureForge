@@ -64,3 +64,8 @@ class DatabaseUnavailableError(ServiceUnavailableError):
 
 class FeatureUnavailableError(ServiceUnavailableError):
     code = "feature_unavailable"
+
+
+class ApprovalRequiredError(DomainError):
+    code = "approval_required"
+    http_status = 409

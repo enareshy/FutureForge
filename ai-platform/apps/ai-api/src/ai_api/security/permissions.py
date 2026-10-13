@@ -31,6 +31,14 @@ CAP_AGENTS_READ = "agents.read"
 CAP_AGENTS_EXECUTE = "agents.execute"
 CAP_RETRIEVAL_SEARCH = "retrieval.search"
 CAP_RETRIEVAL_RAG = "retrieval.rag"
+CAP_FEEDBACK_WRITE = "feedback.write"
+CAP_FEEDBACK_READ = "feedback.read"
+CAP_EXPERIMENTS_READ = "experiments.read"
+CAP_EXPERIMENTS_WRITE = "experiments.write"
+CAP_REGISTRY_READ = "registry.read"
+CAP_REGISTRY_WRITE = "registry.write"
+CAP_EVALUATIONS_READ = "evaluations.read"
+CAP_EVALUATIONS_WRITE = "evaluations.write"
 
 DEFAULT_PERMISSION_MAP: dict[str, str] = {
     CAP_CAPABILITIES_READ: "ai.platform:read",
@@ -46,6 +54,14 @@ DEFAULT_PERMISSION_MAP: dict[str, str] = {
     CAP_AGENTS_EXECUTE: "ai.agents:execute",
     CAP_RETRIEVAL_SEARCH: "ai.retrieval:execute",
     CAP_RETRIEVAL_RAG: "ai.retrieval:execute",
+    CAP_FEEDBACK_WRITE: "ai.feedback:create",
+    CAP_FEEDBACK_READ: "ai.feedback:read",
+    CAP_EXPERIMENTS_READ: "ai.ml:read",
+    CAP_EXPERIMENTS_WRITE: "ai.ml:create",
+    CAP_REGISTRY_READ: "ai.ml:read",
+    CAP_REGISTRY_WRITE: "ai.ml:create",
+    CAP_EVALUATIONS_READ: "ai.ml:read",
+    CAP_EVALUATIONS_WRITE: "ai.ml:create",
 }
 
 

@@ -7,24 +7,28 @@ from typing import Annotated
 
 from fastapi import Depends, Query, Request
 
-from ai_api.application.ports import AiRepository, EventStore
+from ai_api.application.agents.runtime import AgentRuntime
+from ai_api.application.ports import AiRepository, EventStore, TrackingBackend
 from ai_api.application.reliability import RateLimiter
 from ai_api.application.services.agent_service import AgentService
 from ai_api.application.services.audit_service import AuditService
 from ai_api.application.services.capabilities_service import CapabilitiesService
 from ai_api.application.services.chat_service import ChatService
 from ai_api.application.services.event_service import EventConsumer, EventPublisher
+from ai_api.application.services.feedback_service import FeedbackService
 from ai_api.application.services.governance_service import GovernanceService
 from ai_api.application.services.health_service import HealthService
 from ai_api.application.services.indexing_service import IndexingService
 from ai_api.application.services.ingestion_service import IngestionService
 from ai_api.application.services.knowledge_service import KnowledgeService
+from ai_api.application.services.ml_service import MlService
 from ai_api.application.services.model_gateway import ModelGateway
 from ai_api.application.services.retrieval_service import RetrievalService
 from ai_api.application.services.usage_service import UsageService
 from ai_api.config.settings import Settings, get_settings
 from ai_api.infrastructure.db import PostgresDatabase
 from ai_api.infrastructure.events import KafkaEventSink, build_event_store
+from ai_api.infrastructure.ml import build_tracking_backend
 from ai_api.infrastructure.providers.registry import ProviderRegistry, build_default_registry
 from ai_api.infrastructure.repositories import InMemoryAiRepository, PostgresAiRepository
 from ai_api.security.access_control import AccessControl
@@ -131,10 +135,61 @@ def get_usage_service(
     return UsageService(repository=repository)
 
 
+def get_feedback_service(
+    repository: Annotated[AiRepository, Depends(get_ai_repository)],
+    audit: Annotated[AuditService, Depends(get_audit_service)],
+) -> FeedbackService:
+    return FeedbackService(repository=repository, audit=audit)
+
+
+@lru_cache(maxsize=1)
+def get_agent_runtime() -> AgentRuntime:
+    return AgentRuntime(settings=get_settings())
+
+
+@lru_cache(maxsize=1)
+def get_tracking_backend() -> TrackingBackend:
+    return build_tracking_backend(get_settings())
+
+
+def get_ml_service(
+    repository: Annotated[AiRepository, Depends(get_ai_repository)],
+    tracking: Annotated[TrackingBackend, Depends(get_tracking_backend)],
+    audit: Annotated[AuditService, Depends(get_audit_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> MlService:
+    return MlService(
+        repository=repository,
+        tracking=tracking,
+        audit=audit,
+        registration_enabled=settings.ml_enable_registration,
+    )
+
+
 def get_agent_service(
     repository: Annotated[AiRepository, Depends(get_ai_repository)],
+    gateway: Annotated[ModelGateway, Depends(get_model_gateway)],
+    governance: Annotated[GovernanceService, Depends(get_governance_service)],
+    audit: Annotated[AuditService, Depends(get_audit_service)],
+    retrieval: Annotated[RetrievalService, Depends(get_retrieval_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    policy: Annotated[Policy, Depends(get_policy)],
+    permissions: Annotated[PermissionMap, Depends(get_permission_map)],
+    runtime: Annotated[AgentRuntime, Depends(get_agent_runtime)],
+    events: Annotated[EventPublisher, Depends(get_event_publisher)],
 ) -> AgentService:
-    return AgentService(repository=repository)
+    return AgentService(
+        repository=repository,
+        gateway=gateway,
+        governance=governance,
+        audit=audit,
+        retrieval=retrieval,
+        settings=settings,
+        policy=policy,
+        permissions=permissions,
+        runtime=runtime,
+        events=events,
+    )
 
 
 def get_access_control(
@@ -262,7 +317,9 @@ CapabilitiesServiceDep = Annotated[CapabilitiesService, Depends(get_capabilities
 ChatServiceDep = Annotated[ChatService, Depends(get_chat_service)]
 KnowledgeServiceDep = Annotated[KnowledgeService, Depends(get_knowledge_service)]
 UsageServiceDep = Annotated[UsageService, Depends(get_usage_service)]
+FeedbackServiceDep = Annotated[FeedbackService, Depends(get_feedback_service)]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
+MlServiceDep = Annotated[MlService, Depends(get_ml_service)]
 GovernanceServiceDep = Annotated[GovernanceService, Depends(get_governance_service)]
 RetrievalServiceDep = Annotated[RetrievalService, Depends(get_retrieval_service)]
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]

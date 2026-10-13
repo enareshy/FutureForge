@@ -39,3 +39,14 @@ class CapabilitiesResponse(BaseModel):
 
 class ModelListResponse(BaseModel):
     items: list[ModelOut]
+
+
+class ProviderRegistryOut(BaseModel):
+    provider: str
+    available: bool
+    is_mock: bool = False
+    models: list[ModelOut] = []
+
+
+class ProviderListResponse(BaseModel):
+    items: list[ProviderRegistryOut]

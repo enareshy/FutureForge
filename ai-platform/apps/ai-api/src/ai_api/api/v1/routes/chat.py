@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 
 from ai_api.api.deps import (
     ChatServiceDep,
@@ -27,6 +28,19 @@ async def chat(
     payload: ChatRequestIn, principal: PrincipalDep, service: ChatServiceDep
 ) -> ChatResponseOut:
     return ChatResponseOut(**await service.chat(principal, payload))
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    payload: ChatRequestIn, principal: PrincipalDep, service: ChatServiceDep
+) -> StreamingResponse:
+    """Server-Sent Events stream of chat deltas (where the model supports it)."""
+    prepared = await service.prepare_stream(principal, payload)
+    return StreamingResponse(
+        service.stream_events(principal, prepared),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/summarize", response_model=SummarizeResponseOut)

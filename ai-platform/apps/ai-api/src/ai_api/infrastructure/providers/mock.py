@@ -28,21 +28,24 @@ class MockLLMProvider:
     def __init__(self, code: str = "mock") -> None:
         self.code = code
 
-    async def generate(self, spec: ModelSpec, request: ChatRequest) -> ChatResponse:
+    @staticmethod
+    def _content(spec: ModelSpec, request: ChatRequest) -> str:
         last_user = next(
             (m.content for m in reversed(request.messages) if m.role.value == "user"),
             "",
         )
         if request.response_format == "json":
-            content = json.dumps(
+            return json.dumps(
                 {"mock": True, "model": spec.code, "echo": last_user},
                 sort_keys=True,
             )
-        else:
-            content = (
-                f"{MOCK_LABEL} {spec.code} received {len(request.messages)} message(s). "
-                f"Echo: {last_user}"
-            )
+        return (
+            f"{MOCK_LABEL} {spec.code} received {len(request.messages)} message(s). "
+            f"Echo: {last_user}"
+        )
+
+    async def generate(self, spec: ModelSpec, request: ChatRequest) -> ChatResponse:
+        content = self._content(spec, request)
         input_tokens = sum(len(m.content.split()) for m in request.messages)
         output_tokens = len(content.split())
         return ChatResponse(
@@ -53,6 +56,17 @@ class MockLLMProvider:
             finish_reason="stop",
             is_mock=True,
         )
+
+    async def stream(self, spec: ModelSpec, request: ChatRequest):
+        """Yield the (deterministic) mock answer word by word.
+
+        Streaming is simulated for the mock provider only so the SSE path can be
+        exercised end to end without provider credentials. Output stays clearly
+        labelled as mock.
+        """
+        content = self._content(spec, request)
+        for token in re.findall(r"\S+\s*", content):
+            yield token
 
     async def health(self) -> bool:
         return True

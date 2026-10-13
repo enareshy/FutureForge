@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,7 +13,13 @@ from ai_api.application.services.governance_service import GovernanceService
 from ai_api.application.services.model_gateway import ModelGateway
 from ai_api.config.settings import Settings
 from ai_api.domain.errors import AuthorizationError, ValidationError
-from ai_api.domain.models.provider import ChatRequest, ChatResponse, Message, Role
+from ai_api.domain.models.provider import (
+    ChatRequest,
+    ChatResponse,
+    Message,
+    Role,
+    TokenUsage,
+)
 from ai_api.infrastructure.providers.registry import default_chat_model
 from ai_api.security.prompt_safety import PromptGuard
 from ai_api.telemetry.logging import get_logger, request_id_var
@@ -23,6 +31,11 @@ SUMMARIZE_SYSTEM_PROMPT = (
     "provided content, preserve key facts and figures, and never invent details. "
     "If the content is insufficient, say so."
 )
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    """Format a Server-Sent Event frame."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 @dataclass(slots=True)
@@ -82,6 +95,109 @@ class ChatService:
             },
         )
         return self._serialize(response)
+
+    async def prepare_stream(self, principal, payload) -> dict[str, Any]:
+        """Authorize and validate a streaming request before the SSE response.
+
+        Raises the normal domain errors (403/422/429) *before* any stream bytes
+        are sent, so the client still receives a structured error envelope.
+        """
+        model = payload.model or default_chat_model(self.settings)
+        prompt_text = "\n".join(msg.content for msg in payload.messages)
+
+        policy = await self.governance.enforce(
+            principal, operation="chat", model=model, prompt_text=prompt_text, feature="chat"
+        )
+        guard = PromptGuard(block=policy.block_prompt_injection)
+        scan = guard.scan(prompt_text)
+        if guard.block and scan.suspicious:
+            await self._audit_denied(principal, "ai.chat.stream", model, scan.findings)
+            raise AuthorizationError(
+                "request rejected by content security policy",
+                details={"findings": len(scan.findings)},
+            )
+        if not self.gateway.supports_streaming(model):
+            raise ValidationError(
+                "the selected model does not support streaming",
+                details={"model": model},
+            )
+
+        messages = [
+            Message(role=Role.system, content=guard.harden_system_prompt(None)),
+            *(Message(role=Role(msg.role), content=msg.content) for msg in payload.messages),
+        ]
+        request = ChatRequest(
+            messages=tuple(messages),
+            model=model,
+            temperature=payload.temperature,
+            max_output_tokens=payload.max_output_tokens,
+        )
+        return {"request": request, "model": model, "injection_findings": len(scan.findings)}
+
+    async def stream_events(self, principal, prepared: dict[str, Any]) -> AsyncIterator[str]:
+        """Yield SSE frames: `delta` per chunk, then `done` (or `error`)."""
+        request: ChatRequest = prepared["request"]
+        model: str = prepared["model"]
+        is_mock = self.settings.llm_provider.strip().lower() in ("", "mock")
+        started = time.perf_counter()
+        chunks: list[str] = []
+        try:
+            async for chunk in self.gateway.stream_chat(request):
+                chunks.append(chunk)
+                yield _sse("delta", {"content": chunk})
+        except Exception as exc:  # noqa: BLE001 - report failure as an SSE event
+            logger.warning("chat.stream_failed", error=str(exc))
+            yield _sse(
+                "error",
+                {"code": getattr(exc, "code", "provider_error"), "message": str(exc)},
+            )
+            return
+
+        content = "".join(chunks)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        response = ChatResponse(
+            content=content,
+            model=model,
+            provider=self.settings.llm_provider or "mock",
+            usage=TokenUsage.create(
+                sum(len(m.content.split()) for m in request.messages),
+                len(content.split()),
+            ),
+            finish_reason="stop",
+            is_mock=is_mock,
+        )
+        await self._persist(principal, "chat", response, latency_ms)
+        await self.audit.record(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.actor_id,
+            action="ai.chat.stream",
+            resource_type="model",
+            resource_id=response.model,
+            request_id=request_id_var.get(),
+            detail={
+                "is_mock": response.is_mock,
+                "provider": response.provider,
+                "injection_findings": prepared.get("injection_findings", 0),
+            },
+        )
+        yield _sse(
+            "done",
+            {
+                "content": content,
+                "model": response.model,
+                "provider": response.provider,
+                "is_mock": response.is_mock,
+                "finish_reason": response.finish_reason,
+                "usage": {
+                    "input_tokens": response.usage.input_tokens,
+                    "output_tokens": response.usage.output_tokens,
+                    "total_tokens": response.usage.total_tokens,
+                },
+                "estimated_cost_usd": response.estimated_cost_usd,
+                "latency_ms": latency_ms,
+                "request_id": request_id_var.get(),
+            },
+        )
 
     async def summarize(self, principal, payload) -> dict[str, Any]:
         if not payload.text.strip():

@@ -24,5 +24,6 @@ Applied history for this repository:
 | 0004 | `0004_ai_runtime.sql` | Executions, usage/cost, evaluations, feedback, audit, jobs |
 | 0005 | `0005_ai_governance.sql` | Configurable per-tenant usage/retention/feature policies |
 | 0006 | `0006_ai_events.sql` | Durable event log, per-consumer deliveries, dead letters |
+| 0007 | `0007_ai_ml.sql` | Experiments, experiment runs, classical-ML model registry and versions (evaluation tables reused from 0004) |
 
 See `docs/database.md` for the data model and rollback guidance.
