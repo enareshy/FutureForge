@@ -16,7 +16,12 @@ scrape_configs:
       - targets: ["otel-collector:8889"]
 
   # The AI API exposes Prometheus metrics directly at /metrics.
+  #
+  # In the local compose stack the API runs on the host (not as a service),
+  # so it is reached through the host gateway. `docker-compose` adds the
+  # `host.docker.internal` host mapping; in Kubernetes, point this target at
+  # the in-cluster Service (or use a ServiceMonitor) instead.
   - job_name: ai-api
     metrics_path: /metrics
     static_configs:
-      - targets: ["ai-api:8000"]
+      - targets: ["host.docker.internal:8000"]

@@ -80,3 +80,22 @@ docker compose --profile observability up -d
 curl -s localhost:8000/metrics | head
 curl -s localhost:8000/readyz
 ```
+
+## Config validation
+
+The monitoring artifacts are validated in CI (`.github/workflows/ai-platform-ci.yml`):
+`promtool check config` for `prometheus.yml`, `otelcol validate` for the
+collector config, and YAML/JSON parsing for the Grafana provisioning and
+dashboard. The same checks can be run locally:
+
+```bash
+promtool check config infrastructure/monitoring/prometheus/prometheus.yml
+docker run --rm -v "$PWD/infrastructure/monitoring/otel/otel-collector-config.yaml:/etc/otel/config.yaml" \
+  otel/opentelemetry-collector-contrib:0.162.0 validate --config=/etc/otel/config.yaml
+```
+
+The scrape path was also verified live against the running API: Prometheus
+scraped `/metrics` (target `up`, 32 `ai_*` series). In the compose dev stack the
+API runs on the host, so the `ai-api` job targets `host.docker.internal:8000`
+(the `prometheus` service declares a `host-gateway` mapping); in Kubernetes,
+point the target at the in-cluster Service or use a ServiceMonitor.

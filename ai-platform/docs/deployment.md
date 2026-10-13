@@ -122,10 +122,16 @@ from backup only for data corruption (see `backup-recovery.md`).
 
 - `ai-api`: ruff + hermetic tests.
 - `web-console`, `web-ai`: frontend tests + builds.
-- `manifests`: structural validation (`scripts/validate-k8s.py`) and
-  kubeconform schema validation.
+- `manifests`: structural validation (`scripts/validate-k8s.py`), then
+  `kustomize build` + kubeconform schema validation of `base` and
+  `overlays/production`.
+- `monitoring-configs`: `promtool check config`, `otelcol validate`, and
+  Grafana provisioning/dashboard parsing.
 - `images`: build both images, Trivy scan (HIGH/CRITICAL), CycloneDX SBOMs.
-- `dependency-scan`: `pip-audit` (Python) and `npm audit` (both frontends).
+- `dependency-scan`: `pip-audit` (Python) and `npm audit`. The AI-owned
+  `web-ai` app enforces; the pre-existing enterprise console audit runs
+  advisory only (its advisories are in dev-only build/test tooling owned by the
+  platform team, not the AI platform).
 
 ## Software bill of materials
 

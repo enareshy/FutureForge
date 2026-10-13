@@ -68,6 +68,25 @@ boundary.
 - Frontend: **23 passed** (4 files).
 - `ruff check src tests scripts`: clean.
 
+## Live verification
+
+The opt-in integration tests were run against real backing services to confirm
+the integration paths (not just mocks). Passed:
+
+```bash
+AI_TEST_POSTGRES=1 AI_TEST_REDIS=1 AI_TEST_MLFLOW=1 AI_TEST_OBJECTSTORAGE=1 \
+  pytest -m integration tests/test_integration_services.py
+```
+
+- PostgreSQL + pgvector roundtrip
+- Redis reachability
+- Object storage reachability
+- MLflow tracking backend reachable (`available=True`)
+
+Additionally, Prometheus was run against the live API and scraped `/metrics`
+successfully (target `up`, 32 `ai_*` series). Kafka, OpenSearch, the OTLP
+collector and a real LLM provider were not enabled in this environment.
+
 ## CI
 
 `.github/workflows/ai-platform-ci.yml` runs the backend suite, both frontend

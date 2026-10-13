@@ -55,14 +55,18 @@ kubectl -n enterprise-ai wait --for=condition=complete job/ai-db-migrate --timeo
 Full procedures — rollback, backup/restore, disaster recovery — are in
 `docs/deployment.md` and `docs/backup-recovery.md`.
 
-## Validation without a cluster
+## Validation
 
-`kubectl`/`kustomize` are not installed in the development VM. The manifests are
-YAML-validated in CI and by the platform's own check (`scripts/validate-k8s.py`).
-Render with any of:
+Both the `base` and `overlays/production` kustomizations render cleanly and
+pass upstream schema validation. Verified with `kubectl kustomize` and
+kubeconform v0.6.7 — **17/17 resources valid** for each:
 
 ```bash
-kubectl kustomize infrastructure/kubernetes/overlays/production
-# or
-kustomize build infrastructure/kubernetes/overlays/production
+kubectl kustomize infrastructure/kubernetes/overlays/production \
+  | kubeconform -strict -ignore-missing-schemas -summary -
 ```
+
+`scripts/validate-k8s.py` provides an additional dependency-free structural
+check (probes, resources, non-root, NetworkPolicy/Ingress shape) for
+environments without `kubectl`/`kubeconform`. Both run in CI. A server-side
+`--dry-run=server` and an actual apply still require a real cluster.
