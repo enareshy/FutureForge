@@ -12,13 +12,14 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from ai_api.application.ports import AiRepository
+from ai_api.application.ports import AiRepository, SearchBackend
 from ai_api.application.services.audit_service import AuditService
 from ai_api.application.services.context import require_tenant
 from ai_api.application.services.event_service import EventPublisher
 from ai_api.application.services.governance_service import GovernanceService
 from ai_api.application.services.model_gateway import ModelGateway
 from ai_api.config.settings import Settings
+from ai_api.domain.errors import ConfigurationError, ServiceUnavailableError
 from ai_api.domain.models.provider import ChatRequest, EmbeddingRequest, Message, Role
 from ai_api.infrastructure.providers.registry import default_chat_model, default_embedding_model
 from ai_api.security.access_control import AccessControl, within_ceiling
@@ -51,6 +52,7 @@ class RetrievalService:
     access: AccessControl
     settings: Settings
     events: EventPublisher | None = None
+    search_backend: SearchBackend | None = None
 
     async def search(self, principal: Principal, payload: Any) -> dict[str, Any]:
         results = await self.authorized_search(
@@ -79,10 +81,18 @@ class RetrievalService:
         try:
             with span("ai.retrieval.search", {"ai.operation": "retrieval.search"}):
                 vector = await self._embed_query(query)
-                candidates = await self.repository.vector_search(
-                    tenant_id, vector, limit=max(limit * 4, limit)
+                candidate_limit = max(
+                    limit * self.settings.ai_retrieval_candidate_multiplier, limit
                 )
-                results = self._authorize(principal, policy, candidates)[:limit]
+                vector_candidates = await self.repository.vector_search(
+                    tenant_id, vector, limit=candidate_limit
+                )
+                ranked_lists = [self._authorize(principal, policy, vector_candidates)]
+                if self.settings.ai_hybrid_search_enabled:
+                    lexical = await self._lexical_candidates(tenant_id, query, candidate_limit)
+                    if lexical:
+                        ranked_lists.append(self._authorize(principal, policy, lexical))
+                results = self._fuse(ranked_lists)[:limit]
             return results
         except Exception:
             outcome = "error"
@@ -95,6 +105,46 @@ class RetrievalService:
                 result_count=len(results),
             )
 
+    async def _lexical_candidates(
+        self, tenant_id: int, query: str, limit: int
+    ) -> list[dict[str, Any]]:
+        if self.search_backend is None:
+            return []
+        try:
+            return await self.search_backend.search(tenant_id, query, limit=limit)
+        except (ConfigurationError, ServiceUnavailableError) as exc:
+            logger.warning("retrieval.lexical_unavailable", error=str(exc))
+            return []
+
+    def _fuse(self, ranked_lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        """Reciprocal rank fusion of authorized vector/lexical candidate lists.
+
+        Authorization already happened per list, so a high-ranked unauthorized
+        chunk can never push an authorized one out of the fused result. When only
+        one list is present the original similarity scores are preserved.
+        """
+
+        lists = [items for items in ranked_lists if items]
+        if not lists:
+            return []
+        if len(lists) == 1:
+            return list(lists[0])
+        k = self.settings.ai_rrf_k
+        scores: dict[Any, float] = {}
+        items: dict[Any, dict[str, Any]] = {}
+        for items_list in lists:
+            for rank, candidate in enumerate(items_list, start=1):
+                key = candidate["chunk_id"]
+                scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+                items.setdefault(key, candidate)
+        fused: list[dict[str, Any]] = []
+        for key, candidate in items.items():
+            merged = dict(candidate)
+            merged["score"] = round(scores[key], 6)
+            fused.append(merged)
+        fused.sort(key=lambda item: item["score"], reverse=True)
+        return fused
+
     async def rag_query(self, principal: Principal, payload: Any) -> dict[str, Any]:
         with span("ai.rag.query", {"ai.operation": "rag", "ai.model": payload.model}):
             return await self._rag_query_impl(principal, payload)
@@ -106,7 +156,9 @@ class RetrievalService:
             principal, operation="rag", model=model, prompt_text=payload.query, feature="rag_query"
         )
         ranked = await self.authorized_search(principal, payload.query, limit=payload.limit)
-        best_score = ranked[0]["score"] if ranked else 0.0
+        best_score = max(
+            (float(item.get("vector_score") or 0.0) for item in ranked), default=0.0
+        )
 
         if not ranked or best_score < self.settings.ai_rag_min_score:
             await self._record_conversation(
@@ -179,7 +231,12 @@ class RetrievalService:
         return list(response.vectors[0])
 
     def _authorize(
-        self, principal: Principal, policy: Any, candidates: list[dict[str, Any]]
+        self,
+        principal: Principal,
+        policy: Any,
+        candidates: list[dict[str, Any]],
+        *,
+        is_vector: bool = True,
     ) -> list[dict[str, Any]]:
         ceiling = policy.data_classification_ceiling
         allowed: list[dict[str, Any]] = []
@@ -189,7 +246,10 @@ class RetrievalService:
             if not self.access.allows(principal, candidate.get("acl")):
                 continue
             candidate = dict(candidate)
-            candidate["score"] = round(float(candidate.get("score", 0.0)), 6)
+            score = round(float(candidate.get("score", 0.0)), 6)
+            candidate["score"] = score
+            if is_vector:
+                candidate["vector_score"] = score
             allowed.append(candidate)
         allowed.sort(key=lambda item: item["score"], reverse=True)
         return allowed
@@ -216,6 +276,8 @@ class RetrievalService:
             "source_id": item["source_id"],
             "source_code": item["source_code"],
             "chunk_index": item["chunk_index"],
+            "page": item.get("page"),
+            "section": item.get("section"),
             "score": item["score"],
             "classification": item.get("classification"),
             "content": item["content"],
@@ -231,6 +293,8 @@ class RetrievalService:
             "document_id": item["document_id"],
             "chunk_id": item["chunk_id"],
             "chunk_index": item["chunk_index"],
+            "page": item.get("page"),
+            "section": item.get("section"),
             "score": item["score"],
             "snippet": snippet,
         }

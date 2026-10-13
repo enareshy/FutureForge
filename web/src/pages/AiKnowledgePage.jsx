@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { AiApiError, ai } from "../aiApi.js";
+import { AiApiError, ai, downloadDocument } from "../aiApi.js";
 
 const emptySource = { code: "", name: "", kind: "manual", classification: "internal" };
 const emptyDoc = { external_id: "", title: "", text: "" };
@@ -19,6 +19,8 @@ export default function AiKnowledgePage() {
   const [documents, setDocuments] = useState([]);
   const [sourceForm, setSourceForm] = useState(emptySource);
   const [docForm, setDocForm] = useState(emptyDoc);
+  const [uploadFile, setUploadFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
   const [loadingSources, setLoadingSources] = useState(true);
@@ -98,6 +100,55 @@ export default function AiKnowledgePage() {
       loadSources();
       const job = res.job || {};
       setNote(`Index job #${job.id} ${job.status}.`);
+    } catch (err) {
+      setError(describe(err));
+    }
+  }
+
+  async function upload(e) {
+    e.preventDefault();
+    if (!selected || !uploadFile) return;
+    setError("");
+    setNote("");
+    setUploading(true);
+    try {
+      const res = await ai.uploadDocument(selected.id, uploadFile);
+      setUploadFile(null);
+      const input = document.getElementById("knowledge-upload-input");
+      if (input) input.value = "";
+      loadDocuments(selected.id);
+      loadSources();
+      const job = res.job || {};
+      setNote(
+        `Uploaded "${res.document?.title || uploadFile.name}" — job #${job.id} ${job.status}.`
+      );
+    } catch (err) {
+      setError(describe(err));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function reindex() {
+    if (!selected) return;
+    setError("");
+    setNote("");
+    try {
+      const res = await ai.reindexSource(selected.id);
+      loadDocuments(selected.id);
+      setNote(`Reindex queued for "${selected.code}" (${res.result?.documents ?? 0} documents).`);
+    } catch (err) {
+      setError(describe(err));
+    }
+  }
+
+  async function removeDocument(doc) {
+    if (!window.confirm(`Delete document "${doc.title || doc.external_id}" and its chunks?`)) return;
+    setError("");
+    try {
+      await ai.deleteDocument(doc.id);
+      loadDocuments(selected.id);
+      loadSources();
     } catch (err) {
       setError(describe(err));
     }
@@ -196,14 +247,19 @@ export default function AiKnowledgePage() {
         </div>
 
         <div className="panel">
-          <div className="panel-head"><h3>{selected ? `Documents — ${selected.code}` : "Documents"}</h3></div>
+          <div className="panel-head">
+            <h3>{selected ? `Documents — ${selected.code}` : "Documents"}</h3>
+            {selected ? (
+              <button className="btn secondary" onClick={reindex}>Reindex source</button>
+            ) : null}
+          </div>
           {!selected ? (
             <p className="muted">Select a source to view or ingest documents.</p>
           ) : (
             <>
               <table>
                 <thead>
-                  <tr><th>External ID</th><th>Title</th><th>Status</th><th>Size (bytes)</th></tr>
+                  <tr><th>External ID</th><th>Title</th><th>Status</th><th>Search</th><th>Size (bytes)</th><th></th></tr>
                 </thead>
                 <tbody>
                   {documents.map((d) => (
@@ -214,14 +270,51 @@ export default function AiKnowledgePage() {
                       <td className="mono">{d.external_id}</td>
                       <td>{d.title || "—"}</td>
                       <td><span className="badge">{d.status}</span></td>
+                      <td>
+                        {d.error_class ? (
+                          <span className="badge">{d.error_class}</span>
+                        ) : d.search_indexed_at ? (
+                          <span className="muted">indexed</span>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
                       <td>{d.size_bytes ?? "—"}</td>
+                      <td>
+                        <div className="row" style={{ gap: 8 }}>
+                          <button
+                            className="btn ghost"
+                            onClick={() => downloadDocument(d).catch((e) => setError(describe(e)))}
+                          >
+                            Download
+                          </button>
+                          <button className="btn ghost" onClick={() => removeDocument(d)}>
+                            Delete
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                   {documents.length === 0 ? (
-                    <tr><td colSpan={4} className="muted">No documents indexed.</td></tr>
+                    <tr><td colSpan={6} className="muted">No documents indexed.</td></tr>
                   ) : null}
                 </tbody>
               </table>
+
+              <form onSubmit={upload}>
+                <h3>Upload file</h3>
+                <label className="field">
+                  <span>File</span>
+                  <input
+                    id="knowledge-upload-input"
+                    type="file"
+                    onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                  />
+                </label>
+                <button className="btn" disabled={!uploadFile || uploading}>
+                  {uploading ? "Uploading…" : "Upload & index"}
+                </button>
+              </form>
 
               <form onSubmit={ingest}>
                 <h3>Ingest document</h3>

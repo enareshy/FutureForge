@@ -17,7 +17,9 @@ export default function AiJobsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState("");
+  const [note, setNote] = useState("");
   const [loading, setLoading] = useState(true);
+  const [retrying, setRetrying] = useState(null);
   const limit = 20;
 
   const load = useCallback(() => {
@@ -34,6 +36,21 @@ export default function AiJobsPage() {
 
   useEffect(load, [load]);
 
+  async function retry(job) {
+    setError("");
+    setNote("");
+    setRetrying(job.id);
+    try {
+      const updated = await ai.retryJob(job.id);
+      setNote(`Job #${job.id} ${updated.status}.`);
+      load();
+    } catch (e) {
+      setError(describe(e));
+    } finally {
+      setRetrying(null);
+    }
+  }
+
   return (
     <>
       <div className="topbar">
@@ -46,6 +63,7 @@ export default function AiJobsPage() {
       </div>
 
       {error ? <div className="error">{error}</div> : null}
+      {note ? <div className="notice">{note}</div> : null}
 
       <div className="panel">
         <div className="row">
@@ -68,24 +86,37 @@ export default function AiJobsPage() {
 
         <table>
           <thead>
-            <tr><th>Job</th><th>Type</th><th>Source</th><th>Status</th><th>Progress</th><th>Attempts</th><th>Created</th><th>Finished</th></tr>
+            <tr><th>Job</th><th>Type</th><th>Stage</th><th>Source</th><th>Status</th><th>Progress</th><th>Attempts</th><th>Error</th><th>Created</th><th>Finished</th><th></th></tr>
           </thead>
           <tbody>
             {jobs.map((j) => (
               <tr key={j.id}>
                 <td className="mono">#{j.id}</td>
                 <td>{j.type}</td>
+                <td>{j.stage || "—"}</td>
                 <td>{j.source_id ?? "—"}</td>
                 <td><span className="badge">{j.status}</span></td>
                 <td>{(j.progress * 100).toFixed(0)}%</td>
-                <td>{j.attempts}</td>
+                <td>{j.attempts}{j.max_attempts ? ` / ${j.max_attempts}` : ""}</td>
+                <td>{j.error_class ? <span className="badge">{j.error_class}</span> : "—"}</td>
                 <td>{new Date(j.created_at).toLocaleString()}</td>
                 <td>{j.finished_at ? new Date(j.finished_at).toLocaleString() : "—"}</td>
+                <td>
+                  {j.status === "failed" || j.status === "queued" ? (
+                    <button
+                      className="btn ghost"
+                      disabled={retrying === j.id}
+                      onClick={() => retry(j)}
+                    >
+                      {retrying === j.id ? "Retrying…" : "Retry"}
+                    </button>
+                  ) : null}
+                </td>
               </tr>
             ))}
             {jobs.length === 0 ? (
               <tr>
-                <td colSpan={8} className="muted">
+                <td colSpan={11} className="muted">
                   {loading ? "Loading jobs…" : "No jobs found."}
                 </td>
               </tr>

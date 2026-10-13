@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AiApiError, ai, aiApi, streamChat } from "./aiApi.js";
+import { AiApiError, ai, aiApi, downloadDocument, streamChat, uploadDocument } from "./aiApi.js";
 import { setToken } from "./api.js";
 
 function jsonResponse(body, { status = 200, headers = {} } = {}) {
@@ -138,6 +138,50 @@ describe("aiApi error handling", () => {
     expect(err).toBeInstanceOf(AiApiError);
     expect(err.code).toBe("aborted");
     expect(err.status).toBe(0);
+  });
+});
+
+describe("document upload/download", () => {
+  it("posts multipart form data without a Content-Type header", async () => {
+    setToken("tok-1");
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ document: { external_id: "f" }, job: { id: 1, status: "queued" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    const res = await uploadDocument(3, file);
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/ai/knowledge/sources/3/upload");
+    expect(opts.method).toBe("POST");
+    expect(opts.body).toBeInstanceOf(FormData);
+    expect(opts.headers["Content-Type"]).toBeUndefined();
+    expect(opts.headers.Authorization).toBe("Bearer tok-1");
+    expect(res.job.status).toBe("queued");
+  });
+
+  it("downloads bytes with the session token and triggers a blob save", async () => {
+    setToken("tok-2");
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(new Blob(["bytes"]), {
+        status: 200,
+        headers: { "Content-Disposition": 'attachment; filename="report.pdf"' },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const createObjectURL = vi.fn(() => "blob:fake");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    await downloadDocument(9);
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/ai/knowledge/documents/9/download");
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer tok-2");
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(click).toHaveBeenCalled();
+    click.mockRestore();
   });
 });
 

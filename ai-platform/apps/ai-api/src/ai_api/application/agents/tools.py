@@ -96,7 +96,11 @@ class KnowledgeSearchTool:
         results = await self.retrieval.authorized_search(
             context.principal, query, limit=limit
         )
-        best = float(results[0]["score"]) if results else 0.0
+        top = results[0] if results else {}
+        # Fused (RRF) ordering may rescale `score`; the evidence gate uses the
+        # underlying vector similarity so hybrid mode does not change the
+        # "insufficient evidence" decision.
+        best = float(top.get("vector_score", top.get("score", 0.0)) or 0.0)
         return {
             "query": query,
             "count": len(results),

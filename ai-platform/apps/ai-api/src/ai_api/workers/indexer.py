@@ -23,6 +23,8 @@ from ai_api.config.settings import Settings, get_settings
 from ai_api.infrastructure.db import PostgresDatabase
 from ai_api.infrastructure.providers.registry import build_default_registry
 from ai_api.infrastructure.repositories import InMemoryAiRepository, PostgresAiRepository
+from ai_api.infrastructure.search import build_search_backend
+from ai_api.infrastructure.storage import build_object_storage
 from ai_api.telemetry.langfuse import LangfusePublisher
 from ai_api.telemetry.logging import configure_logging, get_logger
 from ai_api.telemetry.metrics_server import start_metrics_server
@@ -47,12 +49,20 @@ def _build_service(settings: Settings) -> IndexingService:
         ),
     )
     ingestion = IngestionService(
-        repository=repository, gateway=gateway, audit=AuditService(repository), settings=settings
+        repository=repository,
+        gateway=gateway,
+        audit=AuditService(repository),
+        settings=settings,
+        storage=build_object_storage(settings),
+        search=build_search_backend(settings, repository),
     )
-    return IndexingService(repository=repository, ingestion=ingestion)
+    return IndexingService(
+        repository=repository, ingestion=ingestion, settings=settings
+    )
 
 
 async def _drain(service: IndexingService, settings: Settings) -> int:
+    await service.reclaim_stale_jobs()
     results = await service.process_queued(limit=settings.ai_worker_batch_size)
     processed = sum(1 for item in results if item is not None)
     if processed:

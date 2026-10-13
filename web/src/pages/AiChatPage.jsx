@@ -17,7 +17,9 @@ function CitationList({ citations }) {
               </Link>
             </div>
             <div className="result-sub">
-              chunk {c.chunk_index} · score {Number(c.score).toFixed(4)}
+              chunk {c.chunk_index}
+              {c.page != null ? ` · page ${c.page}` : ""}
+              {c.section ? ` · ${c.section}` : ""} · score {Number(c.score).toFixed(4)}
             </div>
             <p>{c.snippet}</p>
           </div>
@@ -35,11 +37,22 @@ export default function AiChatPage() {
   const [error, setError] = useState("");
   const [messages, setMessages] = useState([]);
   const [answers, setAnswers] = useState([]);
+  const [conversations, setConversations] = useState([]);
+  const [convoId, setConvoId] = useState(null);
+  const [convo, setConvo] = useState({ conversation: null, messages: [] });
+  const [convoBusy, setConvoBusy] = useState(false);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
   const idRef = useRef(0);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (mode !== "assistant") return;
+    ai.conversations({ limit: 30 })
+      .then((page) => setConversations(page.items))
+      .catch((err) => setError(describe(err)));
+  }, [mode]);
 
   function nextId() {
     idRef.current += 1;
@@ -118,6 +131,8 @@ export default function AiChatPage() {
       if (mode === "chat") {
         const history = [...messages, { role: "user", content: text }];
         await sendChat(history);
+      } else if (mode === "assistant") {
+        await sendAssistant(text);
       } else {
         const res = await ai.rag({ query: text, limit: 5 });
         setAnswers((prev) => [{ question: text, ...res }, ...prev]);
@@ -144,6 +159,93 @@ export default function AiChatPage() {
     }
   }
 
+  async function refreshConversations() {
+    const page = await ai.conversations({ limit: 30 });
+    setConversations(page.items);
+  }
+
+  async function openConversation(id) {
+    setError("");
+    setConvoId(id);
+    setConvoBusy(true);
+    try {
+      const detail = await ai.conversation(id);
+      setConvo(detail);
+    } catch (err) {
+      setError(describe(err));
+    } finally {
+      setConvoBusy(false);
+    }
+  }
+
+  async function newConversation() {
+    setError("");
+    try {
+      const created = await ai.createConversation({});
+      setConversations((prev) => [created, ...prev]);
+      setConvoId(created.id);
+      setConvo({ conversation: created, messages: [] });
+    } catch (err) {
+      setError(describe(err));
+    }
+  }
+
+  async function removeConversation(id) {
+    setError("");
+    try {
+      await ai.deleteConversation(id);
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      if (convoId === id) {
+        setConvoId(null);
+        setConvo({ conversation: null, messages: [] });
+      }
+    } catch (err) {
+      setError(describe(err));
+    }
+  }
+
+  async function rateMessage(messageId, rating) {
+    try {
+      await ai.assistantFeedback({ message_id: messageId, rating });
+      setConvo((prev) => ({
+        ...prev,
+        messages: prev.messages.map((m) => (m.id === messageId ? { ...m, rating } : m)),
+      }));
+    } catch (err) {
+      setError(describe(err));
+    }
+  }
+
+  async function sendAssistant(text) {
+    let id = convoId;
+    if (!id) {
+      const created = await ai.createConversation({ title: text.slice(0, 120) });
+      id = created.id;
+      setConvoId(id);
+      setConversations((prev) => [created, ...prev]);
+      setConvo({ conversation: created, messages: [] });
+    }
+    const optimistic = [
+      { id: `u-${nextId()}`, role: "user", content: text },
+      { id: `p-${nextId()}`, role: "assistant", content: "", pending: true },
+    ];
+    setConvo((prev) => ({ ...prev, messages: [...prev.messages, ...optimistic] }));
+    try {
+      await ai.sendAssistantMessage(id, { content: text });
+      const detail = await ai.conversation(id);
+      setConvo(detail);
+      setConversations((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, ...detail.conversation } : c))
+      );
+    } catch (err) {
+      setConvo((prev) => ({
+        ...prev,
+        messages: prev.messages.filter((m) => !m.pending),
+      }));
+      throw err;
+    }
+  }
+
   return (
     <>
       <div className="topbar">
@@ -164,6 +266,12 @@ export default function AiChatPage() {
           </button>
           <button className={`tab ${mode === "rag" ? "active" : ""}`} onClick={() => setMode("rag")}>
             Knowledge (RAG)
+          </button>
+          <button
+            className={`tab ${mode === "assistant" ? "active" : ""}`}
+            onClick={() => setMode("assistant")}
+          >
+            Assistant
           </button>
         </div>
 
@@ -208,7 +316,7 @@ export default function AiChatPage() {
               ))
             )}
           </div>
-        ) : (
+        ) : mode === "rag" ? (
           <div className="stack">
             {answers.length === 0 ? (
               <p className="muted">
@@ -237,16 +345,123 @@ export default function AiChatPage() {
               ))
             )}
           </div>
+        ) : (
+          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <div className="stack" style={{ flex: "0 0 220px" }}>
+              <button className="btn secondary" onClick={newConversation}>New conversation</button>
+              {conversations.length === 0 ? (
+                <p className="muted">No conversations yet.</p>
+              ) : (
+                conversations.map((c) => (
+                  <div
+                    key={c.id}
+                    className={`notice ${c.id === convoId ? "active" : ""}`}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <div onClick={() => openConversation(c.id)}>
+                      <div className="result-title">
+                        {c.title || `Conversation ${c.id}`}
+                      </div>
+                      <div className="result-sub">
+                        {c.message_count} messages · {new Date(c.updated_at).toLocaleString()}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => removeConversation(c.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="stack grow">
+              {convoBusy ? <p className="muted">Loading conversation…</p> : null}
+              {!convoBusy && convo.messages.length === 0 ? (
+                <p className="muted">
+                  Start a grounded assistant conversation. Every answer is cited from documents
+                  your permissions allow you to see.
+                </p>
+              ) : (
+                convo.messages.map((m) => (
+                  <div
+                    className={`panel ${m.role === "user" ? "" : "notice"}`}
+                    key={m.id}
+                  >
+                    <div className="result-sub">{m.role}</div>
+                    {m.role === "user" ? (
+                      <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
+                    ) : m.pending ? (
+                      <div className="result-sub">thinking…</div>
+                    ) : (
+                      <>
+                        <AiMarkdown text={m.content} />
+                        <div className="result-sub">
+                          {m.answer_status || "answered"}
+                          {m.confidence != null ? ` · confidence ${Number(m.confidence).toFixed(4)}` : ""}
+                          {m.is_mock ? " · mock provider" : ""}
+                          {m.model_code ? ` · ${m.model_code}` : ""}
+                          {m.latency_ms != null ? ` · ${m.latency_ms} ms` : ""}
+                        </div>
+                        {m.sources?.length ? (
+                          <CitationList
+                            citations={m.sources.map((s) => ({
+                              rank: s.rank,
+                              source_id: s.source_id,
+                              source_code: s.source_code,
+                              document_id: s.document_id,
+                              chunk_id: s.chunk_id,
+                              chunk_index: s.chunk_index,
+                              page: s.page,
+                              section: s.section,
+                              score: s.score,
+                              snippet: s.snippet,
+                            }))}
+                          />
+                        ) : null}
+                        <div className="row" style={{ gap: 8, marginTop: 6 }}>
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            disabled={m.rating != null || m.id < 0}
+                            onClick={() => rateMessage(m.id, 1)}
+                          >
+                            {m.rating === 1 ? "Rated helpful" : "Helpful"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            disabled={m.rating != null || m.id < 0}
+                            onClick={() => rateMessage(m.id, -1)}
+                          >
+                            {m.rating === -1 ? "Rated unhelpful" : "Not helpful"}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         )}
 
         <form onSubmit={send} className="row" style={{ marginTop: 12 }}>
           <label className="field grow">
-            <span>{mode === "chat" ? "Message" : "Question"}</span>
+            <span>{mode === "chat" ? "Message" : mode === "assistant" ? "Message" : "Question"}</span>
             <input
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={mode === "chat" ? "Ask anything…" : "Ask about your knowledge sources…"}
+              placeholder={
+                mode === "chat"
+                  ? "Ask anything…"
+                  : mode === "assistant"
+                    ? "Ask your grounded assistant…"
+                    : "Ask about your knowledge sources…"
+              }
             />
           </label>
           {mode === "chat" ? (

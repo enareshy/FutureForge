@@ -91,11 +91,32 @@ class Settings(BaseSettings):
     # V1 tools never require approval; the control exists for future tools.
     ai_agent_require_approval: bool = False
 
+    # Document upload and indexing hardening (Stage 3).
+    ai_upload_max_bytes: int = Field(default=26_214_400, ge=1024)  # 25 MiB
+    # When true, reject uploads whose bytes do not match the declared/allowed
+    # format signature (magic bytes), not just the extension/MIME string.
+    ai_upload_require_signature: bool = True
+    # Bounded retries and per-job processing timeout.
+    ai_max_job_attempts: int = Field(default=5, ge=1, le=50)
+    ai_job_timeout_seconds: float = Field(default=120.0, gt=0)
+    # Lease duration so a crashed worker's job can be reclaimed by another.
+    ai_job_lease_seconds: float = Field(default=300.0, gt=0)
+
+    # Retrieval search: lexical provider ("postgres" full-text, or "opensearch")
+    # and hybrid fusion (combine vector + lexical with reciprocal rank fusion).
     search_provider: str = "postgres"
+    ai_hybrid_search_enabled: bool = True
+    # Reciprocal Rank Fusion constant (Cormack et al., 2009). Larger -> flatter
+    # contribution across ranks.
+    ai_rrf_k: int = Field(default=60, ge=1, le=1000)
+    # Candidates pulled from each path before fusion.
+    ai_retrieval_candidate_multiplier: int = Field(default=4, ge=1, le=20)
     opensearch_url: str = "http://127.0.0.1:9200"
     opensearch_username: str = ""
     opensearch_password: SecretStr = SecretStr("")
     opensearch_insecure: bool = False
+    opensearch_index_prefix: str = "ai-knowledge"
+    opensearch_timeout_seconds: float = Field(default=10.0, gt=0)
 
     event_bus_provider: str = "database"
     kafka_bootstrap_servers: str = "127.0.0.1:9092"

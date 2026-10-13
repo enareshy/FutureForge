@@ -46,6 +46,8 @@ const DEFAULT_TIMEOUT_MS = 60000;
  * @property {number} document_id
  * @property {number} chunk_id
  * @property {number} chunk_index
+ * @property {number|null} page
+ * @property {string|null} section
  * @property {number} score
  * @property {string} snippet
  */
@@ -128,6 +130,48 @@ export async function aiApi(
   return data;
 }
 
+/**
+ * Download a document's stored bytes. Fetched with the session token (the
+ * endpoint is authorization-gated), then handed to the browser as a blob — the
+ * platform never exposes a public object-storage URL.
+ * @param {number|string} documentId
+ * @param {string} [filename]
+ */
+export async function downloadDocument(documentId, filename) {
+  const headers = { Accept: "*/*" };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${AI_BASE}/knowledge/documents/${documentId}/download`, { headers });
+  if (!res.ok) {
+    let code = "http_error";
+    let message = `Download failed (${res.status})`;
+    let requestId = res.headers.get("x-request-id");
+    try {
+      const data = await res.json();
+      code = data?.error?.code || code;
+      message = data?.error?.message || message;
+      requestId = data?.error?.request_id || requestId;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new AiApiError(res.status, code, message, requestId);
+  }
+
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") || "";
+  const match = /filename="?([^";]+)"?/.exec(disposition);
+  const name = filename || (match ? match[1] : `document-${documentId}`);
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 function qs(params) {
   const search = new URLSearchParams();
   Object.entries(params || {}).forEach(([key, value]) => {
@@ -135,6 +179,58 @@ function qs(params) {
   });
   const str = search.toString();
   return str ? `?${str}` : "";
+}
+
+/**
+ * Upload a file (multipart/form-data) to a knowledge source. The browser sets
+ * the multipart boundary, so no Content-Type header is set here.
+ * @param {number|string} sourceId
+ * @param {File} file
+ * @param {{ signal?: AbortSignal, timeoutMs?: number }} [opts]
+ */
+export async function uploadDocument(sourceId, file, { signal, timeoutMs } = {}) {
+  const form = new FormData();
+  form.append("file", file);
+  const headers = { Accept: "application/json" };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const timeout = withTimeout({ signal, timeoutMs });
+  let res;
+  try {
+    res = await fetch(`${AI_BASE}/knowledge/sources/${sourceId}/upload`, {
+      method: "POST",
+      headers,
+      body: form,
+      signal: timeout.signal,
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new AiApiError(0, "aborted", "Request was cancelled or timed out");
+    }
+    throw err;
+  } finally {
+    timeout.cleanup();
+  }
+
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    const err = data?.error;
+    throw new AiApiError(
+      res.status,
+      err?.code || "http_error",
+      err?.message || `Request failed (${res.status})`,
+      err?.request_id || res.headers.get("x-request-id"),
+      err?.details || {},
+    );
+  }
+  return data;
 }
 
 function parseFrame(frame) {
@@ -252,9 +348,23 @@ export const ai = {
   documents: (sourceId, params) => aiApi(`/knowledge/sources/${sourceId}/documents${qs(params)}`),
   ingest: (sourceId, body) =>
     aiApi(`/knowledge/sources/${sourceId}/ingest`, { method: "POST", body }),
+  uploadDocument: (sourceId, file, opts) => uploadDocument(sourceId, file, opts),
+  reindexSource: (sourceId) =>
+    aiApi(`/knowledge/sources/${sourceId}/reindex`, { method: "POST" }),
+  deleteDocument: (id) => aiApi(`/knowledge/documents/${id}`, { method: "DELETE" }),
+  downloadDocument: (id, filename) => downloadDocument(id, filename),
   requestIndex: (body) => aiApi("/knowledge/index", { method: "POST", body }),
+  retryJob: (id) => aiApi(`/knowledge/jobs/${id}/retry`, { method: "POST" }),
   job: (id) => aiApi(`/knowledge/jobs/${id}`),
   jobs: (params) => aiApi(`/knowledge/jobs${qs(params)}`),
+
+  conversations: (params) => aiApi(`/assistant/conversations${qs(params)}`),
+  createConversation: (body) => aiApi("/assistant/conversations", { method: "POST", body }),
+  conversation: (id) => aiApi(`/assistant/conversations/${id}`),
+  deleteConversation: (id) => aiApi(`/assistant/conversations/${id}`, { method: "DELETE" }),
+  sendAssistantMessage: (id, body) =>
+    aiApi(`/assistant/conversations/${id}/messages`, { method: "POST", body }),
+  assistantFeedback: (body) => aiApi("/assistant/feedback", { method: "POST", body }),
 
   audit: (params) => aiApi(`/audit${qs(params)}`),
 

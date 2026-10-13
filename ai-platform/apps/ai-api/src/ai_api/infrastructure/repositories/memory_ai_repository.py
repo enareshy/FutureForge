@@ -29,6 +29,9 @@ class InMemoryAiRepository:
         self._ml_versions: list[dict[str, Any]] = []
         self._evaluations: list[dict[str, Any]] = []
         self._evaluation_results: list[dict[str, Any]] = []
+        self._conversations: list[dict[str, Any]] = []
+        self._messages: list[dict[str, Any]] = []
+        self._message_sources: list[dict[str, Any]] = []
         self._ids: dict[str, count] = {}
 
     def _next_id(self, table: str) -> int:
@@ -114,7 +117,13 @@ class InMemoryAiRepository:
             "idempotency_key": key,
             "progress": 0,
             "attempts": 0,
+            "max_attempts": data.get("max_attempts", 5),
+            "stage": data.get("stage"),
+            "error_class": None,
+            "lease_expires_at": None,
             "payload": data.get("payload", {}),
+            "result": None,
+            "error": None,
             "created_at": self._now(),
             "started_at": None,
             "finished_at": None,
@@ -139,6 +148,10 @@ class InMemoryAiRepository:
                 "source_id",
                 "progress",
                 "attempts",
+                "max_attempts",
+                "stage",
+                "error_class",
+                "lease_expires_at",
                 "payload",
                 "result",
                 "error",
@@ -421,6 +434,8 @@ class InMemoryAiRepository:
                     "content": chunk["content"],
                     "classification": chunk["classification"],
                     "acl": chunk["acl"],
+                    "page": chunk.get("page"),
+                    "section": chunk.get("section"),
                     "source_id": source["id"],
                     "source_code": source["code"],
                     "source_name": source["name"],
@@ -450,6 +465,8 @@ class InMemoryAiRepository:
             "id": self._next_id("document"),
             "title": data.get("title"),
             "mime_type": data.get("mime_type"),
+            "uri": data.get("uri"),
+            "object_key": data.get("object_key"),
             "checksum": data.get("checksum"),
             "size_bytes": data.get("size_bytes"),
             "classification": data.get("classification", "internal"),
@@ -457,6 +474,8 @@ class InMemoryAiRepository:
             "metadata": data.get("metadata", {}),
             "status": "indexed",
             "indexed_at": self._now(),
+            "search_indexed_at": None,
+            "error_class": None,
             "created_at": self._now(),
             "source_id": data["source_id"],
             "external_id": data["external_id"],
@@ -480,6 +499,8 @@ class InMemoryAiRepository:
                 "classification": chunk.get("classification", "internal"),
                 "acl": chunk.get("acl", {}),
                 "metadata": chunk.get("metadata", {}),
+                "page": chunk.get("page"),
+                "section": chunk.get("section"),
                 "created_at": self._now(),
             }
             self._chunks.append(record)
@@ -555,17 +576,57 @@ class InMemoryAiRepository:
                 "external_id": documents[c["document_id"]]["external_id"],
                 "title": documents[c["document_id"]].get("title"),
                 "mime_type": documents[c["document_id"]].get("mime_type"),
+                "object_key": documents[c["document_id"]].get("object_key"),
                 "chunk_index": c["chunk_index"],
                 "content": c["content"],
                 "classification": c.get("classification", "internal"),
                 "acl": c.get("acl", {}),
                 "metadata": c.get("metadata", {}),
+                "page": c.get("page"),
+                "section": c.get("section"),
             }
             for c in self._chunks
             if c["tenant_id"] == tenant_id and c["document_id"] in document_ids
         ]
         rows.sort(key=lambda r: (r["document_id"], r["chunk_index"]))
         return rows
+
+    async def get_document(
+        self, tenant_id: int, document_id: int
+    ) -> dict[str, Any] | None:
+        for document in self._documents:
+            if document["tenant_id"] == tenant_id and document["id"] == document_id:
+                return dict(document)
+        return None
+
+    async def find_document_by_checksum(
+        self, tenant_id: int, checksum: str
+    ) -> dict[str, Any] | None:
+        matches = [
+            dict(d)
+            for d in self._documents
+            if d["tenant_id"] == tenant_id and d.get("checksum") == checksum
+        ]
+        matches.sort(key=lambda d: d["created_at"], reverse=True)
+        return matches[0] if matches else None
+
+    async def set_document_search_state(
+        self,
+        tenant_id: int,
+        document_id: int,
+        *,
+        search_indexed_at: datetime | None,
+        status: str | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        for document in self._documents:
+            if document["tenant_id"] == tenant_id and document["id"] == document_id:
+                if search_indexed_at is not None:
+                    document["search_indexed_at"] = search_indexed_at
+                if status is not None:
+                    document["status"] = status
+                document["error_class"] = error_class
+                return
 
     async def set_source_status(self, tenant_id: int, source_id: int, status: str) -> None:
         for source in self._sources:
@@ -618,6 +679,24 @@ class InMemoryAiRepository:
         self._chunks = [c for c in self._chunks if c["id"] not in doomed_chunks]
         self._embeddings = [e for e in self._embeddings if e["chunk_id"] not in doomed_chunks]
         return removed
+
+    async def delete_document(self, tenant_id: int, document_id: int) -> bool:
+        doomed = [
+            d["id"]
+            for d in self._documents
+            if d["tenant_id"] == tenant_id and d["id"] == document_id
+        ]
+        if not doomed:
+            return False
+        self._documents = [d for d in self._documents if d["id"] != document_id]
+        doomed_chunks = {
+            c["id"] for c in self._chunks if c["document_id"] == document_id
+        }
+        self._chunks = [c for c in self._chunks if c["document_id"] != document_id]
+        self._embeddings = [
+            e for e in self._embeddings if e["chunk_id"] not in doomed_chunks
+        ]
+        return True
 
     # --- ML experiment tracking and model registry (Phase 11) ------------
     async def create_experiment_if_absent(
@@ -900,6 +979,154 @@ class InMemoryAiRepository:
         ]
         items.sort(key=lambda r: r["created_at"], reverse=True)
         return items[offset : offset + limit], len(items)
+
+    # --- Assistant conversations (Stage 3) ------------------------------
+    async def create_conversation(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        now = self._now()
+        record = {
+            "id": self._next_id("conversation"),
+            "tenant_id": tenant_id,
+            "actor_id": data.get("actor_id"),
+            "title": data.get("title"),
+            "status": "active",
+            "metadata": data.get("metadata", {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._conversations.append(record)
+        return dict(record)
+
+    async def list_conversations(
+        self, tenant_id: int, actor_id: int | None, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        items = [
+            dict(c)
+            for c in self._conversations
+            if c["tenant_id"] == tenant_id
+            and c["status"] != "deleted"
+            and (actor_id is None or c["actor_id"] == actor_id)
+        ]
+        items.sort(key=lambda c: c["updated_at"], reverse=True)
+        return items[offset : offset + limit], len(items)
+
+    async def get_conversation(
+        self, tenant_id: int, conversation_id: int
+    ) -> dict[str, Any] | None:
+        for record in self._conversations:
+            if (
+                record["tenant_id"] == tenant_id
+                and record["id"] == conversation_id
+                and record["status"] != "deleted"
+            ):
+                return dict(record)
+        return None
+
+    async def delete_conversation(self, tenant_id: int, conversation_id: int) -> bool:
+        for record in self._conversations:
+            if (
+                record["tenant_id"] == tenant_id
+                and record["id"] == conversation_id
+                and record["status"] != "deleted"
+            ):
+                record["status"] = "deleted"
+                record["deleted_at"] = self._now()
+                record["updated_at"] = self._now()
+                return True
+        return False
+
+    async def touch_conversation(self, tenant_id: int, conversation_id: int) -> None:
+        for record in self._conversations:
+            if record["tenant_id"] == tenant_id and record["id"] == conversation_id:
+                record["updated_at"] = self._now()
+                return
+
+    async def add_message(
+        self, tenant_id: int, conversation_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        record = {
+            "id": self._next_id("message"),
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "role": data["role"],
+            "content": data.get("content", ""),
+            "answer_status": data.get("answer_status"),
+            "confidence": data.get("confidence"),
+            "is_mock": data.get("is_mock"),
+            "model_code": data.get("model_code"),
+            "provider_code": data.get("provider_code"),
+            "token_usage": data.get("token_usage", {}),
+            "latency_ms": data.get("latency_ms"),
+            "execution_id": data.get("execution_id"),
+            "request_id": data.get("request_id"),
+            "error": data.get("error"),
+            "created_at": self._now(),
+        }
+        self._messages.append(record)
+        return dict(record)
+
+    async def list_messages(
+        self, tenant_id: int, conversation_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        items = [
+            dict(m)
+            for m in self._messages
+            if m["tenant_id"] == tenant_id
+            and m["conversation_id"] == conversation_id
+        ]
+        items.sort(key=lambda m: (m["created_at"], m["id"]))
+        return items[offset : offset + limit], len(items)
+
+    async def add_message_sources(
+        self, tenant_id: int, message_id: int, sources: list[dict[str, Any]]
+    ) -> None:
+        existing = {
+            s["rank"]
+            for s in self._message_sources
+            if s["tenant_id"] == tenant_id and s["message_id"] == message_id
+        }
+        for source in sources:
+            rank = source["rank"]
+            if rank in existing:
+                continue
+            existing.add(rank)
+            self._message_sources.append(
+                {
+                    "id": self._next_id("message_source"),
+                    "tenant_id": tenant_id,
+                    "message_id": message_id,
+                    "rank": rank,
+                    "source_id": source.get("source_id"),
+                    "document_id": source.get("document_id"),
+                    "chunk_id": source.get("chunk_id"),
+                    "source_code": source.get("source_code"),
+                    "chunk_index": source.get("chunk_index"),
+                    "page": source.get("page"),
+                    "section": source.get("section"),
+                    "score": source.get("score"),
+                    "snippet": source.get("snippet"),
+                }
+            )
+
+    async def get_message_sources(
+        self, tenant_id: int, message_id: int
+    ) -> list[dict[str, Any]]:
+        items = [
+            dict(s)
+            for s in self._message_sources
+            if s["tenant_id"] == tenant_id and s["message_id"] == message_id
+        ]
+        items.sort(key=lambda s: s["rank"])
+        return items
+
+    async def get_message(
+        self, tenant_id: int, message_id: int
+    ) -> dict[str, Any] | None:
+        for message in self._messages:
+            if message["tenant_id"] == tenant_id and message["id"] == message_id:
+                return dict(message)
+        return None
 
 
 def _cosine(left: list[float], right: list[float]) -> float:

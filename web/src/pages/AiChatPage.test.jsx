@@ -11,6 +11,12 @@ vi.mock("../aiApi.js", async (importActual) => {
       chat: vi.fn(),
       rag: vi.fn(),
       createFeedback: vi.fn(),
+      conversations: vi.fn(),
+      createConversation: vi.fn(),
+      conversation: vi.fn(),
+      deleteConversation: vi.fn(),
+      sendAssistantMessage: vi.fn(),
+      assistantFeedback: vi.fn(),
     },
     streamChat: vi.fn(),
   };
@@ -140,5 +146,70 @@ describe("AiChatPage", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     expect(await screen.findByText("Cancelled.")).toBeInTheDocument();
+  });
+
+  it("runs a grounded assistant conversation with persisted citations", async () => {
+    ai.conversations.mockResolvedValue({ items: [], meta: { total: 0 } });
+    ai.createConversation.mockResolvedValue({
+      id: 5,
+      title: "What is X?",
+      status: "active",
+      message_count: 1,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    ai.sendAssistantMessage.mockResolvedValue({ id: 12 });
+    ai.conversation.mockResolvedValue({
+      conversation: {
+        id: 5,
+        title: "What is X?",
+        status: "active",
+        message_count: 2,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      messages: [
+        { id: 11, conversation_id: 5, role: "user", content: "What is X?", created_at: new Date().toISOString() },
+        {
+          id: 12,
+          conversation_id: 5,
+          role: "assistant",
+          content: "X is grounded",
+          answer_status: "answered",
+          confidence: 0.9,
+          is_mock: true,
+          model_code: "mock-chat",
+          created_at: new Date().toISOString(),
+          sources: [
+            {
+              rank: 1,
+              source_id: 1,
+              document_id: 7,
+              chunk_id: 2,
+              source_code: "SRC-1",
+              chunk_index: 0,
+              page: 3,
+              section: "Intro",
+              score: 0.9,
+              snippet: "excerpt",
+            },
+          ],
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    const { container } = renderPage();
+
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    await user.type(screen.getByPlaceholderText(/grounded assistant/i), "What is X?");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await screen.findByText("X is grounded");
+    expect(ai.createConversation).toHaveBeenCalledWith({ title: "What is X?" });
+    expect(ai.sendAssistantMessage).toHaveBeenCalledWith(5, { content: "What is X?" });
+    expect(screen.getByText(/SRC-1 · document 7/)).toBeInTheDocument();
+    expect(container.textContent).toContain("page 3");
+    expect(container.textContent).toContain("Intro");
   });
 });

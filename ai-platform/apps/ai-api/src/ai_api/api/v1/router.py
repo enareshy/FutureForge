@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from ai_api.api.v1.routes import (
     agents,
+    assistant,
     audit,
     capabilities,
     chat,
@@ -21,6 +22,7 @@ api_router.include_router(health.router)
 api_router.include_router(capabilities.router)
 api_router.include_router(chat.router)
 api_router.include_router(knowledge.router)
+api_router.include_router(assistant.router)
 api_router.include_router(retrieval.router)
 api_router.include_router(usage.router)
 api_router.include_router(audit.router)

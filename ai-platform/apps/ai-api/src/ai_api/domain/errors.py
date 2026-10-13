@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 
@@ -69,3 +70,26 @@ class FeatureUnavailableError(ServiceUnavailableError):
 class ApprovalRequiredError(DomainError):
     code = "approval_required"
     http_status = 409
+
+
+def classify_error(exc: BaseException) -> str:
+    """Map an exception to a stable, non-sensitive error class.
+
+    Used to classify indexing/ingestion failures (validation | storage | provider
+    | timeout | dependency | configuration | internal) for safe UI summaries and
+    retry eligibility. Never includes the raw message.
+    """
+
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, ValidationError):
+        return "validation"
+    if isinstance(exc, NotFoundError):
+        return "storage"
+    if isinstance(exc, ProviderError):
+        return "provider"
+    if isinstance(exc, ServiceUnavailableError):
+        return "dependency"
+    if isinstance(exc, ConfigurationError):
+        return "configuration"
+    return "internal"

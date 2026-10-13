@@ -78,10 +78,11 @@ class PostgresAiRepository:
     ) -> dict[str, Any] | None:
         job = await self._db.fetchrow(
             """
-            INSERT INTO ai.jobs (tenant_id, type, source_id, idempotency_key, payload)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO ai.jobs (tenant_id, type, source_id, idempotency_key, payload, stage)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
-            RETURNING id, type, status, source_id, progress, attempts,
+            RETURNING id, type, status, source_id, progress, attempts, max_attempts,
+                      stage, error_class, lease_expires_at,
                       created_at, started_at, finished_at
             """,
             tenant_id,
@@ -89,11 +90,13 @@ class PostgresAiRepository:
             data.get("source_id"),
             data.get("idempotency_key"),
             data.get("payload", {}),
+            data.get("stage"),
         )
         if job is None and data.get("idempotency_key"):
             job = await self._db.fetchrow(
                 """
-                SELECT id, type, status, source_id, progress, attempts,
+                SELECT id, type, status, source_id, progress, attempts, max_attempts,
+                       stage, error_class, lease_expires_at,
                        created_at, started_at, finished_at
                 FROM ai.jobs
                 WHERE tenant_id = $1 AND idempotency_key = $2
@@ -106,7 +109,8 @@ class PostgresAiRepository:
     async def get_job(self, tenant_id: int, job_id: int) -> dict[str, Any] | None:
         return await self._db.fetchrow(
             """
-            SELECT id, type, status, source_id, progress, attempts, payload,
+            SELECT id, type, status, source_id, progress, attempts, max_attempts,
+                   stage, error_class, lease_expires_at, payload,
                    created_at, started_at, finished_at
             FROM ai.jobs
             WHERE tenant_id = $1 AND id = $2
@@ -425,12 +429,13 @@ class PostgresAiRepository:
     ) -> dict[str, Any]:
         row = await self._db.fetchrow(
             """
-            INSERT INTO ai.feedback (tenant_id, execution_id, actor_id, rating, comment)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, execution_id, actor_id, rating, comment, created_at
+            INSERT INTO ai.feedback (tenant_id, execution_id, message_id, actor_id, rating, comment)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, execution_id, message_id, actor_id, rating, comment, created_at
             """,
             tenant_id,
             data.get("execution_id"),
+            data.get("message_id"),
             data.get("actor_id"),
             data.get("rating"),
             data.get("comment"),
@@ -454,7 +459,7 @@ class PostgresAiRepository:
         where = " AND ".join(clauses)
         items = await self._db.fetch(
             f"""
-            SELECT id, execution_id, actor_id, rating, comment, created_at
+            SELECT id, execution_id, message_id, actor_id, rating, comment, created_at
             FROM ai.feedback
             WHERE {where}
             ORDER BY created_at DESC
@@ -514,8 +519,9 @@ class PostgresAiRepository:
                     (tenant_id, source_id, external_id, title, mime_type, uri, object_key,
                      checksum, size_bytes, classification, acl, metadata, status, indexed_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'indexed', now())
-                RETURNING id, source_id, external_id, title, mime_type, checksum,
-                          size_bytes, classification, acl, metadata, status, created_at
+                RETURNING id, source_id, external_id, title, mime_type, uri, object_key,
+                          checksum, size_bytes, classification, acl, metadata, status,
+                          indexed_at, search_indexed_at, error_class, created_at
                 """,
                 tenant_id,
                 data["source_id"],
@@ -542,10 +548,10 @@ class PostgresAiRepository:
                 """
                 INSERT INTO ai.document_chunks
                     (tenant_id, document_id, chunk_index, content, token_count, checksum,
-                     classification, acl, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     classification, acl, metadata, page, section)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 RETURNING id, document_id, chunk_index, content, token_count, checksum,
-                          classification, acl, metadata
+                          classification, acl, metadata, page, section
                 """,
                 tenant_id,
                 document_id,
@@ -556,6 +562,8 @@ class PostgresAiRepository:
                 chunk.get("classification", "internal"),
                 chunk.get("acl", {}),
                 chunk.get("metadata", {}),
+                chunk.get("page"),
+                chunk.get("section"),
             )
             assert row is not None
             rows.append(row)
@@ -589,7 +597,8 @@ class PostgresAiRepository:
         return await self._db.fetch(
             """
             SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.content,
-                   c.classification, c.acl, d.source_id, s.code AS source_code,
+                   c.classification, c.acl, c.page, c.section,
+                   d.source_id, s.code AS source_code,
                    s.name AS source_name,
                    1 - (e.embedding <=> $2::vector) AS score
             FROM ai.embeddings e
@@ -611,7 +620,8 @@ class PostgresAiRepository:
         return await self._db.fetch(
             """
             SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.content,
-                   c.classification, c.acl, d.source_id, s.code AS source_code,
+                   c.classification, c.acl, c.page, c.section,
+                   d.source_id, s.code AS source_code,
                    s.name AS source_name,
                    ts_rank(to_tsvector('english', c.content),
                            plainto_tsquery('english', $2)) AS score
@@ -634,7 +644,8 @@ class PostgresAiRepository:
         items = await self._db.fetch(
             """
             SELECT id, source_id, external_id, title, mime_type, classification,
-                   status, size_bytes, indexed_at, created_at
+                   status, size_bytes, checksum, indexed_at, search_indexed_at,
+                   error_class, created_at
             FROM ai.documents
             WHERE tenant_id = $1 AND source_id = $2
             ORDER BY created_at DESC
@@ -672,9 +683,13 @@ class PostgresAiRepository:
                 result = COALESCE($6, result),
                 error = COALESCE($7, error),
                 started_at = COALESCE($8, started_at),
-                finished_at = COALESCE($9, finished_at)
+                finished_at = COALESCE($9, finished_at),
+                stage = COALESCE($10, stage),
+                error_class = COALESCE($11, error_class),
+                lease_expires_at = COALESCE($12, lease_expires_at)
             WHERE tenant_id = $1 AND id = $2
-            RETURNING id, type, status, source_id, progress, attempts,
+            RETURNING id, type, status, source_id, progress, attempts, max_attempts,
+                      stage, error_class, lease_expires_at,
                       created_at, started_at, finished_at, result, error
             """,
             tenant_id,
@@ -686,6 +701,9 @@ class PostgresAiRepository:
             fields.get("error"),
             fields.get("started_at"),
             fields.get("finished_at"),
+            fields.get("stage"),
+            fields.get("error_class"),
+            fields.get("lease_expires_at"),
         )
 
     async def delete_source(self, tenant_id: int, source_id: int) -> bool:
@@ -696,12 +714,21 @@ class PostgresAiRepository:
         )
         return result.endswith("1")
 
+    async def delete_document(self, tenant_id: int, document_id: int) -> bool:
+        result = await self._db.execute(
+            "DELETE FROM ai.documents WHERE tenant_id = $1 AND id = $2",
+            tenant_id,
+            document_id,
+        )
+        return result.endswith("1")
+
     async def list_jobs_by_status(
         self, status: str, *, limit: int
     ) -> list[dict[str, Any]]:
         return await self._db.fetch(
             """
-            SELECT id, tenant_id, type, status, source_id, attempts, payload
+            SELECT id, tenant_id, type, status, source_id, attempts, max_attempts,
+                   stage, error_class, lease_expires_at, payload
             FROM ai.jobs
             WHERE status = $1
             ORDER BY id
@@ -716,7 +743,8 @@ class PostgresAiRepository:
     ) -> tuple[list[dict[str, Any]], int]:
         rows = await self._db.fetch(
             """
-            SELECT id, type, status, source_id, progress, attempts,
+            SELECT id, type, status, source_id, progress, attempts, max_attempts,
+                   stage, error_class, lease_expires_at,
                    created_at, started_at, finished_at
             FROM ai.jobs
             WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)
@@ -745,7 +773,9 @@ class PostgresAiRepository:
         return await self._db.fetch(
             """
             SELECT d.id AS document_id, d.external_id, d.title, d.mime_type,
-                   c.chunk_index, c.content, c.classification, c.acl, c.metadata
+                   d.object_key,
+                   c.chunk_index, c.content, c.classification, c.acl, c.metadata,
+                   c.page, c.section
             FROM ai.documents d
             JOIN ai.document_chunks c ON c.document_id = d.id
             WHERE d.tenant_id = $1 AND d.source_id = $2
@@ -753,6 +783,64 @@ class PostgresAiRepository:
             """,
             tenant_id,
             source_id,
+        )
+
+    async def get_document(
+        self, tenant_id: int, document_id: int
+    ) -> dict[str, Any] | None:
+        return await self._db.fetchrow(
+            """
+            SELECT d.id, d.source_id, d.external_id, d.title, d.mime_type, d.uri,
+                   d.object_key, d.checksum, d.size_bytes, d.classification, d.acl,
+                   d.metadata, d.status, d.indexed_at, d.search_indexed_at,
+                   d.error_class, d.created_at, d.updated_at, s.code AS source_code
+            FROM ai.documents d
+            JOIN ai.knowledge_sources s ON s.id = d.source_id
+            WHERE d.tenant_id = $1 AND d.id = $2
+            """,
+            tenant_id,
+            document_id,
+        )
+
+    async def find_document_by_checksum(
+        self, tenant_id: int, checksum: str
+    ) -> dict[str, Any] | None:
+        return await self._db.fetchrow(
+            """
+            SELECT d.id, d.source_id, d.external_id, d.title, d.status,
+                   d.classification, d.created_at, s.code AS source_code
+            FROM ai.documents d
+            JOIN ai.knowledge_sources s ON s.id = d.source_id
+            WHERE d.tenant_id = $1 AND d.checksum = $2
+            ORDER BY d.created_at DESC
+            LIMIT 1
+            """,
+            tenant_id,
+            checksum,
+        )
+
+    async def set_document_search_state(
+        self,
+        tenant_id: int,
+        document_id: int,
+        *,
+        search_indexed_at: datetime | None,
+        status: str | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        await self._db.execute(
+            """
+            UPDATE ai.documents
+            SET search_indexed_at = COALESCE($3, search_indexed_at),
+                status = COALESCE($4, status),
+                error_class = $5
+            WHERE tenant_id = $1 AND id = $2
+            """,
+            tenant_id,
+            document_id,
+            search_indexed_at,
+            status,
+            error_class,
         )
 
     # --- ML experiment tracking and model registry (Phase 11) ------------
@@ -1248,3 +1336,208 @@ class PostgresAiRepository:
             evaluation_id,
         )
         return rows, int(total or 0)
+
+    # --- Assistant conversations (Stage 3) ------------------------------
+    _CONVERSATION_COLUMNS = (
+        "id, tenant_id, actor_id, title, status, metadata, created_at, updated_at"
+    )
+    _MESSAGE_COLUMNS = (
+        "id, tenant_id, conversation_id, role, content, answer_status, confidence, "
+        "is_mock, model_code, provider_code, token_usage, latency_ms, execution_id, "
+        "request_id, error, created_at"
+    )
+    _SOURCE_COLUMNS = (
+        "id, message_id, rank, source_id, document_id, chunk_id, source_code, "
+        "chunk_index, page, section, score, snippet"
+    )
+
+    async def create_conversation(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        row = await self._db.fetchrow(
+            f"""
+            INSERT INTO ai.assistant_conversations (tenant_id, actor_id, title, metadata)
+            VALUES ($1, $2, $3, $4)
+            RETURNING {self._CONVERSATION_COLUMNS}
+            """,
+            tenant_id,
+            data.get("actor_id"),
+            data.get("title"),
+            data.get("metadata", {}),
+        )
+        assert row is not None
+        return row
+
+    async def list_conversations(
+        self, tenant_id: int, actor_id: int | None, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        rows = await self._db.fetch(
+            f"""
+            SELECT {self._CONVERSATION_COLUMNS}
+            FROM ai.assistant_conversations
+            WHERE tenant_id = $1 AND status <> 'deleted'
+              AND ($2::bigint IS NULL OR actor_id = $2)
+            ORDER BY updated_at DESC
+            LIMIT $3 OFFSET $4
+            """,
+            tenant_id,
+            actor_id,
+            limit,
+            offset,
+        )
+        total = await self._db.fetchval(
+            """
+            SELECT count(*) FROM ai.assistant_conversations
+            WHERE tenant_id = $1 AND status <> 'deleted'
+              AND ($2::bigint IS NULL OR actor_id = $2)
+            """,
+            tenant_id,
+            actor_id,
+        )
+        return rows, int(total or 0)
+
+    async def get_conversation(
+        self, tenant_id: int, conversation_id: int
+    ) -> dict[str, Any] | None:
+        return await self._db.fetchrow(
+            f"""
+            SELECT {self._CONVERSATION_COLUMNS}
+            FROM ai.assistant_conversations
+            WHERE tenant_id = $1 AND id = $2 AND status <> 'deleted'
+            """,
+            tenant_id,
+            conversation_id,
+        )
+
+    async def delete_conversation(self, tenant_id: int, conversation_id: int) -> bool:
+        row = await self._db.fetchval(
+            """
+            UPDATE ai.assistant_conversations
+            SET status = 'deleted', deleted_at = now(), updated_at = now()
+            WHERE tenant_id = $1 AND id = $2 AND status <> 'deleted'
+            RETURNING id
+            """,
+            tenant_id,
+            conversation_id,
+        )
+        return row is not None
+
+    async def touch_conversation(self, tenant_id: int, conversation_id: int) -> None:
+        await self._db.execute(
+            """
+            UPDATE ai.assistant_conversations SET updated_at = now()
+            WHERE tenant_id = $1 AND id = $2
+            """,
+            tenant_id,
+            conversation_id,
+        )
+
+    async def add_message(
+        self, tenant_id: int, conversation_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        row = await self._db.fetchrow(
+            f"""
+            INSERT INTO ai.assistant_messages
+                (tenant_id, conversation_id, role, content, answer_status, confidence,
+                 is_mock, model_code, provider_code, token_usage, latency_ms,
+                 execution_id, request_id, error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                    NULLIF($13, '')::uuid, $14)
+            RETURNING {self._MESSAGE_COLUMNS}
+            """,
+            tenant_id,
+            conversation_id,
+            data["role"],
+            data.get("content", ""),
+            data.get("answer_status"),
+            data.get("confidence"),
+            data.get("is_mock"),
+            data.get("model_code"),
+            data.get("provider_code"),
+            data.get("token_usage", {}),
+            data.get("latency_ms"),
+            data.get("execution_id"),
+            data.get("request_id"),
+            data.get("error"),
+        )
+        assert row is not None
+        return row
+
+    async def list_messages(
+        self, tenant_id: int, conversation_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        rows = await self._db.fetch(
+            f"""
+            SELECT {self._MESSAGE_COLUMNS}
+            FROM ai.assistant_messages
+            WHERE tenant_id = $1 AND conversation_id = $2
+            ORDER BY created_at, id
+            LIMIT $3 OFFSET $4
+            """,
+            tenant_id,
+            conversation_id,
+            limit,
+            offset,
+        )
+        total = await self._db.fetchval(
+            """
+            SELECT count(*) FROM ai.assistant_messages
+            WHERE tenant_id = $1 AND conversation_id = $2
+            """,
+            tenant_id,
+            conversation_id,
+        )
+        return rows, int(total or 0)
+
+    async def add_message_sources(
+        self, tenant_id: int, message_id: int, sources: list[dict[str, Any]]
+    ) -> None:
+        for source in sources:
+            await self._db.execute(
+                """
+                INSERT INTO ai.assistant_message_sources
+                    (tenant_id, message_id, rank, source_id, document_id, chunk_id,
+                     source_code, chunk_index, page, section, score, snippet)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ON CONFLICT (message_id, rank) DO NOTHING
+                """,
+                tenant_id,
+                message_id,
+                source["rank"],
+                source.get("source_id"),
+                source.get("document_id"),
+                source.get("chunk_id"),
+                source.get("source_code"),
+                source.get("chunk_index"),
+                source.get("page"),
+                source.get("section"),
+                source.get("score"),
+                source.get("snippet"),
+            )
+
+    async def get_message_sources(
+        self, tenant_id: int, message_id: int
+    ) -> list[dict[str, Any]]:
+        return await self._db.fetch(
+            f"""
+            SELECT {self._SOURCE_COLUMNS}
+            FROM ai.assistant_message_sources
+            WHERE tenant_id = $1 AND message_id = $2
+            ORDER BY rank
+            """,
+            tenant_id,
+            message_id,
+        )
+
+    async def get_message(
+        self, tenant_id: int, message_id: int
+    ) -> dict[str, Any] | None:
+        return await self._db.fetchrow(
+            f"""
+            SELECT {self._MESSAGE_COLUMNS}
+            FROM ai.assistant_messages
+            WHERE tenant_id = $1 AND id = $2
+            """,
+            tenant_id,
+            message_id,
+        )

@@ -36,7 +36,8 @@ class HealthService:
         return {
             "repository": self.settings.ai_repository,
             "vector_store": "pgvector",
-            "search_index": "opensearch" if self.settings.opensearch_url else "disabled",
+            "search_index": self.settings.search_provider,
+            "hybrid_search": "enabled" if self.settings.ai_hybrid_search_enabled else "disabled",
             "event_bus": self.settings.event_bus_provider,
             "ml_tracking": self.settings.ml_tracking_backend,
             "telemetry": {

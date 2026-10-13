@@ -8,9 +8,16 @@ from typing import Annotated
 from fastapi import Depends, Query, Request
 
 from ai_api.application.agents.runtime import AgentRuntime
-from ai_api.application.ports import AiRepository, EventStore, TrackingBackend
+from ai_api.application.ports import (
+    AiRepository,
+    EventStore,
+    ObjectStorage,
+    SearchBackend,
+    TrackingBackend,
+)
 from ai_api.application.reliability import RateLimiter
 from ai_api.application.services.agent_service import AgentService
+from ai_api.application.services.assistant_service import AssistantService
 from ai_api.application.services.audit_service import AuditService
 from ai_api.application.services.capabilities_service import CapabilitiesService
 from ai_api.application.services.chat_service import ChatService
@@ -31,6 +38,8 @@ from ai_api.infrastructure.events import KafkaEventSink, build_event_store
 from ai_api.infrastructure.ml import build_tracking_backend
 from ai_api.infrastructure.providers.registry import ProviderRegistry, build_default_registry
 from ai_api.infrastructure.repositories import InMemoryAiRepository, PostgresAiRepository
+from ai_api.infrastructure.search import build_search_backend
+from ai_api.infrastructure.storage import build_object_storage
 from ai_api.security.access_control import AccessControl
 from ai_api.security.identity import IdentityProvider, build_identity_provider
 from ai_api.security.permissions import build_permission_map, parse_permission_list
@@ -61,6 +70,17 @@ def get_ai_repository() -> AiRepository:
 @lru_cache(maxsize=1)
 def get_provider_registry() -> ProviderRegistry:
     return build_default_registry(get_settings())
+
+
+@lru_cache(maxsize=1)
+def get_object_storage() -> ObjectStorage:
+    return build_object_storage(get_settings())
+
+
+def get_search_backend(
+    repository: Annotated[AiRepository, Depends(get_ai_repository)],
+) -> SearchBackend:
+    return build_search_backend(get_settings(), repository)
 
 
 @lru_cache(maxsize=1)
@@ -141,8 +161,16 @@ def get_knowledge_service(
     repository: Annotated[AiRepository, Depends(get_ai_repository)],
     audit: Annotated[AuditService, Depends(get_audit_service)],
     events: Annotated[EventPublisher, Depends(get_event_publisher)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    storage: Annotated[ObjectStorage, Depends(get_object_storage)],
 ) -> KnowledgeService:
-    return KnowledgeService(repository=repository, audit=audit, events=events)
+    return KnowledgeService(
+        repository=repository,
+        audit=audit,
+        settings=settings,
+        events=events,
+        storage=storage,
+    )
 
 
 def get_usage_service(
@@ -250,18 +278,29 @@ def get_ingestion_service(
     audit: Annotated[AuditService, Depends(get_audit_service)],
     settings: Annotated[Settings, Depends(get_settings)],
     events: Annotated[EventPublisher, Depends(get_event_publisher)],
+    storage: Annotated[ObjectStorage, Depends(get_object_storage)],
+    search: Annotated[SearchBackend, Depends(get_search_backend)],
 ) -> IngestionService:
     return IngestionService(
-        repository=repository, gateway=gateway, audit=audit, settings=settings, events=events
+        repository=repository,
+        gateway=gateway,
+        audit=audit,
+        settings=settings,
+        events=events,
+        storage=storage,
+        search=search,
     )
 
 
 def get_indexing_service(
     repository: Annotated[AiRepository, Depends(get_ai_repository)],
     ingestion: Annotated[IngestionService, Depends(get_ingestion_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
     events: Annotated[EventPublisher, Depends(get_event_publisher)],
 ) -> IndexingService:
-    return IndexingService(repository=repository, ingestion=ingestion, events=events)
+    return IndexingService(
+        repository=repository, ingestion=ingestion, settings=settings, events=events
+    )
 
 
 def get_retrieval_service(
@@ -272,6 +311,7 @@ def get_retrieval_service(
     governance: Annotated[GovernanceService, Depends(get_governance_service)],
     settings: Annotated[Settings, Depends(get_settings)],
     events: Annotated[EventPublisher, Depends(get_event_publisher)],
+    search: Annotated[SearchBackend, Depends(get_search_backend)],
 ) -> RetrievalService:
     return RetrievalService(
         gateway=gateway,
@@ -281,6 +321,18 @@ def get_retrieval_service(
         governance=governance,
         settings=settings,
         events=events,
+        search_backend=search,
+    )
+
+
+def get_assistant_service(
+    repository: Annotated[AiRepository, Depends(get_ai_repository)],
+    retrieval: Annotated[RetrievalService, Depends(get_retrieval_service)],
+    audit: Annotated[AuditService, Depends(get_audit_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AssistantService:
+    return AssistantService(
+        repository=repository, retrieval=retrieval, audit=audit, settings=settings
     )
 
 
@@ -344,8 +396,11 @@ AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 MlServiceDep = Annotated[MlService, Depends(get_ml_service)]
 GovernanceServiceDep = Annotated[GovernanceService, Depends(get_governance_service)]
 RetrievalServiceDep = Annotated[RetrievalService, Depends(get_retrieval_service)]
+AssistantServiceDep = Annotated[AssistantService, Depends(get_assistant_service)]
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
 IndexingServiceDep = Annotated[IndexingService, Depends(get_indexing_service)]
+ObjectStorageDep = Annotated[ObjectStorage, Depends(get_object_storage)]
+SearchBackendDep = Annotated[SearchBackend, Depends(get_search_backend)]
 AccessControlDep = Annotated[AccessControl, Depends(get_access_control)]
 EventPublisherDep = Annotated[EventPublisher, Depends(get_event_publisher)]
 EventConsumerDep = Annotated[EventConsumer, Depends(get_event_consumer)]

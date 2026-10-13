@@ -220,6 +220,24 @@ class AiRepository(Protocol):
         self, tenant_id: int, source_id: int, *, limit: int, offset: int
     ) -> tuple[list[dict[str, Any]], int]: ...
 
+    async def get_document(
+        self, tenant_id: int, document_id: int
+    ) -> dict[str, Any] | None: ...
+
+    async def find_document_by_checksum(
+        self, tenant_id: int, checksum: str
+    ) -> dict[str, Any] | None: ...
+
+    async def set_document_search_state(
+        self,
+        tenant_id: int,
+        document_id: int,
+        *,
+        search_indexed_at: datetime | None,
+        status: str | None = None,
+        error_class: str | None = None,
+    ) -> None: ...
+
     async def set_source_status(self, tenant_id: int, source_id: int, status: str) -> None: ...
 
     async def update_job(
@@ -236,9 +254,103 @@ class AiRepository(Protocol):
 
     async def delete_source(self, tenant_id: int, source_id: int) -> bool: ...
 
+    async def delete_document(self, tenant_id: int, document_id: int) -> bool: ...
+
     async def list_source_chunks(
         self, tenant_id: int, source_id: int
     ) -> list[dict[str, Any]]: ...
+
+    # --- Assistant conversations (Stage 3) ------------------------------
+    async def create_conversation(
+        self, tenant_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_conversations(
+        self, tenant_id: int, actor_id: int | None, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    async def get_conversation(
+        self, tenant_id: int, conversation_id: int
+    ) -> dict[str, Any] | None: ...
+
+    async def delete_conversation(
+        self, tenant_id: int, conversation_id: int
+    ) -> bool: ...
+
+    async def touch_conversation(self, tenant_id: int, conversation_id: int) -> None: ...
+
+    async def add_message(
+        self, tenant_id: int, conversation_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def list_messages(
+        self, tenant_id: int, conversation_id: int, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    async def add_message_sources(
+        self, tenant_id: int, message_id: int, sources: list[dict[str, Any]]
+    ) -> None: ...
+
+    async def get_message_sources(
+        self, tenant_id: int, message_id: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def get_message(
+        self, tenant_id: int, message_id: int
+    ) -> dict[str, Any] | None: ...
+
+
+@runtime_checkable
+class ObjectStorage(Protocol):
+    """Opaque object storage for original uploaded documents.
+
+    Keys are opaque and never exposed to clients; originals are never served
+    through public object-store URLs. `backend` is a short label used by health
+    checks. Implementations must fail closed (raise) when unavailable rather
+    than silently dropping data.
+    """
+
+    backend: str
+
+    async def put(self, key: str, data: bytes, *, content_type: str) -> None: ...
+
+    async def get(self, key: str) -> bytes | None: ...
+
+    async def delete(self, key: str) -> None: ...
+
+    async def exists(self, key: str) -> bool: ...
+
+    async def status(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SearchBackend(Protocol):
+    """Full-text search backend for knowledge chunks (Stage 3).
+
+    ``search`` returns the same candidate shape as ``AiRepository.vector_search``
+    (chunk_id, document_id, chunk_index, content, classification, acl, page,
+    section, source_id, source_code, source_name, score) so vector and lexical
+    candidates can be fused before authorization. Implementations that require an
+    external service must fail closed (raise) rather than silently returning an
+    empty result, and must never expose internal endpoints/credentials.
+    """
+
+    name: str
+
+    async def search(
+        self, tenant_id: int, query: str, *, limit: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def index_document(
+        self,
+        tenant_id: int,
+        document: dict[str, Any],
+        chunks: list[dict[str, Any]],
+    ) -> None: ...
+
+    async def delete_document(self, tenant_id: int, document_id: int) -> None: ...
+
+    async def status(self) -> dict[str, Any]: ...
 
 
 @runtime_checkable
