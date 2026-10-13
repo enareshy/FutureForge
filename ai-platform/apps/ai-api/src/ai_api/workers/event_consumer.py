@@ -29,6 +29,7 @@ from ai_api.domain.events import (
 )
 from ai_api.infrastructure.events import build_event_store
 from ai_api.telemetry.logging import configure_logging, get_logger
+from ai_api.telemetry.metrics_server import start_metrics_server
 
 logger = get_logger("worker.events")
 
@@ -88,9 +89,13 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--once", action="store_true", help="drain backlog then exit")
     group.add_argument("--watch", action="store_true", help="poll continuously")
+    parser.add_argument(
+        "--metrics-port", type=int, default=0, help="expose Prometheus metrics on this port"
+    )
     args = parser.parse_args()
     settings = get_settings()
     configure_logging(settings.ai_api_log_level, json_logs=settings.is_production)
+    start_metrics_server(args.metrics_port)
     asyncio.run(run(once=not args.watch, settings=settings))
 
 

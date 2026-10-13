@@ -26,10 +26,10 @@ function renderInline(text, keyPrefix) {
       nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
     } else if (token.startsWith("*")) {
       nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
-    } else if (match[3]) {
+    } else if (match[4]) {
       nodes.push(
-        <a key={key} href={match[3]} target="_blank" rel="noopener noreferrer">
-          {match[2]}
+        <a key={key} href={match[6]} target="_blank" rel="noopener noreferrer">
+          {match[5]}
         </a>
       );
     }

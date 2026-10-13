@@ -8,6 +8,8 @@ from typing import Any
 import structlog
 
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
+tenant_id_var: ContextVar[int | None] = ContextVar("tenant_id", default=None)
+user_id_var: ContextVar[str | None] = ContextVar("user_id", default=None)
 
 
 def _add_request_id(_logger: Any, _method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
@@ -43,3 +45,24 @@ def configure_logging(level: str = "info", *, json_logs: bool = True) -> None:
 
 def get_logger(name: str = "ai-api") -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name)
+
+
+def bind_log_context(**values: Any) -> None:
+    """Bind safe, bounded context (request/tenant/user refs) to structured logs.
+
+    Only pass low-cardinality references (ids, enums). Never bind secrets, raw
+    prompt text, document content, or unnecessary personal information.
+    """
+    if "tenant_id" in values:
+        tenant_id_var.set(values["tenant_id"])
+    if "user_id" in values:
+        user_id_var.set(values["user_id"])
+    filtered = {key: value for key, value in values.items() if value is not None}
+    if filtered:
+        structlog.contextvars.bind_contextvars(**filtered)
+
+
+def clear_log_context() -> None:
+    structlog.contextvars.clear_contextvars()
+    tenant_id_var.set(None)
+    user_id_var.set(None)

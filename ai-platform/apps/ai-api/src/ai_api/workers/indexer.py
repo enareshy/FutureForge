@@ -23,7 +23,9 @@ from ai_api.config.settings import Settings, get_settings
 from ai_api.infrastructure.db import PostgresDatabase
 from ai_api.infrastructure.providers.registry import build_default_registry
 from ai_api.infrastructure.repositories import InMemoryAiRepository, PostgresAiRepository
+from ai_api.telemetry.langfuse import LangfusePublisher
 from ai_api.telemetry.logging import configure_logging, get_logger
+from ai_api.telemetry.metrics_server import start_metrics_server
 
 logger = get_logger("worker.indexer")
 
@@ -35,7 +37,15 @@ def _build_service(settings: Settings) -> IndexingService:
         repository = InMemoryAiRepository()
     else:
         repository = PostgresAiRepository(PostgresDatabase(settings))
-    gateway = ModelGateway(registry=build_default_registry(settings), settings=settings)
+    gateway = ModelGateway(
+        registry=build_default_registry(settings),
+        settings=settings,
+        langfuse=LangfusePublisher(
+            host=settings.langfuse_host,
+            public_key=settings.langfuse_public_key,
+            secret_key=settings.langfuse_secret_key,
+        ),
+    )
     ingestion = IngestionService(
         repository=repository, gateway=gateway, audit=AuditService(repository), settings=settings
     )
@@ -81,9 +91,13 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--once", action="store_true", help="process backlog then exit")
     group.add_argument("--watch", action="store_true", help="poll continuously")
+    parser.add_argument(
+        "--metrics-port", type=int, default=0, help="expose Prometheus metrics on this port"
+    )
     args = parser.parse_args()
     settings = get_settings()
     configure_logging(settings.ai_api_log_level, json_logs=settings.is_production)
+    start_metrics_server(args.metrics_port)
     asyncio.run(run(once=not args.watch, settings=settings))
 
 

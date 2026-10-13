@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 from ai_api.application.reliability import (
@@ -33,7 +34,10 @@ from ai_api.domain.models.provider import (
     ProviderHealth,
 )
 from ai_api.infrastructure.providers.registry import ProviderRegistry
-from ai_api.telemetry.logging import get_logger
+from ai_api.telemetry.langfuse import LangfusePublisher
+from ai_api.telemetry.logging import get_logger, request_id_var, tenant_id_var, user_id_var
+from ai_api.telemetry.metrics import observe_model_call
+from ai_api.telemetry.tracing import set_attributes, span
 
 logger = get_logger(__name__)
 
@@ -53,9 +57,11 @@ class ModelGateway:
         registry: ProviderRegistry,
         settings: Settings,
         rate_limiter: RateLimiter | None = None,
+        langfuse: LangfusePublisher | None = None,
     ) -> None:
         self._registry = registry
         self._settings = settings
+        self._langfuse = langfuse
         self._retry = RetryPolicy(
             attempts=settings.llm_max_retries,
             base_delay_seconds=settings.llm_retry_base_delay_seconds,
@@ -108,31 +114,99 @@ class ModelGateway:
                 details={"model": spec.code},
             )
         await self._rate_limiter.acquire()
-        async for chunk in provider.stream(spec, request):  # type: ignore[attr-defined]
-            yield chunk
+        started = time.perf_counter()
+        outcome = "success"
+        try:
+            with span(
+                "model.chat.stream",
+                {
+                    "ai.operation": "chat.stream",
+                    "ai.provider": spec.provider_code,
+                    "ai.model": spec.code,
+                },
+            ):
+                async for chunk in provider.stream(spec, request):  # type: ignore[attr-defined]
+                    yield chunk
+        except Exception:  # noqa: BLE001 - record then re-raise
+            outcome = "error"
+            raise
+        finally:
+            duration = time.perf_counter() - started
+            observe_model_call(
+                operation="chat.stream",
+                provider=spec.provider_code,
+                model=spec.code,
+                duration_seconds=duration,
+                outcome=outcome,
+            )
+            self._emit_langfuse(spec, operation="chat.stream", duration=duration, outcome=outcome)
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         provider, spec = self._registry.llm(request.model)
         self._validate_chat_request(spec, request)
         await self._rate_limiter.acquire()
-        response: ChatResponse = await self._invoke(
-            lambda: provider.generate(spec, request),  # type: ignore[attr-defined]
-            provider_code=spec.provider_code,
-            timeout=self._timeout(request.timeout_seconds),
-        )
-        cost = _estimate_cost(spec, response.usage.input_tokens, response.usage.output_tokens)
-        response = ChatResponse(
-            content=response.content,
-            model=response.model,
-            provider=response.provider,
-            usage=response.usage,
-            finish_reason=response.finish_reason,
-            estimated_cost_usd=cost,
-            is_mock=response.is_mock,
-            raw=response.raw,
-        )
-        self._validate_structured_output(request, response)
-        return response
+        started = time.perf_counter()
+        outcome = "success"
+        input_tokens = output_tokens = 0
+        cost: float | None = None
+        try:
+            with span(
+                "model.chat",
+                {"ai.operation": "chat", "ai.provider": spec.provider_code, "ai.model": spec.code},
+            ) as current:
+                response: ChatResponse = await self._invoke(
+                    lambda: provider.generate(spec, request),  # type: ignore[attr-defined]
+                    provider_code=spec.provider_code,
+                    timeout=self._timeout(request.timeout_seconds),
+                )
+                set_attributes(
+                    current,
+                    {
+                        "ai.finish_reason": response.finish_reason,
+                        "ai.usage.input_tokens": response.usage.input_tokens,
+                        "ai.usage.output_tokens": response.usage.output_tokens,
+                        "ai.mock": response.is_mock,
+                    },
+                )
+            cost = _estimate_cost(spec, response.usage.input_tokens, response.usage.output_tokens)
+            response = ChatResponse(
+                content=response.content,
+                model=response.model,
+                provider=response.provider,
+                usage=response.usage,
+                finish_reason=response.finish_reason,
+                estimated_cost_usd=cost,
+                is_mock=response.is_mock,
+                raw=response.raw,
+            )
+            input_tokens = response.usage.input_tokens
+            output_tokens = response.usage.output_tokens
+            self._validate_structured_output(request, response)
+            return response
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            duration = time.perf_counter() - started
+            observe_model_call(
+                operation="chat",
+                provider=spec.provider_code,
+                model=spec.code,
+                duration_seconds=duration,
+                outcome=outcome,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost,
+            )
+            self._emit_langfuse(
+                spec,
+                operation="chat",
+                duration=duration,
+                outcome=outcome,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost,
+            )
 
     async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
         provider, spec = self._registry.embedding(request.model)
@@ -144,27 +218,90 @@ class ModelGateway:
                 details={"max": self._settings.llm_max_embedding_batch},
             )
         await self._rate_limiter.acquire()
-        response: EmbeddingResponse = await self._invoke(
-            lambda: provider.embed(spec, request),  # type: ignore[attr-defined]
-            provider_code=spec.provider_code,
-            timeout=self._timeout(request.timeout_seconds),
-        )
-        expected = spec.capability.embedding_dimensions
-        if expected is not None and response.dimensions != expected:
-            raise ProviderError(
-                "embedding dimensions do not match the model capability",
-                details={"expected": expected, "actual": response.dimensions},
+        started = time.perf_counter()
+        outcome = "success"
+        input_tokens = 0
+        cost: float | None = None
+        try:
+            with span(
+                "model.embed",
+                {
+                    "ai.operation": "embed",
+                    "ai.provider": spec.provider_code,
+                    "ai.model": spec.code,
+                    "ai.embedding.batch": len(request.texts),
+                },
+            ):
+                response: EmbeddingResponse = await self._invoke(
+                    lambda: provider.embed(spec, request),  # type: ignore[attr-defined]
+                    provider_code=spec.provider_code,
+                    timeout=self._timeout(request.timeout_seconds),
+                )
+            expected = spec.capability.embedding_dimensions
+            if expected is not None and response.dimensions != expected:
+                raise ProviderError(
+                    "embedding dimensions do not match the model capability",
+                    details={"expected": expected, "actual": response.dimensions},
+                )
+            input_tokens = response.usage.input_tokens
+            cost = _estimate_cost(spec, input_tokens, 0)
+            return EmbeddingResponse(
+                vectors=response.vectors,
+                model=response.model,
+                provider=response.provider,
+                dimensions=response.dimensions,
+                usage=response.usage,
+                estimated_cost_usd=cost,
+                is_mock=response.is_mock,
             )
-        input_tokens = response.usage.input_tokens
-        cost = _estimate_cost(spec, input_tokens, 0)
-        return EmbeddingResponse(
-            vectors=response.vectors,
-            model=response.model,
-            provider=response.provider,
-            dimensions=response.dimensions,
-            usage=response.usage,
-            estimated_cost_usd=cost,
-            is_mock=response.is_mock,
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            duration = time.perf_counter() - started
+            observe_model_call(
+                operation="embed",
+                provider=spec.provider_code,
+                model=spec.code,
+                duration_seconds=duration,
+                outcome=outcome,
+                input_tokens=input_tokens,
+                cost_usd=cost,
+            )
+            self._emit_langfuse(
+                spec,
+                operation="embed",
+                duration=duration,
+                outcome=outcome,
+                input_tokens=input_tokens,
+                cost_usd=cost,
+            )
+
+    def _emit_langfuse(
+        self,
+        spec: ModelSpec,
+        *,
+        operation: str,
+        duration: float,
+        outcome: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float | None = None,
+    ) -> None:
+        if self._langfuse is None or not self._langfuse.enabled:
+            return
+        self._langfuse.emit_generation(
+            model=spec.code,
+            provider=spec.provider_code,
+            operation=operation,
+            latency_ms=int(duration * 1000),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            outcome=outcome,
+            request_id=request_id_var.get(),
+            tenant_id=tenant_id_var.get(),
+            user_id=user_id_var.get(),
         )
 
     async def _invoke(self, call, *, provider_code: str, timeout: float):  # noqa: ASYNC109

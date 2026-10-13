@@ -9,6 +9,7 @@ read; V1 ships read-only tools only and never mutates business objects.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -18,6 +19,8 @@ from ai_api.domain.errors import ApprovalRequiredError, AuthorizationError, Vali
 from ai_api.security.permissions import CAP_KNOWLEDGE_READ
 from ai_api.security.policies import PermissionMap, Policy, Principal
 from ai_api.telemetry.logging import get_logger
+from ai_api.telemetry.metrics import observe_tool_call
+from ai_api.telemetry.tracing import span
 
 logger = get_logger("agent.tools")
 
@@ -153,7 +156,20 @@ class ToolRegistry:
                 details={"tool": name},
             )
         logger.info("agent.tool.invoke", tool=name)
-        return await tool.run(context, args)
+        started = time.perf_counter()
+        outcome = "success"
+        try:
+            with span("ai.agent.tool", {"ai.operation": "tool", "ai.tool": name}):
+                return await tool.run(context, args)
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            observe_tool_call(
+                tool=name,
+                outcome=outcome,
+                duration_seconds=time.perf_counter() - started,
+            )
 
 
 def build_default_tools(

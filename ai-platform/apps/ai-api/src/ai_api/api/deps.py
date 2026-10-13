@@ -35,6 +35,8 @@ from ai_api.security.access_control import AccessControl
 from ai_api.security.identity import IdentityProvider, build_identity_provider
 from ai_api.security.permissions import build_permission_map, parse_permission_list
 from ai_api.security.policies import PermissionMap, Policy, Principal
+from ai_api.telemetry.langfuse import LangfusePublisher
+from ai_api.telemetry.logging import bind_log_context
 
 
 @dataclass(slots=True)
@@ -62,8 +64,22 @@ def get_provider_registry() -> ProviderRegistry:
 
 
 @lru_cache(maxsize=1)
+def get_langfuse_publisher() -> LangfusePublisher:
+    settings = get_settings()
+    return LangfusePublisher(
+        host=settings.langfuse_host,
+        public_key=settings.langfuse_public_key,
+        secret_key=settings.langfuse_secret_key,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_model_gateway() -> ModelGateway:
-    return ModelGateway(registry=get_provider_registry(), settings=get_settings())
+    return ModelGateway(
+        registry=get_provider_registry(),
+        settings=get_settings(),
+        langfuse=get_langfuse_publisher(),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -288,7 +304,13 @@ async def get_principal(
     request: Request,
     provider: Annotated[IdentityProvider, Depends(get_identity_provider)],
 ) -> Principal:
-    return await provider.resolve(_extract_token(request))
+    principal = await provider.resolve(_extract_token(request))
+    bind_log_context(
+        tenant_id=principal.tenant_id,
+        user_id=principal.user_id,
+        auth_source=principal.auth_source,
+    )
+    return principal
 
 
 _rate_limiters: dict[str, RateLimiter] = {}

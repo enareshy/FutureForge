@@ -4,6 +4,7 @@ import os
 
 os.environ.setdefault("AI_REPOSITORY", "memory")
 os.environ.setdefault("EVENT_BUS_PROVIDER", "database")
+os.environ.setdefault("AI_API_LOG_LEVEL", "warning")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

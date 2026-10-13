@@ -25,6 +25,8 @@ from ai_api.security.access_control import AccessControl, within_ceiling
 from ai_api.security.policies import Principal
 from ai_api.security.prompt_safety import PromptGuard
 from ai_api.telemetry.logging import get_logger, request_id_var
+from ai_api.telemetry.metrics import observe_retrieval
+from ai_api.telemetry.tracing import span
 
 logger = get_logger("retrieval")
 
@@ -71,13 +73,33 @@ class RetrievalService:
         """
         tenant_id = require_tenant(principal)
         policy = await self.governance.policy_for(tenant_id)
-        vector = await self._embed_query(query)
-        candidates = await self.repository.vector_search(
-            tenant_id, vector, limit=max(limit * 4, limit)
-        )
-        return self._authorize(principal, policy, candidates)[:limit]
+        started = time.perf_counter()
+        outcome = "success"
+        results: list[dict[str, Any]] = []
+        try:
+            with span("ai.retrieval.search", {"ai.operation": "retrieval.search"}):
+                vector = await self._embed_query(query)
+                candidates = await self.repository.vector_search(
+                    tenant_id, vector, limit=max(limit * 4, limit)
+                )
+                results = self._authorize(principal, policy, candidates)[:limit]
+            return results
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            observe_retrieval(
+                operation="search",
+                outcome=outcome,
+                duration_seconds=time.perf_counter() - started,
+                result_count=len(results),
+            )
 
     async def rag_query(self, principal: Principal, payload: Any) -> dict[str, Any]:
+        with span("ai.rag.query", {"ai.operation": "rag", "ai.model": payload.model}):
+            return await self._rag_query_impl(principal, payload)
+
+    async def _rag_query_impl(self, principal: Principal, payload: Any) -> dict[str, Any]:
         tenant_id = require_tenant(principal)
         model = payload.model or default_chat_model(self.settings)
         await self.governance.enforce(

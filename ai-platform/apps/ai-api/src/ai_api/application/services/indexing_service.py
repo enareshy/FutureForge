@@ -19,6 +19,7 @@ from ai_api.application.services.ingestion_service import IngestionService
 from ai_api.schemas.knowledge import KnowledgeDocumentIn, KnowledgeIngestRequest
 from ai_api.security.policies import Principal
 from ai_api.telemetry.logging import get_logger
+from ai_api.telemetry.metrics import record_index_job
 
 logger = get_logger("indexing")
 
@@ -80,6 +81,7 @@ class IndexingService:
                     documents=int(result.get("documents", 0)),
                     chunks=int(result.get("chunks", 0)),
                 )
+            record_index_job(status="succeeded")
             return updated
         except Exception as exc:  # noqa: BLE001 - record failure and move on
             logger.warning("index.job_failed", job_id=job_id, error=str(exc))
@@ -99,6 +101,7 @@ class IndexingService:
                     job_id=job_id,
                     error=str(exc),
                 )
+            record_index_job(status="failed")
             return failed
 
     async def process_queued(self, *, limit: int = 10) -> list[dict[str, Any] | None]:

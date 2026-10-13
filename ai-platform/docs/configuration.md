@@ -94,10 +94,14 @@ store only references in source control.
 ### Observability
 | Variable | Default | Description |
 |---|---|---|
+| `OTEL_ENABLED` | `false` | Export OpenTelemetry traces to the collector |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://127.0.0.1:4317` | collector |
 | `OTEL_SERVICE_NAME` | `ai-api` | |
-| `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | empty | LLM tracing |
+| `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | empty | LLM tracing; off unless host and both keys are set |
 | `PROMETHEUS_URL` / `GRAFANA_URL` | — | dashboards |
+
+Prometheus metrics are always exposed at `GET /metrics`; no configuration is
+required. See `docs/PHASE12_OBSERVABILITY.md`.
 
 ### AI API
 | Variable | Default | Description |

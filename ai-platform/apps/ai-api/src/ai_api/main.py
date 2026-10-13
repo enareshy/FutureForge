@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from fastapi.responses import JSONResponse
 
 from ai_api import __version__
 from ai_api.api.deps import get_database
 from ai_api.api.errors import register_exception_handlers
 from ai_api.api.v1.router import api_router
+from ai_api.application.services.health_service import HealthService
 from ai_api.config.settings import get_settings
 from ai_api.telemetry import (
     RequestContextMiddleware,
@@ -15,6 +17,7 @@ from ai_api.telemetry import (
     configure_telemetry,
     get_logger,
 )
+from ai_api.telemetry.metrics import render_metrics
 
 API_PREFIX = "/api/v1/ai"
 
@@ -53,6 +56,29 @@ def create_app() -> FastAPI:
     @app.get("/healthz", tags=["health"])
     def liveness() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/metrics", tags=["health"], include_in_schema=False)
+    def metrics() -> Response:
+        payload, content_type = render_metrics()
+        return Response(content=payload, media_type=content_type)
+
+    @app.get("/readyz", tags=["health"], include_in_schema=False)
+    async def readiness() -> JSONResponse:
+        health = HealthService(settings=settings)
+        checks = health.readiness()
+        ready = True
+        if settings.ai_repository == "postgres":
+            try:
+                await get_database().connect()
+                checks["database"] = "ok"
+            except Exception as exc:  # noqa: BLE001 - readiness must report, not raise
+                ready = False
+                checks["database"] = "unavailable"
+                get_logger("readiness").warning("db.unavailable", error=str(exc))
+        else:
+            checks["database"] = "in_memory"
+        body = {"status": "ok" if ready else "degraded", "checks": checks}
+        return JSONResponse(body, status_code=200 if ready else 503)
 
     app.include_router(api_router, prefix=API_PREFIX)
     get_logger("startup").info(

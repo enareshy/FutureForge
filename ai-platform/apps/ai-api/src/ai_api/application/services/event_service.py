@@ -29,6 +29,7 @@ from ai_api.domain.events import (
     build_envelope,
 )
 from ai_api.telemetry.logging import get_logger, request_id_var
+from ai_api.telemetry.metrics import record_event_consumed, record_event_published
 
 logger = get_logger("events")
 
@@ -44,9 +45,11 @@ class EventPublisher:
         if not self.enabled:
             return
         record = envelope.to_record()
+        published = False
         for sink in self.sinks:
             try:
                 await sink.publish([record])
+                published = True
             except Exception as exc:  # noqa: BLE001 - publishing must not break the request
                 logger.warning(
                     "event.publish_failed",
@@ -54,6 +57,8 @@ class EventPublisher:
                     event_id=envelope.event_id,
                     error=str(exc),
                 )
+        if published:
+            record_event_published(event_type=envelope.type)
 
     async def emit(
         self,
@@ -234,6 +239,7 @@ class EventConsumer:
                     str(exc)[:500],
                     max_attempts=self.max_attempts,
                 )
+                record_event_consumed(consumer_group=self.consumer_group, outcome=status)
                 logger.warning(
                     "event.handler_failed",
                     event_type=envelope.type,
@@ -244,6 +250,7 @@ class EventConsumer:
                 )
                 continue
             await self.store.mark_delivered(envelope.event_id, self.consumer_group)
+            record_event_consumed(consumer_group=self.consumer_group, outcome="delivered")
             delivered += 1
         if delivered:
             logger.info(

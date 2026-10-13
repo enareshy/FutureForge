@@ -19,6 +19,11 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
+markers = [
+    "integration: requires an external backing service (PostgreSQL, OpenSearch, Kafka, Redis, object storage, MLflow)",
+    "e2e: exercises the full request path end to end",
+    "live: opt-in suite that runs against a live deployment (set AI_E2E=1)",
+]
 
 [tool.ruff]
 line-length = 100
