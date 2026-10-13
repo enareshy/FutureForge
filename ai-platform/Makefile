@@ -36,5 +36,15 @@ setup: ## Full local bootstrap (env, daemon, stack, migrations, health)
 config: ## Validate the compose configuration
 	@$(COMPOSE) config -q && echo "compose config: OK"
 
-test: ## Run platform tests
-	@echo "no tests yet — populated in Phase 13"
+test: ## Run the ai-api test suite (hermetic)
+	@cd apps/ai-api && PYTHONPATH=src python3 -m pytest
+
+lint: ## Lint the ai-api source
+	@cd apps/ai-api && ruff check src tests scripts
+
+validate-k8s: ## Structurally validate the Kubernetes manifests
+	@python3 scripts/validate-k8s.py
+
+build-images: ## Build the ai-api and web-ai container images
+	@docker build -t enterprise-ai-platform/ai-api:0.1.0 apps/ai-api
+	@docker build -t enterprise-ai-platform/web-ai:0.1.0 apps/web-ai

@@ -84,8 +84,20 @@ The existing enterprise backend keeps running on 3001 (API) and 5173 (web).
 
 ## Documentation
 
+- `docs/architecture.md` — system architecture
+- `docs/technology-decisions.md` — technology, versions and licensing
 - `docs/installation.md` — prerequisites and installation
 - `docs/configuration.md` — environment variables and secrets
+- `docs/database.md` — schemas and migrations
+- `docs/api.md` — API usage
+- `docs/security.md` — identity, authorization and data protection
+- `docs/rag.md` — ingestion and retrieval
+- `docs/events.md` — event topics and schemas
+- `docs/observability.md` — logs, traces and dashboards
+- `docs/testing.md` — test execution
+- `docs/deployment.md` — Docker and Kubernetes
+- `docs/troubleshooting.md` — common failures
+- `docs/backup-recovery.md` — backup and recovery
  - `docs/PHASE7_KNOWLEDGE_RAG.md` — knowledge ingestion, retrieval and RAG
  - `docs/PHASE8_EVENTS.md` — durable event streaming and background processing
  - `docs/PHASE9_AGENTS.md` — agent framework and the Enterprise Knowledge Assistant
@@ -94,11 +106,12 @@ The existing enterprise backend keeps running on 3001 (API) and 5173 (web).
   - `docs/PHASE12_OBSERVABILITY.md` — metrics, tracing, structured logs and Grafana dashboards
   - `docs/PHASE13_TESTING.md` — unit, integration, end-to-end, AI-evaluation and frontend test strategy
   - `migrations/README.md` — database migration conventions
+  - `infrastructure/kubernetes/README.md` — Kubernetes deployment layout and apply order
   - `../docs/ai-platform/PHASE0_DISCOVERY.md` — Phase 0 assessment and plan
 
 ## Status
 
-Phases 0-13 complete: infrastructure, application skeleton, provider gateway,
+Phases 0-14 complete: infrastructure, application skeleton, provider gateway,
 the AI API (capabilities/chat/summarize/knowledge/usage/audit/agents), enterprise
 security and governance, knowledge ingestion + authorized RAG, durable event
 streaming with a background consumer, a LangGraph-based read-only agent
@@ -109,8 +122,11 @@ provider view and SSE chat streaming), an experiment-tracking / model-registry
 pipeline (training, evaluation, and inference kept separate; no serving), an
 observability layer (Prometheus `/metrics`, OpenTelemetry spans, optional Langfuse
 generation tracing, structured correlated logs with request/tenant/user context,
-and liveness/readiness probes), and a testing and security-validation layer
+and liveness/readiness probes), a testing and security-validation layer
 (hermetic unit/e2e suites, opt-in per-service integration and live-provider
 suites, deterministic AI evaluation on the mock provider, and vitest/Testing
-Library coverage for the console).
+Library coverage for the console), and production deployment readiness
+(multi-stage non-root images, Kubernetes base + production overlay with probes,
+resource limits, PVC/NetworkPolicy/Ingress-TLS, a migration Job, CI checks with
+image/dependency scanning and SBOMs, and deployment/backup/troubleshooting docs).
 Do not treat any demo, mock or synthetic value as production data.

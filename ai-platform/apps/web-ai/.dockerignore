@@ -1,5 +1,9 @@
-node_modules
-dist
-coverage
+# Build context exclusions for the console image.
+node_modules/
+dist/
+coverage/
 .env
 .env.*
+*.log
+Dockerfile
+.dockerignore

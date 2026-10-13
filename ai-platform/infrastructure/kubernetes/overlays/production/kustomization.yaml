@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Production overlay: pins release image tags, scales the API and raises its
+# resource envelope, and sets the public host. Adjust `newTag`, the ingress
+# host and the resource values per release / environment.
+namespace: enterprise-ai
+
+resources:
+  - ../../base
+
+images:
+  - name: enterprise-ai-platform/ai-api
+    newTag: "0.1.0"
+  - name: enterprise-ai-platform/web-ai
+    newTag: "0.1.0"
+
+replicas:
+  - name: ai-api
+    count: 3
+  - name: web
+    count: 2
+
+patches:
+  - path: ai-api-resources-patch.yaml
+    target:
+      kind: Deployment
+      name: ai-api
+
+commonAnnotations:
+  platform.monkeycode.ai/release: "0.1.0"

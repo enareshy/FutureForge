@@ -1,0 +1,53 @@
+# Enterprise AI Platform — console nginx configuration (template).
+#
+# Rendered at container start by the nginx entrypoint's envsubst step. Only
+# `AI_API_UPSTREAM` is substituted (see NGINX_ENVSUBST_FILTER in the
+# Dockerfile); nginx runtime variables such as $host are left untouched.
+
+server {
+    listen 8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Security headers for a single-origin SPA.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Liveness/readiness endpoint served directly by nginx.
+    location = /healthz {
+        access_log off;
+        add_header Content-Type text/plain always;
+        return 200 "ok\n";
+    }
+
+    # Reverse proxy API traffic to the AI API (and enterprise backend when
+    # behind the same ingress). Set AI_API_UPSTREAM at deploy time.
+    location /api/ {
+        proxy_pass ${AI_API_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Server-Sent Events (chat streaming): no buffering, long read timeout.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    # Hashed build assets are immutable.
+    location /assets/ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # SPA fallback.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

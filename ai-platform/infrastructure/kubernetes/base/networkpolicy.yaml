@@ -1,0 +1,134 @@
+# Network policies for the AI platform namespace.
+#
+# Default-deny for all pods, then narrowly allow:
+#   - DNS egress (cluster DNS),
+#   - ingress to the console from the ingress controller,
+#   - ingress to the AI API from the console,
+#   - AI API egress to the backing data/services namespaces.
+#
+# Backing services are assumed to live in separate namespaces. The
+# `kubernetes.io/metadata.name` label is added automatically by Kubernetes, so
+# these selectors work regardless of custom namespace labels.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-web
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-ai-api
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ai-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ai-api-egress-backends
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ai-api
+  policyTypes:
+    - Egress
+  egress:
+    # PostgreSQL / pgvector, Redis, S3-compatible object storage, OpenSearch,
+    # Kafka, MLflow, OTLP collector and the enterprise backend.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mlops
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: enterprise
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 8333
+        - protocol: TCP
+          port: 9333
+        - protocol: TCP
+          port: 9200
+        - protocol: TCP
+          port: 9092
+        - protocol: TCP
+          port: 5000
+        - protocol: TCP
+          port: 4317
+        - protocol: TCP
+          port: 3001

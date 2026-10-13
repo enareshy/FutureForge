@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base manifests for the Enterprise AI Platform on Kubernetes.
+#
+# The migration SQL files are delivered as a ConfigMap named `ai-migrations`.
+# Because Kustomize only loads files under its own root, that ConfigMap is
+# created by `scripts/k8s-migrations-configmap.sh` before applying this base
+# (see infrastructure/kubernetes/README.md for the exact apply order).
+namespace: enterprise-ai
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  # Placeholder secret so the base renders end to end. Replace it with a real
+  # secret (Sealed Secrets / External Secrets) before any production apply.
+  - secret.example.yaml
+  - ai-api-deployment.yaml
+  - ai-api-service.yaml
+  - ai-api-hpa.yaml
+  - ai-api-pdb.yaml
+  - web-deployment.yaml
+  - web-service.yaml
+  - migration-job.yaml
+  - ingress.yaml
+  - networkpolicy.yaml

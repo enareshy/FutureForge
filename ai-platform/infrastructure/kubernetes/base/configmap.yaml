@@ -1,0 +1,59 @@
+# Non-secret configuration for the AI API. Secrets live in `ai-api-secrets`.
+# Values here are safe defaults for a cluster where the backing services run
+# in the `data` namespace; override per environment with Kustomize.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-api-config
+  labels:
+    app.kubernetes.io/name: ai-api
+    app.kubernetes.io/part-of: enterprise-ai-platform
+data:
+  # --- Application -----------------------------------------------------
+  AI_ENV: "production"
+  AI_API_HOST: "0.0.0.0"
+  AI_API_PORT: "8000"
+  AI_API_LOG_LEVEL: "info"
+  AI_REPOSITORY: "postgres"
+  AI_DB_SCHEMA: "ai"
+
+  # --- Enterprise backend (identity, audit, events, jobs, files) -------
+  ENTERPRISE_API_BASE_URL: "http://enterprise-api.enterprise.svc.cluster.local:3001"
+
+  # --- PostgreSQL / pgvector (internal only) ---------------------------
+  POSTGRES_HOST: "postgres.data.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "helix"
+  POSTGRES_USER: "helix"
+
+  # --- Cache -----------------------------------------------------------
+  REDIS_URL: "redis://redis.data.svc.cluster.local:6379/0"
+
+  # --- Object storage (S3-compatible) ----------------------------------
+  S3_ENDPOINT: "http://objectstore.data.svc.cluster.local:8333"
+  S3_REGION: "us-east-1"
+  S3_BUCKET: "ai-knowledge"
+  S3_FORCE_PATH_STYLE: "true"
+
+  # --- Search ----------------------------------------------------------
+  SEARCH_PROVIDER: "postgres"
+  OPENSEARCH_URL: "http://opensearch.data.svc.cluster.local:9200"
+
+  # --- Event streaming -------------------------------------------------
+  EVENT_BUS_PROVIDER: "database"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka.data.svc.cluster.local:9092"
+  AI_EVENT_TOPIC: "ai.platform.events"
+  AI_EVENT_CONSUMER_GROUP: "ai-api-events"
+
+  # --- ML lifecycle ----------------------------------------------------
+  ML_TRACKING_BACKEND: "auto"
+  MLFLOW_TRACKING_URI: "http://mlflow.mlops.svc.cluster.local:5000"
+
+  # --- Provider gateway (mock by default; set a real provider + key) ---
+  LLM_PROVIDER: "mock"
+  LLM_EMBEDDING_DIMENSIONS: "1536"
+
+  # --- Observability ---------------------------------------------------
+  OTEL_ENABLED: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "ai-api"

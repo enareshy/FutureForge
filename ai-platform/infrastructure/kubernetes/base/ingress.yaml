@@ -1,0 +1,40 @@
+# Public ingress for the console. Only the frontend is exposed; the AI API,
+# databases, Kafka, object storage and monitoring consoles stay cluster-internal
+# (reachable via `kubectl port-forward` for operators).
+#
+# TLS is terminated at the ingress. Replace the host and the cluster-issuer
+# with the customer's values. `secretName` is created by cert-manager; if TLS
+# is terminated upstream instead, remove the `tls` block and the annotation.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  labels:
+    app.kubernetes.io/name: web
+    app.kubernetes.io/part-of: enterprise-ai-platform
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+    # Server-Sent Events (chat streaming) need a long read timeout and no
+    # response buffering.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - ai.example.com
+      secretName: web-tls
+  rules:
+    - host: ai.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  name: http

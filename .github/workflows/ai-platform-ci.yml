@@ -1,0 +1,178 @@
+name: ai-platform-ci
+
+on:
+  push:
+    branches: [postgres, main]
+    paths:
+      - "ai-platform/**"
+      - "web/**"
+      - "vite.config.js"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/ai-platform-ci.yml"
+  pull_request:
+    paths:
+      - "ai-platform/**"
+      - "web/**"
+      - ".github/workflows/ai-platform-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-platform-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "22"
+
+jobs:
+  ai-api:
+    name: ai-api (lint + tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-platform/apps/ai-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: ai-platform/apps/ai-api/requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check src tests scripts
+      - name: "Tests (hermetic: unit + e2e + AI evaluation)"
+        run: PYTHONPATH=src python -m pytest
+
+  web-console:
+    name: enterprise console (test + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Frontend tests
+        run: npm run test:web
+      - name: Build
+        run: npx vite build
+
+  web-ai:
+    name: web-ai console (test + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-platform/apps/web-ai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ai-platform/apps/web-ai/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  manifests:
+    name: kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Structural validation
+        run: |
+          python -m pip install pyyaml
+          python ai-platform/scripts/validate-k8s.py
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar -xz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+      - name: Schema validation
+        run: |
+          kubeconform -strict -ignore-missing-schemas -summary \
+            ai-platform/infrastructure/kubernetes/base \
+            ai-platform/infrastructure/kubernetes/overlays/production
+
+  images:
+    name: images (build + scan + SBOM)
+    runs-on: ubuntu-latest
+    needs: [ai-api]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ai-api image
+        uses: docker/build-push-action@v6
+        with:
+          context: ai-platform/apps/ai-api
+          push: false
+          load: true
+          tags: enterprise-ai-platform/ai-api:${{ github.sha }}
+      - name: Build web-ai image
+        uses: docker/build-push-action@v6
+        with:
+          context: ai-platform/apps/web-ai
+          push: false
+          load: true
+          tags: enterprise-ai-platform/web-ai:${{ github.sha }}
+      - name: Trivy image scan (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: enterprise-ai-platform/ai-api:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: SBOM (CycloneDX) for ai-api
+        uses: anchore/sbom-action@v0.17.9
+        with:
+          image: enterprise-ai-platform/ai-api:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom-ai-api.cdx.json
+      - name: SBOM (CycloneDX) for web-ai
+        uses: anchore/sbom-action@v0.17.9
+        with:
+          image: enterprise-ai-platform/web-ai:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom-web-ai.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom-*.cdx.json
+          if-no-files-found: error
+
+  dependency-scan:
+    name: dependency scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: pip-audit (ai-api)
+        run: |
+          python -m pip install pip-audit
+          pip-audit -r ai-platform/apps/ai-api/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: npm audit (enterprise console)
+        run: npm audit --audit-level=high
+        continue-on-error: false
+      - name: npm audit (web-ai)
+        working-directory: ai-platform/apps/web-ai
+        run: npm audit --audit-level=high
+        continue-on-error: false
