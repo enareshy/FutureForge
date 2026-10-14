@@ -20,10 +20,24 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ai_api.config.settings import Settings
-from ai_api.domain.errors import ConfigurationError
+from ai_api.domain.errors import ConfigurationError, ServiceUnavailableError
 
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/_.\-]*$")
 _FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _storage_unavailable(exc: Exception) -> ServiceUnavailableError:
+    """Translate a low-level object-store failure into a safe domain error.
+
+    Only the exception *type* is surfaced (never the raw message, which may
+    contain endpoints or credentials); the API returns a clean 503 so callers
+    can retry rather than a 500 `internal_error`.
+    """
+
+    return ServiceUnavailableError(
+        "object storage is unavailable",
+        details={"backend": "s3", "reason": type(exc).__name__},
+    )
 
 
 def sanitize_filename(filename: str, *, default: str = "document") -> str:
@@ -132,20 +146,33 @@ class S3ObjectStorage:
                 ContentType=content_type or "application/octet-stream",
             )
 
-        await asyncio.to_thread(_put)
+        try:
+            await asyncio.to_thread(_put)
+        except Exception as exc:  # noqa: BLE001 - translated to a safe domain error
+            raise _storage_unavailable(exc) from exc
 
     async def get(self, key: str) -> bytes | None:
         safe = validate_object_key(key)
 
         def _get() -> bytes | None:
+            from botocore.exceptions import ClientError  # noqa: PLC0415
+
             client = self._ensure_client()
             try:
                 response = client.get_object(Bucket=self._bucket, Key=safe)
             except client.exceptions.NoSuchKey:
                 return None
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code")
+                if code in ("NoSuchKey", "NoSuchBucket", "404", "NotFound"):
+                    return None
+                raise
             return response["Body"].read()
 
-        return await asyncio.to_thread(_get)
+        try:
+            return await asyncio.to_thread(_get)
+        except Exception as exc:  # noqa: BLE001 - translated to a safe domain error
+            raise _storage_unavailable(exc) from exc
 
     async def delete(self, key: str) -> None:
         safe = validate_object_key(key)
@@ -153,20 +180,28 @@ class S3ObjectStorage:
         def _delete() -> None:
             self._ensure_client().delete_object(Bucket=self._bucket, Key=safe)
 
-        await asyncio.to_thread(_delete)
+        try:
+            await asyncio.to_thread(_delete)
+        except Exception as exc:  # noqa: BLE001 - translated to a safe domain error
+            raise _storage_unavailable(exc) from exc
 
     async def exists(self, key: str) -> bool:
         safe = validate_object_key(key)
 
         def _exists() -> bool:
+            from botocore.exceptions import ClientError  # noqa: PLC0415
+
             client = self._ensure_client()
             try:
                 client.head_object(Bucket=self._bucket, Key=safe)
                 return True
-            except client.exceptions.ClientError:
+            except ClientError:
                 return False
 
-        return await asyncio.to_thread(_exists)
+        try:
+            return await asyncio.to_thread(_exists)
+        except Exception as exc:  # noqa: BLE001 - translated to a safe domain error
+            raise _storage_unavailable(exc) from exc
 
     async def status(self) -> dict[str, Any]:
         def _status() -> dict[str, Any]:

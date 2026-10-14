@@ -84,3 +84,19 @@ async def test_rate_limiter_blocks_when_exhausted() -> None:
     await limiter.acquire()
     with pytest.raises(RateLimitError):
         await limiter.acquire()
+
+
+async def test_readiness_ping_revalidates_cached_pool() -> None:
+    from ai_api.config.settings import get_settings
+    from ai_api.infrastructure.db.database import PostgresDatabase
+
+    db = PostgresDatabase(get_settings())
+
+    class _BrokenPool:
+        async def fetchval(self, _query: str) -> None:
+            raise ConnectionError("pool is gone")
+
+    db._pool = _BrokenPool()  # type: ignore[assignment]
+    with pytest.raises(ConnectionError):
+        await db.ping()
+

@@ -807,7 +807,8 @@ class PostgresAiRepository:
     ) -> dict[str, Any] | None:
         return await self._db.fetchrow(
             """
-            SELECT d.id, d.source_id, d.external_id, d.title, d.status,
+            SELECT d.id, d.source_id, d.external_id, d.title, d.mime_type,
+                   d.object_key, d.size_bytes, d.status,
                    d.classification, d.created_at, s.code AS source_code
             FROM ai.documents d
             JOIN ai.knowledge_sources s ON s.id = d.source_id

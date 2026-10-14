@@ -88,6 +88,14 @@ class PostgresDatabase:
             await self._pool.close()
             self._pool = None
 
+    async def ping(self) -> None:
+        """Round-trip a trivial query so readiness reflects live connectivity.
+
+        Unlike :meth:`connect`, this revalidates an already-cached pool, so a
+        database that goes away after startup is reported as unavailable.
+        """
+        await self.fetchval("SELECT 1")
+
     async def _pool_or_connect(self) -> asyncpg.Pool:
         if self._pool is None:
             await self.connect()

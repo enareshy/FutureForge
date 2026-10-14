@@ -217,7 +217,9 @@ class IngestionService:
         classification = document.classification or source["classification"]
         acl = document.acl if document.acl else source["acl"]
         text = "\n\n".join(segment.text for segment in segments)
-        checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        encoded = text.encode("utf-8")
+        checksum = getattr(document, "checksum", None) or hashlib.sha256(encoded).hexdigest()
+        size_bytes = getattr(document, "size_bytes", None) or len(encoded)
 
         document_row = await self.repository.create_or_replace_document(
             tenant_id,
@@ -228,7 +230,7 @@ class IngestionService:
                 "mime_type": document.mime_type,
                 "object_key": getattr(document, "object_key", None),
                 "checksum": checksum,
-                "size_bytes": len(text.encode("utf-8")),
+                "size_bytes": size_bytes,
                 "classification": classification,
                 "acl": acl,
                 "metadata": document.metadata,

@@ -69,7 +69,7 @@ def create_app() -> FastAPI:
         ready = True
         if settings.ai_repository == "postgres":
             try:
-                await get_database().connect()
+                await get_database().ping()
                 checks["database"] = "ok"
             except Exception as exc:  # noqa: BLE001 - readiness must report, not raise
                 ready = False

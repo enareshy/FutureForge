@@ -236,6 +236,8 @@ async def upload_document(
                 title=descriptor["title"],
                 mime_type=descriptor["mime_type"],
                 object_key=descriptor["object_key"],
+                checksum=descriptor["checksum"],
+                size_bytes=descriptor["size_bytes"],
             )
         ]
     )

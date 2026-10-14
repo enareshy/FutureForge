@@ -60,6 +60,11 @@ class KnowledgeDocumentIn(BaseModel):
     # Original stored in object storage (preferred for uploads). When present the
     # bytes are fetched from storage instead of being sent inline.
     object_key: str | None = Field(default=None, max_length=1024)
+    # Content checksum/size of the original upload. Carried through so dedup
+    # compares like-for-like (original bytes) rather than re-deriving a checksum
+    # from extracted text, which can differ from the raw bytes.
+    checksum: str | None = Field(default=None, max_length=128)
+    size_bytes: int | None = Field(default=None, ge=0)
     classification: str | None = Field(default=None, max_length=64)
     acl: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)

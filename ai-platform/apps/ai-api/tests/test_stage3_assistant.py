@@ -175,6 +175,29 @@ def test_upload_indexes_and_deduplicates(repository: InMemoryAiRepository) -> No
         assert again.json()["job"] is None
 
 
+def test_upload_dedup_uses_original_bytes_checksum(repository: InMemoryAiRepository) -> None:
+    # Extraction normalizes whitespace, so the stored text checksum differs from
+    # the raw-bytes checksum. Dedup must compare the original bytes, not the
+    # re-derived text checksum, or identical uploads are never detected.
+    with _client(repository) as client:
+        source_id = _create_source(client, "raw-dedup")
+        payload = b"Body text without a trailing newline\n\n"
+        first = client.post(
+            f"/api/v1/ai/knowledge/sources/{source_id}/upload",
+            files={"file": ("note.txt", payload, "text/plain")},
+        )
+        assert first.status_code == 202, first.text
+        assert first.json()["document"]["deduplicated"] is False
+
+        again = client.post(
+            f"/api/v1/ai/knowledge/sources/{source_id}/upload",
+            files={"file": ("note.txt", payload, "text/plain")},
+        )
+        assert again.status_code == 202, again.text
+        assert again.json()["document"]["deduplicated"] is True
+        assert again.json()["job"] is None
+
+
 def test_upload_then_rag_returns_citation(repository: InMemoryAiRepository) -> None:
     with _client(repository) as client:
         source_id = _create_source(client, "maintenance")
