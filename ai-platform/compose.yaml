@@ -60,7 +60,19 @@ services:
   # --- S3-compatible object storage (SeaweedFS, Apache-2.0) -------------
   objectstore:
     image: chrislusf/seaweedfs:3.80
-    command: ["server", "-s3", "-dir=/data"]
+    # The image entrypoint enables -master.volumePreallocate with a 1 GiB volume
+    # size, so every restarted/new volume preallocates a full 1 GiB on disk even
+    # when (nearly) empty. Override it for the local lean profile so the data dir
+    # only grows with actual objects. Production sizing is set via the cluster
+    # manifests, not this local compose file.
+    command:
+      [
+        "server",
+        "-s3",
+        "-dir=/data",
+        "-master.volumePreallocate=false",
+        "-master.volumeSizeLimitMB=64",
+      ]
     ports:
       - "127.0.0.1:${SEAWEEDFS_S3_PORT:-8333}:8333"
       - "127.0.0.1:${SEAWEEDFS_MASTER_PORT:-9333}:9333"
