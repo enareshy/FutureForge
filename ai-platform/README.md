@@ -127,6 +127,16 @@ and liveness/readiness probes), a testing and security-validation layer
 suites, deterministic AI evaluation on the mock provider, and vitest/Testing
 Library coverage for the console), and production deployment readiness
 (multi-stage non-root images, Kubernetes base + production overlay with probes,
-resource limits, PVC/NetworkPolicy/Ingress-TLS, a migration Job, CI checks with
-image/dependency scanning and SBOMs, and deployment/backup/troubleshooting docs).
-Do not treat any demo, mock or synthetic value as production data.
+  resource limits, PVC/NetworkPolicy/Ingress-TLS, a migration Job, CI checks with
+  image/dependency scanning and SBOMs, and deployment/backup/troubleshooting docs).
+
+Stage 3 extends the knowledge stack into an enterprise assistant without
+rebuilding the platform: validated file uploads to tenant-scoped object storage,
+page/section-aware extraction and chunking, hardened indexing jobs (lease,
+bounded retries, timeout and safe error classification), hybrid retrieval
+(pgvector + PostgreSQL FTS or OpenSearch with reciprocal rank fusion), reindex
+and job-retry endpoints, and grounded assistant conversations that persist
+citation snapshots and re-validate authorization on every request. The console
+gains upload/reindex/download/delete controls, search-index state, a job
+monitor with retry, and an assistant tab. Do not treat any demo, mock or
+synthetic value as production data.

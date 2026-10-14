@@ -81,6 +81,22 @@ store only references in source control.
 | `AI_AGENT_TRACE_MAX_EVENTS` | `40` | max trace events retained |
 | `AI_AGENT_REQUIRE_APPROVAL` | `false` | require approval for all tools |
 
+### Knowledge assistant (Stage 3)
+| Variable | Default | Description |
+|---|---|---|
+| `AI_UPLOAD_MAX_BYTES` | `26214400` | Max upload size (25 MiB) |
+| `AI_UPLOAD_REQUIRE_SIGNATURE` | `true` | Enforce content-signature sniffing on upload |
+| `AI_MAX_JOB_ATTEMPTS` | `5` | Retries before an indexing job fails |
+| `AI_JOB_TIMEOUT_SECONDS` | `120` | Per-attempt indexing timeout |
+| `AI_JOB_LEASE_SECONDS` | `300` | Advisory lease for a processing job |
+| `AI_HYBRID_SEARCH_ENABLED` | `true` | Fuse vector + lexical candidates (RRF) |
+| `AI_RRF_K` | `60` | Reciprocal rank fusion constant |
+| `AI_RETRIEVAL_CANDIDATE_MULTIPLIER` | `4` | Per-list candidate oversampling |
+
+File uploads require the object-storage settings (`S3_*`) above; when external
+search is selected, `SEARCH_PROVIDER=opensearch` uses the `OPENSEARCH_*` settings
+and falls back to PostgreSQL FTS if the index is unavailable.
+
 ### Model lifecycle (Phase 11)
 | Variable | Default | Description |
 |---|---|---|

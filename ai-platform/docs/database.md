@@ -91,6 +91,28 @@ is only an optional mirror referenced by `external_*` columns.
 Evaluation definitions (`ai.evaluations`) and per-case results
 (`ai.evaluation_results`) already exist from 0004 and are reused as-is.
 
+### Knowledge assistant (0008)
+
+Stage 3 adds the assistant conversation tables and enriches existing ones. All
+are tenant-scoped and reuse the existing knowledge/feedback/jobs tables rather
+than duplicating them.
+
+| Table | Purpose |
+|---|---|
+| `ai.assistant_conversations` | Conversation scoped to tenant + actor, with `title`, `status` and `metadata` |
+| `ai.assistant_messages` | Ordered user/assistant/system messages with answer status, confidence, model/provider and token usage |
+| `ai.assistant_message_sources` | Citation **snapshots** (rank, source/document/chunk, page/section, score, snippet) captured at answer time |
+
+Column additions:
+
+- `ai.documents`: `search_indexed_at`, `error_class` and a
+  `documents_tenant_checksum_idx` for upload deduplication.
+- `ai.document_chunks`: `page`, `section`.
+- `ai.jobs`: `stage`, `max_attempts`, `error_class`, `lease_expires_at`.
+- `ai.feedback`: `message_id` (references the answered assistant message).
+
+Conversation deletion cascades to its messages and message sources.
+
 ## Embedding dimensions and similarity
 
 - Embedding models in V1 are the 1536-dimension class

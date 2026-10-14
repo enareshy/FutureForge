@@ -75,9 +75,23 @@ Process probes `GET /healthz`, `GET /readyz` and `GET /metrics` sit at the root
 | GET/POST | `/knowledge/sources` | List / create sources. |
 | GET/DELETE | `/knowledge/sources/{source_id}` | Fetch / delete a source. |
 | GET | `/knowledge/sources/{source_id}/documents` | List documents in a source. |
-| POST | `/knowledge/sources/{source_id}/ingest` | Ingest documents. |
+| POST | `/knowledge/sources/{source_id}/ingest` | Ingest inline documents. |
+| POST | `/knowledge/sources/{source_id}/upload` | Upload a file (multipart) and enqueue indexing. |
+| POST | `/knowledge/sources/{source_id}/reindex` | Rebuild chunks/embeddings from stored content. |
+| GET | `/knowledge/documents/{document_id}/download` | Stream stored bytes (authorized). |
+| DELETE | `/knowledge/documents/{document_id}` | Delete a document and its chunks. |
 | POST | `/knowledge/index` | Enqueue indexing. |
 | GET | `/knowledge/jobs`, `/knowledge/jobs/{job_id}` | Indexing job status. |
+| POST | `/knowledge/jobs/{job_id}/retry` | Requeue a failed/queued job. |
+
+### Assistant conversations
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET/POST | `/assistant/conversations` | List / create conversations. |
+| GET/DELETE | `/assistant/conversations/{conversation_id}` | Fetch / delete a conversation. |
+| POST | `/assistant/conversations/{conversation_id}/messages` | Ask a grounded question; persists citations. |
+| POST | `/assistant/feedback` | Rate an answered message. |
 
 ### Usage, audit and feedback
 
@@ -140,6 +154,16 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/ai/chat \
 curl -s -X POST http://127.0.0.1:8000/api/v1/ai/rag/query \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"query":"what is the torque spec?","limit":5}'
+
+# Upload a file to a source (multipart; the browser sets the boundary).
+curl -s -X POST http://127.0.0.1:8000/api/v1/ai/knowledge/sources/1/upload \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@manual.pdf;type=application/pdf"
+
+# Ask the grounded assistant (persists the answer and its citations).
+curl -s -X POST http://127.0.0.1:8000/api/v1/ai/assistant/conversations/1/messages \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"content":"what is the torque spec?"}'
 ```
 
 The console client (`web/src/aiApi.js`) wraps all of the above in JavaScript.

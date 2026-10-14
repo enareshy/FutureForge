@@ -57,15 +57,15 @@ From the repository root (vitest + Testing Library):
 npm run test:web
 ```
 
-Covers the API client (request building, error mapping, SSE parsing, timeouts),
-the AI chat page (citations, insufficient evidence, errors, auth state,
-streaming), the safe Markdown renderer (injection safety, links) and the error
-boundary.
+Covers the API client (request building, error mapping, SSE parsing, timeouts,
+uploads/downloads), the AI chat page (citations, insufficient evidence, errors,
+auth state, streaming, assistant conversations), the safe Markdown renderer
+(injection safety, links) and the error boundary.
 
 ## Results (current)
 
-- Backend: **134 passed, 14 skipped** (skips are opt-in integration/live).
-- Frontend: **23 passed** (4 files).
+- Backend: **151 passed, 14 skipped** (skips are opt-in integration/live).
+- Frontend: **26 passed** (4 files).
 - `ruff check src tests scripts`: clean.
 
 ## Live verification
