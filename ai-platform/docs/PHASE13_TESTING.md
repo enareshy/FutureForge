@@ -171,6 +171,6 @@ corrected (`match[4]`/`match[5]`/`match[6]`), and the regression is now covered 
 
 ## Results
 
-- Backend: **151 passed, 14 skipped** (skips are the opt-in integration/live tests).
+- Backend: **153 passed, 14 skipped** (skips are the opt-in integration/live tests).
 - Frontend: **26 passed** (4 files).
 - `ruff check src tests scripts`: clean.

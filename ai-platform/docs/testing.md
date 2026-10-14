@@ -64,7 +64,7 @@ auth state, streaming, assistant conversations), the safe Markdown renderer
 
 ## Results (current)
 
-- Backend: **151 passed, 14 skipped** (skips are opt-in integration/live).
+- Backend: **153 passed, 14 skipped** (skips are opt-in integration/live).
 - Frontend: **26 passed** (4 files).
 - `ruff check src tests scripts`: clean.
 
