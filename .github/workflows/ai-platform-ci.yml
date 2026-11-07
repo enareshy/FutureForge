@@ -334,7 +334,7 @@ jobs:
         working-directory: ai-platform
         run: docker compose -f compose.yaml config -q
       - name: Trivy image scan (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: enterprise-ai-platform/ai-api:${{ github.sha }}
