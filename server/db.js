@@ -444,8 +444,7 @@ function templateReady(name, check) {
   }
 }
 
-function ensureTemplates(base) {
-  if (templatesCache && templatesCache.base === base) return templatesCache.names;
+function ensureSchemaTemplate(base) {
   const names = templateNames(base);
 
   const schemaReady = templateReady(names.schema, (db) => {
@@ -455,7 +454,7 @@ function ensureTemplates(base) {
   });
 
   if (!schemaReady) {
-    // 1. Schema template: schema.sql + bootstrap sentinels, no demo data.
+    // Schema template: schema.sql + bootstrap sentinels, no demo data.
     const schemaDb = new Database(
       createBridge({
         config: databaseConfig(names.schema),
@@ -479,30 +478,44 @@ function ensureTemplates(base) {
     schemaDb.close();
   }
 
-  // A rebuilt schema invalidates any existing seed template, so rebuild it too.
-  const seedReady = schemaReady && templateReady(names.seed, (db) => hasSeedState(db));
+  return { names, schemaReady };
+}
 
-  if (!seedReady) {
-    if (!registeredSeed) {
-      throw new Error("seedDatabase must be imported before openTestDatabase to build the test seed template");
-    }
-    // 2. Seed template: a clone of the schema template with the demo estate.
-    const seedDb = new Database(
-      createBridge({
-        config: databaseConfig(names.seed),
-        schema: "public",
-        maintenanceConfig: maintenanceConfigDefault(),
-        bootstrap: { createDatabase: true, cloneFrom: names.schema, ensureSchema: false, truncate: false },
-        statementTimeout: 0,
-        bridgeTimeout: bootstrapTimeout(),
-      }),
-      "public"
-    );
-    seedDb.prepare("SELECT 1 AS ok").get();
-    registeredSeed(seedDb);
-    seedDb.close();
+// The seed template is built on demand: suites that only exercise the schema
+// (and never call seedDatabase) never need the seeded estate, so openTestDatabase
+// must not require a registered seed. Building it lazily also keeps the schema
+// clone cheap for the common case.
+export function ensureSeedTemplate(base) {
+  const { names, schemaReady } = ensureSchemaTemplate(base);
+
+  // A freshly (re)built schema invalidates any existing seed template, so it
+  // must be rebuilt rather than trusted.
+  if (schemaReady && templateReady(names.seed, (db) => hasSeedState(db))) return names.seed;
+
+  if (!registeredSeed) {
+    throw new Error("seedDatabase must be imported before openTestDatabase to build the test seed template");
   }
+  // Seed template: a clone of the schema template with the demo estate.
+  const seedDb = new Database(
+    createBridge({
+      config: databaseConfig(names.seed),
+      schema: "public",
+      maintenanceConfig: maintenanceConfigDefault(),
+      bootstrap: { createDatabase: true, cloneFrom: names.schema, ensureSchema: false, truncate: false },
+      statementTimeout: 0,
+      bridgeTimeout: bootstrapTimeout(),
+    }),
+    "public"
+  );
+  seedDb.prepare("SELECT 1 AS ok").get();
+  registeredSeed(seedDb);
+  seedDb.close();
+  return names.seed;
+}
 
+function ensureTemplates(base) {
+  if (templatesCache && templatesCache.base === base) return templatesCache.names;
+  const { names } = ensureSchemaTemplate(base);
   templatesCache = { base, names };
   return names;
 }
@@ -532,6 +545,7 @@ export function openTestDatabase() {
   });
   const db = new Database(bridge, "public", config);
   db.__seedTemplate = names.seed;
+  db.__seedBase = base;
   return db;
 }
 

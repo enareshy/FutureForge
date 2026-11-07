@@ -1,6 +1,6 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openDatabase, migrate, queryOne, queryAll, run, nowIso, transaction, refreshFromTemplate, registerTestSeed, TEST_SEED_MARKER } from "./db.js";
+import { openDatabase, migrate, queryOne, queryAll, run, nowIso, transaction, refreshFromTemplate, registerTestSeed, ensureSeedTemplate, TEST_SEED_MARKER } from "./db.js";
 import * as users from "./services/users.js";
 import * as groups from "./services/groups.js";
 import * as roles from "./services/roles.js";
@@ -3344,6 +3344,9 @@ export function seedDatabase(db) {
   // seed statement. The template is always fully seeded, so no marker check is
   // needed — and skipping it avoids materialising the schema clone first.
   if (db.__seedTemplate) {
+    // The seeded template is built lazily so suites that never seed do not pay
+    // for it; materialise it now, then swap the clone for a seeded copy.
+    ensureSeedTemplate(db.__seedBase);
     refreshFromTemplate(db, db.__seedTemplate);
     // The ensure/initialize steps below are idempotent: on the seeded clone they
     // find everything already present, so they only refresh in-process state
