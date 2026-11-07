@@ -262,10 +262,6 @@ export default function StandardsExchangePage() {
             transformation, validation, dry-run reconciliation and full exchange history.
           </p>
         </div>
-        <div className="stack-row">
-          {meta?.source_module ? <Badge tone="ok">{meta.source_module}</Badge> : null}
-          {health?.status ? <Badge tone={toneFor(health.status)}>{health.status}</Badge> : null}
-        </div>
       </div>
 
       <div className="tabs">

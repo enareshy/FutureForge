@@ -1,6 +1,6 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, run } from "../db.js";
+import { migrate, queryOne, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as events from "../services/events.js";
 
@@ -14,7 +14,7 @@ describe("event & messaging framework services", () => {
   let actor;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin'");

@@ -1,6 +1,6 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, queryAll, run } from "../db.js";
+import { migrate, queryOne, queryAll, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as j from "../services/jobs.js";
 import * as e from "../services/job-execution.js";
@@ -21,7 +21,7 @@ describe("job scheduling & execution engine", () => {
   const flakyAttempts = new Map();
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;
@@ -307,7 +307,7 @@ describe("job scheduling & execution engine", () => {
       const job = submit("ENGINE_SUCCESS");
       const claim = e.claimJob(db, { workerId: "crashed-worker", queueCodes: ["DEFAULT"] });
       assert.ok(claim);
-      run(db, "UPDATE jobs SET lease_expires_at = datetime('now', '-10 minutes'), heartbeat_at = datetime('now', '-10 minutes') WHERE id = ?", [claim.job.id]);
+      run(db, "UPDATE jobs SET lease_expires_at = to_char((now() at time zone 'utc') + interval '-10 minutes','YYYY-MM-DD HH24:MI:SS'), heartbeat_at = to_char((now() at time zone 'utc') + interval '-10 minutes','YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [claim.job.id]);
       const summary = e.recoverStaleJobs(db);
       assert.ok(summary.recovered + summary.failed >= 1);
       const row = j.getJobRow(db, claim.job.id);
@@ -372,7 +372,7 @@ describe("job scheduling & execution engine", () => {
         { code: "ENGINE_SWEEP", job_type_code: "ENGINE_SUCCESS", schedule_type: "interval", interval_seconds: 3600 },
         admin
       );
-      run(db, "UPDATE job_schedules SET next_run_at = datetime('now', '-2 minutes') WHERE id = ?", [schedule.id]);
+      run(db, "UPDATE job_schedules SET next_run_at = to_char((now() at time zone 'utc') + interval '-2 minutes','YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [schedule.id]);
       const first = e.sweepSchedules(db);
       assert.equal(first.locked, true);
       assert.equal(first.due, 1);
@@ -382,14 +382,14 @@ describe("job scheduling & execution engine", () => {
       assert.equal(jobs.length, 1);
       const fresh = e.getSchedule(db, "ENGINE_SWEEP");
       assert.equal(fresh.execution_count, 1);
-      assert.ok(fresh.next_run_at > queryOne(db, "SELECT datetime('now') AS now").now);
+      assert.ok(fresh.next_run_at > queryOne(db, "SELECT to_char(now() at time zone 'utc','YYYY-MM-DD HH24:MI:SS') AS now").now);
 
       const runs = e.listScheduleRuns(db, "ENGINE_SWEEP", { pageSize: 10 }).items;
       assert.equal(runs.length, 1);
       assert.equal(runs[0].status, "enqueued");
 
       // Re-running the same occurrence must not duplicate work.
-      run(db, "UPDATE job_schedules SET next_run_at = datetime('now', '-2 minutes') WHERE id = ?", [schedule.id]);
+      run(db, "UPDATE job_schedules SET next_run_at = to_char((now() at time zone 'utc') + interval '-2 minutes','YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [schedule.id]);
       const second = e.sweepSchedules(db);
       assert.equal(second.enqueued, 0);
       assert.equal(queryAll(db, "SELECT * FROM jobs WHERE schedule_id = ?", [schedule.id]).length, 1);
@@ -463,7 +463,7 @@ describe("job scheduling & execution engine", () => {
       assert.ok(listed.items.some((item) => item.id === "test-worker-1"));
       assert.ok(listed.summary.total >= 1);
 
-      run(db, "UPDATE job_workers SET last_heartbeat = datetime('now', '-10 minutes') WHERE id = 'test-worker-1'");
+      run(db, "UPDATE job_workers SET last_heartbeat = to_char((now() at time zone 'utc') + interval '-10 minutes','YYYY-MM-DD HH24:MI:SS') WHERE id = 'test-worker-1'");
       const reaped = e.reapStaleWorkers(db, { offlineAfterSeconds: 0 });
       assert.ok(reaped.length >= 1);
       assert.ok(reaped.some((item) => item.id === "test-worker-1" && item.status === "offline"));

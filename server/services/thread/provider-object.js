@@ -6,13 +6,19 @@
 // an edge. Cross-domain traceability therefore comes for free from the shared
 // Object & Relationship Framework.
 import { queryAll } from "../../db.js";
-import { adjacency } from "../objects.js";
+import { queryAllAsync } from "../../db-async.js";
+import { adjacency, adjacencyAsync } from "../objects.js";
 import { nodeRef } from "./providers.js";
 import { nodeRefKey } from "./validation.js";
 import { domainForType } from "./domains.js";
 import { PROVIDERS } from "./constants.js";
 
 const NON_OBJECT_PREFIXES = ["pdm_", "bom_"];
+// Domain types that own their own tables and are deliberately NOT stamped into
+// the generic `objects` table, so the Object provider must not attempt to
+// resolve them. Classification characteristics and Content documents expose
+// their own Digital Thread provider instead.
+const NON_OBJECT_CODES = new Set(["characteristic", "content"]);
 
 function parseJson(raw, fallback) {
   if (!raw) return fallback;
@@ -25,6 +31,7 @@ function parseJson(raw, fallback) {
 
 function isObjectType(type) {
   const code = String(type || "").toLowerCase();
+  if (NON_OBJECT_CODES.has(code)) return false;
   return !NON_OBJECT_PREFIXES.some((prefix) => code.startsWith(prefix));
 }
 
@@ -77,6 +84,27 @@ export function resolveObjectRows(db, tenantId, refs) {
   }
   for (const entry of codes) {
     const row = queryAll(db, `${OBJECT_SELECT} WHERE o.tenant_id = ? AND o.code = ? LIMIT 1`, [Number(tenantId), entry.code])[0];
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+export async function resolveObjectRowsAsync(db, tenantId, refs) {
+  const numeric = new Map();
+  const codes = [];
+  for (const ref of refs) {
+    const key = nodeRefKey(ref);
+    if (/^\d+$/.test(String(ref.objectId))) numeric.set(Number(ref.objectId), key);
+    else codes.push({ key, code: String(ref.objectId) });
+  }
+  const rows = [];
+  if (numeric.size) {
+    const ids = [...numeric.keys()];
+    const marks = ids.map(() => "?").join(",");
+    rows.push(...(await queryAllAsync(db, `${OBJECT_SELECT} WHERE o.tenant_id = ? AND o.id IN (${marks})`, [Number(tenantId), ...ids])));
+  }
+  for (const entry of codes) {
+    const row = (await queryAllAsync(db, `${OBJECT_SELECT} WHERE o.tenant_id = ? AND o.code = ? LIMIT 1`, [Number(tenantId), entry.code]))[0];
     if (row) rows.push(row);
   }
   return rows;
@@ -136,6 +164,17 @@ export const objectProvider = {
   resolve(db, tenantId, ref, context = {}) {
     return this.resolveMany(db, tenantId, [ref], context)[0] || null;
   },
+  async resolveManyAsync(db, tenantId, refs, context = {}) {
+    const rows = await resolveObjectRowsAsync(db, tenantId, refs);
+    const includeInactive = context.includeInactive ?? true;
+    return rows
+      .filter((row) => !row.deleted_at)
+      .filter((row) => includeInactive || ["active", "released"].includes(String(row.status).toLowerCase()))
+      .map((row) => objectNodeFromRow(row, context.definition || null));
+  },
+  async resolveAsync(db, tenantId, ref, context = {}) {
+    return (await this.resolveManyAsync(db, tenantId, [ref], context))[0] || null;
+  },
   neighbors(db, tenantId, refs, context = {}) {
     const ids = [];
     for (const ref of refs) {
@@ -144,6 +183,16 @@ export const objectProvider = {
     if (!ids.length) return [];
     const direction = (context.direction || "BOTH") === "UPSTREAM" ? "in" : context.direction === "DOWNSTREAM" ? "out" : "both";
     const relationships = adjacency(db, ids, { tenantId, direction, status: "active", limit: context.edgeLimit || 20000 });
+    return relationships.map((rel) => edgeFromRelationship(rel, context.definition || null)).filter(Boolean);
+  },
+  async neighborsAsync(db, tenantId, refs, context = {}) {
+    const ids = [];
+    for (const ref of refs) {
+      if (isObjectType(ref.objectType) && /^\d+$/.test(String(ref.objectId))) ids.push(Number(ref.objectId));
+    }
+    if (!ids.length) return [];
+    const direction = (context.direction || "BOTH") === "UPSTREAM" ? "in" : context.direction === "DOWNSTREAM" ? "out" : "both";
+    const relationships = await adjacencyAsync(db, ids, { tenantId, direction, status: "active", limit: context.edgeLimit || 20000 });
     return relationships.map((rel) => edgeFromRelationship(rel, context.definition || null)).filter(Boolean);
   },
 };

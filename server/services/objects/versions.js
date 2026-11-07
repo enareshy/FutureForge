@@ -1,4 +1,5 @@
 import { run } from "../../db.js";
+import { runAsync } from "../../db-async.js";
 
 // Immutable object revision snapshots. Kept in a dedicated module so the
 // Lifecycle engine can record versions without importing the object domain
@@ -40,6 +41,15 @@ export function snapshot(row) {
 
 export function recordObjectVersion(db, row, changeType, summary, actorId) {
   run(
+    db,
+    `INSERT INTO object_versions (object_id, revision, change_type, snapshot, change_summary, created_by)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [row.id, row.revision, changeType, JSON.stringify(snapshot(row)), summary || "", actorId ?? null]
+  );
+}
+
+export async function recordObjectVersionAsync(db, row, changeType, summary, actorId) {
+  await runAsync(
     db,
     `INSERT INTO object_versions (object_id, revision, change_type, snapshot, change_summary, created_by)
      VALUES (?, ?, ?, ?, ?, ?)`,

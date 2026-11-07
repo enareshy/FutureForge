@@ -5,9 +5,10 @@
 // Engine so they are durable, resumable, observable and retryable. Handlers only
 // drive the thread core.
 import { queryAll, run, nowIso } from "../../db.js";
+import { queryAllAsync, runAsync } from "../../db-async.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
-import { getJobTypeRow, createJobType } from "../jobs/types.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
+import { getJobTypeRow, getJobTypeRowAsync, createJobType, createJobTypeAsync } from "../jobs/types.js";
 import { reindexType } from "../search/indexing.js";
 import { THREAD_HANDLER_CODES, THREAD_JOB_TYPES, SEARCH_OBJECT_TYPES } from "./constants.js";
 import { executeTraversal } from "./engine.js";
@@ -18,7 +19,7 @@ import { createBaseline } from "./baselines.js";
 import { evaluateCompleteness } from "./completeness.js";
 import { rebuildProjection, handleSourceEvent } from "./projection.js";
 import { invalidate, bumpEpoch, cacheStats } from "./cache.js";
-import { getConfig } from "./configuration.js";
+import { getConfig, getConfigAsync } from "./configuration.js";
 
 const THREAD_QUEUE = "thread";
 const PROJECT_HANDLER = "thread.project";
@@ -28,6 +29,16 @@ export function ensureThreadJobTypes(db) {
   for (const def of THREAD_JOB_TYPES) {
     if (getJobTypeRow(db, def.code)) continue;
     createJobType(db, { ...def }, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
+export async function ensureThreadJobTypesAsync(db) {
+  let created = 0;
+  for (const def of THREAD_JOB_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    await createJobTypeAsync(db, { ...def }, null, null);
     created += 1;
   }
   return { created };
@@ -48,40 +59,91 @@ function submit(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority 
   );
 }
 
+async function submitAsync(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority = "normal", queue = THREAD_QUEUE, idempotencyKey = null }) {
+  return await submitJobAsync(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      input: { tenant_id: Number(tenantId), ...handlerParams },
+      tenant_id: Number(tenantId),
+      priority,
+      queue,
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+}
+
 export function submitTraversalJob(db, { tenantId, root, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "THREAD_TRAVERSAL", handlerParams: { root, options }, actor, ip, idempotencyKey });
+}
+
+export async function submitTraversalJobAsync(db, { tenantId, root, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "THREAD_TRAVERSAL", handlerParams: { root, options }, actor, ip, idempotencyKey });
 }
 
 export function submitImpactJob(db, { tenantId, root, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "THREAD_IMPACT", handlerParams: { root, options }, actor, ip, idempotencyKey });
 }
 
+export async function submitImpactJobAsync(db, { tenantId, root, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "THREAD_IMPACT", handlerParams: { root, options }, actor, ip, idempotencyKey });
+}
+
 export function submitPathJob(db, { tenantId, source, target, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "THREAD_PATH", handlerParams: { source, target, options }, actor, ip, idempotencyKey });
+}
+
+export async function submitPathJobAsync(db, { tenantId, source, target, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "THREAD_PATH", handlerParams: { source, target, options }, actor, ip, idempotencyKey });
 }
 
 export function submitSnapshotJob(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "THREAD_SNAPSHOT_CREATE", handlerParams: { body }, actor, ip, idempotencyKey });
 }
 
+export async function submitSnapshotJobAsync(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "THREAD_SNAPSHOT_CREATE", handlerParams: { body }, actor, ip, idempotencyKey });
+}
+
 export function submitBaselineJob(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "THREAD_BASELINE_CREATE", handlerParams: { body }, actor, ip, idempotencyKey });
+}
+
+export async function submitBaselineJobAsync(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "THREAD_BASELINE_CREATE", handlerParams: { body }, actor, ip, idempotencyKey });
 }
 
 export function submitCompletenessJob(db, { tenantId, root, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "THREAD_COMPLETENESS", handlerParams: { root, options }, actor, ip, idempotencyKey });
 }
 
+export async function submitCompletenessJobAsync(db, { tenantId, root, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "THREAD_COMPLETENESS", handlerParams: { root, options }, actor, ip, idempotencyKey });
+}
+
 export function submitReindexJob(db, { tenantId, objectTypes = null, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "THREAD_REINDEX", handlerParams: { object_types: objectTypes }, actor, ip, priority: "low", idempotencyKey });
+}
+
+export async function submitReindexJobAsync(db, { tenantId, objectTypes = null, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "THREAD_REINDEX", handlerParams: { object_types: objectTypes }, actor, ip, priority: "low", idempotencyKey });
 }
 
 export function submitProjectionRebuildJob(db, { tenantId, objectTypes = null, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "THREAD_PROJECTION_REBUILD", handlerParams: { object_types: objectTypes }, actor, ip, priority: "low", idempotencyKey });
 }
 
+export async function submitProjectionRebuildJobAsync(db, { tenantId, objectTypes = null, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "THREAD_PROJECTION_REBUILD", handlerParams: { object_types: objectTypes }, actor, ip, priority: "low", idempotencyKey });
+}
+
 export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "THREAD_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low", queue: "default", idempotencyKey });
+}
+
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return await submitAsync(db, { tenantId, jobTypeCode: "THREAD_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low", queue: "default", idempotencyKey });
 }
 
 // ── Synchronous cores (also used by the handlers) ────────────────────────────
@@ -98,6 +160,25 @@ export function runThreadMaintenance(db, { tenantId = null } = {}) {
     summary.query_history_pruned += run(db, "DELETE FROM thread_query_history WHERE tenant_id = ? AND created_at < ?", [tenant, cutoff]).changes || 0;
     summary.events_processed_pruned += run(db, "DELETE FROM thread_events_processed WHERE tenant_id = ? AND processed_at < ?", [tenant, cutoff]).changes || 0;
     summary.stale_projections_pruned += run(db, "DELETE FROM thread_projections WHERE tenant_id = ? AND status = 'STALE' AND updated_at < ?", [tenant, cutoff]).changes || 0;
+    invalidate(tenant);
+    bumpEpoch(tenant);
+  }
+  summary.cache = cacheStats();
+  return summary;
+}
+
+export async function runThreadMaintenanceAsync(db, { tenantId = null } = {}) {
+  const tenantRows = tenantId
+    ? [{ tenant_id: Number(tenantId) }]
+    : await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM thread_query_history WHERE tenant_id IS NOT NULL");
+  const summary = { tenants: tenantRows.length, query_history_pruned: 0, events_processed_pruned: 0, stale_projections_pruned: 0, ran_at: nowIso() };
+  for (const row of tenantRows) {
+    const tenant = Number(row.tenant_id);
+    const retentionDays = Number(await getConfigAsync(db, tenant, "history_retention_days") || 90);
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    summary.query_history_pruned += (await runAsync(db, "DELETE FROM thread_query_history WHERE tenant_id = ? AND created_at < ?", [tenant, cutoff])).changes || 0;
+    summary.events_processed_pruned += (await runAsync(db, "DELETE FROM thread_events_processed WHERE tenant_id = ? AND processed_at < ?", [tenant, cutoff])).changes || 0;
+    summary.stale_projections_pruned += (await runAsync(db, "DELETE FROM thread_projections WHERE tenant_id = ? AND status = 'STALE' AND updated_at < ?", [tenant, cutoff])).changes || 0;
     invalidate(tenant);
     bumpEpoch(tenant);
   }

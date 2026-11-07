@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 import * as versioning from "../services/versioning.js";
@@ -94,7 +94,7 @@ function modelDef(db, code, values, extra = {}) {
 describe("Versioning foundation & revisions", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });
@@ -171,7 +171,7 @@ describe("Versioning foundation & revisions", () => {
 describe("Effectivity validation and definitions", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });
@@ -253,7 +253,7 @@ describe("Effectivity validation and definitions", () => {
 describe("As-of resolution engine", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });
@@ -463,7 +463,7 @@ describe("As-of resolution engine", () => {
 describe("Variants, configuration contexts, baselines and snapshots", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });
@@ -557,7 +557,7 @@ describe("Versioning REST API", () => {
   let port;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const app = createApp(db);

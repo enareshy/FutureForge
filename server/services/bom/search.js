@@ -4,9 +4,15 @@
 // through the shared Enterprise Search, so BOM content is discoverable with the
 // same facets, authorization and saved searches as every other module.
 import { queryAll, queryOne } from "../../db.js";
-import { registerObjectType, tenantIds } from "../search/registry.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { registerObjectType, tenantIds, registerObjectTypeAsync, tenantIdsAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
-import { getObjectType, registerObjectType as registerSecurityObjectType } from "../security/repository.js";
+import {
+  getObjectType,
+  getObjectTypeAsync,
+  registerObjectType as registerSecurityObjectType,
+  registerObjectTypeAsync as registerSecurityObjectTypeAsync,
+} from "../security/repository.js";
 import { BOM_RESOURCES, SEARCH_OBJECT_TYPES } from "./constants.js";
 
 function defFor(code) {
@@ -92,6 +98,31 @@ export function registerBomSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM bom_headers WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM bom_headers WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "bom",
+        objectId: String(row.id),
+        code: row.bom_number,
+        title: row.name || row.bom_number,
+        subtitle: row.bom_number,
+        summary: row.description || "",
+        searchableText: joinText([row.bom_number, row.name, row.description, row.bom_type, row.status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? null,
+        classification: "internal",
+        tags: [row.bom_type, row.status].filter(Boolean),
+        attributes: { bom_number: row.bom_number, bom_type: row.bom_type, status: row.status, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM bom_headers WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("bom_revision", {
@@ -123,6 +154,32 @@ export function registerBomSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM bom_revisions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM bom_revisions WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      const bom = await queryOneAsync(db, "SELECT bom_number, name FROM bom_headers WHERE id = ?", [row.bom_id]);
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "bom_revision",
+        objectId: String(row.id),
+        code: row.revision_ref,
+        title: `${bom?.bom_number ?? row.bom_id} rev ${row.revision_number}`,
+        subtitle: row.revision_ref,
+        summary: row.configuration_context || "",
+        searchableText: joinText([row.revision_ref, row.revision_number, row.status, row.variant_code, row.configuration_context, bom?.bom_number]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? null,
+        classification: "internal",
+        tags: [row.status, row.variant_code].filter(Boolean),
+        attributes: { revision_number: row.revision_number, status: row.status, bom_id: row.bom_id, variant_id: row.variant_id ?? null, variant_code: row.variant_code },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM bom_revisions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("bom_line", {
@@ -153,6 +210,31 @@ export function registerBomSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM bom_lines WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM bom_lines WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "bom_line",
+        objectId: String(row.id),
+        code: row.line_ref,
+        title: row.child_object_id || row.line_ref,
+        subtitle: row.find_number || "",
+        summary: row.line_ref,
+        searchableText: joinText([row.line_ref, row.child_object_id, row.child_object_type, row.find_number, row.usage, row.reference_designator, row.notes]),
+        status: row.line_status,
+        ownerId: null,
+        classification: "internal",
+        tags: [row.usage, row.line_status].filter(Boolean),
+        attributes: { child_object_id: row.child_object_id, child_object_type: row.child_object_type, usage: row.usage, line_status: row.line_status, bom_revision_id: row.bom_revision_id },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM bom_lines WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   return SEARCH_REGISTRATIONS.map((entry) => entry.code);
@@ -169,6 +251,28 @@ export function ensureBomSearch(db) {
       }
       if (!getObjectType(db, tenantId, def.code)) {
         registerSecurityObjectType(
+          db,
+          { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource },
+          null,
+          tenantId
+        );
+      }
+    }
+  }
+  return { created };
+}
+
+export async function ensureBomSearchAsync(db) {
+  let created = 0;
+  for (const tenantId of await tenantIdsAsync(db)) {
+    for (const def of SEARCH_REGISTRATIONS) {
+      const existing = await queryOneAsync(db, "SELECT id FROM search_object_types WHERE code = ? AND tenant_id = ?", [def.code, Number(tenantId)]);
+      if (!existing) {
+        await registerObjectTypeAsync(db, def, null, tenantId, null);
+        created += 1;
+      }
+      if (!(await getObjectTypeAsync(db, tenantId, def.code))) {
+        await registerSecurityObjectTypeAsync(
           db,
           { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource },
           null,

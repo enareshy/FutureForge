@@ -3,13 +3,14 @@
 // demonstrate every framework capability (scope, hierarchy, translation,
 // aliases, codes, effective dating, approval, versions).
 import { queryOne } from "../../db.js";
-import { createDomain, getDomainRow } from "./domains.js";
+import { queryOneAsync } from "../../db-async.js";
+import { createDomain, createDomainAsync, getDomainRow, getDomainRowAsync } from "./domains.js";
 import { createItem, getItemRow, setItemStatus } from "./items.js";
 import { createAlias } from "./aliases.js";
 import { createCode } from "./codes.js";
 import { upsertTranslation } from "./translations.js";
 import { createEdge } from "./hierarchy.js";
-import { publishGovernanceVersion } from "./governance.js";
+import { publishGovernanceVersion, publishGovernanceVersionAsync } from "./governance.js";
 import { getActiveGovernancePolicy } from "./governance.js";
 
 export const MANDATORY_DOMAINS = [
@@ -122,6 +123,31 @@ export function ensureReferenceDomains(db, { tenantId = null, actor = null } = {
   return { created, codes };
 }
 
+export async function ensureReferenceDomainsAsync(db, { tenantId = null, actor = null } = {}) {
+  let created = 0;
+  const codes = [];
+  for (const domain of MANDATORY_DOMAINS) {
+    const existing = await queryOneAsync(
+      db,
+      "SELECT id FROM reference_domains WHERE code = ? AND COALESCE(tenant_id, 0) = COALESCE(?, 0)",
+      [domain.code, tenantId]
+    );
+    if (existing) continue;
+    try {
+      await createDomainAsync(db, { ...domain, is_system: true }, actor, tenantId, "seed");
+      if (domain.hierarchy) {
+        const row = await getDomainRowAsync(db, domain.code);
+        await publishGovernanceVersionAsync(db, row, { hierarchy_enabled: true, approval_required: false }, actor, "seed");
+      }
+      created += 1;
+      codes.push(domain.code);
+    } catch {
+      /* a partially migrated database must not fail seeding */
+    }
+  }
+  return { created, codes };
+}
+
 function seedItemsForDomain(db, domain, actor, tenantId) {
   const created = [];
   for (const item of SAMPLE_ITEMS[domain.code] || []) {
@@ -186,7 +212,7 @@ function seedEnrichment(db, actor, tenantId) {
 }
 
 export function seedReference(db, { actor = null, tenantId = null } = {}) {
-  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM reference_data_items WHERE is_system = 1 OR item_ref LIKE 'RDM-%'");
+  const existing = queryOne(db, "SELECT COUNT(*) AS c FROM reference_data_items WHERE is_system = 1 OR item_ref ILIKE 'RDM-%'");
   const domains = ensureReferenceDomains(db, { tenantId, actor });
   let items = 0;
   for (const domain of MANDATORY_DOMAINS) {

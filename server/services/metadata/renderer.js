@@ -1,8 +1,9 @@
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import { assertReadable } from "./scope.js";
-import { effectiveAttributes, getTypeRow } from "./types.js";
-import { listValues } from "./lovs.js";
+import { effectiveAttributes, effectiveAttributesAsync, getTypeRow, getTypeRowAsync } from "./types.js";
+import { listValues, listValuesAsync } from "./lovs.js";
 import { evaluate } from "./expression.js";
 
 // Produces a transport-friendly, UI-agnostic render tree for a form. The same
@@ -165,6 +166,27 @@ function buildField(db, field, attributes, evalContext, mode, tenantId) {
   }
   const conditions = parseArray(field.conditions_json);
   const conditionVisible = conditionsPass(field.conditions_json, evalContext);
+  const options = attribute.lov_id ? listValues(db, attribute.lov_id, { activeOnly: true }) : [];
+  return assembleField(field, attribute, conditions, conditionVisible, options, mode, evalContext);
+}
+
+async function buildFieldAsync(db, field, attributes, evalContext, mode, tenantId) {
+  const attribute = attributes.get(field.attribute_id);
+  if (!attribute) {
+    return {
+      ...field,
+      condition_visible: true,
+      condition_editable: true,
+      is_orphan: true,
+    };
+  }
+  const conditions = parseArray(field.conditions_json);
+  const conditionVisible = conditionsPass(field.conditions_json, evalContext);
+  const options = attribute.lov_id ? await listValuesAsync(db, attribute.lov_id, { activeOnly: true }) : [];
+  return assembleField(field, attribute, conditions, conditionVisible, options, mode, evalContext);
+}
+
+function assembleField(field, attribute, conditions, conditionVisible, options, mode, evalContext) {
   const viewMode = mode === "view";
   const required = field.required_override === null || field.required_override === undefined
     ? Boolean(attribute.required)
@@ -193,7 +215,7 @@ function buildField(db, field, attributes, evalContext, mode, tenantId) {
     max_length: attribute.max_length,
     validation: attribute.validation || {},
     lov_id: attribute.lov_id,
-    options: attribute.lov_id ? listValues(db, attribute.lov_id, { activeOnly: true }) : [],
+    options,
     sequence: field.sequence,
     node_id: field.node_id,
     col_span: field.col_span,
@@ -287,4 +309,149 @@ export function formByTypeAndMode(db, typeId, mode, tenantId) {
      ORDER BY tenant_id IS NULL LIMIT 1`,
     params
   );
+}
+
+export async function formByTypeAndModeAsync(db, typeId, mode, tenantId) {
+  const scope = tenantId
+    ? "(tenant_id IS NULL OR tenant_id = ?)"
+    : "tenant_id IS NULL";
+  const params = tenantId ? [Number(typeId), mode, Number(tenantId)] : [Number(typeId), mode];
+  return queryOneAsync(
+    db,
+    `SELECT * FROM metadata_forms WHERE type_id = ? AND mode = ? AND status = 'active' AND ${scope}
+     ORDER BY tenant_id IS NULL LIMIT 1`,
+    params
+  );
+}
+
+export async function renderFormAsync(db, idOrCode, tenantId, { mode, values = {}, context = {} } = {}) {
+  const form = await queryOneAsync(
+    db,
+    /^\d+$/.test(String(idOrCode))
+      ? "SELECT * FROM metadata_forms WHERE id = ?"
+      : "SELECT * FROM metadata_forms WHERE code = ?",
+    [/^\d+$/.test(String(idOrCode)) ? Number(idOrCode) : String(idOrCode)]
+  );
+  assertReadable(form, tenantId, "Form not found");
+  const selectedMode = mode || form.mode;
+  const type = await getTypeRowAsync(db, form.type_id);
+  assertReadable(type, tenantId, "Type not found");
+
+  const attributes = new Map((await effectiveAttributesAsync(db, type.id, tenantId)).map((a) => [a.id, a]));
+  const valuesByCode = normalizeValues(values);
+  const evalContext = { values: valuesByCode, record: valuesByCode, ...context };
+
+  const nodes = (
+    await queryAllAsync(db, "SELECT * FROM metadata_form_nodes WHERE form_id = ? ORDER BY sequence, label", [form.id])
+  ).map((node) => ({
+    id: node.id,
+    kind: node.kind,
+    code: node.code,
+    label: node.label,
+    parent_id: node.parent_id,
+    sequence: node.sequence,
+    visible: node.visible === 1 && conditionsPass(node.conditions_json, evalContext),
+    conditions: parseArray(node.conditions_json),
+    children: [],
+    fields: [],
+  }));
+  const nodeIndex = new Map(nodes.map((n) => [n.id, n]));
+
+  const rawFields = await queryAllAsync(db, "SELECT * FROM metadata_form_fields WHERE form_id = ? ORDER BY sequence", [
+    form.id,
+  ]);
+  const fields = [];
+  for (const field of rawFields) {
+    fields.push(await buildFieldAsync(db, field, attributes, evalContext, selectedMode, tenantId));
+  }
+
+  for (const field of fields) {
+    if (field.node_id && nodeIndex.has(field.node_id)) nodeIndex.get(field.node_id).fields.push(field);
+    else field.node_id = null;
+  }
+  for (const node of nodes) {
+    if (node.parent_id && nodeIndex.has(node.parent_id)) nodeIndex.get(node.parent_id).children.push(node);
+  }
+
+  const defaultColumn = {
+    fields: fields.filter((f) => !f.node_id),
+    children: [],
+    id: null,
+    kind: "section",
+    code: "__default__",
+    label: "",
+    visible: true,
+    conditions: [],
+  };
+  const panelNodes = nodes.filter((n) => !n.parent_id).map((node) => serializeNode(node, selectedMode));
+
+  return {
+    form: {
+      id: form.id,
+      code: form.code,
+      name: form.name,
+      description: form.description,
+      mode: selectedMode,
+      status: form.status,
+      version: form.version,
+      tenant_id: form.tenant_id,
+    },
+    type: {
+      id: type.id,
+      code: type.code,
+      name: type.name,
+      module: type.module,
+      parent_type_id: type.parent_type_id,
+    },
+    fields: fields.map((f) => publicFieldForRender(f, selectedMode)),
+    nodes: [...panelNodes, ...(defaultColumn.fields.length ? [serializeNode(defaultColumn, selectedMode)] : [])],
+    context: { tenantId: tenantId ?? null, values: valuesByCode },
+  };
+}
+
+export async function renderTypeAsync(db, typeIdOrCode, tenantId, { mode = "create", values = {}, context = {} } = {}) {
+  const type = await queryOneAsync(
+    db,
+    /^\d+$/.test(String(typeIdOrCode))
+      ? "SELECT * FROM metadata_types WHERE id = ?"
+      : "SELECT * FROM metadata_types WHERE code = ?",
+    [/^\d+$/.test(String(typeIdOrCode)) ? Number(typeIdOrCode) : String(typeIdOrCode)]
+  );
+  assertReadable(type, tenantId, "Type not found");
+  const valuesByCode = normalizeValues(values);
+  const effective = await effectiveAttributesAsync(db, type.id, tenantId);
+  const fields = [];
+  let index = 0;
+  for (const attribute of effective) {
+    fields.push({
+      code: attribute.code,
+      label: attribute.name,
+      data_type: attribute.data_type,
+      required: Boolean(attribute.required),
+      default: attribute.default_value,
+      multi_value: Boolean(attribute.multi_value),
+      minimum: attribute.min_value,
+      maximum: attribute.max_value,
+      min_length: attribute.min_length,
+      max_length: attribute.max_length,
+      validation: attribute.validation || {},
+      visible: Boolean(attribute.visible),
+      editable: Boolean(attribute.editable),
+      lov_id: attribute.lov_id,
+      options: attribute.lov_id ? await listValuesAsync(db, attribute.lov_id, { activeOnly: true }) : [],
+      sequence: index,
+      node_id: null,
+      conditions: [],
+    });
+    index += 1;
+  }
+  return {
+    form: null,
+    type: { id: type.id, code: type.code, name: type.name, module: type.module, parent_type_id: type.parent_type_id },
+    fields: fields.map((f) => publicFieldForRender(f, mode)),
+    nodes: [
+      { id: null, kind: "section", code: "__default__", label: "", visible: true, conditions: [], children: [], fields: [] },
+    ],
+    context: { tenantId: tenantId ?? null, values: valuesByCode },
+  };
 }

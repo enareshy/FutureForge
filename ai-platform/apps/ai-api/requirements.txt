@@ -1,0 +1,23 @@
+# Runtime dependencies — pinned. Transitive versions resolved by pip.
+fastapi==0.143.0
+# Pinned explicitly: ai_api.main imports starlette.middleware.body_limit, which
+# only exists from 1.6.0. FastAPI only requires starlette>=0.46.0, so an
+# unpinned resolve can install an older Starlette and crash at import time.
+starlette==1.10.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+pydantic-settings==2.15.0
+httpx==0.28.1
+structlog==26.1.0
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-instrumentation-fastapi==0.66b1
+opentelemetry-exporter-otlp==1.45.1
+prometheus-client==0.23.1
+asyncpg==0.32.0
+langgraph==1.2.14
+litellm==1.105.0
+jsonschema==4.26.0
+python-multipart==0.0.32
+pypdf==6.21.4
+boto3==1.43.111

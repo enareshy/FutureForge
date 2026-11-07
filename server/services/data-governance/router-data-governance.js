@@ -1,7 +1,11 @@
 // REST router for Data Governance (domains, ownership, catalogue, policies,
 // configuration, dimensions, metrics and background runs). Built as a factory
-// so it reuses the application's auth, authorization and error middleware.
+// so it reuses the application's async auth, authorization and error middleware.
 // Mounted at /api/data-governance and /api/v1/data-governance.
+//
+// Every route is authorized against an IAM permission resource. The whole
+// request path runs on the async `pg` layer so a slow query never stalls the
+// process; only the pure `/meta` handler stays synchronous.
 import {
   constants,
   Validation,
@@ -16,23 +20,26 @@ import {
   Foundation,
 } from "./index.js";
 
-export function createDataGovernanceRouter({ express, db, auth, can, wrap }) {
+export function createDataGovernanceRouter({ express, db, auth, authAsync, can, canAsync, wrap }) {
   const router = express.Router();
   const tenantOf = (req) => req.tenantId ?? null;
 
-  const canDomains = (action) => can("iam.data_governance.domains", action);
-  const canOwnership = (action) => can("iam.data_governance.ownership", action);
-  const canCatalog = (action) => can("iam.data_governance.catalog", action);
-  const canPolicies = (action) => can("iam.data_governance.policies", action);
-  const canConfiguration = (action) => can("iam.data_governance.configuration", action);
-  const canDimensions = (action) => can("iam.data_governance.dimensions", action);
-  const canMetrics = (action) => can("iam.data_governance.metrics", action);
-  const canJobs = (action) => can("iam.data_governance.jobs", action);
+  const guard = authAsync || auth;
+  const gate = canAsync || can;
+
+  const canDomains = (action) => gate("iam.data_governance.domains", action);
+  const canOwnership = (action) => gate("iam.data_governance.ownership", action);
+  const canCatalog = (action) => gate("iam.data_governance.catalog", action);
+  const canPolicies = (action) => gate("iam.data_governance.policies", action);
+  const canConfiguration = (action) => gate("iam.data_governance.configuration", action);
+  const canDimensions = (action) => gate("iam.data_governance.dimensions", action);
+  const canMetrics = (action) => gate("iam.data_governance.metrics", action);
+  const canJobs = (action) => gate("iam.data_governance.jobs", action);
 
   router.get(
     "/meta",
-    auth,
-    can("iam.data_governance", "read"),
+    guard,
+    gate("iam.data_governance", "read"),
     wrap((_req, res) => {
       res.json({
         source_module: constants.SOURCE_MODULE,
@@ -49,76 +56,79 @@ export function createDataGovernanceRouter({ express, db, auth, can, wrap }) {
   // ── Domains ───────────────────────────────────────────────────────────────
   router.get(
     "/domains",
-    auth,
+    guard,
     canDomains("read"),
-    wrap((req, res) => res.json(Domains.listDomains(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Domains.listDomainsAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
   router.post(
     "/domains",
-    auth,
+    guard,
     canDomains("create"),
-    wrap((req, res) => res.status(201).json(Domains.createDomain(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Domains.createDomainAsync(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.get(
     "/domains/tree",
-    auth,
+    guard,
     canDomains("read"),
-    wrap((req, res) => res.json({ items: Domains.domainTree(db, { tenantId: tenantOf(req), rootId: req.query.rootId }) }))
+    wrap(async (req, res) => res.json({ items: await Domains.domainTreeAsync(db, { tenantId: tenantOf(req), rootId: req.query.rootId }) }))
   );
   router.get(
     "/domains/:ref",
-    auth,
+    guard,
     canDomains("read"),
-    wrap((req, res) => res.json(Domains.getDomain(db, req.params.ref, { breadcrumb: Domains.breadcrumb(db, Domains.requireDomain(db, req.params.ref)) })))
+    wrap(async (req, res) => {
+      const row = await Domains.requireDomainAsync(db, req.params.ref);
+      res.json(await Domains.getDomainAsync(db, req.params.ref, { breadcrumb: await Domains.breadcrumbAsync(db, row) }));
+    })
   );
-  const updateDomain = wrap((req, res) => res.json(Domains.updateDomain(db, req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/domains/:ref", auth, canDomains("update"), updateDomain);
-  router.patch("/domains/:ref", auth, canDomains("update"), updateDomain);
+  const updateDomain = wrap(async (req, res) => res.json(await Domains.updateDomainAsync(db, req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/domains/:ref", guard, canDomains("update"), updateDomain);
+  router.patch("/domains/:ref", guard, canDomains("update"), updateDomain);
   router.post(
     "/domains/:ref/status",
-    auth,
+    guard,
     canDomains("execute"),
-    wrap((req, res) => res.json(Domains.setDomainStatus(db, req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Domains.setDomainStatusAsync(db, req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.delete(
     "/domains/:ref",
-    auth,
+    guard,
     canDomains("delete"),
-    wrap((req, res) => res.json(Domains.deleteDomain(db, req.params.ref, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Domains.deleteDomainAsync(db, req.params.ref, req.actor, req.ip)))
   );
 
   // ── Ownership ─────────────────────────────────────────────────────────────
   router.get(
     "/ownership",
-    auth,
+    guard,
     canOwnership("read"),
-    wrap((req, res) => res.json(Ownership.listOwnership(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Ownership.listOwnershipAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
   router.post(
     "/ownership",
-    auth,
+    guard,
     canOwnership("create"),
-    wrap((req, res) => res.status(201).json(Ownership.createOwnership(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Ownership.createOwnershipAsync(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.patch(
     "/ownership/:id",
-    auth,
+    guard,
     canOwnership("update"),
-    wrap((req, res) => res.json(Ownership.updateOwnership(db, req.params.id, req.body || {}, req.actor)))
+    wrap(async (req, res) => res.json(await Ownership.updateOwnershipAsync(db, req.params.id, req.body || {}, req.actor)))
   );
   router.delete(
     "/ownership/:id",
-    auth,
+    guard,
     canOwnership("delete"),
-    wrap((req, res) => res.json(Ownership.deleteOwnership(db, req.params.id, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Ownership.deleteOwnershipAsync(db, req.params.id, req.actor, req.ip)))
   );
   router.get(
     "/ownership/resolve",
-    auth,
+    guard,
     canOwnership("read"),
-    wrap((req, res) =>
+    wrap(async (req, res) =>
       res.json({
-        items: Ownership.resolveOwnership(db, {
+        items: await Ownership.resolveOwnershipAsync(db, {
           tenantId: tenantOf(req),
           domainId: req.query.domainId || null,
           objectType: req.query.objectType || null,
@@ -131,185 +141,188 @@ export function createDataGovernanceRouter({ express, db, auth, can, wrap }) {
 
   // Convenience aliases: owners and stewards are ownership records filtered by
   // relationship. They exist so callers can use the vocabulary of the spec.
-  const listOwners = wrap((req, res) =>
-    res.json(Ownership.listOwnership(db, { ...req.query, relationship: "owner", tenantId: tenantOf(req) }))
+  const listOwners = wrap(async (req, res) =>
+    res.json(await Ownership.listOwnershipAsync(db, { ...req.query, relationship: "owner", tenantId: tenantOf(req) }))
   );
-  const listStewards = wrap((req, res) =>
-    res.json(Ownership.listOwnership(db, { ...req.query, relationship: "steward", tenantId: tenantOf(req) }))
+  const listStewards = wrap(async (req, res) =>
+    res.json(await Ownership.listOwnershipAsync(db, { ...req.query, relationship: "steward", tenantId: tenantOf(req) }))
   );
-  router.get("/owners", auth, canOwnership("read"), listOwners);
-  router.get("/stewards", auth, canOwnership("read"), listStewards);
+  router.get("/owners", guard, canOwnership("read"), listOwners);
+  router.get("/stewards", guard, canOwnership("read"), listStewards);
   router.post(
     "/owners",
-    auth,
+    guard,
     canOwnership("create"),
-    wrap((req, res) =>
-      res.status(201).json(Ownership.createOwnership(db, { ...(req.body || {}), relationship: "owner" }, req.actor, tenantOf(req), req.ip))
+    wrap(async (req, res) =>
+      res.status(201).json(await Ownership.createOwnershipAsync(db, { ...(req.body || {}), relationship: "owner" }, req.actor, tenantOf(req), req.ip))
     )
   );
   router.post(
     "/stewards",
-    auth,
+    guard,
     canOwnership("create"),
-    wrap((req, res) =>
-      res.status(201).json(Ownership.createOwnership(db, { ...(req.body || {}), relationship: "steward" }, req.actor, tenantOf(req), req.ip))
+    wrap(async (req, res) =>
+      res.status(201).json(await Ownership.createOwnershipAsync(db, { ...(req.body || {}), relationship: "steward" }, req.actor, tenantOf(req), req.ip))
     )
   );
 
   // ── Catalogue ─────────────────────────────────────────────────────────────
   router.get(
     "/catalog",
-    auth,
+    guard,
     canCatalog("read"),
-    wrap((req, res) => res.json(Catalog.listCatalog(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Catalog.listCatalogAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
   router.post(
     "/catalog",
-    auth,
+    guard,
     canCatalog("create"),
-    wrap((req, res) => res.status(201).json(Catalog.registerCatalogObject(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Catalog.registerCatalogObjectAsync(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.get(
     "/catalog/:ref",
-    auth,
+    guard,
     canCatalog("read"),
-    wrap((req, res) => res.json(Catalog.getCatalog(db, req.params.ref, { includeAttributes: req.query.includeAttributes !== "false" })))
+    wrap(async (req, res) => res.json(await Catalog.getCatalogAsync(db, req.params.ref, { includeAttributes: req.query.includeAttributes !== "false" })))
   );
-  const updateCatalog = wrap((req, res) => res.json(Catalog.updateCatalogObject(db, req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/catalog/:ref", auth, canCatalog("update"), updateCatalog);
-  router.patch("/catalog/:ref", auth, canCatalog("update"), updateCatalog);
+  const updateCatalog = wrap(async (req, res) => res.json(await Catalog.updateCatalogObjectAsync(db, req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/catalog/:ref", guard, canCatalog("update"), updateCatalog);
+  router.patch("/catalog/:ref", guard, canCatalog("update"), updateCatalog);
   router.get(
     "/catalog/:ref/attributes",
-    auth,
+    guard,
     canCatalog("read"),
-    wrap((req, res) => res.json({ items: Catalog.listAttributes(db, Catalog.requireCatalog(db, req.params.ref).id) }))
+    wrap(async (req, res) => {
+      const row = await Catalog.requireCatalogAsync(db, req.params.ref);
+      res.json({ items: await Catalog.listAttributesAsync(db, row.id) });
+    })
   );
   router.post(
     "/catalog/:ref/attributes",
-    auth,
+    guard,
     canCatalog("create"),
-    wrap((req, res) => res.status(201).json(Catalog.registerAttribute(db, req.params.ref, req.body || {}, req.actor)))
+    wrap(async (req, res) => res.status(201).json(await Catalog.registerAttributeAsync(db, req.params.ref, req.body || {}, req.actor)))
   );
   router.patch(
     "/catalog/:ref/attributes/:attributeId",
-    auth,
+    guard,
     canCatalog("update"),
-    wrap((req, res) => res.json(Catalog.updateAttribute(db, req.params.ref, req.params.attributeId, req.body || {})))
+    wrap(async (req, res) => res.json(await Catalog.updateAttributeAsync(db, req.params.ref, req.params.attributeId, req.body || {})))
   );
 
   // ── Policies ──────────────────────────────────────────────────────────────
   router.get(
     "/policies",
-    auth,
+    guard,
     canPolicies("read"),
-    wrap((req, res) => res.json(Policies.listPolicies(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Policies.listPoliciesAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
   router.post(
     "/policies",
-    auth,
+    guard,
     canPolicies("create"),
-    wrap((req, res) => res.status(201).json(Policies.createPolicy(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Policies.createPolicyAsync(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.get(
     "/policies/:ref",
-    auth,
+    guard,
     canPolicies("read"),
-    wrap((req, res) => res.json(Policies.getPolicy(db, req.params.ref, { includeVersions: req.query.includeVersions === "true" })))
+    wrap(async (req, res) => res.json(await Policies.getPolicyAsync(db, req.params.ref, { includeVersions: req.query.includeVersions === "true" })))
   );
-  const updatePolicy = wrap((req, res) => res.json(Policies.updatePolicy(db, req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/policies/:ref", auth, canPolicies("update"), updatePolicy);
-  router.patch("/policies/:ref", auth, canPolicies("update"), updatePolicy);
+  const updatePolicy = wrap(async (req, res) => res.json(await Policies.updatePolicyAsync(db, req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/policies/:ref", guard, canPolicies("update"), updatePolicy);
+  router.patch("/policies/:ref", guard, canPolicies("update"), updatePolicy);
   router.post(
     "/policies/:ref/status",
-    auth,
+    guard,
     canPolicies("execute"),
-    wrap((req, res) => res.json(Policies.setPolicyStatus(db, req.params.ref, req.body?.status, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Policies.setPolicyStatusAsync(db, req.params.ref, req.body?.status, req.actor, req.ip)))
   );
   router.get(
     "/policies/:ref/versions",
-    auth,
+    guard,
     canPolicies("read"),
-    wrap((req, res) => res.json({ items: Policies.listPolicyVersions(db, req.params.ref) }))
+    wrap(async (req, res) => res.json({ items: await Policies.listPolicyVersionsAsync(db, req.params.ref) }))
   );
   router.post(
     "/policies/:ref/activate",
-    auth,
+    guard,
     canPolicies("execute"),
-    wrap((req, res) => res.json(Policies.setPolicyStatus(db, req.params.ref, "active", req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Policies.setPolicyStatusAsync(db, req.params.ref, "active", req.actor, req.ip)))
   );
   router.post(
     "/policies/:ref/retire",
-    auth,
+    guard,
     canPolicies("execute"),
-    wrap((req, res) => res.json(Policies.setPolicyStatus(db, req.params.ref, "retired", req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Policies.setPolicyStatusAsync(db, req.params.ref, "retired", req.actor, req.ip)))
   );
   router.post(
     "/policies/:ref/suspend",
-    auth,
+    guard,
     canPolicies("execute"),
-    wrap((req, res) => res.json(Policies.setPolicyStatus(db, req.params.ref, "suspended", req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Policies.setPolicyStatusAsync(db, req.params.ref, "suspended", req.actor, req.ip)))
   );
 
   // ── Configuration & dimensions ────────────────────────────────────────────
   router.get(
     "/configuration",
-    auth,
+    guard,
     canConfiguration("read"),
-    wrap((req, res) => res.json(Configuration.listConfig(db, tenantOf(req))))
+    wrap(async (req, res) => res.json(await Configuration.listConfigAsync(db, tenantOf(req))))
   );
   router.put(
     "/configuration",
-    auth,
+    guard,
     canConfiguration("update"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
       const results = {};
       for (const [key, value] of Object.entries(body)) {
-        results[key] = Configuration.setConfig(db, tenantOf(req), key, value, req.actor, req.ip);
+        results[key] = await Configuration.setConfigAsync(db, tenantOf(req), key, value, req.actor, req.ip);
       }
-      res.json({ updated: results, configuration: Configuration.listConfig(db, tenantOf(req)) });
+      res.json({ updated: results, configuration: await Configuration.listConfigAsync(db, tenantOf(req)) });
     })
   );
 
   router.get(
     "/dimensions",
-    auth,
+    guard,
     canDimensions("read"),
-    wrap((req, res) => res.json({ items: Dimensions.listDimensions(db, tenantOf(req), { status: req.query.status }) }))
+    wrap(async (req, res) => res.json({ items: await Dimensions.listDimensionsAsync(db, tenantOf(req), { status: req.query.status }) }))
   );
   router.put(
     "/dimensions/:code",
-    auth,
+    guard,
     canDimensions("update"),
-    wrap((req, res) => res.json(Dimensions.upsertDimension(db, tenantOf(req), req.params.code, req.body || {}, req.actor, req.ip)))
+    wrap(async (req, res) => res.json(await Dimensions.upsertDimensionAsync(db, tenantOf(req), req.params.code, req.body || {}, req.actor, req.ip)))
   );
 
   // ── Metrics, health and background runs ───────────────────────────────────
   router.get(
     "/metrics",
-    auth,
+    guard,
     canMetrics("read"),
-    wrap((req, res) => res.json(Metrics.metricsSnapshot(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Metrics.metricsSnapshotAsync(db, { tenantId: tenantOf(req) })))
   );
   router.get(
     "/health",
-    auth,
+    guard,
     canMetrics("read"),
-    wrap((req, res) => res.json(Metrics.healthCheck(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Metrics.healthCheckAsync(db, { tenantId: tenantOf(req) })))
   );
   router.get(
     "/jobs",
-    auth,
+    guard,
     canJobs("read"),
-    wrap((req, res) => res.json({ items: Jobs.listQualityJobs(db, { tenantId: tenantOf(req), status: req.query.status, limit: req.query.limit }) }))
+    wrap(async (req, res) => res.json({ items: await Jobs.listQualityJobsAsync(db, { tenantId: tenantOf(req), status: req.query.status, limit: req.query.limit }) }))
   );
   router.post(
     "/jobs/evaluate",
-    auth,
+    guard,
     canJobs("execute"),
-    wrap((req, res) =>
+    wrap(async (req, res) =>
       res.status(202).json(
-        Jobs.submitBatchEvaluation(db, {
+        await Jobs.submitBatchEvaluationAsync(db, {
           tenantId: tenantOf(req),
           objectTypes: req.body?.object_types || [],
           objectIds: req.body?.object_ids || null,
@@ -321,11 +334,11 @@ export function createDataGovernanceRouter({ express, db, auth, can, wrap }) {
   );
   router.post(
     "/jobs/duplicates",
-    auth,
+    guard,
     canJobs("execute"),
-    wrap((req, res) =>
+    wrap(async (req, res) =>
       res.status(202).json(
-        Jobs.submitDuplicateScan(db, { tenantId: tenantOf(req), objectType: req.body?.object_type, actor: req.actor, ip: req.ip })
+        await Jobs.submitDuplicateScanAsync(db, { tenantId: tenantOf(req), objectType: req.body?.object_type, actor: req.actor, ip: req.ip })
       )
     )
   );

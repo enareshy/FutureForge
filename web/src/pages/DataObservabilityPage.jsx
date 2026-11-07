@@ -252,10 +252,6 @@ export default function DataObservabilityPage() {
           <h1>Data observability</h1>
           <p className="subtle">Platform-wide telemetry from every capability: volume, freshness, quality, throughput, failures, alerts, incidents and SLOs. This workspace consumes telemetry; it is never a source of truth.</p>
         </div>
-        <div className="stack-row">
-          {meta?.source_module ? <Badge tone="ok">{meta.source_module}</Badge> : null}
-          <Badge tone={HEALTH_TONES[overall] ?? toneFor(overall)}>{overall}</Badge>
-        </div>
       </div>
 
       <div className="tabs">

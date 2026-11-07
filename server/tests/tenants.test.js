@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as orgs from "../services/orgs.js";
 import * as tenants from "../services/tenants.js";
@@ -10,7 +10,7 @@ import { HttpError } from "../validation.js";
 import { queryOne } from "../db.js";
 
 function db() {
-  const database = openDatabase(":memory:");
+  const database = openTestDatabase();
   migrate(database);
   seedDatabase(database);
   return database;

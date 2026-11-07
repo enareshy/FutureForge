@@ -4,12 +4,12 @@
 // resolves the definition and tenant configuration, runs the traversal engine
 // with consistent bounds and security, records query history, publishes domain
 // events and shapes a public graph payload.
-import { traverseThread } from "./traversal.js";
-import { resolveDefinition } from "./definitions.js";
-import { getConfig, getNumericConfig, listConfig } from "./configuration.js";
-import { createNodeAuthorizer } from "./security.js";
-import { recordQuery } from "./history.js";
-import { publishThreadEvent, threadEventCode } from "./events.js";
+import { traverseThread, traverseThreadAsync } from "./traversal.js";
+import { resolveDefinition, resolveDefinitionAsync } from "./definitions.js";
+import { getConfig, getNumericConfig, listConfig, getConfigAsync, getNumericConfigAsync, listConfigAsync } from "./configuration.js";
+import { createNodeAuthorizer, createNodeAuthorizerAsync } from "./security.js";
+import { recordQuery, recordQueryAsync } from "./history.js";
+import { publishThreadEvent, threadEventCode, publishThreadEventAsync } from "./events.js";
 
 function effectiveMaxDepth(requested, definition, config) {
   const bound = Number(config.max_traversal_depth) || 25;
@@ -129,3 +129,85 @@ export function publicGraph(result, definition = null) {
 }
 
 export { getConfig, getNumericConfig, resolveDefinition };
+
+// Async twin of `executeTraversal`. Resolves the definition, configuration and
+// per-query authorizer through their async counterparts, runs the async
+// traversal and records query history / publishes the domain event best-effort.
+export async function executeTraversalAsync(db, tenantId, options = {}, actor = null, { action = "TRAVERSAL", record = true, publish = true, includeLineage = false } = {}) {
+  const tenant = Number(tenantId);
+  const definition = options.definition || (await resolveDefinitionAsync(db, tenant, { code: options.definitionCode || options.definition_code, id: options.definitionId ?? options.definition_id }));
+  const config = await listConfigAsync(db, tenant);
+  const authorizer = options.authorizer || (await createNodeAuthorizerAsync(db, actor, { tenantId: tenant, organizationId: options.organizationId, ip: options.ip, action: "read" }));
+  const relationshipTypes = options.relationshipTypes || (options.enforceDefinition === true ? definition.relationships?.map((entry) => entry.relationship_type).filter(Boolean) : null);
+
+  const result = await traverseThreadAsync(
+    db,
+    tenant,
+    {
+      root: options.root,
+      direction: options.direction || definition.direction || "DOWNSTREAM",
+      maxDepth: effectiveMaxDepth(options.maxDepth ?? options.max_depth, definition, config),
+      maxNodes: effectiveMaxNodes(options.maxNodes ?? options.max_nodes, config),
+      configMaxDepth: Number(config.max_traversal_depth),
+      configMaxNodes: Number(config.max_traversal_nodes),
+      configTimeout: Number(config.query_timeout_ms),
+      includeInactive: options.includeInactive ?? config.include_inactive_nodes,
+      includeDomains: options.includeDomains || null,
+      excludeDomains: options.excludeDomains || null,
+      relationshipTypes: relationshipTypes || null,
+      allowCrossDomain: options.allowCrossDomain !== undefined ? options.allowCrossDomain : config.allow_cross_domain,
+      asOf: options.asOf || options.as_of || "",
+      serialNumber: options.serialNumber || options.serial_number || "",
+      lot: options.lot || "",
+      change: options.change || "",
+      variant: options.variant || "",
+      configuration: options.configuration || "",
+      revision: options.revision || options.revisionRule || "",
+      organizationId: options.organizationId ?? null,
+      ip: options.ip ?? null,
+      definition,
+      authorizer,
+    },
+    actor
+  );
+
+  if (record) {
+    try {
+      await recordQueryAsync(db, {
+        tenantId: tenant,
+        action,
+        request: { root: options.root, direction: result.direction, definition_code: definition.code, max_depth: result.max_depth },
+        summary: { node_count: result.node_count, edge_count: result.edge_count, truncated: result.truncated, domains: result.domains },
+        durationMs: result.duration_ms,
+        nodeCount: result.node_count,
+        edgeCount: result.edge_count,
+        truncated: result.truncated,
+        actor,
+      });
+    } catch {
+      // Query history must never fail a read.
+    }
+  }
+  if (publish) {
+    try {
+      const eventKey = action === "IMPACT" ? "IMPACT_RUN" : action === "PATH" ? "PATH_RUN" : "TRAVERSAL_RUN";
+      await publishThreadEventAsync(
+        db,
+        {
+          eventType: threadEventCode(eventKey),
+          objectType: "thread_query",
+          objectId: null,
+          tenantId: tenant,
+          payload: { action, root: result.root?.node_ref || null, node_count: result.node_count, edge_count: result.edge_count, truncated: result.truncated },
+        },
+        actor
+      );
+    } catch {
+      // Events are best-effort.
+    }
+  }
+
+  const payload = { result, definition, config, authorizer, tenant };
+  if (includeLineage) payload.lineage = [];
+  return payload;
+}

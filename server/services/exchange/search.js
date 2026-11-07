@@ -5,9 +5,12 @@
 // history are discoverable with the same facets, authorization and saved
 // searches as every other module.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerObjectType, tenantIds } from "../search/registry.js";
+import { registerObjectTypeAsync, tenantIdsAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { getObjectType, registerObjectType as registerSecurityObjectType } from "../security/repository.js";
+import { getObjectTypeAsync, registerObjectTypeAsync as registerSecurityObjectTypeAsync } from "../security/repository.js";
 import { EXCHANGE_RESOURCES, SEARCH_OBJECT_TYPES } from "./constants.js";
 
 function defFor(code) {
@@ -93,6 +96,31 @@ export function registerExchangeSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM exchange_formats WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM exchange_formats WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: null,
+        objectType: "exchange_format",
+        objectId: String(row.id),
+        code: row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.standard_name, row.category, row.status]),
+        status: row.status,
+        ownerId: row.created_by ?? null,
+        classification: "internal",
+        tags: [row.category, row.status].filter(Boolean),
+        attributes: { category: row.category, direction: row.direction },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM exchange_formats WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   registerSourceResolver("exchange_definition", {
@@ -122,6 +150,31 @@ export function registerExchangeSources() {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM exchange_definitions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM exchange_definitions WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "exchange_definition",
+        objectId: String(row.id),
+        code: row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.format_code, row.direction, row.status]),
+        status: row.status,
+        ownerId: row.created_by ?? null,
+        classification: "internal",
+        tags: [row.format_code, row.direction, row.status].filter(Boolean),
+        attributes: { format_code: row.format_code, direction: row.direction, organization_id: row.organization_id ?? null },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM exchange_definitions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
   });
 
@@ -153,6 +206,31 @@ export function registerExchangeSources() {
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, "SELECT id, tenant_id FROM exchange_transactions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM exchange_transactions WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "exchange_transaction",
+        objectId: String(row.id),
+        code: row.transaction_ref,
+        title: row.transaction_ref,
+        subtitle: `${row.direction} ${row.operation}`,
+        summary: row.status,
+        searchableText: joinText([row.transaction_ref, row.definition_code, row.format_code, row.direction, row.operation, row.status]),
+        status: row.status,
+        ownerId: row.created_by ?? null,
+        classification: "internal",
+        tags: [row.direction, row.operation, row.status].filter(Boolean),
+        attributes: { direction: row.direction, operation: row.operation, definition_code: row.definition_code },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, "SELECT id, tenant_id FROM exchange_transactions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?", [Number(tenantId), Number(afterId), Number(limit)]);
+    },
   });
 
   return SEARCH_REGISTRATIONS.map((entry) => entry.code);
@@ -169,6 +247,23 @@ export function ensureExchangeSearch(db) {
       }
       if (!getObjectType(db, Number(tenantId), def.code)) {
         registerSecurityObjectType(db, { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource }, null, tenantId);
+      }
+    }
+  }
+  return { created };
+}
+
+export async function ensureExchangeSearchAsync(db) {
+  let created = 0;
+  for (const tenantId of await tenantIdsAsync(db)) {
+    for (const def of SEARCH_REGISTRATIONS) {
+      const existing = await queryOneAsync(db, "SELECT id FROM search_object_types WHERE code = ? AND tenant_id = ?", [def.code, Number(tenantId)]);
+      if (!existing) {
+        await registerObjectTypeAsync(db, def, null, tenantId, null);
+        created += 1;
+      }
+      if (!(await getObjectTypeAsync(db, Number(tenantId), def.code))) {
+        await registerSecurityObjectTypeAsync(db, { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource }, null, tenantId);
       }
     }
   }

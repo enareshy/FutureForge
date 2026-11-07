@@ -41,31 +41,52 @@ export {
 
 export {
   ensureDefaultQueues,
+  ensureDefaultQueuesAsync,
   listQueues,
+  listQueuesAsync,
   getQueue,
+  getQueueAsync,
   getQueueRow,
+  getQueueRowAsync,
   createQueue,
+  createQueueAsync,
   updateQueue,
+  updateQueueAsync,
   setQueueEnabled,
+  setQueueEnabledAsync,
   setQueuePaused,
+  setQueuePausedAsync,
   queueHealth,
+  queueHealthAsync,
   queueLoad,
+  queueLoadAsync,
   orderQueuesForClaim,
+  orderQueuesForClaimAsync,
   resolveQueuePolicy,
+  resolveQueuePolicyAsync,
   publicQueue,
 } from "./job-execution/queues.js";
 
 export {
   publicSchedule,
   listSchedules,
+  listSchedulesAsync,
   getSchedule,
+  getScheduleAsync,
   getScheduleRow,
+  getScheduleRowAsync,
   createSchedule,
+  createScheduleAsync,
   updateSchedule,
+  updateScheduleAsync,
   setScheduleStatus,
+  setScheduleStatusAsync,
   setScheduleEnabled,
+  setScheduleEnabledAsync,
   runScheduleNow,
+  runScheduleNowAsync,
   listScheduleRuns,
+  listScheduleRunsAsync,
   sweepSchedules,
   reconcileScheduleRuns,
 } from "./job-execution/schedules.js";
@@ -74,8 +95,13 @@ export {
   publicDeadLetter,
   getDeadLetterRow,
   listDeadLetters,
+  listDeadLettersAsync,
+  recordDeadLetter,
+  recordDeadLetterAsync,
   requeueDeadLetter,
+  requeueDeadLetterAsync,
   discardDeadLetter,
+  discardDeadLetterAsync,
 } from "./job-execution/deadletter.js";
 
 export {
@@ -83,7 +109,11 @@ export {
   generateWorkerId,
   registerWorker,
   heartbeatWorker,
+  heartbeatWorkerAsync,
+  recordWorkerOutcome,
+  recordWorkerOutcomeAsync,
   listWorkers,
+  listWorkersAsync,
   reapStaleWorkers,
 } from "./job-execution/worker-registry.js";
 
@@ -100,33 +130,46 @@ export {
 export {
   DEFAULT_LEASE_SECONDS,
   claimJob,
+  claimJobAsync,
   claimSpecificJob,
+  claimSpecificJobAsync,
   executeClaimedJob,
+  executeClaimedJobAsync,
   processOnce,
+  processOnceAsync,
   runJobNow,
+  runJobNowAsync,
   promoteReadyJobs,
+  promoteReadyJobsAsync,
   recoverStaleJobs,
+  recoverStaleJobsAsync,
   reapTimedOutJobs,
+  reapTimedOutJobsAsync,
   requestCancellation,
+  requestCancellationAsync,
   requestManualRetry,
+  requestManualRetryAsync,
   engineMaintenance,
+  engineMaintenanceAsync,
   engineStatus,
+  engineStatusAsync,
   tick,
+  tickAsync,
   resolveEffectiveTimeout,
 } from "./job-execution/engine.js";
 
 export { createWorker, EngineWorker } from "./job-execution/worker.js";
 
-export { executionMetrics, jobStatusCounts } from "./job-execution/metrics.js";
+export { executionMetrics, executionMetricsAsync, jobStatusCounts, jobStatusCountsAsync } from "./job-execution/metrics.js";
 
 export { effectiveMaxRetries, computeRetryDelay, decideRetry } from "./job-execution/retry.js";
 
 export { computeNextRun, nextRunAt, describeSchedule } from "./job-execution/recurrence.js";
 
-export { acquireLock, releaseLock, renewLock, getLock, withLock, purgeExpiredLocks } from "./job-execution/locks.js";
+export { acquireLock, releaseLock, renewLock, getLock, getLockAsync, withLock, purgeExpiredLocks } from "./job-execution/locks.js";
 
 export { requestSignal, clearSignal, getSignal, isCancelled } from "./job-execution/signals.js";
 
 export { registerDemoHandlers } from "./job-execution/demo-handlers.js";
 
-export { recordEngineAudit, listEngineAudit } from "./job-execution/audit.js";
+export { recordEngineAudit, recordEngineAuditAsync, listEngineAudit, listEngineAuditAsync } from "./job-execution/audit.js";

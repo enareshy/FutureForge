@@ -1,0 +1,31 @@
+# Secrets and local state — never commit.
+.env
+.env.*
+!.env.example
+# Local Prometheus scrape token mounted into the compose stack.
+infrastructure/monitoring/prometheus/local-metrics-token
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# Local persistence / logs
+.volumes/
+data/
+*.log
+
+# OS
+.DS_Store

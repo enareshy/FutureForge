@@ -1,8 +1,9 @@
 // Search provider abstraction. The relational provider is the default and
-// compiles declarative queries into parameterised SQLite. Alternative engines
+// compiles declarative queries into parameterised PostgreSQL. Alternative engines
 // (for example a dedicated index server) can be registered under a new name
 // without changing the search service or its callers.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
 import {
   FILTERABLE_COLUMNS,
@@ -61,7 +62,7 @@ function columnExpression(field) {
     if (!/^[A-Za-z0-9_. -]+$/.test(name)) {
       throw new HttpError(400, `Invalid attribute filter "${field}"`);
     }
-    return `json_extract(i.attributes_json, '$."${name.replace(/"/g, "")}"')`;
+    return `(i.attributes_json::jsonb ->> '${name}')`;
   }
   if (!FILTERABLE_COLUMNS.includes(field)) {
     throw new HttpError(400, `Field "${field}" is not filterable`);
@@ -111,19 +112,19 @@ function compileFilter(filter, state) {
     case "lte":
       return push(`${expr} <= ?`, [coerce(value)]);
     case "contains":
-      return push(`lower(${expr}) LIKE ?`, [`%${normalizeText(value)}%`]);
+      return push(`lower(${expr}) ILIKE ?`, [`%${normalizeText(value)}%`]);
     case "not_contains":
-      return push(`(${expr} IS NULL OR lower(${expr}) NOT LIKE ?)`, [`%${normalizeText(value)}%`]);
+      return push(`(${expr} IS NULL OR lower(${expr}) NOT ILIKE ?)`, [`%${normalizeText(value)}%`]);
     case "starts_with":
-      return push(`lower(${expr}) LIKE ?`, [`${normalizeText(value)}%`]);
+      return push(`lower(${expr}) ILIKE ?`, [`${normalizeText(value)}%`]);
     case "ends_with":
-      return push(`lower(${expr}) LIKE ?`, [`%${normalizeText(value)}`]);
+      return push(`lower(${expr}) ILIKE ?`, [`%${normalizeText(value)}`]);
     case "wildcard": {
       const pattern = String(value ?? "")
         .replace(/[%_\\]/g, (ch) => `\\${ch}`)
         .replace(/\*/g, "%")
         .replace(/\?/g, "_");
-      return push(`lower(${expr}) LIKE ? ESCAPE '\\'`, [normalizeText(pattern)]);
+      return push(`lower(${expr}) ILIKE ? ESCAPE '\\'`, [normalizeText(pattern)]);
     }
     case "in": {
       const list = Array.isArray(value) ? value : [value];
@@ -178,7 +179,7 @@ function compileTags(tags, state) {
   const expressions = [];
   for (const tag of tags) {
     state.params.push(`%"${normalizeText(tag)}"%`);
-    expressions.push("lower(i.tags_json) LIKE ?");
+    expressions.push("lower(i.tags_json) ILIKE ?");
   }
   return expressions.length ? `(${expressions.join(" AND ")})` : null;
 }
@@ -274,7 +275,7 @@ export function compileWhere(query, { allowedTypes, tenantId, scope, organizatio
   const terms = tokenize(query.text);
   for (const term of terms) {
     state.params.push(`%${term}%`);
-    clauses.push("i.searchable_text LIKE ?");
+    clauses.push("i.searchable_text ILIKE ?");
   }
 
   for (const status of query.statuses || []) {
@@ -454,13 +455,56 @@ export const relationalProvider = {
     const params = [...compiled.params];
     let where = compiled.where;
     if (term) {
-      where += " AND lower(i.title) LIKE ?";
+      where += " AND lower(i.title) ILIKE ?";
       params.push(`%${term}%`);
     }
     const limit = Math.max(1, Math.min(Number(context.limit) || 10, 50));
     const titles = queryAll(
       db,
-      `SELECT i.title AS value, i.object_type, COUNT(*) AS count
+      `SELECT MIN(i.title) AS value, MIN(i.object_type) AS object_type, COUNT(*) AS count
+       FROM search_index i WHERE ${where}
+       GROUP BY lower(i.title) ORDER BY count DESC, lower(i.title) ASC LIMIT ?`,
+      [...params, limit]
+    );
+    return titles;
+  },
+  async searchAsync(db, query, context = {}) {
+    const compiled = compileWhere(query, context);
+    const countRow = await queryOneAsync(
+      db,
+      `SELECT COUNT(*) AS total FROM search_index i WHERE ${compiled.where}`,
+      compiled.params
+    );
+    const orderBy = compileSort(query);
+    const limit = Math.max(1, Math.min(Number(context.maxResults) || 500, 5000));
+    const rows = await queryAllAsync(
+      db,
+      `SELECT i.* FROM search_index i WHERE ${compiled.where} ORDER BY ${orderBy} LIMIT ?`,
+      [...compiled.params, limit]
+    );
+    return { total: countRow?.total || 0, rows, compiled };
+  },
+  async facetsAsync(db, query, facetFields, context = {}) {
+    const compiled = compileWhere(query, context);
+    const results = [];
+    for (const field of facetFields) {
+      results.push(await facetForFieldAsync(db, field, compiled));
+    }
+    return results;
+  },
+  async suggestAsync(db, query, context = {}) {
+    const compiled = compileWhere(query, context);
+    const term = normalizeText(query.text);
+    const params = [...compiled.params];
+    let where = compiled.where;
+    if (term) {
+      where += " AND lower(i.title) ILIKE ?";
+      params.push(`%${term}%`);
+    }
+    const limit = Math.max(1, Math.min(Number(context.limit) || 10, 50));
+    const titles = await queryAllAsync(
+      db,
+      `SELECT MIN(i.title) AS value, MIN(i.object_type) AS object_type, COUNT(*) AS count
        FROM search_index i WHERE ${where}
        GROUP BY lower(i.title) ORDER BY count DESC, lower(i.title) ASC LIMIT ?`,
       [...params, limit]
@@ -517,9 +561,6 @@ export const relationalProvider = {
   },
 };
 
-// The relational provider is also exposed under the `sqlite` name used by the
-// spec's initial implementation; both names resolve to the same engine.
-registerSearchProvider("sqlite", relationalProvider);
 registerSearchProvider(DEFAULT_PROVIDER, relationalProvider);
 
 const ATTRIBUTE_FACETS = new Set(["tags"]);
@@ -565,5 +606,46 @@ function facetForField(db, field, compiled) {
   };
 }
 
-export { compileSort, columnExpression };
+async function facetForFieldAsync(db, field, compiled) {
+  if (ATTRIBUTE_FACETS.has(field)) {
+    const rows = await queryAllAsync(
+      db,
+      `SELECT i.tags_json FROM search_index i WHERE ${compiled.where} LIMIT 2000`,
+      compiled.params
+    );
+    const counts = new Map();
+    for (const row of rows) {
+      let tags = [];
+      try {
+        tags = JSON.parse(row.tags_json || "[]");
+      } catch {
+        tags = [];
+      }
+      for (const tag of tags) counts.set(String(tag), (counts.get(String(tag)) || 0) + 1);
+    }
+    return {
+      field,
+      values: [...counts.entries()]
+        .map(([value, count]) => ({ value, count }))
+        .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value))
+        .slice(0, 50),
+    };
+  }
+  const expression = columnExpression(field);
+  const rows = await queryAllAsync(
+    db,
+    `SELECT ${expression} AS value, COUNT(*) AS count
+     FROM search_index i WHERE ${compiled.where}
+     GROUP BY value ORDER BY count DESC LIMIT 50`,
+    compiled.params
+  );
+  return {
+    field,
+    values: rows
+      .filter((row) => row.value !== null && row.value !== undefined && row.value !== "")
+      .map((row) => ({ value: row.value, count: row.count })),
+  };
+}
+
+export { compileSort, columnExpression, facetForFieldAsync };
 

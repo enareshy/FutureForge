@@ -1,5 +1,6 @@
 // Row → DTO mapping and shared lookups for the Search & Discovery Framework.
 import { queryOne } from "../../db.js";
+import { queryOneAsync } from "../../db-async.js";
 
 export function safeParse(json, fallback = {}) {
   if (json === null || json === undefined || json === "") return fallback;
@@ -257,4 +258,56 @@ export function exportRow(db, reference, tenantId) {
 
 export function configRow(db, tenantId) {
   return queryOne(db, "SELECT * FROM search_configuration WHERE tenant_id = ?", [Number(tenantId)]);
+}
+
+// ── Async twins (row lookups) ───────────────────────────────────────────────
+
+export function objectTypeRowAsync(db, code, tenantId) {
+  if (!code) return Promise.resolve(null);
+  return queryOneAsync(db, "SELECT * FROM search_object_types WHERE tenant_id = ? AND code = ?", [
+    Number(tenantId),
+    String(code),
+  ]);
+}
+
+export function indexRowAsync(db, tenantId, objectType, objectId) {
+  return queryOneAsync(
+    db,
+    "SELECT * FROM search_index WHERE tenant_id = ? AND object_type = ? AND object_id = ?",
+    [Number(tenantId), String(objectType), String(objectId)]
+  );
+}
+
+export function savedSearchRowAsync(db, reference, tenantId) {
+  if (reference === undefined || reference === null || reference === "") return Promise.resolve(null);
+  const text = String(reference);
+  if (/^\d+$/.test(text)) {
+    return queryOneAsync(db, "SELECT * FROM search_saved_searches WHERE id = ? AND tenant_id = ?", [
+      Number(text),
+      Number(tenantId),
+    ]);
+  }
+  return queryOneAsync(db, "SELECT * FROM search_saved_searches WHERE uuid = ? AND tenant_id = ?", [
+    text,
+    Number(tenantId),
+  ]);
+}
+
+export function exportRowAsync(db, reference, tenantId) {
+  if (reference === undefined || reference === null || reference === "") return Promise.resolve(null);
+  const text = String(reference);
+  if (/^\d+$/.test(text)) {
+    return queryOneAsync(db, "SELECT * FROM search_exports WHERE id = ? AND tenant_id = ?", [
+      Number(text),
+      Number(tenantId),
+    ]);
+  }
+  return queryOneAsync(db, "SELECT * FROM search_exports WHERE uuid = ? AND tenant_id = ?", [
+    text,
+    Number(tenantId),
+  ]);
+}
+
+export function configRowAsync(db, tenantId) {
+  return queryOneAsync(db, "SELECT * FROM search_configuration WHERE tenant_id = ?", [Number(tenantId)]);
 }

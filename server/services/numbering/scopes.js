@@ -6,6 +6,7 @@
 // date, status, default flag and priority. Ties are refused as ambiguous.
 import { queryAll, queryOne } from "../../db.js";
 import { nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { ambiguousScheme, invalidObjectType, noApplicableScheme, schemeInactive, schemeNotFound } from "./errors.js";
 
 export function toSqlDate(value) {
@@ -66,6 +67,14 @@ export function getSchemeRow(db, ref) {
   return queryOne(db, "SELECT * FROM numbering_schemes WHERE code = ?", [String(ref)]);
 }
 
+export async function getSchemeRowAsync(db, ref) {
+  if (ref === null || ref === undefined) return null;
+  if (/^\d+$/.test(String(ref))) {
+    return queryOneAsync(db, "SELECT * FROM numbering_schemes WHERE id = ?", [Number(ref)]);
+  }
+  return queryOneAsync(db, "SELECT * FROM numbering_schemes WHERE code = ?", [String(ref)]);
+}
+
 // Deterministic scheme resolution. `request.requireActive` defaults to true.
 export function resolveApplicableScheme(db, request = {}) {
   const objectTypeCode = String(request.objectTypeCode || "").toUpperCase();
@@ -95,6 +104,41 @@ export function resolveApplicableScheme(db, request = {}) {
        AND (tenant_id IS NULL OR tenant_id = ?)`,
     [objectTypeCode, request.tenantId ?? null]
   );
+  return chooseApplicableScheme(rows, request, objectTypeCode);
+}
+
+export async function resolveApplicableSchemeAsync(db, request = {}) {
+  const objectTypeCode = String(request.objectTypeCode || "").toUpperCase();
+  if (!objectTypeCode) throw invalidObjectType(request.objectTypeCode);
+  const objectType = await queryOneAsync(db, "SELECT * FROM numbering_object_types WHERE code = ?", [objectTypeCode]);
+  if (!objectType || objectType.status !== "active") throw invalidObjectType(objectTypeCode);
+
+  if (request.schemeCode || request.schemeId) {
+    const scheme = request.schemeCode
+      ? await queryOneAsync(db, "SELECT * FROM numbering_schemes WHERE code = ?", [String(request.schemeCode)])
+      : await getSchemeRowAsync(db, request.schemeId);
+    if (!scheme) throw schemeNotFound(request.schemeCode || request.schemeId);
+    if (scheme.status !== "active") throw schemeInactive(scheme.code);
+    if (scheme.object_type_code !== objectTypeCode) {
+      throw noApplicableScheme({ reason: "object_type_mismatch", scheme: scheme.code, objectType: objectTypeCode });
+    }
+    if (!isEffective(scheme, request.now)) throw schemeInactive(`${scheme.code} (outside effective window)`);
+    const score = scopeScore(scheme, request);
+    if (score === null) throw noApplicableScheme({ reason: "scope_mismatch", scheme: scheme.code });
+    return scheme;
+  }
+
+  const rows = await queryAllAsync(
+    db,
+    `SELECT * FROM numbering_schemes
+     WHERE object_type_code = ? AND status = 'active'
+       AND (tenant_id IS NULL OR tenant_id = ?)`,
+    [objectTypeCode, request.tenantId ?? null]
+  );
+  return chooseApplicableScheme(rows, request, objectTypeCode);
+}
+
+function chooseApplicableScheme(rows, request, objectTypeCode) {
   const candidates = [];
   for (const scheme of rows) {
     if (!isEffective(scheme, request.now)) continue;
@@ -210,6 +254,10 @@ export function fiscalYearOf(at, fiscalStartMonth = 4) {
 
 export function listScopes(db) {
   return queryAll(db, "SELECT * FROM numbering_scopes ORDER BY code");
+}
+
+export async function listScopesAsync(db) {
+  return queryAllAsync(db, "SELECT * FROM numbering_scopes ORDER BY code");
 }
 
 export function currentTimestamp() {

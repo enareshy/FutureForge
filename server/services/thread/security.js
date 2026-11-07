@@ -4,10 +4,10 @@
 // listed object is authorized through the centralized Data Security model with a
 // platform-IAM fallback. Decisions are memoized per object type for the life of
 // one query so a large traversal does not repeat the same check.
-import { buildSecurityContext } from "../security/context.js";
-import { authorizeRequest } from "../security/index.js";
-import { getObjectType } from "../security/repository.js";
-import { checkPermission } from "../authorization.js";
+import { buildSecurityContext, buildSecurityContextAsync } from "../security/context.js";
+import { authorizeRequest, authorizeRequestAsync } from "../security/index.js";
+import { getObjectType, getObjectTypeAsync } from "../security/repository.js";
+import { checkPermission, checkPermissionAsync } from "../authorization.js";
 import { securityBlocked } from "./errors.js";
 
 const DEFAULT_OBJECT_RESOURCE = "iam.objects.instances";
@@ -78,6 +78,80 @@ function fallbackAllows(db, actor, { objectType, action, tenantId, organizationI
   const iamAction = IAM_ACTIONS[String(action).toLowerCase()] || "read";
   try {
     return Boolean(checkPermission(db, { id: actor.id }, resourceCode, iamAction, { organizationId: organizationId || 0 })?.allowed);
+  } catch {
+    return false;
+  }
+}
+
+export async function buildThreadContextAsync(db, actor, { tenantId, organizationId = null, ip = null, correlationId = null } = {}) {
+  return buildSecurityContextAsync(db, actor, { tenantId, organizationId, ip, correlationId });
+}
+
+export async function authorizeThreadActionAsync(db, actor, { resource, action, tenantId, organizationId = null }) {
+  if (!actor?.id) return { allowed: false, reason: "NO_ACTOR" };
+  try {
+    return await checkPermissionAsync(db, { id: actor.id }, resource, action, { organizationId: organizationId || 0 });
+  } catch (error) {
+    return { allowed: false, reason: "ERROR", message: error.message };
+  }
+}
+
+export async function assertThreadActionAsync(db, actor, options) {
+  const decision = await authorizeThreadActionAsync(db, actor, options);
+  if (!decision.allowed) throw securityBlocked({ action: options.action, resource: options.resource, reason: decision.reason });
+  return decision;
+}
+
+// Async twin of `createNodeAuthorizer`. The per-query decision cache is shared,
+// but lookups go through the async Data Security engine so a large traversal
+// does not block the event loop.
+export async function createNodeAuthorizerAsync(db, actor, { tenantId, organizationId = null, ip = null, action = "read", context = null } = {}) {
+  const cache = new Map();
+  const securityContext = context || (await buildThreadContextAsync(db, actor, { tenantId, organizationId, ip }));
+
+  const allowsTypeAsync = async (objectType, nodeOrgId = null) => {
+    const key = `${String(objectType).toLowerCase()}|${nodeOrgId ?? organizationId ?? 0}`;
+    if (cache.has(key)) return cache.get(key);
+    let allowed = false;
+    try {
+      const decision = await authorizeRequestAsync(db, actor, {
+        action,
+        resource: { type: objectType, id: null, organization_id: nodeOrgId ?? organizationId, classification: "" },
+        options: { tenantId, organizationId: nodeOrgId ?? organizationId, ip, context: securityContext, audit: false },
+      });
+      allowed = Boolean(decision.allowed);
+      if (!allowed) allowed = await fallbackAllowsAsync(db, actor, { objectType, action, tenantId, organizationId: nodeOrgId ?? organizationId });
+    } catch {
+      allowed = await fallbackAllowsAsync(db, actor, { objectType, action, tenantId, organizationId: nodeOrgId ?? organizationId });
+    }
+    cache.set(key, allowed);
+    return allowed;
+  };
+
+  return {
+    allowsTypeAsync,
+    async allowsNodeAsync(node) {
+      if (!node) return false;
+      return allowsTypeAsync(node.object_type, node.organization_id ?? null);
+    },
+    async filterAsync(nodes) {
+      const output = [];
+      for (const node of nodes || []) {
+        if (await this.allowsNodeAsync(node)) output.push(node);
+      }
+      return output;
+    },
+    decisions: cache,
+  };
+}
+
+async function fallbackAllowsAsync(db, actor, { objectType, action, tenantId, organizationId }) {
+  if (!actor?.id) return false;
+  const registration = await getObjectTypeAsync(db, Number(tenantId), objectType);
+  const resourceCode = registration?.permission_resource || DEFAULT_OBJECT_RESOURCE;
+  const iamAction = IAM_ACTIONS[String(action).toLowerCase()] || "read";
+  try {
+    return Boolean((await checkPermissionAsync(db, { id: actor.id }, resourceCode, iamAction, { organizationId: organizationId || 0 }))?.allowed);
   } catch {
     return false;
   }

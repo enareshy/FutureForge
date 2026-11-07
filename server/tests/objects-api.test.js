@@ -1,7 +1,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -69,7 +69,7 @@ describe("object framework REST APIs", () => {
   let createdId;
 
   before(async () => {
-    const database = openDatabase(":memory:");
+    const database = openTestDatabase();
     migrate(database);
     seedDatabase(database);
     const started = await listen(createApp(database));
@@ -109,6 +109,11 @@ describe("object framework REST APIs", () => {
     const summary = await request(port, "GET", "/api/objects/summary", { token });
     assert.equal(summary.status, 200);
     assert.ok(summary.body.total >= 7);
+
+    const detail = await request(port, "GET", `/api/objects/${list.body.items[0].id}`, { token });
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.id, list.body.items[0].id);
+    assert.ok(detail.body.type && detail.body.type.code);
   });
 
   test("creates an object and rejects invalid payloads", async () => {

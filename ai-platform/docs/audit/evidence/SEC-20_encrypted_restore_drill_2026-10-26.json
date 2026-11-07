@@ -1,0 +1,169 @@
+{
+  "backup": {
+    "checksum": "c3e675367a26ce7f69e27d9ca1eadfa1ed8a4b1ddc47023ffe00cb3e77ec6623",
+    "created_at": "2026-10-26T10:31:17.480608Z",
+    "encrypted": true,
+    "run_id": "20261026T103104Z-3e8513",
+    "size_bytes": 75688
+  },
+  "checks": [
+    {
+      "detail": "manifest,checksums,pg_restore_list,object_archive",
+      "name": "artifact_integrity",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "schema_present",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "migration_history",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "critical_row_counts",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "tenant_counts",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "document_object_key_count",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "document_object_keys",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "tenant_document_tenant_mismatch",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "tenant_embedding_tenant_mismatch",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "tenant_object_key_tenant_mismatch",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "tenant_event_delivery_duplicates",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "event_idempotency_constraint",
+      "status": "pass"
+    },
+    {
+      "detail": "embeddings=3",
+      "name": "vector_search",
+      "status": "pass"
+    },
+    {
+      "detail": "{\"checked\": 2, \"mismatched\": 0, \"missing\": 0}",
+      "name": "document_object_links",
+      "status": "pass"
+    },
+    {
+      "detail": "16.211s",
+      "name": "restore_elapsed",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "api_readiness",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "api_liveness",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "worker_event_consumer",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "worker_indexer",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "worker_reconciler",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "name": "worker_agent",
+      "status": "pass"
+    }
+  ],
+  "cleanup": {
+    "reason": "destructive cleanup requires an operator",
+    "status": "deferred"
+  },
+  "components": [
+    {
+      "action": "restored",
+      "detail": "ai_restore_drill_20261026_103451",
+      "name": "postgresql"
+    },
+    {
+      "action": "restored",
+      "detail": "ai-knowledge-restore-drill-20261026103451",
+      "name": "object_storage"
+    },
+    {
+      "action": "not_required",
+      "detail": "reconstructible; deployed default is PostgreSQL search",
+      "name": "opensearch"
+    },
+    {
+      "action": "not_required",
+      "detail": "database outbox is authoritative",
+      "name": "kafka"
+    },
+    {
+      "action": "not_required",
+      "detail": "cache-only",
+      "name": "redis"
+    }
+  ],
+  "data_loss": {
+    "expected_window": "up to 365d retention; RPO target <= 24h",
+    "observed": "none beyond the backup point"
+  },
+  "deviations": [
+    "Restore target is an isolated database on the same PostgreSQL server; no separate physical cluster was available.",
+    "Enterprise IAM authentication is external to the AI schema and was not exercised; tenant boundary checks were run against restored rows."
+  ],
+  "drill_id": "20261026T103451Z-6ae044",
+  "drill_timestamp": "2026-10-26T10:34:51.110213Z",
+  "drill_version": 1,
+  "elapsed_seconds": 51.707,
+  "follow_up_actions": [
+    "When approved, remove scratch database ai_restore_drill_20261026_103451 and bucket ai-knowledge-restore-drill-20261026103451 using the documented cleanup procedure."
+  ],
+  "report_path": "/tmp/sec20-backups/restore-drills/drill-20261026T103451Z-6ae044.json",
+  "result": "success",
+  "target": {
+    "bucket": "ai-knowledge-restore-drill-20261026103451",
+    "database": "ai_restore_drill_20261026_103451",
+    "isolated_from_source_database": true
+  }
+}

@@ -7,12 +7,13 @@
 // points. Adding a warehouse later means registering a provider here, not
 // rewriting the query engine.
 import { queryAll } from "../../db.js";
+import { queryAllAsync } from "../../db-async.js";
 import { DATA_SOURCE_CODES } from "./constants.js";
 import { dataSourceNotFound, dataSourceUnavailable } from "./errors.js";
-import { resolveEntityRows, getEntity } from "./semantic.js";
-import { createRecordAuthorizer } from "./security.js";
+import { resolveEntityRows, resolveEntityRowsAsync, getEntity } from "./semantic.js";
+import { createRecordAuthorizer, createRecordAuthorizerAsync } from "./security.js";
 import { parseJson } from "./repository.js";
-import { searchObjects } from "../search.js";
+import { searchObjects, searchObjectsAsync } from "../search.js";
 
 const CATALOG = [
   {
@@ -93,6 +94,9 @@ const objectModelProvider = {
   resolve(db, { entity, tenantId, actor, organizationId, ip, context, limit, options }) {
     return resolveEntityRows(db, entity, { tenantId, actor, organizationId, ip, context, limit });
   },
+  async resolveAsync(db, { entity, tenantId, actor, organizationId, ip, context, limit, options }) {
+    return await resolveEntityRowsAsync(db, entity, { tenantId, actor, organizationId, ip, context, limit });
+  },
 };
 
 const readModelProvider = {
@@ -113,6 +117,23 @@ const readModelProvider = {
     }));
     const authorizer = createRecordAuthorizer(db, actor, { tenantId: Number(tenantId), action: "read", organizationId, ip, context });
     return { records: authorizer.filter(records), denied: authorizer.deniedCount(records), total_before_security: records.length };
+  },
+  async resolveAsync(db, { entity, tenantId, actor, organizationId, ip, context, limit }) {
+    getEntity(entity);
+    const rows = await queryAllAsync(
+      db,
+      "SELECT * FROM reporting_read_model WHERE tenant_id = ? AND entity = ? ORDER BY id LIMIT ?",
+      [Number(tenantId), entity, Math.min(100000, Math.max(1, Number(limit) || 50000))]
+    );
+    const records = rows.map((row) => ({
+      object_type: row.object_type || entity,
+      object_id: String(row.object_id ?? row.id),
+      organization_id: row.organization_id ?? null,
+      classification: row.classification || "",
+      attributes: parseJson(row.attributes_json, {}),
+    }));
+    const authorizer = await createRecordAuthorizerAsync(db, actor, { tenantId: Number(tenantId), action: "read", organizationId, ip, context });
+    return { records: await authorizer.filter(records), denied: await authorizer.deniedCount(records), total_before_security: records.length };
   },
 };
 
@@ -137,6 +158,25 @@ const searchIndexProvider = {
     const authorizer = createRecordAuthorizer(db, actor, { tenantId: Number(tenantId), action: "read", organizationId, ip, context });
     return { records: authorizer.filter(records), denied: authorizer.deniedCount(records), total_before_security: records.length };
   },
+  async resolveAsync(db, { entity, tenantId, actor, organizationId, ip, context, limit }) {
+    const definition = getEntity(entity);
+    const objectType = definition.object_type || (definition.source === "object" ? "object" : definition.source);
+    const result = await searchObjectsAsync(
+      db,
+      { object_types: [objectType], page_size: Math.min(500, Number(limit) || 200) },
+      actor,
+      { tenantId: Number(tenantId), ip }
+    );
+    const records = (result.results || result.items || []).map((item) => ({
+      object_type: item.object_type || objectType,
+      object_id: String(item.object_id ?? item.id),
+      organization_id: item.organization_id ?? null,
+      classification: "",
+      attributes: { number: item.code || item.title, name: item.title, status: item.status, object_type: item.object_type },
+    }));
+    const authorizer = await createRecordAuthorizerAsync(db, actor, { tenantId: Number(tenantId), action: "read", organizationId, ip, context });
+    return { records: await authorizer.filter(records), denied: await authorizer.deniedCount(records), total_before_security: records.length };
+  },
 };
 
 const PROVIDERS = new Map([
@@ -157,6 +197,11 @@ export function getProvider(code, options = {}) {
 export function resolveDataSourceRows(db, code, options = {}) {
   const provider = getProvider(code, options);
   return provider.resolve(db, options);
+}
+
+export async function resolveDataSourceRowsAsync(db, code, options = {}) {
+  const provider = getProvider(code, options);
+  return await provider.resolveAsync(db, options);
 }
 
 export function availableDataSourceCodes() {

@@ -196,3 +196,12 @@ export function applyEffectivity(db, { tenantId, effectivity, rows, objectTypes 
   const filtered = resolver(db, { tenantId, effectivity, rows, objectTypes, actor });
   return Array.isArray(filtered) ? filtered : rows;
 }
+
+export async function applyEffectivityAsync(db, { tenantId, effectivity, rows, objectTypes = null, actor = null } = {}) {
+  if (!effectivity || !rows?.length) return rows;
+  const named = effectivity.resolver || effectivity.resolverName;
+  const resolver = (named && getEffectivityResolver(named)) || getEffectivityResolver("default");
+  if (!resolver) return rows;
+  const filtered = await resolver(db, { tenantId, effectivity, rows, objectTypes, actor });
+  return Array.isArray(filtered) ? filtered : rows;
+}

@@ -6,15 +6,16 @@
 // registers into platform seams (IAM, events, jobs, search) and never
 // duplicates them.
 import { queryAll, queryOne } from "../../db.js";
-import { tenantIds } from "../search/registry.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { registerHandler as registerEventHandler } from "../events/handlers.js";
 import { SOURCE_MODULE } from "./constants.js";
-import { ensureThreadEventTypes } from "./events.js";
-import { ensureThreadJobTypes, registerThreadHandlers, PROJECT_HANDLER } from "./jobs.js";
-import { ensureThreadSearch, registerThreadSources } from "./search.js";
-import { ensureThreadConfig } from "./configuration.js";
-import { ensureDefaultDefinitions } from "./definitions.js";
-import { ensureDefaultRules } from "./rules.js";
+import { ensureThreadEventTypes, ensureThreadEventTypesAsync } from "./events.js";
+import { ensureThreadJobTypes, ensureThreadJobTypesAsync, registerThreadHandlers, PROJECT_HANDLER } from "./jobs.js";
+import { ensureThreadSearch, ensureThreadSearchAsync, registerThreadSources } from "./search.js";
+import { ensureThreadConfig, ensureThreadConfigAsync } from "./configuration.js";
+import { ensureDefaultDefinitions, ensureDefaultDefinitionsAsync } from "./definitions.js";
+import { ensureDefaultRules, ensureDefaultRulesAsync } from "./rules.js";
 import { registerBuiltinProviders } from "./provider-builtins.js";
 import { ensureProviders } from "./traversal.js";
 import { listProviders } from "./providers.js";
@@ -73,6 +74,47 @@ export function ensureThreadFoundation(db) {
   };
 }
 
+export async function ensureThreadFoundationAsync(db) {
+  const providers = registerBuiltinProviders();
+  ensureProviders();
+  const eventTypes = await ensureThreadEventTypesAsync(db);
+  const jobTypes = await ensureThreadJobTypesAsync(db);
+  const handlers = registerThreadHandlers();
+  const eventBridge = ensureThreadEventBridge();
+  registerThreadSources();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+
+  let configuration = 0;
+  let definitions = 0;
+  let rules = 0;
+  for (const tenantId of tenants) {
+    configuration += (await ensureThreadConfigAsync(db, tenantId)).created || 0;
+    definitions += (await ensureDefaultDefinitionsAsync(db, tenantId)).created || 0;
+    rules += (await ensureDefaultRulesAsync(db, tenantId)).created || 0;
+  }
+  const search = (await ensureThreadSearchAsync(db)).created || 0;
+
+  return {
+    source_module: SOURCE_MODULE,
+    providers,
+    event_types: eventTypes,
+    event_bridge: eventBridge,
+    job_types: jobTypes.created,
+    handlers,
+    configuration,
+    definitions,
+    rules,
+    search,
+    tenants: tenants.length,
+  };
+}
+
 export function threadHealth(db, tenantId = null) {
   const scope = tenantId ? Number(tenantId) : null;
   const scoped = (table) =>
@@ -110,5 +152,45 @@ export function threadHealth(db, tenantId = null) {
       projections: scoped("thread_projections"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM thread_definitions").length,
+  };
+}
+
+export async function threadHealthAsync(db, tenantId = null) {
+  const scope = tenantId ? Number(tenantId) : null;
+  const scoped = async (table) =>
+    Number(
+      (scope
+        ? await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ?`, [scope])
+        : await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0
+    );
+  // Child tables inherit tenancy through their parent snapshot/baseline.
+  const childScoped = async (table, parent, foreignKey) =>
+    Number(
+      (scope
+        ? await queryOneAsync(
+            db,
+            `SELECT COUNT(*) AS c FROM ${table} child JOIN ${parent} parent_row ON parent_row.id = child.${foreignKey} WHERE parent_row.tenant_id = ?`,
+            [scope]
+          )
+        : await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0
+    );
+  return {
+    source_module: SOURCE_MODULE,
+    providers: listProviders(),
+    counts: {
+      definitions: await scoped("thread_definitions"),
+      definition_domains: await scoped("thread_definition_domains"),
+      definition_relationships: await scoped("thread_definition_relationships"),
+      rules: await scoped("thread_traceability_rules"),
+      snapshots: await scoped("thread_snapshots"),
+      snapshot_nodes: await childScoped("thread_snapshot_nodes", "thread_snapshots", "snapshot_id"),
+      snapshot_edges: await childScoped("thread_snapshot_edges", "thread_snapshots", "snapshot_id"),
+      baselines: await scoped("thread_baselines"),
+      baseline_members: await childScoped("thread_baseline_members", "thread_baselines", "baseline_id"),
+      query_history: await scoped("thread_query_history"),
+      change_history: await scoped("thread_change_history"),
+      projections: await scoped("thread_projections"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM thread_definitions")).length,
   };
 }

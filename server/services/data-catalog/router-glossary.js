@@ -6,17 +6,17 @@ import { constants, Validation, Glossary, Metrics } from "./index.js";
 
 const R = constants.CATALOG_RESOURCES;
 
-export function createGlossaryRouter({ express, db, auth, can, wrap }) {
+export function createGlossaryRouter({ express, db, auth, authAsync, can, canAsync, wrap }) {
   const router = express.Router();
   const tenantOf = (req) => req.tenantId ?? null;
 
-  const canGlossary = (a) => can(R.glossary, a);
-  const canTerms = (a) => can(R.terms, a);
-  const canMetrics = (a) => can(R.metrics, a);
+  const canGlossary = (a) => canAsync(R.glossary, a);
+  const canTerms = (a) => canAsync(R.terms, a);
+  const canMetrics = (a) => canAsync(R.metrics, a);
 
   router.get(
     "/meta",
-    auth,
+    authAsync,
     canGlossary("read"),
     wrap((_req, res) => {
       res.json({
@@ -36,161 +36,161 @@ export function createGlossaryRouter({ express, db, auth, can, wrap }) {
 
   router.get(
     "/terms",
-    auth,
+    authAsync,
     canTerms("read"),
-    wrap((req, res) => res.json(Glossary.listTerms(db, { ...req.query, tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Glossary.listTermsAsync(db, { ...req.query, tenantId: tenantOf(req) })))
   );
   router.post(
     "/terms",
-    auth,
+    authAsync,
     canTerms("create"),
-    wrap((req, res) => res.status(201).json(Glossary.createTerm(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Glossary.createTermAsync(db, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.get(
     "/terms/export",
-    auth,
+    authAsync,
     canTerms("read"),
-    wrap((req, res) => res.json({ items: Glossary.glossarySnapshot(db, tenantOf(req)) }))
+    wrap(async (req, res) => res.json({ items: await Glossary.glossarySnapshotAsync(db, tenantOf(req)) }))
   );
   router.get(
     "/terms/:ref",
-    auth,
+    authAsync,
     canTerms("read"),
-    wrap((req, res) => res.json(Glossary.getTerm(db, req.params.ref, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Glossary.getTermAsync(db, req.params.ref, { tenantId: tenantOf(req) })))
   );
-  const updateTerm = wrap((req, res) => res.json(Glossary.updateTerm(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)));
-  router.put("/terms/:ref", auth, canTerms("update"), updateTerm);
-  router.patch("/terms/:ref", auth, canTerms("update"), updateTerm);
+  const updateTerm = wrap(async (req, res) => res.json(await Glossary.updateTermAsync(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)));
+  router.put("/terms/:ref", authAsync, canTerms("update"), updateTerm);
+  router.patch("/terms/:ref", authAsync, canTerms("update"), updateTerm);
 
   // Lifecycle
   router.post(
     "/terms/:ref/submit",
-    auth,
+    authAsync,
     canTerms("execute"),
-    wrap((req, res) => res.json(Glossary.submitTerm(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.json(await Glossary.submitTermAsync(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.post(
     "/terms/:ref/approve",
-    auth,
+    authAsync,
     canTerms("execute"),
-    wrap((req, res) => res.json(Glossary.approveTerm(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.json(await Glossary.approveTermAsync(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.post(
     "/terms/:ref/reject",
-    auth,
+    authAsync,
     canTerms("execute"),
-    wrap((req, res) => res.json(Glossary.rejectTerm(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.json(await Glossary.rejectTermAsync(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.post(
     "/terms/:ref/status",
-    auth,
+    authAsync,
     canTerms("execute"),
-    wrap((req, res) => res.json(Glossary.setTermStatus(db, req.params.ref, req.body?.status, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.json(await Glossary.setTermStatusAsync(db, req.params.ref, req.body?.status, req.actor, tenantOf(req), req.ip)))
   );
 
   // Definitions
   router.get(
     "/terms/:ref/definitions",
-    auth,
+    authAsync,
     canTerms("read"),
-    wrap((req, res) => {
-      const term = Glossary.requireTerm(db, req.params.ref, tenantOf(req));
-      res.json({ items: Glossary.listTermDefinitions(db, term.id) });
+    wrap(async (req, res) => {
+      const term = await Glossary.requireTermAsync(db, req.params.ref, tenantOf(req));
+      res.json({ items: await Glossary.listTermDefinitionsAsync(db, term.id) });
     })
   );
   router.put(
     "/terms/:ref/definitions/:type",
-    auth,
+    authAsync,
     canTerms("update"),
-    wrap((req, res) => res.json(Glossary.upsertDefinition(db, req.params.ref, { ...(req.body || {}), definition_type: req.params.type }, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.json(await Glossary.upsertDefinitionAsync(db, req.params.ref, { ...(req.body || {}), definition_type: req.params.type }, req.actor, tenantOf(req), req.ip)))
   );
   router.delete(
     "/terms/:ref/definitions/:type",
-    auth,
+    authAsync,
     canTerms("delete"),
-    wrap((req, res) => res.json(Glossary.deleteDefinition(db, req.params.ref, req.params.type, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.json(await Glossary.deleteDefinitionAsync(db, req.params.ref, req.params.type, req.actor, tenantOf(req), req.ip)))
   );
 
   // Synonyms
   router.get(
     "/terms/:ref/synonyms",
-    auth,
+    authAsync,
     canTerms("read"),
-    wrap((req, res) => {
-      const term = Glossary.requireTerm(db, req.params.ref, tenantOf(req));
-      res.json({ items: Glossary.listTermSynonyms(db, term.id) });
+    wrap(async (req, res) => {
+      const term = await Glossary.requireTermAsync(db, req.params.ref, tenantOf(req));
+      res.json({ items: await Glossary.listTermSynonymsAsync(db, term.id) });
     })
   );
   router.post(
     "/terms/:ref/synonyms",
-    auth,
+    authAsync,
     canTerms("update"),
-    wrap((req, res) => res.status(201).json(Glossary.addSynonym(db, req.params.ref, req.body || {}, req.actor, tenantOf(req))))
+    wrap(async (req, res) => res.status(201).json(await Glossary.addSynonymAsync(db, req.params.ref, req.body || {}, req.actor, tenantOf(req))))
   );
   router.delete(
     "/terms/:ref/synonyms/:synonym",
-    auth,
+    authAsync,
     canTerms("delete"),
-    wrap((req, res) => res.json(Glossary.removeSynonym(db, req.params.ref, req.params.synonym, req.actor, tenantOf(req))))
+    wrap(async (req, res) => res.json(await Glossary.removeSynonymAsync(db, req.params.ref, req.params.synonym, req.actor, tenantOf(req))))
   );
 
   // Relations
   router.get(
     "/terms/:ref/relations",
-    auth,
+    authAsync,
     canTerms("read"),
-    wrap((req, res) => {
-      const term = Glossary.requireTerm(db, req.params.ref, tenantOf(req));
-      res.json({ items: Glossary.listTermRelations(db, term.id) });
+    wrap(async (req, res) => {
+      const term = await Glossary.requireTermAsync(db, req.params.ref, tenantOf(req));
+      res.json({ items: await Glossary.listTermRelationsAsync(db, term.id) });
     })
   );
   router.post(
     "/terms/:ref/relations",
-    auth,
+    authAsync,
     canTerms("update"),
-    wrap((req, res) => res.status(201).json(Glossary.addRelation(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Glossary.addRelationAsync(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.delete(
     "/term-relations/:id",
-    auth,
+    authAsync,
     canTerms("delete"),
-    wrap((req, res) => res.json(Glossary.removeRelation(db, req.params.id, req.actor, tenantOf(req))))
+    wrap(async (req, res) => res.json(await Glossary.removeRelationAsync(db, req.params.id, req.actor, tenantOf(req))))
   );
 
   // Mappings
   router.get(
     "/terms/:ref/mappings",
-    auth,
+    authAsync,
     canTerms("read"),
-    wrap((req, res) => {
-      const term = Glossary.requireTerm(db, req.params.ref, tenantOf(req));
-      res.json({ items: Glossary.listTermMappings(db, term.id) });
+    wrap(async (req, res) => {
+      const term = await Glossary.requireTermAsync(db, req.params.ref, tenantOf(req));
+      res.json({ items: await Glossary.listTermMappingsAsync(db, term.id) });
     })
   );
   router.post(
     "/terms/:ref/mappings",
-    auth,
+    authAsync,
     canTerms("update"),
-    wrap((req, res) => res.status(201).json(Glossary.addMapping(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
+    wrap(async (req, res) => res.status(201).json(await Glossary.addMappingAsync(db, req.params.ref, req.body || {}, req.actor, tenantOf(req), req.ip)))
   );
   router.delete(
     "/term-mappings/:id",
-    auth,
+    authAsync,
     canTerms("delete"),
-    wrap((req, res) => res.json(Glossary.removeMapping(db, req.params.id, req.actor, tenantOf(req))))
+    wrap(async (req, res) => res.json(await Glossary.removeMappingAsync(db, req.params.id, req.actor, tenantOf(req))))
   );
   router.get(
     "/term-mappings",
-    auth,
+    authAsync,
     canTerms("read"),
-    wrap((req, res) => res.json({ items: Glossary.termsForTarget(db, tenantOf(req), req.query.target_type, req.query.target_id) }))
+    wrap(async (req, res) => res.json({ items: await Glossary.termsForTargetAsync(db, tenantOf(req), req.query.target_type, req.query.target_id) }))
   );
 
   router.get(
     "/metrics",
-    auth,
+    authAsync,
     canMetrics("read"),
-    wrap((req, res) => res.json(Metrics.metricsSnapshot(db, { tenantId: tenantOf(req) })))
+    wrap(async (req, res) => res.json(await Metrics.metricsSnapshotAsync(db, { tenantId: tenantOf(req) })))
   );
 
   return router;

@@ -1,6 +1,6 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, queryAll, run } from "../db.js";
+import { migrate, queryOne, queryAll, run, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as workflow from "../services/workflow.js";
 import * as lifecycle from "../services/lifecycle.js";
@@ -15,7 +15,7 @@ describe("workflow engine services", () => {
   let tenantId;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin'");

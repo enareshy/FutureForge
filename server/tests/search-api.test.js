@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 import * as search from "../services/search.js";
@@ -59,7 +59,7 @@ describe("Search & Discovery REST APIs", () => {
   let tenantId;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const started = await listen(createApp(db));
@@ -256,7 +256,7 @@ describe("Search & Discovery REST APIs", () => {
     const permission = queryOne(db, "SELECT id FROM permissions WHERE code = 'iam.search.global:read'");
     assert.ok(role && permission, "reader role and search permission must exist");
     db.prepare(
-      "INSERT OR REPLACE INTO role_permissions (role_id, permission_id, effect, organization_id) VALUES (?, ?, 'deny', 0)"
+      "INSERT INTO role_permissions (role_id, permission_id, effect, organization_id) VALUES (?, ?, 'deny', 0) ON CONFLICT (role_id, permission_id, organization_id) DO UPDATE SET effect = EXCLUDED.effect"
     ).run(role.id, permission.id);
     const denied = await request(port, "GET", "/api/search?q=compressor", { token: userToken });
     assert.equal(denied.status, 403);

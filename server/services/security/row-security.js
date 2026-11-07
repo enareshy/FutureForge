@@ -1,20 +1,26 @@
 // Row level security. Produces a SQL predicate the data layer appends so
 // unauthorized rows never leave the database (and therefore never influence
 // counts, facets or pagination).
-import { descendantOrganizationIds } from "../orgs.js";
+import { descendantOrganizationIds, descendantOrganizationIdsAsync } from "../orgs.js";
 import { DECISION_REASONS, DEFAULT_ENFORCEMENT } from "./constants.js";
 import { evaluateCondition } from "./conditions.js";
-import { buildEvaluationContext, effectiveEnforcement } from "./engine.js";
+import { buildEvaluationContext, effectiveEnforcement, effectiveEnforcementAsync } from "./engine.js";
 import { subjectMatches } from "./context.js";
 import { evaluateFields } from "./engine.js";
 import {
   getObjectType,
   listClassificationRules,
+  listClassificationRulesAsync,
   listEntitlements,
+  listEntitlementsAsync,
   listFieldRules,
+  listFieldRulesAsync,
   listOrganizationRules,
+  listOrganizationRulesAsync,
   listPlantRules,
+  listPlantRulesAsync,
   listPolicies,
+  listPoliciesAsync,
 } from "./repository.js";
 
 function withinValidity(row, time) {
@@ -47,10 +53,65 @@ function pushIn(clauses, params, column, values, negate) {
 export function buildRowSecurityFilter(db, context, resourceType, action = "read") {
   const tenantId = Number(context?.tenantId ?? 0);
   const enforcement = effectiveEnforcement(db, tenantId, resourceType);
+  return buildRowSecurityFilterFrom({
+    enforcement,
+    context,
+    resourceType,
+    action,
+    policies: listPolicies(db, tenantId, { status: "active" }),
+    entitlements: listEntitlements(db, tenantId, { status: "active" }),
+    classificationRules: listClassificationRules(db, tenantId),
+    orgRules: listOrganizationRules(db, tenantId),
+    plantRules: listPlantRules(db, tenantId),
+    descendantOf: (id) => descendantOrganizationIds(db, id),
+  });
+}
+
+export async function buildRowSecurityFilterAsync(db, context, resourceType, action = "read") {
+  const tenantId = Number(context?.tenantId ?? 0);
+  const enforcement = await effectiveEnforcementAsync(db, tenantId, resourceType);
+  const [policies, entitlements, classificationRules, orgRules, plantRules] = await Promise.all([
+    listPoliciesAsync(db, tenantId, { status: "active" }),
+    listEntitlementsAsync(db, tenantId, { status: "active" }),
+    listClassificationRulesAsync(db, tenantId),
+    listOrganizationRulesAsync(db, tenantId),
+    listPlantRulesAsync(db, tenantId),
+  ]);
+  const expandIds = new Set();
+  for (const rule of orgRules) expandIds.add(Number(rule.organization_id));
+  for (const rule of plantRules) expandIds.add(Number(rule.plant_id));
+  const descendantCache = new Map();
+  for (const id of expandIds) descendantCache.set(id, await descendantOrganizationIdsAsync(db, id));
+  return buildRowSecurityFilterFrom({
+    enforcement,
+    context,
+    resourceType,
+    action,
+    policies,
+    entitlements,
+    classificationRules,
+    orgRules,
+    plantRules,
+    descendantOf: (id) => descendantCache.get(Number(id)) || [],
+  });
+}
+
+function buildRowSecurityFilterFrom({
+  enforcement,
+  context,
+  resourceType,
+  action,
+  policies: policiesRaw,
+  entitlements: entitlementsRaw,
+  classificationRules: classificationRaw,
+  orgRules: orgRulesRaw,
+  plantRules: plantRulesRaw,
+  descendantOf,
+}) {
   const evalContext = subjectOnlyContext(context, resourceType, action);
   const time = evalContext.request.time;
 
-  const policies = listPolicies(db, tenantId, { status: "active" }).filter(
+  const policies = policiesRaw.filter(
     (row) =>
       withinValidity(row, time) &&
       (!row.resource_type || row.resource_type === resourceType) &&
@@ -58,22 +119,14 @@ export function buildRowSecurityFilter(db, context, resourceType, action = "read
       subjectMatches(context, row.subject_type, row.subject_id) &&
       conditionPasses(row, evalContext)
   );
-  const entitlements = listEntitlements(db, tenantId, { status: "active" }).filter(
+  const entitlements = entitlementsRaw.filter(
     (row) =>
       (!row.resource_type || row.resource_type === resourceType) &&
       (!row.action || row.action === action) &&
       subjectMatches(context, row.subject_type, row.subject_id) &&
       conditionPasses(row, evalContext)
   );
-  const classificationRules = listClassificationRules(db, tenantId).filter(
-    (row) =>
-      withinValidity(row, time) &&
-      (!row.resource_type || row.resource_type === resourceType) &&
-      (!row.action || row.action === action) &&
-      subjectMatches(context, row.subject_type, row.subject_id) &&
-      conditionPasses(row, evalContext)
-  );
-  const orgRules = listOrganizationRules(db, tenantId).filter(
+  const classificationRules = classificationRaw.filter(
     (row) =>
       withinValidity(row, time) &&
       (!row.resource_type || row.resource_type === resourceType) &&
@@ -81,7 +134,15 @@ export function buildRowSecurityFilter(db, context, resourceType, action = "read
       subjectMatches(context, row.subject_type, row.subject_id) &&
       conditionPasses(row, evalContext)
   );
-  const plantRules = listPlantRules(db, tenantId).filter(
+  const orgRules = orgRulesRaw.filter(
+    (row) =>
+      withinValidity(row, time) &&
+      (!row.resource_type || row.resource_type === resourceType) &&
+      (!row.action || row.action === action) &&
+      subjectMatches(context, row.subject_type, row.subject_id) &&
+      conditionPasses(row, evalContext)
+  );
+  const plantRules = plantRulesRaw.filter(
     (row) =>
       withinValidity(row, time) &&
       (!row.resource_type || row.resource_type === resourceType) &&
@@ -134,7 +195,7 @@ export function buildRowSecurityFilter(db, context, resourceType, action = "read
     } else {
       orgAllow.add(Number(rule.organization_id));
       if (rule.include_descendants || rule.scope_mode === "self_and_descendants" || rule.scope_mode === "include_descendants") {
-        for (const id of descendantOrganizationIds(db, Number(rule.organization_id))) orgAllow.add(Number(id));
+        for (const id of descendantOf(Number(rule.organization_id))) orgAllow.add(Number(id));
       }
     }
   }
@@ -158,7 +219,7 @@ export function buildRowSecurityFilter(db, context, resourceType, action = "read
     } else {
       plantAllow.add(Number(rule.plant_id));
       if (rule.include_descendants) {
-        for (const id of descendantOrganizationIds(db, Number(rule.plant_id))) plantAllow.add(Number(id));
+        for (const id of descendantOf(Number(rule.plant_id))) plantAllow.add(Number(id));
       }
     }
   }
@@ -207,6 +268,31 @@ export function buildSearchSecurityPredicate(db, context, objectTypes, action = 
   let enforced = false;
   for (const objectType of objectTypes) {
     const filter = buildRowSecurityFilter(db, context, objectType, action);
+    if (!filter.enforced || !filter.sql) {
+      free.push(objectType);
+      continue;
+    }
+    enforced = true;
+    pieces.push(`(i.object_type = ? AND ${filter.sql})`);
+    params.push(String(objectType), ...filter.params);
+  }
+  if (!enforced) {
+    return { enforced: false, sql: null, params: [], objectTypes };
+  }
+  if (free.length) {
+    pieces.push(`i.object_type IN (${free.map(() => "?").join(", ")})`);
+    params.push(...free);
+  }
+  return { enforced: true, sql: `(${pieces.join(" OR ")})`, params, objectTypes };
+}
+
+export async function buildSearchSecurityPredicateAsync(db, context, objectTypes, action = "read") {
+  const pieces = [];
+  const params = [];
+  const free = [];
+  let enforced = false;
+  for (const objectType of objectTypes) {
+    const filter = await buildRowSecurityFilterAsync(db, context, objectType, action);
     if (!filter.enforced || !filter.sql) {
       free.push(objectType);
       continue;

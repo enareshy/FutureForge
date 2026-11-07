@@ -7,8 +7,9 @@
 // overview is populated on a fresh install. All policy comes from constants,
 // never hard-coded in the engine.
 import { queryOne } from "../../db.js";
-import { withEventSuppression } from "../events/emit.js";
-import { ensureObservabilityFoundation } from "./foundation.js";
+import { queryOneAsync } from "../../db-async.js";
+import { withEventSuppression, withEventSuppressionAsync } from "../events/emit.js";
+import { ensureObservabilityFoundation, ensureObservabilityFoundationAsync } from "./foundation.js";
 import {
   METRIC_CATALOG,
   FRESHNESS_CATALOG,
@@ -17,14 +18,14 @@ import {
   DASHBOARD_CATALOG,
   OBSERVABILITY_RESOURCES,
 } from "./constants.js";
-import { createMetric, getMetricRow } from "./metrics.js";
-import { createFreshness, createAsset, getFreshnessRow, getAssetRow } from "./freshness.js";
-import { createAlertRule, getAlertRuleRow } from "./alerts.js";
-import { createSlo, getSloRow } from "./slo.js";
-import { ensureDefaultDashboards } from "./dashboards.js";
-import { collectTenant } from "./collection.js";
-import { getConfig } from "./configuration.js";
-import { ensureObservabilityReportingAssets } from "./reporting-bridge.js";
+import { createMetric, createMetricAsync, getMetricRow, getMetricRowAsync } from "./metrics.js";
+import { createFreshness, createFreshnessAsync, createAsset, createAssetAsync, getFreshnessRow, getFreshnessRowAsync, getAssetRow, getAssetRowAsync } from "./freshness.js";
+import { createAlertRule, createAlertRuleAsync, getAlertRuleRow, getAlertRuleRowAsync } from "./alerts.js";
+import { createSlo, createSloAsync, getSloRow, getSloRowAsync } from "./slo.js";
+import { ensureDefaultDashboards, ensureDefaultDashboardsAsync } from "./dashboards.js";
+import { collectTenant, collectTenantAsync } from "./collection.js";
+import { getConfig, getConfigAsync } from "./configuration.js";
+import { ensureObservabilityReportingAssets, ensureObservabilityReportingAssetsAsync } from "./reporting-bridge.js";
 
 function resolveTenantId(db, tenantId) {
   const explicit = Number(tenantId);
@@ -39,6 +40,22 @@ function resolveSeedActor(db) {
   const admin = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin' LIMIT 1");
   if (admin) return { id: admin.id, username: admin.username };
   const any = queryOne(db, "SELECT id, username FROM users ORDER BY id LIMIT 1");
+  return any ? { id: any.id, username: any.username } : null;
+}
+
+async function resolveTenantIdAsync(db, tenantId) {
+  const explicit = Number(tenantId);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const helix = await queryOneAsync(db, "SELECT id FROM organizations WHERE code = 'helix'");
+  if (helix) return helix.id;
+  const any = await queryOneAsync(db, "SELECT id FROM organizations ORDER BY id LIMIT 1");
+  return any?.id ?? null;
+}
+
+async function resolveSeedActorAsync(db) {
+  const admin = await queryOneAsync(db, "SELECT id, username FROM users WHERE username = 'admin' LIMIT 1");
+  if (admin) return { id: admin.id, username: admin.username };
+  const any = await queryOneAsync(db, "SELECT id, username FROM users ORDER BY id LIMIT 1");
   return any ? { id: any.id, username: any.username } : null;
 }
 
@@ -184,6 +201,142 @@ export function ensureDefaultObservabilityAssets(db, tenantId) {
   return { created, catalog: { metrics: METRIC_CATALOG.length, dashboards: DASHBOARD_CATALOG.length }, bridge, collection };
 }
 
+export async function ensureDefaultObservabilityAssetsAsync(db, tenantId) {
+  const tenant = await resolveTenantIdAsync(db, tenantId);
+  if (!tenant) return { created: 0, reason: "no_tenant" };
+  const actor = await resolveSeedActorAsync(db);
+  const created = { metrics: 0, assets: 0, freshness: 0, alert_rules: 0, slos: 0, dashboards: 0 };
+
+  for (const entry of METRIC_CATALOG) {
+    if (await getMetricRowAsync(db, tenant, entry.code)) continue;
+    await createMetricAsync(
+      db,
+      tenant,
+      {
+        code: entry.code,
+        name: entry.name,
+        description: entry.description || `Auto-seeded metric ${entry.code}.`,
+        category: entry.category,
+        provider_code: entry.provider,
+        entity_code: entry.entity,
+        calculation: entry.calculation,
+        attribute: entry.attribute,
+        unit: entry.unit,
+        direction: entry.direction,
+        frequency_seconds: entry.frequency_seconds,
+        aggregation: entry.aggregation,
+        warning_threshold: entry.warning_threshold,
+        critical_threshold: entry.critical_threshold,
+        metadata: entry.metadata || {},
+      },
+      actor
+    );
+    created.metrics += 1;
+  }
+
+  for (const entry of FRESHNESS_CATALOG) {
+    if (!(await getAssetRowAsync(db, tenant, entry.asset))) {
+      await createAssetAsync(
+        db,
+        tenant,
+        {
+          code: entry.asset,
+          name: entry.name,
+          description: `${entry.name} data asset.`,
+          asset_type: "TABLE",
+          provider_code: entry.provider,
+          source_table: entry.table,
+          refresh_interval_seconds: Math.max(60, Number(entry.warn_age_seconds) || 3600),
+          warn_age_seconds: entry.warn_age_seconds,
+          critical_age_seconds: entry.critical_age_seconds,
+        },
+        actor
+      );
+      created.assets += 1;
+    }
+    if (!(await getFreshnessRowAsync(db, tenant, entry.code))) {
+      await createFreshnessAsync(
+        db,
+        tenant,
+        {
+          code: entry.code,
+          name: entry.name,
+          description: `${entry.name} freshness objective.`,
+          asset_code: entry.asset,
+          provider_code: entry.provider,
+          source_table: entry.table,
+          max_age_seconds: entry.max_age_seconds,
+          warn_age_seconds: entry.warn_age_seconds,
+          critical_age_seconds: entry.critical_age_seconds,
+        },
+        actor
+      );
+      created.freshness += 1;
+    }
+  }
+
+  for (const entry of ALERT_RULE_CATALOG) {
+    if (await getAlertRuleRowAsync(db, tenant, entry.code)) continue;
+    await createAlertRuleAsync(
+      db,
+      tenant,
+      {
+        code: entry.code,
+        name: entry.name,
+        description: entry.description || `Auto-seeded alert rule ${entry.code}.`,
+        metric_code: entry.metric,
+        condition: { operator: entry.operator, value: entry.value },
+        severity: entry.severity,
+        service_code: entry.service,
+        for_seconds: entry.for_seconds,
+        cooldown_seconds: entry.cooldown_seconds,
+        auto_resolve: entry.auto_resolve,
+      },
+      actor
+    );
+    created.alert_rules += 1;
+  }
+
+  for (const entry of SLO_CATALOG) {
+    if (await getSloRowAsync(db, tenant, entry.code)) continue;
+    await createSloAsync(
+      db,
+      tenant,
+      {
+        code: entry.code,
+        name: entry.name,
+        description: `${entry.kind} ${entry.name}.`,
+        kind: entry.kind,
+        metric_code: entry.metric,
+        target: entry.target,
+        comparison: entry.comparison,
+        window_seconds: entry.window_seconds,
+        unit: entry.unit,
+      },
+      actor
+    );
+    created.slos += 1;
+  }
+
+  const dashboards = await ensureDefaultDashboardsAsync(db, tenant, actor);
+  created.dashboards = dashboards.created;
+
+  const bridge = await ensureObservabilityReportingAssetsAsync(db, tenant, actor);
+
+  let collection = null;
+  const autoCollect = await getConfigAsync(db, tenant, "auto_collect_on_seed");
+  const hasObservation = await queryOneAsync(db, "SELECT id FROM observability_metric_observations WHERE tenant_id = ? LIMIT 1", [tenant]);
+  if (autoCollect && !hasObservation) {
+    try {
+      collection = (await collectTenantAsync(db, tenant, { trigger: "SEED", actor })).counts;
+    } catch (err) {
+      collection = { error: err.message };
+    }
+  }
+
+  return { created, catalog: { metrics: METRIC_CATALOG.length, dashboards: DASHBOARD_CATALOG.length }, bridge, collection };
+}
+
 export function seedObservability(db, tenantId) {
   return withEventSuppression(() => {
     const tenant = resolveTenantId(db, tenantId);
@@ -196,4 +349,18 @@ export function seedObservability(db, tenantId) {
 
 export function ensureObservabilitySeed(db, tenantId) {
   return seedObservability(db, tenantId);
+}
+
+export async function seedObservabilityAsync(db, tenantId) {
+  return withEventSuppressionAsync(async () => {
+    const tenant = await resolveTenantIdAsync(db, tenantId);
+    const foundation = await ensureObservabilityFoundationAsync(db);
+    if (!tenant) return { foundation, seeded: false, reason: "no_tenant" };
+    const assets = await ensureDefaultObservabilityAssetsAsync(db, tenant);
+    return { foundation, assets, seeded: true };
+  });
+}
+
+export async function ensureObservabilitySeedAsync(db, tenantId) {
+  return seedObservabilityAsync(db, tenantId);
 }

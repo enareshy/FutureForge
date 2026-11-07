@@ -1,9 +1,10 @@
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { checkPermission } from "../authorization.js";
-import { isPlatformAdmin, assertTenantScope } from "../tenants.js";
+import { checkPermission, checkPermissionAsync } from "../authorization.js";
+import { isPlatformAdmin, isPlatformAdminAsync, assertTenantScope, assertTenantScopeAsync } from "../tenants.js";
 import { assertTenant } from "./repository.js";
-import { fileEventSummary } from "./events.js";
+import { fileEventSummary, fileEventSummaryAsync } from "./events.js";
 
 // Aggregated, tenant-scoped operational metrics for the Document module console.
 // Counts and byte totals only; no storage keys or per-file content is exposed.
@@ -123,5 +124,126 @@ export function processingSummary(db, actor, tenantId) {
     "SELECT COUNT(*) AS c FROM files WHERE tenant_id = ? AND status IN ('pending_scan','scan_in_progress','scan_failed')",
     [scope]
   ).c;
+  return { pending, failed, quarantined, blocked };
+}
+
+// ── Async twins of the file metrics reads ──
+
+async function assertMetricsAccessAsync(db, actor, scope) {
+  if (await isPlatformAdminAsync(db, actor?.id)) return;
+  const granted = (await checkPermissionAsync(db, actor, "iam.files.browser", "read", {})).allowed;
+  if (!granted) throw new HttpError(403, "Not authorized to view file metrics");
+}
+
+export async function fileMetricsAsync(db, actor, tenantId) {
+  const scope = await assertTenantScopeAsync(db, actor, assertTenant(tenantId));
+  await assertMetricsAccessAsync(db, actor, scope);
+  const base = "FROM files WHERE tenant_id = ? AND deleted_at IS NULL";
+  const total = await queryOneAsync(db, `SELECT COUNT(*) AS files, COALESCE(SUM(size_bytes), 0) AS bytes ${base}`, [scope]);
+  const deleted = await queryOneAsync(db, "SELECT COUNT(*) AS files FROM files WHERE tenant_id = ? AND deleted_at IS NOT NULL", [scope]);
+  const versions = await queryOneAsync(
+    db,
+    "SELECT COUNT(*) AS versions FROM file_versions v JOIN files f ON f.id = v.file_id WHERE f.tenant_id = ?",
+    [scope]
+  );
+  const byStatus = await queryAllAsync(db, `SELECT status AS key, COUNT(*) AS count ${base} GROUP BY status ORDER BY count DESC`, [scope]);
+  const byCategory = await queryAllAsync(db, `SELECT file_category AS key, COUNT(*) AS count, COALESCE(SUM(size_bytes),0) AS bytes ${base} GROUP BY file_category ORDER BY count DESC`, [scope]);
+  const byClassification = await queryAllAsync(db, `SELECT security_classification AS key, COUNT(*) AS count ${base} GROUP BY security_classification ORDER BY count DESC`, [scope]);
+  const scanStates = await queryAllAsync(db, `SELECT virus_scan_status AS key, COUNT(*) AS count ${base} GROUP BY virus_scan_status`, [scope]);
+  const processing = await queryAllAsync(
+    db,
+    `SELECT processing_type, status, COUNT(*) AS count FROM file_processing WHERE tenant_id = ? GROUP BY processing_type, status`,
+    [scope]
+  );
+  const uploads = await queryAllAsync(
+    db,
+    `SELECT status AS key, COUNT(*) AS count, COALESCE(SUM(declared_size),0) AS bytes
+     FROM file_uploads WHERE tenant_id = ? GROUP BY status`,
+    [scope]
+  );
+  const locks = await queryOneAsync(
+    db,
+    "SELECT COUNT(*) AS active FROM file_locks WHERE tenant_id = ? AND released_at IS NULL",
+    [scope]
+  );
+  const associations = await queryOneAsync(
+    db,
+    "SELECT COUNT(*) AS total FROM file_associations WHERE tenant_id = ? AND deleted_at IS NULL",
+    [scope]
+  );
+  const folders = await queryOneAsync(db, "SELECT COUNT(*) AS total FROM folders WHERE tenant_id = ? AND deleted_at IS NULL", [scope]);
+  const collections = await queryOneAsync(db, "SELECT COUNT(*) AS total FROM file_collections WHERE tenant_id = ? AND deleted_at IS NULL", [scope]);
+  const recentRows = await queryAllAsync(
+    db,
+    `SELECT f.id, f.file_ref, f.name, f.status, f.size_bytes, f.mime_type, f.created_at,
+            u.username AS owner_username
+     FROM files f LEFT JOIN users u ON u.id = f.owner_id
+     WHERE f.tenant_id = ? AND f.deleted_at IS NULL
+     ORDER BY f.created_at DESC, f.id DESC LIMIT 10`,
+    [scope]
+  );
+  const recent = recentRows.map((row) => ({ ...row, owner_username: row.owner_username || "" }));
+
+  return {
+    tenant_id: scope,
+    totals: {
+      files: total.files,
+      bytes: total.bytes,
+      deleted_files: deleted.files,
+      versions: versions.versions,
+      folders: folders.total,
+      collections: collections.total,
+      associations: associations.total,
+      active_locks: locks.active,
+    },
+    by_status: byStatus,
+    by_category: byCategory,
+    by_classification: byClassification,
+    scan_states: scanStates,
+    processing,
+    uploads,
+    recent_files: recent,
+    events: await fileEventSummaryAsync(db, scope),
+  };
+}
+
+export async function storageBreakdownAsync(db, actor, tenantId) {
+  const scope = await assertTenantScopeAsync(db, actor, assertTenant(tenantId));
+  await assertMetricsAccessAsync(db, actor, scope);
+  const byProvider = await queryAllAsync(
+    db,
+    `SELECT storage_provider AS provider, COUNT(*) AS files, COALESCE(SUM(size_bytes),0) AS bytes
+     FROM files WHERE tenant_id = ? AND deleted_at IS NULL GROUP BY storage_provider`,
+    [scope]
+  );
+  const byExtension = await queryAllAsync(
+    db,
+    `SELECT extension AS key, COUNT(*) AS files, COALESCE(SUM(size_bytes),0) AS bytes
+     FROM files WHERE tenant_id = ? AND deleted_at IS NULL GROUP BY extension ORDER BY bytes DESC LIMIT 25`,
+    [scope]
+  );
+  const largest = await queryAllAsync(
+    db,
+    `SELECT id, file_ref, name, size_bytes FROM files WHERE tenant_id = ? AND deleted_at IS NULL ORDER BY size_bytes DESC LIMIT 10`,
+    [scope]
+  );
+  return { by_provider: byProvider, by_extension: byExtension, largest_files: largest };
+}
+
+export async function processingSummaryAsync(db, actor, tenantId) {
+  const scope = await assertTenantScopeAsync(db, actor, assertTenant(tenantId));
+  await assertMetricsAccessAsync(db, actor, scope);
+  const pending = (await queryOneAsync(
+    db,
+    "SELECT COUNT(*) AS c FROM file_processing WHERE tenant_id = ? AND status IN ('pending','in_progress')",
+    [scope]
+  )).c;
+  const failed = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM file_processing WHERE tenant_id = ? AND status = 'failed'", [scope])).c;
+  const quarantined = (await queryOneAsync(db, "SELECT COUNT(*) AS c FROM files WHERE tenant_id = ? AND status = 'quarantined'", [scope])).c;
+  const blocked = (await queryOneAsync(
+    db,
+    "SELECT COUNT(*) AS c FROM files WHERE tenant_id = ? AND status IN ('pending_scan','scan_in_progress','scan_failed')",
+    [scope]
+  )).c;
   return { pending, failed, quarantined, blocked };
 }

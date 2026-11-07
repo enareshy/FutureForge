@@ -1,7 +1,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -53,7 +53,7 @@ describe("lifecycle REST APIs", () => {
   let token;
 
   before(async () => {
-    const database = openDatabase(":memory:");
+    const database = openTestDatabase();
     migrate(database);
     seedDatabase(database);
     const started = await listen(createApp(database));

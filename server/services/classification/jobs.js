@@ -6,8 +6,8 @@
 // core against classification data.
 import { queryAll, run, nowIso } from "../../db.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
-import { getJobTypeRow, createJobType } from "../jobs/types.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
+import { getJobTypeRow, createJobType, getJobTypeRowAsync, createJobTypeAsync } from "../jobs/types.js";
 import { CLASSIFICATION_HANDLER_CODES, CLASSIFICATION_JOB_TYPES, MAX_BULK_OBJECTS } from "./constants.js";
 import { getConfig } from "./configuration.js";
 import { assignClass, unassign } from "./assignments.js";
@@ -27,8 +27,33 @@ export function ensureClassificationJobTypes(db) {
   return { created };
 }
 
+export async function ensureClassificationJobTypesAsync(db) {
+  let created = 0;
+  for (const def of CLASSIFICATION_JOB_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    await createJobTypeAsync(db, { ...def }, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
 function submit(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority = "normal", queue = "classification", idempotencyKey = null }) {
   return submitJob(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      input: { tenant_id: Number(tenantId), ...handlerParams },
+      tenant_id: Number(tenantId),
+      priority,
+      queue,
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+}
+
+async function submitAsync(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority = "normal", queue = "classification", idempotencyKey = null }) {
+  return submitJobAsync(
     db,
     {
       job_type_code: jobTypeCode,
@@ -53,8 +78,30 @@ export function submitBulkAssignJob(db, { tenantId, classId, objectType, objectI
   });
 }
 
+export async function submitBulkAssignJobAsync(db, { tenantId, classId, objectType, objectIds = [], values = null, action = "ASSIGN", actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, {
+    tenantId,
+    jobTypeCode: "CLASSIFICATION_BULK_ASSIGN",
+    handlerParams: { class_id: Number(classId), object_type: objectType, object_ids: objectIds, values, action },
+    actor,
+    ip,
+    idempotencyKey,
+  });
+}
+
 export function submitBulkValidateJob(db, { tenantId, objectType, objectIds = [], actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, {
+    tenantId,
+    jobTypeCode: "CLASSIFICATION_BULK_VALIDATE",
+    handlerParams: { object_type: objectType, object_ids: objectIds },
+    actor,
+    ip,
+    idempotencyKey,
+  });
+}
+
+export async function submitBulkValidateJobAsync(db, { tenantId, objectType, objectIds = [], actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, {
     tenantId,
     jobTypeCode: "CLASSIFICATION_BULK_VALIDATE",
     handlerParams: { object_type: objectType, object_ids: objectIds },
@@ -76,8 +123,33 @@ export function submitDuplicateScanJob(db, { tenantId, classRef = null, objectTy
   });
 }
 
+export async function submitDuplicateScanJobAsync(db, { tenantId, classRef = null, objectType = null, threshold = null, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, {
+    tenantId,
+    jobTypeCode: "CLASSIFICATION_DUPLICATE_SCAN",
+    handlerParams: { class_ref: classRef, object_type: objectType, threshold },
+    actor,
+    ip,
+    priority: "low",
+    idempotencyKey,
+  });
+}
+
 export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, {
+    tenantId,
+    jobTypeCode: "CLASSIFICATION_MAINTENANCE",
+    handlerParams: {},
+    actor,
+    ip,
+    priority: "low",
+    queue: "default",
+    idempotencyKey,
+  });
+}
+
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, {
     tenantId,
     jobTypeCode: "CLASSIFICATION_MAINTENANCE",
     handlerParams: {},

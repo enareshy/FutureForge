@@ -1,0 +1,29 @@
+# Alertmanager configuration for the Stage 1-6 backup alerts.
+#
+# IMPORTANT: this deliberately has NO working integration. Alerts are grouped
+# and shown in the Alertmanager UI, but nothing is delivered to a human. Add a
+# real receiver (webhook, PagerDuty, Slack, email) and replace the empty
+# `receivers` entry before claiming that alerting works.
+#
+# Generated into the `ai-alertmanager-config` ConfigMap by
+# `scripts/k8s-monitoring-config.sh`.
+route:
+  receiver: unconfigured
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: unconfigured
+      repeat_interval: 1h
+
+receivers:
+  # A receiver with no integration: it is valid config, but it does not notify
+  # anyone. Replace this with the organisation's real destination.
+  - name: unconfigured
+
+# No inhibit rules on purpose. `AIBackupFailed` and `AIBackupStale` usually
+# fire together, but both carry distinct information (the newest run failed vs.
+# the last success is old), and suppression would hide a recovery regression.

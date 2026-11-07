@@ -6,11 +6,15 @@
 // required characteristics (inherited included) and class rules. It never
 // trusts client-provided values and always uses the server-resolved definition.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { coerceCharacteristicValue, normalizeText, normalizeUpper } from "./validation.js";
 import { resolveEffectiveCharacteristics } from "./inheritance.js";
+import { resolveEffectiveCharacteristicsAsync } from "./inheritance.js";
 import { convertValue, listUnits } from "./units.js";
 import { getConfig } from "./configuration.js";
+import { getConfigAsync } from "./configuration.js";
 import { evaluateRules } from "./rules.js";
+import { evaluateRulesAsync } from "./rules.js";
 import { validationFailed } from "./errors.js";
 import { publicAssignment, publicAssignmentValue } from "./repository.js";
 
@@ -185,10 +189,122 @@ export function validateClassValues(db, tenantId, classRef, rawValues = {}, { pa
   };
 }
 
+export async function validateClassValuesAsync(db, tenantId, classRef, rawValues = {}, { partial = false } = {}) {
+  const resolved = await resolveEffectiveCharacteristicsAsync(db, tenantId, classRef);
+  const { grouped, unmatched } = groupValues(resolved, rawValues);
+  const units = listUnits(db, { limit: 2000 });
+  const enforceUnits = (await getConfigAsync(db, tenantId, "enforce_units")) !== false;
+  const errors = [];
+  const warnings = [];
+  const missingRequired = [];
+  const invalidValues = [];
+  const unitErrors = [];
+  const items = [];
+
+  if (unmatched.length) {
+    warnings.push({
+      code: "UNKNOWN_CHARACTERISTIC",
+      message: "Values were supplied for characteristics not defined on this class",
+      refs: unmatched.map((entry) => entry.ref),
+    });
+  }
+
+  for (const entry of resolved.items) {
+    const values = grouped.get(entry.characteristic_id) || [];
+    const characteristic = {
+      id: entry.characteristic_id,
+      code: entry.code,
+      name: entry.name,
+      data_type: entry.data_type,
+      required: entry.required,
+      min_value: entry.min_value,
+      max_value: entry.max_value,
+      min_inclusive: entry.min_inclusive,
+      max_inclusive: entry.max_inclusive,
+      scale: entry.scale,
+      unit: entry.unit,
+      base_unit: entry.base_unit,
+    };
+    const allowedCodes = (entry.allowed_values || []).map((value) => normalizeUpper(value.code));
+
+    if (entry.required && values.length === 0 && !partial) {
+      const record = { characteristic_id: entry.characteristic_id, characteristic_code: entry.code, code: "REQUIRED", message: `${entry.name || entry.code} is required` };
+      missingRequired.push(record);
+      errors.push(record);
+      continue;
+    }
+    if (values.length > 1 && !entry.multi_valued) {
+      warnings.push({ characteristic_id: entry.characteristic_id, code: entry.code, code: "MULTIPLE_VALUES", message: `${entry.code} is single-valued; only the first value is used` });
+    }
+    const effective = entry.multi_valued ? values : values.slice(0, 1);
+    let itemValid = true;
+    for (const valueEntry of effective) {
+      const coerced = coerceCharacteristicValue(characteristic, valueEntry.value, { allowedCodes: entry.data_type === "ENUMERATION" ? allowedCodes : null });
+      if (!coerced.valid) {
+        itemValid = false;
+        for (const issue of coerced.issues) {
+          const record = { characteristic_id: entry.characteristic_id, code: entry.code, ...issue };
+          if (issue.code === "REQUIRED") missingRequired.push(record);
+          else invalidValues.push(record);
+          errors.push(record);
+        }
+      }
+      if (entry.data_type === "UNIT_NUMERIC" && enforceUnits && valueEntry.value !== null && valueEntry.value !== undefined && valueEntry.value !== "") {
+        const providedUnit = valueEntry.unit || entry.unit;
+        const conversion = convertValue(Number(valueEntry.value), providedUnit, entry.base_unit || entry.unit, { units, strict: false });
+        if (conversion.compatible === false) {
+          itemValid = false;
+          const record = { characteristic_id: entry.characteristic_id, code: entry.code, code: "UNIT_INCOMPATIBLE", message: `${entry.code} unit ${providedUnit} is not compatible with ${entry.base_unit || entry.unit}`, value: valueEntry.value };
+          unitErrors.push(record);
+          errors.push(record);
+        }
+      }
+    }
+    items.push({
+      characteristic_id: entry.characteristic_id,
+      code: entry.code,
+      origin: entry.origin,
+      valid: itemValid,
+      value_count: values.length,
+      allowed_value_mode: entry.allowed_value_mode,
+    });
+  }
+
+  const effectiveByCharacteristic = new Map();
+  for (const entry of resolved.items) effectiveByCharacteristic.set(Number(entry.characteristic_id), entry);
+  for (const issue of await evaluateRulesAsync(db, tenantId, resolved.chain.map((entry) => entry.id), grouped, effectiveByCharacteristic)) {
+    if (issue.severity === "error") errors.push(issue);
+    else if (issue.severity === "warning") warnings.push(issue);
+  }
+
+  return {
+    valid: errors.length === 0,
+    class: resolved.class,
+    errors,
+    warnings,
+    missing_required: missingRequired,
+    invalid_values: invalidValues,
+    unit_errors: unitErrors,
+    items,
+    evaluated: resolved.items.length,
+  };
+}
+
 // ── Assignment / object / batch validation ───────────────────────────────────
 
 export function storedValuesForAssignment(db, assignmentId) {
   const rows = queryAll(
+    db,
+    `SELECT v.*, c.code AS characteristic_code FROM cla_assignment_values v
+       JOIN cla_characteristics c ON c.id = v.characteristic_id
+      WHERE v.assignment_id = ? AND v.status = 'ACTIVE' ORDER BY v.characteristic_id, v.sequence`,
+    [Number(assignmentId)]
+  );
+  return rows.map((row) => ({ ...publicAssignmentValue(row), characteristic_code: row.characteristic_code }));
+}
+
+export async function storedValuesForAssignmentAsync(db, assignmentId) {
+  const rows = await queryAllAsync(
     db,
     `SELECT v.*, c.code AS characteristic_code FROM cla_assignment_values v
        JOIN cla_characteristics c ON c.id = v.characteristic_id
@@ -203,8 +319,19 @@ export function validateAssignmentValues(db, tenantId, assignment, rawValues = n
   return validateClassValues(db, tenantId, assignment.class_id, values, { partial });
 }
 
+export async function validateAssignmentValuesAsync(db, tenantId, assignment, rawValues = null, { partial = false } = {}) {
+  const values = rawValues === null || rawValues === undefined ? await storedValuesForAssignmentAsync(db, assignment.id) : rawValues;
+  return await validateClassValuesAsync(db, tenantId, assignment.class_id, values, { partial });
+}
+
 export function getAssignmentForValidation(db, tenantId, assignmentId) {
   const row = queryOne(db, "SELECT * FROM cla_assignments WHERE tenant_id = ? AND id = ?", [Number(tenantId), Number(assignmentId)]);
+  if (!row) throw validationFailed({ assignment_id: Number(assignmentId), reason: "not found" });
+  return row;
+}
+
+export async function getAssignmentForValidationAsync(db, tenantId, assignmentId) {
+  const row = await queryOneAsync(db, "SELECT * FROM cla_assignments WHERE tenant_id = ? AND id = ?", [Number(tenantId), Number(assignmentId)]);
   if (!row) throw validationFailed({ assignment_id: Number(assignmentId), reason: "not found" });
   return row;
 }
@@ -231,12 +358,50 @@ export function validateObject(db, tenantId, { objectType, objectId }) {
   };
 }
 
+export async function validateObjectAsync(db, tenantId, { objectType, objectId }) {
+  const assignments = await queryAllAsync(
+    db,
+    "SELECT * FROM cla_assignments WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND status = 'ACTIVE'",
+    [Number(tenantId), normalizeText(objectType, { max: 120 }), normalizeText(objectId, { max: 300 })]
+  );
+  const results = [];
+  for (const assignment of assignments) {
+    results.push({
+      assignment: publicAssignment(assignment),
+      validation: await validateAssignmentValuesAsync(db, tenantId, assignment),
+    });
+  }
+  const valid = results.every((entry) => entry.validation.valid);
+  return {
+    object_type: objectType,
+    object_id: objectId,
+    valid,
+    assignment_count: results.length,
+    results,
+    errors: results.flatMap((entry) => entry.validation.errors),
+    warnings: results.flatMap((entry) => entry.validation.warnings),
+  };
+}
+
 export function validateBatch(db, tenantId, { objectType, objectIds = [] } = {}) {
   const items = [];
   let valid = 0;
   let invalid = 0;
   for (const objectId of objectIds) {
     const result = validateObject(db, tenantId, { objectType, objectId });
+    if (result.valid) valid += 1;
+    else invalid += 1;
+    items.push({ object_id: objectId, valid: result.valid, assignment_count: result.assignment_count, errors: result.errors.length, warnings: result.warnings.length });
+  }
+  return { object_type: objectType, total: items.length, valid_count: valid, invalid_count: invalid, items };
+}
+
+export async function validateBatchAsync(db, tenantId, { objectType, objectIds = [] } = {}) {
+  const items = [];
+  let valid = 0;
+  let invalid = 0;
+  for (const objectId of objectIds) {
+    const result = await validateObjectAsync(db, tenantId, { objectType, objectId });
     if (result.valid) valid += 1;
     else invalid += 1;
     items.push({ object_id: objectId, valid: result.valid, assignment_count: result.assignment_count, errors: result.errors.length, warnings: result.warnings.length });

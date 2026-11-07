@@ -1,6 +1,6 @@
 import { safeParse } from "./validation.js";
 import { usersForAssignee } from "./routing.js";
-import { triggerEvent } from "./bindings.js";
+import { triggerEvent, triggerEventAsync } from "./bindings.js";
 import { registerWorkflowExecutor } from "../lifecycle/workflow.js";
 
 // Bridge between the Workflow Engine and the Lifecycle Management module.
@@ -48,11 +48,33 @@ export function onLifecycleApprovalComplete(db, { release, object, rule } = {}) 
   return { delegated: true, ...result };
 }
 
+export async function onLifecycleApprovalCompleteAsync(db, { release, object, rule } = {}) {
+  if (!release || !release.tenant_id) return { delegated: true, started: [] };
+  const event = RELEASE_EVENTS[release.status];
+  if (!event) return { delegated: true, started: [] };
+  const payload = {
+    tenant_id: release.tenant_id,
+    object_id: object?.id ?? release.object_id ?? null,
+    object_code: object?.code ?? null,
+    organization_id: object?.organization_id ?? null,
+    release_id: release.id,
+    release_status: release.status,
+    rule_code: rule?.code ?? null,
+    transition_id: release.transition_id ?? null,
+    from_state_id: release.from_state_id ?? null,
+    to_state_id: release.to_state_id ?? null,
+    title: `${object?.code ?? "Object"} release ${release.status}`,
+  };
+  const result = await triggerEventAsync(db, event, payload, { tenantId: release.tenant_id });
+  return { delegated: true, ...result };
+}
+
 export function lifecycleExecutor() {
   return {
     resolveApprovers: resolveLifecycleApprovers,
     startApproval: () => ({ delegated: true }),
     onApprovalComplete: onLifecycleApprovalComplete,
+    onApprovalCompleteAsync: onLifecycleApprovalCompleteAsync,
   };
 }
 

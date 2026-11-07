@@ -1,7 +1,7 @@
 // Cross-cutting hooks for the Event & Messaging Framework. Audit and structured
 // logging are best-effort: an observability outage must never fail (or roll
 // back) an event write or a consumer's business operation.
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 
 export function correlationId(req) {
   return (
@@ -42,6 +42,42 @@ export function auditEvent(db, input = {}) {
   } = input;
   try {
     return writeAudit(db, {
+      actor,
+      action,
+      resourceType,
+      resourceId: resourceId === undefined || resourceId === null ? null : String(resourceId),
+      details: { ...details, correlationId: correlation || details.correlationId || undefined },
+      reason,
+      ip,
+      status,
+      errorMessage,
+      source: "events",
+      category,
+      eventType,
+    });
+  } catch {
+    return null;
+  }
+}
+
+// Async twin of `auditEvent`; best-effort and never throws into the caller.
+export async function auditEventAsync(db, input = {}) {
+  const {
+    actor = null,
+    action,
+    resourceType,
+    resourceId,
+    details = {},
+    reason = null,
+    ip = null,
+    status = "success",
+    errorMessage = null,
+    correlation = null,
+    category = "administration",
+    eventType = null,
+  } = input;
+  try {
+    return await writeAuditAsync(db, {
       actor,
       action,
       resourceType,

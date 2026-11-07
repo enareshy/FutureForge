@@ -28,13 +28,21 @@ const ClassificationPage = React.lazy(() => import("./pages/ClassificationPage.j
 const BomPage = React.lazy(() => import("./pages/BomPage.jsx"));
 const PdmPage = React.lazy(() => import("./pages/PdmPage.jsx"));
 const ChangeManagementPage = React.lazy(() => import("./pages/ChangeManagementPage.jsx"));
+const RequirementsPage = React.lazy(() => import("./pages/RequirementsPage.jsx"));
+const RequirementPdmPage = React.lazy(() => import("./pages/RequirementPdmPage.jsx"));
+const RequirementManufacturingPage = React.lazy(() => import("./pages/RequirementManufacturingPage.jsx"));
+const VerificationValidationPage = React.lazy(() => import("./pages/VerificationValidationPage.jsx"));
+const ManufacturingQualityPage = React.lazy(() => import("./pages/ManufacturingQualityPage.jsx"));
+const PredictiveIntelligencePage = React.lazy(() => import("./pages/PredictiveIntelligencePage.jsx"));
 const DigitalThreadPage = React.lazy(() => import("./pages/DigitalThreadPage.jsx"));
+const TraceabilityPage = React.lazy(() => import("./pages/TraceabilityPage.jsx"));
 const StandardsExchangePage = React.lazy(() => import("./pages/StandardsExchangePage.jsx"));
 const ReportingAnalyticsPage = React.lazy(() => import("./pages/ReportingAnalyticsPage.jsx"));
 const DataObservabilityPage = React.lazy(() => import("./pages/DataObservabilityPage.jsx"));
 const OrganizationsPage = React.lazy(() => import("./pages/OrganizationsPage.jsx"));
 const OrganizationDetailPage = React.lazy(() => import("./pages/OrganizationDetailPage.jsx"));
 const PlatformPage = React.lazy(() => import("./pages/PlatformPage.jsx"));
+const DeploymentPage = React.lazy(() => import("./pages/DeploymentPage.jsx"));
 const TenantsPage = React.lazy(() => import("./pages/TenantsPage.jsx"));
 const ConfigurationPage = React.lazy(() => import("./pages/ConfigurationPage.jsx"));
 const MetadataPage = React.lazy(() => import("./pages/MetadataPage.jsx"));
@@ -72,6 +80,27 @@ const EventsPage = React.lazy(() => import("./pages/EventsPage.jsx"));
 const NumberingPage = React.lazy(() => import("./pages/NumberingPage.jsx"));
 const VersioningPage = React.lazy(() => import("./pages/VersioningPage.jsx"));
 const ReferenceDataPage = React.lazy(() => import("./pages/ReferenceDataPage.jsx"));
+const AiDashboardPage = React.lazy(() => import("./pages/AiDashboardPage.jsx"));
+const AiChatPage = React.lazy(() => import("./pages/AiChatPage.jsx"));
+const AiKnowledgePage = React.lazy(() => import("./pages/AiKnowledgePage.jsx"));
+const AiJobsPage = React.lazy(() => import("./pages/AiJobsPage.jsx"));
+const AiAgentsPage = React.lazy(() => import("./pages/AiAgentsPage.jsx"));
+const AiAgentAdminPage = React.lazy(() => import("./pages/AiAgentAdminPage.jsx"));
+const AiKnowledgeGraphPage = React.lazy(() => import("./pages/AiKnowledgeGraphPage.jsx"));
+const AiProductBomPage = React.lazy(() => import("./pages/AiProductBomPage.jsx"));
+const AiManufacturingQualityPage = React.lazy(() =>
+  import("./pages/AiManufacturingQualityPage.jsx"),
+);
+const AiPredictiveIntelligencePage = React.lazy(() =>
+  import("./pages/AiPredictiveIntelligencePage.jsx"),
+);
+const AiModelsPage = React.lazy(() => import("./pages/AiModelsPage.jsx"));
+const AiEvaluationsPage = React.lazy(() => import("./pages/AiEvaluationsPage.jsx"));
+const AiExperimentsPage = React.lazy(() => import("./pages/AiExperimentsPage.jsx"));
+const AiUsagePage = React.lazy(() => import("./pages/AiUsagePage.jsx"));
+const AiEventsPage = React.lazy(() => import("./pages/AiEventsPage.jsx"));
+const AiAuditPage = React.lazy(() => import("./pages/AiAuditPage.jsx"));
+const AiSearchPage = React.lazy(() => import("./pages/AiSearchPage.jsx"));
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -184,6 +213,7 @@ const NAV_SECTIONS = [
     items: [
       { to: "/tenants", label: "Tenants", platform: true },
       { to: "/platform", label: "Platform properties", platform: true },
+      { to: "/deployment", label: "Deployment & editions", platform: true },
     ],
   },
   {
@@ -201,12 +231,19 @@ const NAV_SECTIONS = [
     key: "engineering",
     label: "Engineering",
     items: [
-      { to: "/pdm", label: "Product data (PDM)" },
-      { to: "/bom", label: "Bill of materials" },
-      { to: "/change", label: "Change management (ECR/ECO/ECN)" },
-      { to: "/classification", label: "Classification" },
-      { to: "/digital-thread", label: "Digital thread" },
-      { to: "/standards-exchange", label: "Standards & exchange" },
+      { to: "/pdm", label: "Product data (PDM)", feature: "pdm" },
+      { to: "/requirements", label: "Requirements manager" },
+      { to: "/requirement-pdm", label: "Requirement / PDM" },
+      { to: "/requirement-manufacturing", label: "Requirement / Manufacturing" },
+      { to: "/verification-validation", label: "Verification & validation" },
+      { to: "/manufacturing-quality", label: "Manufacturing & quality" },
+      { to: "/predictive-intelligence", label: "Predictive intelligence" },
+      { to: "/bom", label: "Bill of materials", feature: "bom" },
+      { to: "/change", label: "Change management (ECR/ECO/ECN)", feature: "change_management" },
+      { to: "/classification", label: "Classification", feature: "classification" },
+      { to: "/digital-thread", label: "Digital thread", feature: "digital_thread" },
+      { to: "/traceability", label: "Traceability engine", feature: "digital_thread" },
+      { to: "/standards-exchange", label: "Standards & exchange", feature: "standards_exchange" },
     ],
   },
   {
@@ -215,7 +252,30 @@ const NAV_SECTIONS = [
     items: [
       { to: "/search", label: "Search & discovery", end: true },
       { to: "/search/foundation", label: "Enterprise search" },
-      { to: "/reporting", label: "Reporting & analytics" },
+      { to: "/reporting", label: "Reporting & analytics", feature: "reporting" },
+    ],
+  },
+  {
+    key: "ai",
+    label: "AI Platform",
+    items: [
+      { to: "/ai", label: "AI dashboard", end: true },
+      { to: "/ai/chat", label: "Enterprise Copilot" },
+      { to: "/ai/search", label: "AI search & intelligence" },
+      { to: "/ai/knowledge", label: "Knowledge sources" },
+      { to: "/ai/jobs", label: "Indexing jobs" },
+      { to: "/ai/agents", label: "Agents" },
+      { to: "/ai/agents/admin", label: "Agent platform" },
+      { to: "/ai/graph", label: "Knowledge graph" },
+      { to: "/ai/product", label: "Product & BOM" },
+      { to: "/ai/manufacturing-quality", label: "Manufacturing & Quality" },
+      { to: "/ai/predictive", label: "Predictive intelligence" },
+      { to: "/ai/models", label: "Models & providers" },
+      { to: "/ai/experiments", label: "Experiments & models" },
+      { to: "/ai/evaluations", label: "Evaluation & feedback" },
+      { to: "/ai/usage", label: "Usage & cost" },
+      { to: "/ai/events", label: "Events & observability", platformOrAdmin: true },
+      { to: "/ai/audit", label: "AI audit log", platformOrAdmin: true },
     ],
   },
   {
@@ -283,27 +343,27 @@ const NAV_SECTIONS = [
         label: "Governance",
         items: [
           { to: "/audit", label: "Audit log", platformOrAdmin: true },
-          { to: "/data-governance", label: "Governance & quality", platformOrAdmin: true },
-          { to: "/data-catalog", label: "Catalog registry", platformOrAdmin: true },
-          { to: "/glossary", label: "Business glossary", platformOrAdmin: true },
-          { to: "/data-lifecycle", label: "Lifecycle & archival", platformOrAdmin: true },
-          { to: "/reference-data", label: "Enterprise reference data", platformOrAdmin: true },
+          { to: "/data-governance", label: "Governance & quality", platformOrAdmin: true, feature: "data_governance" },
+          { to: "/data-catalog", label: "Catalog registry", platformOrAdmin: true, feature: "data_catalog" },
+          { to: "/glossary", label: "Business glossary", platformOrAdmin: true, feature: "data_catalog" },
+          { to: "/data-lifecycle", label: "Lifecycle & archival", platformOrAdmin: true, feature: "data_lifecycle" },
+          { to: "/reference-data", label: "Enterprise reference data", platformOrAdmin: true, feature: "reference_data" },
         ],
       },
       {
         key: "admin-exchange",
         label: "Exchange",
         items: [
-          { to: "/data-exchange", label: "Import & export", platformOrAdmin: true },
-          { to: "/migration", label: "Migration & onboarding", platformOrAdmin: true },
+          { to: "/data-exchange", label: "Import & export", platformOrAdmin: true, feature: "data_exchange" },
+          { to: "/migration", label: "Migration & onboarding", platformOrAdmin: true, feature: "migration" },
         ],
       },
       {
         key: "admin-integration",
         label: "Integration",
         items: [
-          { to: "/integration", label: "Integration hub", platformOrAdmin: true },
-          { to: "/events", label: "Event framework", platformOrAdmin: true },
+          { to: "/integration", label: "Integration hub", platformOrAdmin: true, feature: "integration" },
+          { to: "/events", label: "Event framework", platformOrAdmin: true, feature: "events" },
         ],
       },
       {
@@ -321,22 +381,24 @@ const NAV_SECTIONS = [
           { to: "/jobs/queues", label: "Job queues", platformOrAdmin: true },
           { to: "/jobs/schedules", label: "Job schedules", platformOrAdmin: true },
           { to: "/jobs/admin", label: "Job types", platformOrAdmin: true },
-          { to: "/observability", label: "Data observability", platformOrAdmin: true },
+          { to: "/observability", label: "Data observability", platformOrAdmin: true, feature: "observability" },
         ],
       },
     ],
   },
 ];
 
-function Shell({ me, access, tenant, tenants, onSwitch, onLogout, children }) {
+function Shell({ me, access, tenant, tenants, deployment, onSwitch, onLogout, children }) {
   const location = useLocation();
   const roles = access?.roles || [];
   const canPlatform = roles.some((r) => r.code === "platform.admin");
   const canMetadata = canPlatform || roles.some((r) => r.code === "iam.admin");
+  const features = deployment?.features || null;
 
   const visible = (item) => {
     if (item.platform && !canPlatform) return false;
     if (item.platformOrAdmin && !canMetadata) return false;
+    if (item.feature && features && features[item.feature] === false) return false;
     return true;
   };
 
@@ -463,6 +525,7 @@ export default function App() {
   const [access, setAccess] = useState(null);
   const [tenant, setTenant] = useState(null);
   const [tenants, setTenants] = useState([]);
+  const [deployment, setDeployment] = useState(null);
   const [ready, setReady] = useState(!getToken());
   const navigate = useNavigate();
 
@@ -471,6 +534,7 @@ export default function App() {
     setAccess(res.access || null);
     setTenant(res.tenant || null);
     setTenants(res.tenants || []);
+    setDeployment(res.deployment || null);
   }
 
   useEffect(() => {
@@ -500,6 +564,7 @@ export default function App() {
     setAccess(null);
     setTenant(null);
     setTenants([]);
+    setDeployment(null);
     navigate("/");
   }
 
@@ -516,7 +581,7 @@ export default function App() {
   }
 
   return (
-    <Shell me={me} access={access} tenant={tenant} tenants={tenants} onSwitch={switchTenant} onLogout={logout}>
+    <Shell me={me} access={access} tenant={tenant} tenants={tenants} deployment={deployment} onSwitch={switchTenant} onLogout={logout}>
       <ErrorBoundary>
       <React.Suspense fallback={<div className="page-loading mono">Loading…</div>}>
       <Routes>
@@ -543,7 +608,14 @@ export default function App() {
         <Route path="/bom" element={<BomPage />} />
         <Route path="/pdm" element={<PdmPage />} />
         <Route path="/change" element={<ChangeManagementPage />} />
+        <Route path="/requirements" element={<RequirementsPage />} />
+        <Route path="/requirement-pdm" element={<RequirementPdmPage />} />
+        <Route path="/requirement-manufacturing" element={<RequirementManufacturingPage />} />
+        <Route path="/verification-validation" element={<VerificationValidationPage />} />
+        <Route path="/manufacturing-quality" element={<ManufacturingQualityPage />} />
+        <Route path="/predictive-intelligence" element={<PredictiveIntelligencePage />} />
         <Route path="/digital-thread" element={<DigitalThreadPage />} />
+        <Route path="/traceability" element={<TraceabilityPage />} />
         <Route path="/standards-exchange" element={<StandardsExchangePage />} />
         <Route path="/reporting" element={<ReportingAnalyticsPage />} />
         <Route path="/observability" element={<DataObservabilityPage />} />
@@ -561,6 +633,7 @@ export default function App() {
         <Route path="/workflows" element={<WorkflowPage mode="user" />} />
         <Route path="/workflows/templates" element={<WorkflowPage mode="config" />} />
         <Route path="/platform" element={<PlatformPage />} />
+        <Route path="/deployment" element={<DeploymentPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="/notifications/admin" element={<NotificationAdminPage />} />
@@ -578,6 +651,29 @@ export default function App() {
         <Route path="/numbering" element={<NumberingPage />} />
         <Route path="/versioning" element={<VersioningPage />} />
         <Route path="/reference-data" element={<ReferenceDataPage />} />
+        <Route path="/ai" element={<AiDashboardPage />} />
+        <Route path="/ai/chat" element={<AiChatPage />} />
+        <Route path="/ai/search" element={<AiSearchPage />} />
+        <Route path="/ai/knowledge" element={<AiKnowledgePage />} />
+        <Route path="/ai/jobs" element={<AiJobsPage />} />
+        <Route path="/ai/agents" element={<AiAgentsPage />} />
+        <Route path="/ai/agents/admin" element={<AiAgentAdminPage />} />
+        <Route path="/ai/graph" element={<AiKnowledgeGraphPage />} />
+        <Route path="/ai/product" element={<AiProductBomPage />} />
+        <Route
+          path="/ai/manufacturing-quality"
+          element={<AiManufacturingQualityPage />}
+        />
+        <Route
+          path="/ai/predictive"
+          element={<AiPredictiveIntelligencePage />}
+        />
+        <Route path="/ai/models" element={<AiModelsPage />} />
+        <Route path="/ai/experiments" element={<AiExperimentsPage />} />
+        <Route path="/ai/evaluations" element={<AiEvaluationsPage />} />
+        <Route path="/ai/usage" element={<AiUsagePage />} />
+        <Route path="/ai/events" element={<AiEventsPage />} />
+        <Route path="/ai/audit" element={<AiAuditPage />} />
         <Route path="/jobs" element={<JobsDashboardPage />} />
         <Route path="/jobs/list" element={<JobsPage />} />
         <Route path="/jobs/execution" element={<JobExecutionPage />} />

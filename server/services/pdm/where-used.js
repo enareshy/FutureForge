@@ -6,13 +6,14 @@
 // consumers recorded in the PDM reference index (BOM lines, CAD, documents).
 // Traversal is bounded by depth and node caps.
 import { queryAll } from "../../db.js";
+import { queryAllAsync } from "../../db-async.js";
 import { publicItem, publicRevision } from "./repository.js";
-import { getItemRow, requireItemRow } from "./items.js";
-import { getRevisionRow } from "./revisions.js";
-import { resolveRevisionRule } from "./revision-rules.js";
-import { publishPdmEvent, pdmEventCode } from "./events.js";
+import { getItemRow, requireItemRow, getItemRowAsync, requireItemRowAsync } from "./items.js";
+import { getRevisionRow, getRevisionRowAsync } from "./revisions.js";
+import { resolveRevisionRule, resolveRevisionRuleAsync } from "./revision-rules.js";
+import { publishPdmEvent, publishPdmEventAsync, pdmEventCode } from "./events.js";
 import { SOURCE_MODULE, MAX_TRAVERSAL_NODES } from "./constants.js";
-import { getConfig } from "./configuration.js";
+import { getConfig, getConfigAsync } from "./configuration.js";
 import { objectNotFound } from "./errors.js";
 
 const PARENT_RELATIONSHIP_TYPES = ["PRODUCT_HAS_PART", "ITEM_DERIVED_FROM", "PART_SUBSTITUTE"];
@@ -171,4 +172,115 @@ function clampDepth(requested, fallback) {
   const n = Number(requested);
   if (Number.isFinite(n) && n > 0) return Math.min(n, 200);
   return fallback;
+}
+
+// ── Async twins (used by migrated read routes) ───────────────────────────────
+
+async function findParentLinksAsync(db, tenantId, itemId) {
+  const placeholders = PARENT_RELATIONSHIP_TYPES.map(() => "?").join(",");
+  return queryAllAsync(
+    db,
+    `SELECT * FROM pdm_relationships
+      WHERE tenant_id = ? AND status = 'ACTIVE' AND relationship_type IN (${placeholders})
+        AND target_type = 'ITEM' AND target_id = ?
+      ORDER BY id ASC`,
+    [Number(tenantId), ...PARENT_RELATIONSHIP_TYPES, String(itemId)]
+  );
+}
+
+async function externalConsumersAsync(db, tenantId, itemId, revisionId) {
+  const clauses = ["tenant_id = ?", "target_type IN ('ITEM','REVISION')", "(target_id = ?" + (revisionId ? " OR target_id = ?" : "") + ")"];
+  const params = [Number(tenantId), String(itemId)];
+  if (revisionId) params.push(String(revisionId));
+  const rows = await queryAllAsync(db, `SELECT * FROM pdm_references WHERE ${clauses.join(" AND ")} ORDER BY category, id`, params);
+  return rows.map((row) => ({ category: row.category, source_type: row.source_type, source_id: row.source_id, source_ref: row.source_ref || "", relationship_type: row.relationship_type || "" }));
+}
+
+async function safeResolveRevisionAsync(db, tenantId, itemId, options) {
+  try {
+    return (await resolveRevisionRuleAsync(db, tenantId, { itemId, ...options })).revision;
+  } catch {
+    return null;
+  }
+}
+
+export async function whereUsedAsync(db, tenantId, ref, { revisionId = null, revisionRuleId = null, ruleCode = null, context = {}, recursive = true, maxDepth = null, includeExternal = true, actor = null } = {}) {
+  const tenant = Number(tenantId);
+  const itemRow = await requireItemRowAsync(db, tenant, ref);
+  const limit = clampDepth(maxDepth, 25);
+  const nodeCap = Number((await getConfigAsync(db, tenant, "max_traversal_nodes")) || MAX_TRAVERSAL_NODES);
+
+  let targetRevision = null;
+  if (revisionId != null) {
+    const row = await getRevisionRowAsync(db, tenant, revisionId, { itemId: itemRow.id });
+    if (!row) throw objectNotFound({ revision_id: revisionId, item_id: itemRow.id });
+    targetRevision = row;
+  } else {
+    try {
+      targetRevision = (await resolveRevisionRuleAsync(db, tenant, { itemId: itemRow.id, ruleId: revisionRuleId, ruleCode, context })).revision;
+    } catch {
+      targetRevision = null;
+    }
+  }
+
+  const nodes = [nodeFor(itemRow, targetRevision, 0, "0", null, null)];
+  const edges = [];
+  const topLevel = [];
+  const queue = [{ itemId: itemRow.id, level: 0, path: "0" }];
+  let visited = 1;
+  let truncated = false;
+
+  while (queue.length) {
+    const current = queue.shift();
+    if (recursive && current.level >= limit) {
+      if ((await findParentLinksAsync(db, tenant, current.itemId)).length) truncated = true;
+      continue;
+    }
+    const parents = await findParentLinksAsync(db, tenant, current.itemId);
+    if (!parents.length) {
+      const currentItem = await getItemRowAsync(db, tenant, current.itemId);
+      if (currentItem) topLevel.push({ item_id: currentItem.id, item_number: currentItem.item_number, item_ref: currentItem.item_ref, name: currentItem.name, level: current.level });
+      continue;
+    }
+    for (const link of parents) {
+      const parentId = Number(link.source_id);
+      if (!Number.isInteger(parentId)) continue;
+      const parentRow = await getItemRowAsync(db, tenant, parentId);
+      if (!parentRow) continue;
+      const parentRevision = await safeResolveRevisionAsync(db, tenant, parentId, { revisionRuleId, ruleCode, context });
+      const already = nodes.some((node) => node.item_id === parentId);
+      const childPath = `${current.path}<${link.id}`;
+      if (!already) {
+        nodes.push(nodeFor(parentRow, parentRevision, current.level + 1, childPath, current.itemId, link));
+      }
+      edges.push({ relationship_id: link.id, relationship_ref: link.relationship_ref, relationship_type: link.relationship_type, parent_item_id: parentId, child_item_id: current.itemId, level: current.level + 1, quantity: parseQuantity(link.attributes_json) });
+      visited += 1;
+      if (!recursive) continue;
+      if (visited >= nodeCap) {
+        truncated = true;
+        break;
+      }
+      if (!queue.some((entry) => entry.itemId === parentId && entry.level === current.level + 1)) queue.push({ itemId: parentId, level: current.level + 1, path: childPath });
+    }
+    if (visited >= nodeCap) break;
+  }
+
+  const external = includeExternal ? await externalConsumersAsync(db, tenant, itemRow.id, targetRevision?.id ?? null) : [];
+  const result = {
+    source_module: SOURCE_MODULE,
+    target: { item: publicItem(itemRow), revision: targetRevision ? publicRevision(targetRevision) : null },
+    immediate_parent_count: edges.filter((edge) => edge.level === 1).length,
+    nodes,
+    edges,
+    top_level: dedupeTopLevel(topLevel),
+    external_consumers: external,
+    node_count: nodes.length,
+    edge_count: edges.length,
+    truncated,
+    max_depth: limit,
+    recursive: Boolean(recursive),
+    analyzed_at: new Date().toISOString(),
+  };
+  await publishPdmEventAsync(db, { eventType: pdmEventCode("WHERE_USED_RUN"), objectType: "pdm_item", objectId: itemRow.id, tenantId: tenant, organizationId: itemRow.organization_id, payload: { item_ref: itemRow.item_ref, node_count: nodes.length } }, actor);
+  return result;
 }

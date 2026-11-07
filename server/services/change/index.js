@@ -70,5 +70,8 @@ export const Change = {
 };
 
 export const ensureChangeFoundation = Foundation.ensureChangeFoundation;
+export const ensureChangeFoundationAsync = Foundation.ensureChangeFoundationAsync;
 export const changeHealth = Foundation.changeHealth;
+export const changeHealthAsync = Foundation.changeHealthAsync;
 export const seedChange = Seed.seedChange;
+export const seedChangeAsync = Seed.seedChangeAsync;

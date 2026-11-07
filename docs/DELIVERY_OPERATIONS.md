@@ -49,7 +49,7 @@ import { openDatabase, migrate } from "./server/db.js";
 import { ensureDefaultProviders } from "./server/services/delivery.js";
 import { createWorker } from "./server/services/delivery/worker.js";
 
-const db = openDatabase(process.env.IAM_DB || "data/iam.db");
+const db = openDatabase();
 migrate(db);
 ensureDefaultProviders(db);
 

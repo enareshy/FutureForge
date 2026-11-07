@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { assertArtifactType } from "./versions.js";
 
 export const SCOPES = ["system", "tenant", "organization"];
@@ -180,6 +181,178 @@ export function effectiveCatalog(db, { artifactType, tenantId, organizationId } 
 // Confirms an artifact is enabled in the given context before it is consumed.
 export function assertEnabled(db, artifactType, artifactId, context) {
   const config = resolveArtifactConfig(db, artifactType, artifactId, context);
+  if (!config.enabled) {
+    throw new HttpError(409, `Metadata ${artifactType} ${artifactId} is disabled at ${config.source} scope`);
+  }
+  return config;
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+
+export async function listConfigurationsAsync(db, { scope, scopeId, artifactType } = {}) {
+  const where = [];
+  const params = [];
+  if (scope) {
+    assertScope(scope);
+    where.push("scope = ?");
+    params.push(scope);
+  }
+  if (scopeId !== undefined && scopeId !== null && scopeId !== "") {
+    where.push("scope_id = ?");
+    params.push(Number(scopeId) || 0);
+  }
+  if (artifactType) {
+    assertArtifactType(artifactType);
+    where.push("artifact_type = ?");
+    params.push(artifactType);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  return (
+    await queryAllAsync(
+      db,
+      `SELECT * FROM metadata_configurations ${clause} ORDER BY scope, artifact_type, artifact_id`,
+      params
+    )
+  ).map(publicConfig);
+}
+
+export async function resolveArtifactConfigAsync(db, artifactType, artifactId, context = {}) {
+  assertArtifactType(artifactType);
+  const tenantId = Number(context.tenantId || context.tenant_id || 0) || 0;
+  const organizationId = Number(context.organizationId || context.organization_id || 0) || 0;
+  const layers = [];
+  const resolved = { enabled: true, pinned_version: null, settings: {}, source: "default" };
+
+  const scopeIds = [["system", 0]];
+  if (tenantId) scopeIds.push(["tenant", tenantId]);
+  if (organizationId) scopeIds.push(["organization", organizationId]);
+
+  for (const [scope, scopeId] of scopeIds) {
+    const row = await queryOneAsync(
+      db,
+      "SELECT * FROM metadata_configurations WHERE scope = ? AND scope_id = ? AND artifact_type = ? AND artifact_id = ?",
+      [scope, scopeId, artifactType, Number(artifactId)]
+    );
+    if (!row) continue;
+    const config = publicConfig(row);
+    resolved.enabled = config.enabled;
+    if (config.pinned_version !== null && config.pinned_version !== undefined) {
+      resolved.pinned_version = config.pinned_version;
+    }
+    resolved.settings = { ...resolved.settings, ...config.settings };
+    resolved.source = scope;
+    layers.push({ scope, scope_id: scopeId, enabled: config.enabled, pinned_version: config.pinned_version });
+  }
+  return { artifact_type: artifactType, artifact_id: Number(artifactId), ...resolved, layers };
+}
+
+export async function setConfigurationAsync(db, input, actor, ip) {
+  const scope = input?.scope || "system";
+  assertScope(scope);
+  const artifactType = input?.artifactType ?? input?.artifact_type;
+  assertArtifactType(artifactType);
+  const artifactId = Number(input?.artifactId ?? input?.artifact_id);
+  if (!artifactId) throw new HttpError(400, "artifact_id is required");
+  const scopeId = scope === "system" ? 0 : Number(input?.scopeId ?? input?.scope_id ?? 0);
+  if (scope !== "system" && !scopeId) throw new HttpError(400, "scope_id is required for tenant/organization scope");
+  const enabled = input.enabled === false ? 0 : 1;
+  const pinnedVersion =
+    input.pinnedVersion === undefined && input.pinned_version === undefined
+      ? null
+      : input.pinnedVersion ?? input.pinned_version;
+  const settings = input.settings || {};
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `INSERT INTO metadata_configurations
+      (scope, scope_id, artifact_type, artifact_id, enabled, pinned_version, settings_json, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(scope, scope_id, artifact_type, artifact_id) DO UPDATE SET
+       enabled = excluded.enabled,
+       pinned_version = excluded.pinned_version,
+       settings_json = excluded.settings_json,
+       updated_at = excluded.updated_at`,
+    [scope, scopeId, artifactType, artifactId, enabled, pinnedVersion, JSON.stringify(settings), ts]
+  );
+  await writeAuditAsync(db, {
+    actor,
+    action: "metadata.configuration.set",
+    resourceType: "metadata_configuration",
+    resourceId: `${scope}:${scopeId}:${artifactType}:${artifactId}`,
+    details: { scope, scopeId, artifactType, artifactId, enabled: Boolean(enabled), pinnedVersion },
+    ip,
+  });
+  return resolveArtifactConfigAsync(db, artifactType, artifactId, {
+    tenantId: scope === "tenant" ? scopeId : undefined,
+    organizationId: scope === "organization" ? scopeId : undefined,
+  });
+}
+
+export async function deleteConfigurationAsync(db, { scope, scopeId, artifactType, artifactId }, actor, ip) {
+  assertScope(scope);
+  assertArtifactType(artifactType);
+  const result = await runAsync(
+    db,
+    "DELETE FROM metadata_configurations WHERE scope = ? AND scope_id = ? AND artifact_type = ? AND artifact_id = ?",
+    [scope, Number(scopeId) || 0, artifactType, Number(artifactId)]
+  );
+  if (!result.changes) throw new HttpError(404, "Configuration not found");
+  await writeAuditAsync(db, {
+    actor,
+    action: "metadata.configuration.delete",
+    resourceType: "metadata_configuration",
+    resourceId: `${scope}:${Number(scopeId) || 0}:${artifactType}:${artifactId}`,
+    ip,
+  });
+  return { deleted: true };
+}
+
+export async function effectiveCatalogAsync(db, { artifactType, tenantId, organizationId } = {}) {
+  const [types, lovs, forms, rules, attributes] = await Promise.all([
+    artifactType && artifactType !== "type"
+      ? []
+      : queryAllAsync(db, "SELECT id, code, name, tenant_id, status FROM metadata_types ORDER BY code"),
+    artifactType && artifactType !== "lov"
+      ? []
+      : queryAllAsync(db, "SELECT id, code, name, tenant_id, status FROM metadata_lovs ORDER BY code"),
+    artifactType && artifactType !== "form"
+      ? []
+      : queryAllAsync(db, "SELECT id, code, name, tenant_id, status FROM metadata_forms ORDER BY code"),
+    artifactType && artifactType !== "rule"
+      ? []
+      : queryAllAsync(db, "SELECT id, code, name, tenant_id, status FROM metadata_rules ORDER BY code"),
+    artifactType && artifactType !== "attribute"
+      ? []
+      : queryAllAsync(db, "SELECT id, code, name, tenant_id, status FROM metadata_attributes ORDER BY code"),
+  ]);
+
+  const context = { tenantId, organizationId };
+  const groups = [
+    ["type", types],
+    ["attribute", attributes],
+    ["lov", lovs],
+    ["form", forms],
+    ["rule", rules],
+  ];
+  const items = [];
+  for (const [artifactTypeName, rows] of groups) {
+    for (const row of rows) {
+      items.push({
+        artifact_type: artifactTypeName,
+        artifact_id: row.id,
+        code: row.code,
+        name: row.name,
+        status: row.status,
+        is_global: row.tenant_id === null || row.tenant_id === undefined,
+        config: await resolveArtifactConfigAsync(db, artifactTypeName, row.id, context),
+      });
+    }
+  }
+  return items;
+}
+
+export async function assertEnabledAsync(db, artifactType, artifactId, context) {
+  const config = await resolveArtifactConfigAsync(db, artifactType, artifactId, context);
   if (!config.enabled) {
     throw new HttpError(409, `Metadata ${artifactType} ${artifactId} is disabled at ${config.source} scope`);
   }

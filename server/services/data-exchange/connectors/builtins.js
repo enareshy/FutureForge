@@ -7,6 +7,7 @@
 // provider with `registerConnector(..., { replace: true })` to back them with a
 // real adapter. Until then they fail closed with a clear, actionable error.
 import { queryAll } from "../../../db.js";
+import { queryAllAsync } from "../../../db-async.js";
 import { connectorFailed, connectorUnsupported, invalidConnector } from "../errors.js";
 import { normalizeText, parseArray } from "../validation.js";
 import { registerConnector, getConnector } from "./registry.js";
@@ -201,6 +202,7 @@ export function registerBuiltinConnectors() {
       const records = readDatabase(ctx);
       return { fields: normalizeFields(null, records), records };
     },
+    readAsync: (ctx) => readDatabaseAsync(ctx).then((records) => ({ fields: normalizeFields(null, records), records })),
     write: () => {
       throw connectorUnsupported("DATABASE", "WRITE");
     },
@@ -311,6 +313,15 @@ function readDatabase(ctx) {
   const db = ctx.db;
   if (!db) throw connectorFailed("A database handle is required to read from the platform database");
   const rows = queryAll(db, assertSelect(settings.query), parseArray(settings.params, []));
+  return rows.map((row) => ({ ...row }));
+}
+
+async function readDatabaseAsync(ctx) {
+  const settings = settingsOf(ctx);
+  if (!settings.query) throw invalidConnector("A DATABASE connector requires settings.query");
+  const db = ctx.db;
+  if (!db) throw connectorFailed("A database handle is required to read from the platform database");
+  const rows = await queryAllAsync(db, assertSelect(settings.query), parseArray(settings.params, []));
   return rows.map((row) => ({ ...row }));
 }
 

@@ -5,15 +5,16 @@
 // Scheduling & Execution Engine so they are durable, resumable, observable and
 // retryable. Handlers only drive the PDM core.
 import { queryAll, run, nowIso } from "../../db.js";
+import { queryAllAsync, runAsync } from "../../db-async.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
-import { getJobTypeRow, createJobType } from "../jobs/types.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
+import { getJobTypeRow, createJobType, getJobTypeRowAsync, createJobTypeAsync } from "../jobs/types.js";
 import { reindexType } from "../search/indexing.js";
 import { PDM_HANDLER_CODES, PDM_JOB_TYPES, SEARCH_OBJECT_TYPES } from "./constants.js";
-import { getConfig } from "./configuration.js";
+import { getConfig, getConfigAsync } from "./configuration.js";
 import { resolveStructure } from "./structure.js";
 import { whereUsed } from "./where-used.js";
-import { whereReferenced, rebuildReferences } from "./where-referenced.js";
+import { whereReferenced, rebuildReferences, rebuildReferencesAsync } from "./where-referenced.js";
 import { createBaseline } from "./baselines.js";
 import { validateItem, validateRevision, validateDataset, validateTenant } from "./validator.js";
 import { invalidate, bumpEpoch, cacheStats } from "./cache.js";
@@ -31,8 +32,33 @@ export function ensurePdmJobTypes(db) {
   return { created };
 }
 
+export async function ensurePdmJobTypesAsync(db) {
+  let created = 0;
+  for (const def of PDM_JOB_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    await createJobTypeAsync(db, { ...def }, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
 function submit(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority = "normal", queue = PDM_QUEUE, idempotencyKey = null }) {
   return submitJob(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      input: { tenant_id: Number(tenantId), ...handlerParams },
+      tenant_id: Number(tenantId),
+      priority,
+      queue,
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+}
+
+async function submitAsync(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority = "normal", queue = PDM_QUEUE, idempotencyKey = null }) {
+  return submitJobAsync(
     db,
     {
       job_type_code: jobTypeCode,
@@ -74,6 +100,34 @@ export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null, id
   return submit(db, { tenantId, jobTypeCode: "PDM_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low", queue: "default", idempotencyKey });
 }
 
+export async function submitStructureResolveJobAsync(db, { tenantId, itemId, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "PDM_STRUCTURE_RESOLVE", handlerParams: { item_id: Number(itemId), options }, actor, ip, idempotencyKey });
+}
+
+export async function submitWhereUsedJobAsync(db, { tenantId, itemId, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "PDM_WHERE_USED", handlerParams: { item_id: Number(itemId), options }, actor, ip, idempotencyKey });
+}
+
+export async function submitWhereReferencedJobAsync(db, { tenantId, targetType, targetId, options = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "PDM_WHERE_REFERENCED", handlerParams: { target_type: targetType, target_id: String(targetId), options }, actor, ip, idempotencyKey });
+}
+
+export async function submitBaselineJobAsync(db, { tenantId, body = {}, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "PDM_BASELINE_CREATE", handlerParams: { body }, actor, ip, idempotencyKey });
+}
+
+export async function submitValidateJobAsync(db, { tenantId, scope = "TENANT", itemId = null, revisionId = null, datasetId = null, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "PDM_VALIDATE", handlerParams: { scope, item_id: itemId, revision_id: revisionId, dataset_id: datasetId }, actor, ip, idempotencyKey });
+}
+
+export async function submitReindexJobAsync(db, { tenantId, objectTypes = null, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "PDM_REINDEX", handlerParams: { object_types: objectTypes }, actor, ip, idempotencyKey });
+}
+
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "PDM_MAINTENANCE", handlerParams: {}, actor, ip, priority: "low", queue: "default", idempotencyKey });
+}
+
 // ── Synchronous cores (also used by the handlers) ────────────────────────────
 
 export function runPdmMaintenance(db, { tenantId = null } = {}) {
@@ -97,6 +151,38 @@ export function runPdmMaintenance(db, { tenantId = null } = {}) {
       [tenant]
     ).changes || 0;
     summary.references_rebuilt += rebuildReferences(db, tenant).added;
+    invalidate(tenant);
+    bumpEpoch(tenant);
+  }
+  summary.cache = cacheStats();
+  return summary;
+}
+
+export async function runPdmMaintenanceAsync(db, { tenantId = null } = {}) {
+  const tenantRows = tenantId
+    ? [{ tenant_id: Number(tenantId) }]
+    : await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM pdm_items WHERE tenant_id IS NOT NULL");
+  const summary = { tenants: tenantRows.length, history_pruned: 0, orphan_members_pruned: 0, orphan_references_pruned: 0, references_rebuilt: 0, ran_at: nowIso() };
+  for (const row of tenantRows) {
+    const tenant = Number(row.tenant_id);
+    const retentionDays = Number((await getConfigAsync(db, tenant, "history_retention_days")) || 365);
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    summary.history_pruned += (await runAsync(db, "DELETE FROM pdm_change_history WHERE tenant_id = ? AND created_at < ?", [tenant, cutoff])).changes || 0;
+    summary.orphan_members_pruned += (
+      await runAsync(
+        db,
+        "DELETE FROM pdm_baseline_members WHERE tenant_id = ? AND baseline_id NOT IN (SELECT id FROM pdm_baselines)",
+        [tenant]
+      )
+    ).changes || 0;
+    summary.orphan_references_pruned += (
+      await runAsync(
+        db,
+        "DELETE FROM pdm_references WHERE tenant_id = ? AND source_type = 'RELATIONSHIP' AND source_id NOT IN (SELECT CAST(id AS TEXT) FROM pdm_relationships)",
+        [tenant]
+      )
+    ).changes || 0;
+    summary.references_rebuilt += (await rebuildReferencesAsync(db, tenant)).added;
     invalidate(tenant);
     bumpEpoch(tenant);
   }

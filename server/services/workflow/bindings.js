@@ -1,10 +1,11 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError, requireFields, validateCode, pagination } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable } from "../metadata/scope.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { readTenant, writeTenant, tenantClause, assertReadable, assertMutable, writeTenantAsync, assertMutableAsync } from "../metadata/scope.js";
 import { BINDING_EVENTS, safeParse, evaluateCondition } from "./validation.js";
-import { startInstance } from "./engine.js";
-import { getDefinitionRow, publishedVersionRow } from "./templates.js";
+import { startInstance, startInstanceAsync } from "./engine.js";
+import { getDefinitionRow, getDefinitionRowAsync, publishedVersionRow, publishedVersionRowAsync } from "./templates.js";
 
 // Workflow bindings connect platform events to workflow templates. When the
 // Lifecycle module approves a release, for example, a binding starts the
@@ -94,8 +95,8 @@ export function createBinding(db, body, actor = null, ip = null, reqTenantId = n
     if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Binding code already exists in this scope");
     throw err;
   }
-  writeAudit(db, { actor, action: "workflow.binding.create", resourceType: "workflow_binding", resourceId: result.lastInsertRowid, details: { code: body.code, event: body.event }, ip });
-  return publicBinding(getBindingRow(db, result.lastInsertRowid));
+  writeAudit(db, { actor, action: "workflow.binding.create", resourceType: "workflow_binding", resourceId: result.lastInsertId, details: { code: body.code, event: body.event }, ip });
+  return publicBinding(getBindingRow(db, result.lastInsertId));
 }
 
 export function updateBinding(db, id, body, actor = null, ip = null, tenantId = null) {
@@ -201,8 +202,161 @@ export function triggerEvent(db, event, payload = {}, { actor = null, tenantId =
   return { event, started };
 }
 
+export async function triggerEventAsync(db, event, payload = {}, { actor = null, tenantId = null, ip = null } = {}) {
+  const effectiveTenant = tenantId ?? payload.tenant_id ?? payload.tenantId ?? null;
+  if (!effectiveTenant) return { event, started: [] };
+  const bindings = await queryAllAsync(
+    db,
+    `${BINDING_SELECT} WHERE b.event = ? AND b.status = 'active' AND (b.tenant_id IS NULL OR b.tenant_id = ?) ORDER BY b.id`,
+    [event, Number(effectiveTenant)]
+  );
+  const started = [];
+  for (const binding of bindings) {
+    const condition = safeParse(binding.condition_json, {});
+    if (condition && Object.keys(condition).length && !evaluateCondition(condition, payload)) continue;
+    const definition = await getDefinitionRowAsync(db, binding.definition_id);
+    if (!definition) continue;
+    const version = binding.version_id ? null : await publishedVersionRowAsync(db, definition.id);
+    if (!binding.version_id && !version) continue;
+    try {
+      const instance = await startInstanceAsync(
+        db,
+        {
+          definition_id: definition.id,
+          version_id: binding.version_id ?? version.id,
+          title: payload.title || `${definition.name} (${event})`,
+          object_id: payload.object_id ?? payload.objectId ?? null,
+          organization_id: payload.organization_id ?? payload.organizationId ?? null,
+          context: { event, ...mapContext(safeParse(binding.context_map_json, {}), payload) },
+          organization: payload.organization_id ?? null,
+        },
+        actor,
+        effectiveTenant,
+        ip
+      );
+      started.push({ binding_id: binding.id, instance_id: instance.id, code: instance.code });
+    } catch (err) {
+      // A single misconfigured binding must not break the originating action.
+      await writeAuditAsync(db, {
+        actor,
+        action: "workflow.binding.trigger_failed",
+        resourceType: "workflow_binding",
+        resourceId: binding.id,
+        details: { event, error: String(err.message) },
+        ip,
+      });
+    }
+  }
+  return { event, started };
+}
+
 export function readBindingTenant(db, actor, query, reqTenantId) {
   return readTenant(db, actor, query, reqTenantId);
+}
+
+// ── Async twins (config writes) ───────────────────────────────────────────────
+
+export async function getBindingRowAsync(db, id) {
+  return queryOneAsync(db, `${BINDING_SELECT} WHERE b.id = ?`, [Number(id)]);
+}
+
+export async function listBindingsAsync(db, query = {}, tenantId) {
+  const { page, pageSize, offset } = pagination(query);
+  const scope = tenantClause("b", tenantId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+  if (query.event) {
+    where.push("b.event = ?");
+    params.push(query.event);
+  }
+  if (query.definitionId || query.definition_id) {
+    where.push("b.definition_id = ?");
+    params.push(Number(query.definitionId || query.definition_id));
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  const total = (await queryOneAsync(db, `SELECT COUNT(*) AS c FROM workflow_bindings b ${clause}`, params)).c;
+  const items = (
+    await queryAllAsync(db, `${BINDING_SELECT} ${clause} ORDER BY b.event, b.code LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+  ).map(publicBinding);
+  return { items, total, page, pageSize };
+}
+
+export async function createBindingAsync(db, body, actor = null, ip = null, reqTenantId = null) {
+  requireFields(body, ["code", "name", "event", "definition_id"]);
+  validateCode(body.code, "Binding code");
+  const tenantId = await writeTenantAsync(db, actor, body, reqTenantId);
+  const definition = await getDefinitionRowAsync(db, Number(body.definition_id ?? body.definitionId));
+  if (!definition) throw new HttpError(400, "Workflow definition not found");
+  const ts = nowIso();
+  let result;
+  try {
+    result = await runAsync(
+      db,
+      `INSERT INTO workflow_bindings
+        (code, name, description, event, definition_id, version_id, condition_json, context_map_json, status, tenant_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        body.code,
+        String(body.name).trim(),
+        body.description || "",
+        body.event,
+        definition.id,
+        body.version_id ?? body.versionId ?? null,
+        JSON.stringify(body.condition ?? safeParse(body.condition_json, {})),
+        JSON.stringify(body.context_map ?? safeParse(body.context_map_json, {})),
+        body.status || "active",
+        tenantId ?? null,
+        ts,
+        ts,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Binding code already exists in this scope");
+    throw err;
+  }
+  await writeAuditAsync(db, { actor, action: "workflow.binding.create", resourceType: "workflow_binding", resourceId: result.lastInsertId, details: { code: body.code, event: body.event }, ip });
+  return publicBinding(await getBindingRowAsync(db, result.lastInsertId));
+}
+
+export async function updateBindingAsync(db, id, body, actor = null, ip = null, tenantId = null) {
+  const row = await getBindingRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Binding not found");
+  if (body.code && body.code !== row.code) validateCode(body.code, "Binding code");
+  try {
+    await runAsync(
+      db,
+      `UPDATE workflow_bindings SET
+         code = ?, name = ?, description = ?, event = ?, definition_id = ?, version_id = ?,
+         condition_json = ?, context_map_json = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        body.code ?? row.code,
+        String(body.name ?? row.name).trim(),
+        body.description ?? row.description,
+        body.event ?? row.event,
+        body.definition_id === undefined && body.definitionId === undefined ? row.definition_id : Number(body.definition_id ?? body.definitionId),
+        body.version_id === undefined && body.versionId === undefined ? row.version_id : body.version_id ?? body.versionId,
+        body.condition === undefined && body.condition_json === undefined ? row.condition_json : JSON.stringify(body.condition ?? safeParse(body.condition_json, {})),
+        body.context_map === undefined && body.context_map_json === undefined ? row.context_map_json : JSON.stringify(body.context_map ?? safeParse(body.context_map_json, {})),
+        body.status ?? row.status,
+        nowIso(),
+        row.id,
+      ]
+    );
+  } catch (err) {
+    if (String(err.message).includes("UNIQUE")) throw new HttpError(409, "Binding code already exists in this scope");
+    throw err;
+  }
+  await writeAuditAsync(db, { actor, action: "workflow.binding.update", resourceType: "workflow_binding", resourceId: row.id, details: { code: row.code }, ip });
+  return publicBinding(await getBindingRowAsync(db, row.id));
+}
+
+export async function deleteBindingAsync(db, id, actor = null, ip = null, tenantId = null) {
+  const row = await getBindingRowAsync(db, id);
+  await assertMutableAsync(db, row, tenantId, actor, "Binding not found");
+  await runAsync(db, "DELETE FROM workflow_bindings WHERE id = ?", [row.id]);
+  await writeAuditAsync(db, { actor, action: "workflow.binding.delete", resourceType: "workflow_binding", resourceId: row.id, details: { code: row.code }, ip });
+  return { deleted: true, id: row.id };
 }
 
 export { BINDING_EVENTS };

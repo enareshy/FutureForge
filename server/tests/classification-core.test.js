@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { HttpError } from "../validation.js";
 import * as constants from "../services/classification/constants.js";
@@ -190,7 +190,7 @@ describe("classification foundation (db backed)", () => {
   let actor;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const row = queryOne(db, "SELECT id, username FROM users WHERE username = 'admin'");

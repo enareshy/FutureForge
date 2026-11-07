@@ -3,6 +3,7 @@
 // platform seams (events, jobs, search, security, dimensions, configuration)
 // without duplicating them.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { tenantIds } from "../search/registry.js";
 import { registerHandler as registerEventConsumer } from "../events/handlers.js";
 import { createSubscription } from "../events/subscriptions.js";
@@ -130,4 +131,15 @@ export function dataGovernanceHealth(db) {
     exceptions: Number(queryOne(db, "SELECT COUNT(*) AS c FROM dg_quality_exceptions")?.c ?? 0),
   };
   return { counts, tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM dg_domains").length };
+}
+
+export async function dataGovernanceHealthAsync(db) {
+  const counts = {
+    domains: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM dg_domains"))?.c ?? 0),
+    policies: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM dg_policies"))?.c ?? 0),
+    rules: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM dg_rules"))?.c ?? 0),
+    results: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM dg_quality_results"))?.c ?? 0),
+    exceptions: Number((await queryOneAsync(db, "SELECT COUNT(*) AS c FROM dg_quality_exceptions"))?.c ?? 0),
+  };
+  return { counts, tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM dg_domains")).length };
 }

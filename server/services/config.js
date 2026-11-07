@@ -1,7 +1,8 @@
 import { queryAll, queryOne, run, nowIso } from "../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../db-async.js";
 import { HttpError } from "../validation.js";
-import { writeAudit } from "./audit.js";
-import { getSetting, getSettings } from "./hierarchy.js";
+import { writeAudit, writeAuditAsync } from "./audit.js";
+import { getSetting, getSettingAsync, getSettings, getSettingsAsync } from "./hierarchy.js";
 
 export const SCOPES = ["system", "tenant", "organization"];
 export const VALUE_TYPES = ["boolean", "number", "string", "json"];
@@ -87,6 +88,657 @@ export const DEFAULT_DEFINITIONS = [
     feature: "authentication",
     description: "Revoke other sessions after password reset",
   },
+  {
+    key: "requirement_pdm.auto_trace_on_allocation",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Automatically create traceability coverage when a requirement is allocated to PDM",
+  },
+  {
+    key: "requirement_pdm.require_target_released",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Only allow allocation to released PDM items, revisions and datasets",
+  },
+  {
+    key: "requirement_pdm.enforce_effectivity",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Reject allocations whose effectivity window is fully in the past",
+  },
+  {
+    key: "requirement_pdm.default_revision_rule",
+    value_type: "string",
+    default_value: "LATEST",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Revision rule applied when resolving the effective PDM revision of an allocation",
+  },
+  {
+    key: "requirement_pdm.default_configuration_context",
+    value_type: "string",
+    default_value: "",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Default configuration context used for structure and effectivity resolution",
+  },
+  {
+    key: "requirement_pdm.mirror_to_pdm_relationships",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Best-effort mirror requirement allocations into PDM-native relationships for where-used",
+  },
+  {
+    key: "requirement_pdm.traceability_provider_enabled",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Expose the Requirement -> PDM forward edges through the Digital Thread provider registry",
+  },
+  {
+    key: "requirement_pdm.impact_max_depth",
+    value_type: "number",
+    default_value: "10",
+    min_value: "1",
+    max_value: "50",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Maximum depth for Requirement -> PDM impact propagation",
+  },
+  {
+    key: "requirement_pdm.notify_on_allocation",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Notify requirement owners when allocations change",
+  },
+  {
+    key: "requirement_pdm.sync_batch_size",
+    value_type: "number",
+    default_value: "200",
+    min_value: "1",
+    max_value: "5000",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Batch size for change synchronization between Requirements and PDM",
+  },
+  {
+    key: "requirement_pdm.auto_change_request",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Automatically initiate an existing Change Management request when a requirement change impacts released PLM objects",
+  },
+  {
+    key: "requirement_pdm.auto_change_request_severities",
+    value_type: "string",
+    default_value: "CRITICAL,HIGH",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Comma-separated requirement severities that are eligible for automatic change-request initiation",
+  },
+  {
+    key: "requirement_pdm.auto_change_request_require_released",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Only initiate a change request when at least one impacted PLM object is released",
+  },
+  {
+    key: "requirement_pdm.impact_analysis_async_threshold",
+    value_type: "number",
+    default_value: "500",
+    min_value: "1",
+    max_value: "100000",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Impact analyses touching more than this many objects are dispatched to a background job",
+  },
+  {
+    key: "requirement_pdm.impact_categories",
+    value_type: "string",
+    default_value: "DIRECT,INDIRECT,CONFIGURATION,EFFECTIVITY,PROCESS,DOCUMENT,CHANGE",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Impact categories reported by Requirement -> PLM impact analysis",
+  },
+  {
+    key: "requirement_pdm.change_initiation_workflow",
+    value_type: "string",
+    default_value: "",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Workflow definition code used when a requirement change initiates a change request",
+  },
+  {
+    key: "requirement_pdm.change_request_category",
+    value_type: "string",
+    default_value: "DESIGN",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Default Change Management request category used for requirement-initiated changes",
+  },
+  {
+    key: "requirement_pdm.change_request_priority",
+    value_type: "string",
+    default_value: "NORMAL",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Default Change Management request priority used for requirement-initiated changes",
+  },
+  {
+    key: "requirement_pdm.change_link_auto",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Automatically link a requirement to a change request when it is created from that requirement",
+  },
+  {
+    key: "requirement_pdm.notify_on_impact",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Notify requirement owners when downstream PLM impact is detected",
+  },
+  {
+    key: "requirement_pdm.plm_sync_analyze",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Classify PLM impact when a Product/EBOM/MBOM/BOP/Document/Change object change is propagated to linked requirements",
+  },
+  {
+    key: "requirement_pdm.plm_sync_notify",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-pdm",
+    description: "Notify requirement owners when a PLM object change is propagated to their requirement",
+  },
+  {
+    key: "requirement_manufacturing.auto_trace_on_allocation",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Automatically create traceability coverage when a requirement is allocated to a manufacturing target",
+  },
+  {
+    key: "requirement_manufacturing.require_target_released",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Only allow allocation to released manufacturing items, process plans and operations",
+  },
+  {
+    key: "requirement_manufacturing.enforce_effectivity",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Reject allocations whose effectivity window is fully in the past",
+  },
+  {
+    key: "requirement_manufacturing.default_configuration_context",
+    value_type: "string",
+    default_value: "",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Default configuration context used for manufacturing structure and effectivity resolution",
+  },
+  {
+    key: "requirement_manufacturing.trace_provenance",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Persist EBOM-to-MBOM item provenance when an existing transformation runs",
+  },
+  {
+    key: "requirement_manufacturing.require_ebom_mbom_mapping",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Coverage rule: an MBOM item must have an EBOM source mapping where the business process requires it",
+  },
+  {
+    key: "requirement_manufacturing.require_mbom_bop_assignment",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Coverage rule: a manufacturing item must have a process (BOP) assignment where required",
+  },
+  {
+    key: "requirement_manufacturing.require_operation_work_center",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Coverage rule: an operation must have a work-center association where required",
+  },
+  {
+    key: "requirement_manufacturing.ctq_enabled",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Enable critical-to-quality traceability coverage rules",
+  },
+  {
+    key: "requirement_manufacturing.require_ctq_for_critical",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Coverage rule: a critical requirement must have CTQ coverage where required",
+  },
+  {
+    key: "requirement_manufacturing.ctq_criticality",
+    value_type: "string",
+    default_value: "HIGH,CRITICAL",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Comma-separated requirement criticality values that require CTQ coverage when the critical-CTQ rule is enabled",
+  },
+  {
+    key: "requirement_manufacturing.coverage_rules",
+    value_type: "string",
+    default_value: "MUST:EBOM_MBOM_MAPPING,MUST:REQUIREMENT_IMPLEMENTATION,SHOULD:MBOM_BOP_ASSIGNMENT,SHOULD:CTQ_COVERAGE",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Configurable manufacturing coverage rule set (category:rule pairs)",
+  },
+  {
+    key: "requirement_manufacturing.impact_max_depth",
+    value_type: "number",
+    default_value: "10",
+    min_value: "1",
+    max_value: "50",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Maximum depth for Requirement -> Manufacturing impact propagation",
+  },
+  {
+    key: "requirement_manufacturing.sync_batch_size",
+    value_type: "number",
+    default_value: "200",
+    min_value: "1",
+    max_value: "5000",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Batch size for manufacturing traceability synchronization",
+  },
+  {
+    key: "requirement_manufacturing.notify_on_impact",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "requirement-manufacturing",
+    description: "Notify requirement owners when manufacturing impact is detected",
+  },
+  {
+    key: "verification_validation.default_verification_kind",
+    value_type: "string",
+    default_value: "VERIFICATION",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Default verification kind applied to new V&V test cases",
+  },
+  {
+    key: "verification_validation.require_approved_test_case",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Require an approved test case before a test execution can be planned",
+  },
+  {
+    key: "verification_validation.require_approved_procedure",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Require an approved test procedure before a test execution can be planned",
+  },
+  {
+    key: "verification_validation.require_evidence_for_pass",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Require evidence to be attached before a result can be recorded as PASS",
+  },
+  {
+    key: "verification_validation.require_execution_for_verification",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Require a completed execution with results before a requirement can be marked verified/validated",
+  },
+  {
+    key: "verification_validation.aggregation_rule",
+    value_type: "string",
+    default_value: "ALL_MANDATORY",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "How requirement-level V&V status is aggregated from its test results (ALL_MANDATORY, ANY, MAJORITY)",
+  },
+  {
+    key: "verification_validation.waivers_enabled",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Enable the verification/validation waiver (exception) flow",
+  },
+  {
+    key: "verification_validation.waiver_require_approval",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Require an approval decision before a waiver becomes active",
+  },
+  {
+    key: "verification_validation.retest_policy",
+    value_type: "string",
+    default_value: "FULL_TEST",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Scope of a retest after a failure (FULL_TEST, FAILED_STEPS, FAILED_TEST)",
+  },
+  {
+    key: "verification_validation.stale_evidence_on_revision_change",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Flag verification evidence as potentially stale when a linked requirement or test case revision changes",
+  },
+  {
+    key: "verification_validation.auto_invalidate_evidence",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Automatically invalidate (rather than only flag) stale verification evidence on a revision change",
+  },
+  {
+    key: "verification_validation.impact_max_depth",
+    value_type: "number",
+    default_value: "10",
+    min_value: "1",
+    max_value: "50",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Maximum depth for verification/validation impact propagation",
+  },
+  {
+    key: "verification_validation.notify_on_failure",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Notify requirement owners when a verification/validation activity fails",
+  },
+  {
+    key: "verification_validation.quality_exception_on_failure",
+    value_type: "boolean",
+    default_value: "0",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Automatically raise an existing Quality module exception when a verification/validation fails",
+  },
+  {
+    key: "verification_validation.quality_exception_severity",
+    value_type: "string",
+    default_value: "warning",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Severity assigned to the Quality module exception raised from a V&V failure",
+  },
+  {
+    key: "verification_validation.coverage_batch_size",
+    value_type: "number",
+    default_value: "200",
+    min_value: "1",
+    max_value: "5000",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "verification-validation",
+    description: "Batch size for V&V coverage recalculation",
+  },
+  {
+    key: "manufacturing_quality.readiness_profile",
+    value_type: "string",
+    default_value: "DEFAULT",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "manufacturing-quality",
+    description: "Release-readiness profile applied to a new evaluation",
+  },
+  {
+    key: "manufacturing_quality.readiness_pass_threshold",
+    value_type: "number",
+    default_value: "80",
+    min_value: "0",
+    max_value: "100",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "manufacturing-quality",
+    description: "Minimum weighted readiness score (0-100) for a PASS result",
+  },
+  {
+    key: "manufacturing_quality.readiness_checks",
+    value_type: "string",
+    default_value: "PRODUCT_REVISION_PRESENT,PRODUCT_REVISION_RELEASED,BOM_STRUCTURE_PRESENT,BOM_STRUCTURE_VALID,MBOM_PRESENT,BOP_PRESENT,OPERATIONS_PRESENT,OPERATIONS_HAVE_WORK_INSTRUCTIONS,OPEN_QUALITY_ISSUES,CORRECTIVE_ACTIONS_COMPLETE,INSPECTIONS_COMPLETE,REQUIRED_APPROVALS,DOCUMENT_COMPLETENESS",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "manufacturing-quality",
+    description: "Comma-separated readiness checks enabled for the tenant profile",
+  },
+  {
+    key: "manufacturing_quality.require_released_revision",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "manufacturing-quality",
+    description: "Treat an unreleased subject product revision as a readiness failure",
+  },
+  {
+    key: "manufacturing_quality.require_inspections",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "manufacturing-quality",
+    description: "Require planned inspections to be complete before release",
+  },
+  {
+    key: "manufacturing_quality.require_work_instructions",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "manufacturing-quality",
+    description: "Require every operation to have a work instruction before release",
+  },
+  {
+    key: "manufacturing_quality.block_on_critical_issues",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "manufacturing-quality",
+    description: "Block release while a critical quality issue is still open",
+  },
+  {
+    key: "manufacturing_quality.stale_on_source_change",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "manufacturing-quality",
+    description: "Flag readiness evaluations stale when a linked source revision changes",
+  },
+  {
+    key: "manufacturing_quality.recurrence_window_days",
+    value_type: "number",
+    default_value: "90",
+    min_value: "1",
+    max_value: "3650",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "manufacturing-quality",
+    description: "Rolling window (days) used for recurrence detection",
+  },
+  {
+    key: "predictive_intelligence.prediction_ttl_hours",
+    value_type: "number",
+    default_value: "168",
+    min_value: "1",
+    max_value: "8760",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "predictive-intelligence",
+    description: "Hours before a stored prediction is considered stale",
+  },
+  {
+    key: "predictive_intelligence.min_data_volume",
+    value_type: "number",
+    default_value: "50",
+    min_value: "0",
+    max_value: "1000000",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "predictive-intelligence",
+    description: "Minimum labelled sample size before a model evaluation can be validated",
+  },
+  {
+    key: "predictive_intelligence.risk_high_threshold",
+    value_type: "number",
+    default_value: "60",
+    min_value: "1",
+    max_value: "100",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "predictive-intelligence",
+    description: "Score at or above which a rule-based risk assessment is reported HIGH",
+  },
+  {
+    key: "predictive_intelligence.risk_critical_threshold",
+    value_type: "number",
+    default_value: "80",
+    min_value: "1",
+    max_value: "100",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "predictive-intelligence",
+    description: "Score at or above which a rule-based risk assessment is reported CRITICAL",
+  },
+  {
+    key: "predictive_intelligence.max_recommendations",
+    value_type: "number",
+    default_value: "10",
+    min_value: "1",
+    max_value: "100",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "predictive-intelligence",
+    description: "Maximum recommendations generated per prediction",
+  },
+  {
+    key: "predictive_intelligence.stale_on_source_change",
+    value_type: "boolean",
+    default_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "predictive-intelligence",
+    description: "Allow predictions to be marked stale when their source data changes",
+  },
+  {
+    key: "predictive_intelligence.drift_alert_ratio",
+    value_type: "number",
+    default_value: "0.1",
+    min_value: "0",
+    max_value: "1",
+    scopes: ["system", "tenant", "organization"],
+    system_only: 0,
+    feature: "predictive-intelligence",
+    description: "Mismatch ratio of observed vs predicted risk above which drift is alerted",
+  },
 ];
 
 function parseScopes(raw) {
@@ -145,9 +797,9 @@ export function ensureDefinitions(db) {
   for (const def of DEFAULT_DEFINITIONS) {
     run(
       db,
-      `INSERT OR IGNORE INTO config_definitions
+      `INSERT INTO config_definitions
         (key, value_type, default_value, min_value, max_value, scopes, system_only, feature, description, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       [
         def.key,
         def.value_type,
@@ -341,6 +993,203 @@ export function catalogAndEffective(db, context = {}) {
   return {
     definitions: listDefinitions(db),
     effective: resolveAll(db, context),
+    system: settings.values,
+  };
+}
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+// The layered configuration resolver for migrated config routes. Reads walk the
+// same default → system → tenant → organization layers; writes upsert the same
+// config_values rows and audit as the synchronous path.
+
+const definitionsInitialisedAsync = new WeakSet();
+
+export async function ensureDefinitionsAsync(db) {
+  if (definitionsInitialised.has(db) || definitionsInitialisedAsync.has(db)) return;
+  const ts = nowIso();
+  for (const def of DEFAULT_DEFINITIONS) {
+    await runAsync(
+      db,
+      `INSERT INTO config_definitions
+        (key, value_type, default_value, min_value, max_value, scopes, system_only, feature, description, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+      [
+        def.key,
+        def.value_type,
+        def.default_value,
+        def.min_value || "",
+        def.max_value || "",
+        JSON.stringify(def.scopes),
+        def.system_only ? 1 : 0,
+        def.feature,
+        def.description,
+        ts,
+        ts,
+      ]
+    );
+  }
+  definitionsInitialisedAsync.add(db);
+}
+
+export async function listDefinitionsAsync(db) {
+  await ensureDefinitionsAsync(db);
+  return (await queryAllAsync(db, "SELECT * FROM config_definitions ORDER BY feature, key")).map(publicDefinition);
+}
+
+export async function getDefinitionAsync(db, key) {
+  await ensureDefinitionsAsync(db);
+  const row = await queryOneAsync(db, "SELECT * FROM config_definitions WHERE key = ?", [key]);
+  if (!row) throw new HttpError(400, `Unknown setting: ${key}`);
+  return publicDefinition(row);
+}
+
+async function readOverrideAsync(db, key, scope, scopeId) {
+  return queryOneAsync(
+    db,
+    "SELECT * FROM config_values WHERE key = ? AND scope = ? AND scope_id = ?",
+    [key, scope, scopeId || 0]
+  );
+}
+
+export async function resolveConfigAsync(db, key, context = {}, preloadedDefinition = null) {
+  const def = preloadedDefinition || (await getDefinitionAsync(db, key));
+  const layers = [];
+  let value = parseValue(def.value_type, def.default_value);
+  let source = "default";
+
+  const systemSetting = await getSettingAsync(db, key, undefined);
+  if (systemSetting !== undefined) {
+    const parsed = typeof systemSetting === "string" ? parseValue(def.value_type, systemSetting) : systemSetting;
+    if (parsed !== null && parsed !== undefined) {
+      value = parsed;
+      source = "system";
+    }
+  }
+  layers.push({ scope: "system", scope_id: 0, value, source });
+
+  const tenantId = Number(context.tenantId || context.tenant_id || 0) || 0;
+  const orgId = Number(context.organizationId || context.organization_id || 0) || 0;
+
+  if (tenantId && def.scopes.includes("tenant") && !def.system_only) {
+    const row = await readOverrideAsync(db, key, "tenant", tenantId);
+    if (row) {
+      const parsed = parseValue(def.value_type, row.value);
+      if (parsed !== null && parsed !== undefined) {
+        value = parsed;
+        source = "tenant";
+        layers.push({ scope: "tenant", scope_id: tenantId, value: parsed });
+      }
+    }
+  }
+
+  if (orgId && def.scopes.includes("organization") && !def.system_only) {
+    const row = await readOverrideAsync(db, key, "organization", orgId);
+    if (row) {
+      const parsed = parseValue(def.value_type, row.value);
+      if (parsed !== null && parsed !== undefined) {
+        value = parsed;
+        source = "organization";
+        layers.push({ scope: "organization", scope_id: orgId, value: parsed });
+      }
+    }
+  }
+
+  return {
+    key,
+    value,
+    source,
+    type: def.value_type,
+    definition: def,
+    layers,
+  };
+}
+
+export async function resolveAllAsync(db, context = {}) {
+  const definitions = await listDefinitionsAsync(db);
+  const out = [];
+  for (const def of definitions) {
+    const resolved = await resolveConfigAsync(db, def.key, context, def);
+    out.push({
+      key: def.key,
+      value: resolved.value,
+      source: resolved.source,
+      type: def.value_type,
+      feature: def.feature,
+      description: def.description,
+      scopes: def.scopes,
+      system_only: def.system_only,
+    });
+  }
+  return out;
+}
+
+export async function listScopeValuesAsync(db, scope, scopeId) {
+  if (!SCOPES.includes(scope)) throw new HttpError(400, "scope must be system, tenant or organization");
+  const rows = await queryAllAsync(
+    db,
+    "SELECT * FROM config_values WHERE scope = ? AND scope_id = ? ORDER BY key",
+    [scope, scopeId || 0]
+  );
+  const out = [];
+  for (const row of rows) {
+    const def = await queryOneAsync(db, "SELECT * FROM config_definitions WHERE key = ?", [row.key]);
+    out.push({
+      ...row,
+      parsed: def ? parseValue(def.value_type, row.value) : row.value,
+    });
+  }
+  return out;
+}
+
+export async function putValuesAsync(db, { scope, scopeId, values }, actor, ip) {
+  await ensureDefinitionsAsync(db);
+  if (!SCOPES.includes(scope)) throw new HttpError(400, "scope must be system, tenant or organization");
+  const patch = values || {};
+  const keys = Object.keys(patch);
+  if (!keys.length) throw new HttpError(400, "No settings provided");
+  if (scope === "system") {
+    throw new HttpError(400, "System settings use /api/platform/settings");
+  }
+  const ts = nowIso();
+  for (const key of keys) {
+    const def = await getDefinitionAsync(db, key);
+    if (def.system_only) throw new HttpError(400, `${key} is system-only`);
+    if (!def.scopes.includes(scope)) {
+      throw new HttpError(400, `${key} cannot be set at ${scope} scope`);
+    }
+    const raw = validateRaw(def, patch[key]);
+    await runAsync(
+      db,
+      `INSERT INTO config_values (key, scope, scope_id, value, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(key, scope, scope_id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [key, scope, Number(scopeId) || 0, raw, ts]
+    );
+  }
+  await writeAuditAsync(db, {
+    actor,
+    action: "config.update",
+    resourceType: "config",
+    resourceId: `${scope}:${scopeId || 0}`,
+    details: { scope, scopeId: Number(scopeId) || 0, keys },
+    ip,
+  });
+  return {
+    scope,
+    scope_id: Number(scopeId) || 0,
+    items: await listScopeValuesAsync(db, scope, scopeId),
+    effective: await resolveAllAsync(db, {
+      tenantId: scope === "tenant" ? scopeId : undefined,
+      organizationId: scope === "organization" ? scopeId : undefined,
+    }),
+  };
+}
+
+export async function catalogAndEffectiveAsync(db, context = {}) {
+  const settings = await getSettingsAsync(db);
+  return {
+    definitions: await listDefinitionsAsync(db),
+    effective: await resolveAllAsync(db, context),
     system: settings.values,
   };
 }

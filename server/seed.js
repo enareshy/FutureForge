@@ -1,6 +1,6 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openDatabase, migrate, queryOne, queryAll, run, nowIso } from "./db.js";
+import { openDatabase, migrate, queryOne, queryAll, run, nowIso, transaction, refreshFromTemplate, registerTestSeed, ensureSeedTemplate, TEST_SEED_MARKER } from "./db.js";
 import * as users from "./services/users.js";
 import * as groups from "./services/groups.js";
 import * as roles from "./services/roles.js";
@@ -1119,6 +1119,66 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.change.affected-items", name: "Change order affected items", parentCode: "iam.change" },
     { applicationCode: "iam", code: "iam.change.ccb", name: "CCB screening, approval & decisions", parentCode: "iam.change" },
     { applicationCode: "iam", code: "iam.change.admin", name: "Change Management administration & configuration", parentCode: "iam.change" },
+    { applicationCode: "iam", code: "iam.requirements", name: "Requirements Manager service", kind: "module" },
+    { applicationCode: "iam", code: "iam.requirements.overview", name: "Requirements overview & registry", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.items", name: "Requirements items & revisions", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.types", name: "Requirement types & configuration", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.relationships", name: "Requirement relationships & traceability", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.hierarchy", name: "Requirement hierarchy", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.baselines", name: "Requirement baselines", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.reviews", name: "Requirement reviews & validation", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirements.admin", name: "Requirements administration & configuration", parentCode: "iam.requirements" },
+    { applicationCode: "iam", code: "iam.requirement-pdm", name: "Requirement & PDM integration service", kind: "module" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.overview", name: "Requirement & PDM integration overview", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.allocations", name: "Requirement to PDM allocations", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.coverage", name: "Requirement allocation coverage", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.compatibility", name: "Requirement/PDM compatibility & effectivity", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.impact", name: "Requirement/PDM impact analysis", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.synchronization", name: "Requirement/PDM change synchronization", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.metrics", name: "Requirement/PDM metrics & health", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.plm", name: "Requirement PLM workspace (product, EBOM, MBOM, BOP, lifecycle)", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.changes", name: "Requirement linked change requests & orders", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.change-initiation", name: "Requirement change initiation", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.documents", name: "Requirement linked documents", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-pdm.admin", name: "Requirement & PDM integration administration", parentCode: "iam.requirement-pdm" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing", name: "Requirement & Manufacturing traceability service", kind: "module" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.overview", name: "Requirement & Manufacturing overview", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.allocations", name: "Requirement to manufacturing allocations", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.coverage", name: "Manufacturing coverage & gap analysis", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.traceability", name: "Manufacturing traceability & matrix", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.transformations", name: "EBOM to MBOM transformation traceability", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.operations", name: "BOP & operation linkage", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.characteristics", name: "Manufacturing characteristics & process constraints", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.ctq", name: "Critical-to-quality traceability", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.work-centers", name: "Work-center association", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.impact", name: "Requirement/Manufacturing impact analysis", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.changes", name: "Requirement linked changes & CTQ controls", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.metrics", name: "Requirement/Manufacturing metrics & health", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.requirement-manufacturing.admin", name: "Requirement & Manufacturing administration", parentCode: "iam.requirement-manufacturing" },
+    { applicationCode: "iam", code: "iam.verification-validation", name: "Verification & Validation service", kind: "module" },
+    { applicationCode: "iam", code: "iam.verification-validation.overview", name: "Verification & Validation overview", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.test-cases", name: "V&V test cases", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.procedures", name: "V&V test procedures", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.executions", name: "V&V test executions", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.results", name: "V&V test results", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.evidence", name: "V&V evidence", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.coverage", name: "V&V requirement coverage", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.waivers", name: "V&V waivers & exceptions", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.traceability", name: "V&V traceability", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.impact", name: "V&V impact analysis", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.quality", name: "V&V quality integration", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.metrics", name: "V&V metrics & health", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.verification-validation.admin", name: "Verification & Validation administration", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality", name: "Manufacturing & Quality Intelligence service", kind: "module" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.overview", name: "Manufacturing & Quality overview", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.issues", name: "Quality issues & non-conformances", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.inspections", name: "Quality inspections", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.corrective-actions", name: "Corrective & preventive actions", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.readiness", name: "Release readiness evaluations", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.impact", name: "Manufacturing & quality impact analysis", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.summaries", name: "Manufacturing & quality summaries", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.metrics", name: "Manufacturing & quality metrics & health", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.admin", name: "Manufacturing & Quality administration", parentCode: "iam.manufacturing-quality" },
     { applicationCode: "iam", code: "iam.thread", name: "Digital Thread service", kind: "module" },
     { applicationCode: "iam", code: "iam.thread.overview", name: "Digital Thread overview & registry", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.explorer", name: "Digital Thread explorer & traversal", parentCode: "iam.thread" },
@@ -1135,6 +1195,16 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.thread.audit", name: "Digital Thread audit trail & lineage", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.metrics", name: "Digital Thread metrics & health", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.admin", name: "Digital Thread administration & configuration", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence", name: "Predictive Intelligence & Recommendations service", kind: "module" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.overview", name: "Predictive intelligence overview & health", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.use-cases", name: "Prediction use-case registry", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.predictions", name: "Prediction requests & history", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.explanations", name: "Prediction explanations", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.recommendations", name: "Ranked recommendations", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.feedback", name: "Prediction & recommendation feedback", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.evaluations", name: "Model evaluations", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.monitoring", name: "Model monitoring, drift & freshness", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.admin", name: "Predictive Intelligence administration", parentCode: "iam.predictive-intelligence" },
     { applicationCode: "iam", code: "iam.exchange", name: "Standards & Exchange service", kind: "module" },
     { applicationCode: "iam", code: "iam.exchange.dashboard", name: "Standards & Exchange overview & dashboard", parentCode: "iam.exchange" },
     { applicationCode: "iam", code: "iam.exchange.formats", name: "Standards & Exchange formats & adapters", parentCode: "iam.exchange" },
@@ -1188,11 +1258,15 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.observability.search", name: "Observability search & discovery", parentCode: "iam.observability" },
     { applicationCode: "iam", code: "iam.observability.audit", name: "Observability audit trail", parentCode: "iam.observability" },
     { applicationCode: "iam", code: "iam.observability.admin", name: "Observability administration & configuration", parentCode: "iam.observability" },
+    { applicationCode: "iam", code: "iam.deployment", name: "Deployment & editions service", kind: "module" },
+    { applicationCode: "iam", code: "iam.deployment.profile", name: "Deployment profile, topology & edition", parentCode: "iam.deployment" },
+    { applicationCode: "iam", code: "iam.deployment.features", name: "Feature entitlements & editions", parentCode: "iam.deployment" },
+    { applicationCode: "iam", code: "iam.deployment.history", name: "Deployment change history", parentCode: "iam.deployment" },
   ];
   const created = extra.map((item) => ensureResource(db, item)).filter(Boolean);
   const platform = roleByCode(db, "platform.admin");
   const platformRes = queryOne(db, "SELECT * FROM resources WHERE code = 'iam.platform'");
-  for (const code of ["iam.tenants", "iam.config", "iam.metadata"]) {
+  for (const code of ["iam.tenants", "iam.config", "iam.metadata", "iam.deployment.profile", "iam.deployment.features", "iam.deployment.history"]) {
     const res = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (platform && res) {
       const grantRes = code === "iam.metadata" ? res : res;
@@ -1558,6 +1632,76 @@ function seedMissingCatalog(db) {
     "iam.change.ccb",
     "iam.change.admin",
   ];
+  const requirementsResourceCodes = [
+    "iam.requirements",
+    "iam.requirements.overview",
+    "iam.requirements.items",
+    "iam.requirements.types",
+    "iam.requirements.relationships",
+    "iam.requirements.hierarchy",
+    "iam.requirements.baselines",
+    "iam.requirements.reviews",
+    "iam.requirements.admin",
+  ];
+  const requirementPdmResourceCodes = [
+    "iam.requirement-pdm",
+    "iam.requirement-pdm.overview",
+    "iam.requirement-pdm.allocations",
+    "iam.requirement-pdm.coverage",
+    "iam.requirement-pdm.compatibility",
+    "iam.requirement-pdm.impact",
+    "iam.requirement-pdm.synchronization",
+    "iam.requirement-pdm.metrics",
+    "iam.requirement-pdm.plm",
+    "iam.requirement-pdm.changes",
+    "iam.requirement-pdm.change-initiation",
+    "iam.requirement-pdm.documents",
+    "iam.requirement-pdm.admin",
+  ];
+  const requirementManufacturingResourceCodes = [
+    "iam.requirement-manufacturing",
+    "iam.requirement-manufacturing.overview",
+    "iam.requirement-manufacturing.allocations",
+    "iam.requirement-manufacturing.coverage",
+    "iam.requirement-manufacturing.traceability",
+    "iam.requirement-manufacturing.transformations",
+    "iam.requirement-manufacturing.operations",
+    "iam.requirement-manufacturing.characteristics",
+    "iam.requirement-manufacturing.ctq",
+    "iam.requirement-manufacturing.work-centers",
+    "iam.requirement-manufacturing.impact",
+    "iam.requirement-manufacturing.changes",
+    "iam.requirement-manufacturing.metrics",
+    "iam.requirement-manufacturing.admin",
+  ];
+  const verificationValidationResourceCodes = [
+    "iam.verification-validation",
+    "iam.verification-validation.overview",
+    "iam.verification-validation.test-cases",
+    "iam.verification-validation.procedures",
+    "iam.verification-validation.executions",
+    "iam.verification-validation.results",
+    "iam.verification-validation.evidence",
+    "iam.verification-validation.coverage",
+    "iam.verification-validation.waivers",
+    "iam.verification-validation.traceability",
+    "iam.verification-validation.impact",
+    "iam.verification-validation.quality",
+    "iam.verification-validation.metrics",
+    "iam.verification-validation.admin",
+  ];
+  const manufacturingQualityResourceCodes = [
+    "iam.manufacturing-quality",
+    "iam.manufacturing-quality.overview",
+    "iam.manufacturing-quality.issues",
+    "iam.manufacturing-quality.inspections",
+    "iam.manufacturing-quality.corrective-actions",
+    "iam.manufacturing-quality.readiness",
+    "iam.manufacturing-quality.impact",
+    "iam.manufacturing-quality.summaries",
+    "iam.manufacturing-quality.metrics",
+    "iam.manufacturing-quality.admin",
+  ];
   const threadResourceCodes = [
     "iam.thread",
     "iam.thread.overview",
@@ -1575,6 +1719,18 @@ function seedMissingCatalog(db) {
     "iam.thread.audit",
     "iam.thread.metrics",
     "iam.thread.admin",
+  ];
+  const predictiveResourceCodes = [
+    "iam.predictive-intelligence",
+    "iam.predictive-intelligence.overview",
+    "iam.predictive-intelligence.use-cases",
+    "iam.predictive-intelligence.predictions",
+    "iam.predictive-intelligence.explanations",
+    "iam.predictive-intelligence.recommendations",
+    "iam.predictive-intelligence.feedback",
+    "iam.predictive-intelligence.evaluations",
+    "iam.predictive-intelligence.monitoring",
+    "iam.predictive-intelligence.admin",
   ];
   const exchangeResourceCodes = [
     "iam.exchange",
@@ -1635,7 +1791,7 @@ function seedMissingCatalog(db) {
     "iam.observability.audit",
     "iam.observability.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...requirementPdmResourceCodes, ...requirementManufacturingResourceCodes, ...verificationValidationResourceCodes, ...manufacturingQualityResourceCodes, ...predictiveResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);
@@ -3089,6 +3245,42 @@ function seedJobs(db) {
 // Ensures the logical execution queues and a representative set of recurring
 // schedules exist. Queues are system configuration and are only created when
 // missing; admin edits are never overwritten.
+const JOB_SCHEDULE_SAMPLES = [
+  {
+    code: "NIGHTLY_SEARCH_REINDEX",
+    name: "Nightly search reindex",
+    description: "Rebuild the full-text search index every night at 02:00 UTC.",
+    job_type_code: "SEARCH_INDEXING",
+    queue: "SEARCH_INDEXING",
+    schedule_type: "cron",
+    cron_expression: "0 2 * * *",
+    timezone: "UTC",
+    catchup_policy: "skip",
+  },
+  {
+    code: "HOURLY_ERP_SYNC",
+    name: "Hourly ERP sync",
+    description: "Synchronize the item master with the ERP system every hour.",
+    job_type_code: "DATA_SYNC",
+    queue: "INTEGRATION",
+    schedule_type: "interval",
+    interval_seconds: 3600,
+    failure_policy: "continue",
+  },
+  {
+    code: "WEEKLY_COST_ROLLUP",
+    name: "Weekly cost rollup",
+    description: "Roll up approved cost records into the weekly report on Mondays.",
+    job_type_code: "REPORT_GENERATION",
+    queue: "REPORTING",
+    schedule_type: "weekly",
+    weekdays: [1],
+    daily_time: "06:00",
+    timezone: "UTC",
+    max_retries: 2,
+  },
+];
+
 function seedJobEngine(db) {
   const helix = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'");
   const admin = queryOne(db, "SELECT id, username, display_name, email FROM users WHERE username = 'admin'");
@@ -3100,41 +3292,7 @@ function seedJobEngine(db) {
   const existing = queryOne(db, "SELECT COUNT(*) AS c FROM job_schedules").c;
   if (existing > 0) return { jobEngineSeeded: true, queuesSeeded: jobExecution.LOGICAL_QUEUES.length };
 
-  const samples = [
-    {
-      code: "NIGHTLY_SEARCH_REINDEX",
-      name: "Nightly search reindex",
-      description: "Rebuild the full-text search index every night at 02:00 UTC.",
-      job_type_code: "SEARCH_INDEXING",
-      queue: "SEARCH_INDEXING",
-      schedule_type: "cron",
-      cron_expression: "0 2 * * *",
-      timezone: "UTC",
-      catchup_policy: "skip",
-    },
-    {
-      code: "HOURLY_ERP_SYNC",
-      name: "Hourly ERP sync",
-      description: "Synchronize the item master with the ERP system every hour.",
-      job_type_code: "DATA_SYNC",
-      queue: "INTEGRATION",
-      schedule_type: "interval",
-      interval_seconds: 3600,
-      failure_policy: "continue",
-    },
-    {
-      code: "WEEKLY_COST_ROLLUP",
-      name: "Weekly cost rollup",
-      description: "Roll up approved cost records into the weekly report on Mondays.",
-      job_type_code: "REPORT_GENERATION",
-      queue: "REPORTING",
-      schedule_type: "weekly",
-      weekdays: [1],
-      daily_time: "06:00",
-      timezone: "UTC",
-      max_retries: 2,
-    },
-  ];
+  const samples = JOB_SCHEDULE_SAMPLES;
   let created = 0;
   for (const sample of samples) {
     try {
@@ -3147,44 +3305,103 @@ function seedJobEngine(db) {
   return { jobEngineSeeded: true, queuesSeeded: jobExecution.LOGICAL_QUEUES.length, schedulesSeeded: created };
 }
 
+// Re-anchors every active schedule's next run to the current time. Test
+// databases cloned from the pre-seeded template carry a `next_run_at` computed
+// when the template was built, which may already be in the past; re-anchoring
+// keeps time-based behaviour deterministic without changing production boots.
+export function rescheduleJobSchedules(db) {
+  const rows = queryAll(db, "SELECT * FROM job_schedules WHERE status = 'active' AND enabled = 1");
+  let updated = 0;
+  for (const row of rows) {
+    const patch = { schedule_type: row.schedule_type, timezone: row.timezone };
+    if (row.schedule_type === "cron") {
+      patch.cron_expression = row.cron_expression;
+    } else if (row.schedule_type === "interval") {
+      patch.interval_seconds = row.interval_seconds;
+    } else if (row.schedule_type === "weekly") {
+      try {
+        patch.weekdays = JSON.parse(row.weekdays_json || "[]");
+      } catch {
+        patch.weekdays = [];
+      }
+      if (!Array.isArray(patch.weekdays) || patch.weekdays.length === 0) patch.weekdays = [1];
+      patch.daily_time = row.daily_time;
+    } else if (row.schedule_type === "monthly") {
+      patch.day_of_month = row.day_of_month;
+      patch.daily_time = row.daily_time;
+    } else {
+      continue;
+    }
+    jobExecution.updateSchedule(db, row.id, patch, null);
+    updated += 1;
+  }
+  return updated;
+}
+
 export function seedDatabase(db) {
-  hierarchy.ensureHierarchy(db);
-  config.ensureDefinitions(db);
-  providers.ensureDefaultProviders(db);
-  const identity = seedIdentity(db);
-  const authz = seedAuthz(db);
-  seedMissingCatalog(db);
-  seedMissingHierarchy(db);
-  tenants.backfillTenants(db);
-  seedMetadata(db);
-  seedObjects(db);
-  seedLifecycle(db);
-  seedWorkflow(db);
-  seedAudit(db);
-  seedNotifications(db);
-  seedDelivery(db);
-  seedJobs(db);
-  seedJobEngine(db);
-  const searchResult = seedSearch(db);
-  const integrationResult = seedIntegration(db);
-  const eventsResult = seedEvents(db);
-  const numberingResult = withEventSuppression(() => seedNumbering(db));
-  const versioningResult = withEventSuppression(() => seedVersioning(db));
-  const referenceResult = withEventSuppression(() => seedReference(db));
-  const contentResult = withEventSuppression(() => seedContent(db));
-  const dataGovernanceResult = withEventSuppression(() => seedDataGovernance(db));
-  const dataCatalogResult = withEventSuppression(() => seedDataCatalog(db));
-  const dataLifecycleResult = withEventSuppression(() => seedDataLifecycle(db));
-  const dataExchangeResult = withEventSuppression(() => seedDataExchange(db));
-  const migrationResult = withEventSuppression(() => seedMigrationFramework(db));
-  const classificationResult = withEventSuppression(() => seedClassificationFramework(db));
-  const bomResult = withEventSuppression(() => seedBomEngine(db));
-  const pdmResult = withEventSuppression(() => seedPdmDomain(db));
-  const threadResult = withEventSuppression(() => seedThreadDomain(db));
-  const exchangeResult = withEventSuppression(() => seedExchangeDomain(db));
-  const reportingResult = withEventSuppression(() => seedReportingDomain(db));
-  const observabilityResult = withEventSuppression(() => seedObservabilityDomain(db));
-  return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult, ...threadResult, ...exchangeResult, ...reportingResult, ...observabilityResult };
+  // Test databases are backed by the pre-seeded template: replace the (possibly
+  // still unmaterialised) clone with the seeded one instead of replaying every
+  // seed statement. The template is always fully seeded, so no marker check is
+  // needed — and skipping it avoids materialising the schema clone first.
+  if (db.__seedTemplate) {
+    // The seeded template is built lazily so suites that never seed do not pay
+    // for it; materialise it now, then swap the clone for a seeded copy.
+    ensureSeedTemplate(db.__seedBase);
+    refreshFromTemplate(db, db.__seedTemplate);
+    // The ensure/initialize steps below are idempotent: on the seeded clone they
+    // find everything already present, so they only refresh in-process state
+    // (search/index registration, migration adapters, job handlers, ...) without
+    // rewriting data.
+    const result = runSeed(db);
+    // Time-sensitive seed rows (recurring schedules) must be re-anchored to the
+    // clone's current time; the template froze them when it was built.
+    rescheduleJobSchedules(db);
+    return result;
+  }
+  return runSeed(db);
+}
+
+function runSeed(db) {
+  return transaction(db, () => {
+    hierarchy.ensureHierarchy(db);
+    config.ensureDefinitions(db);
+    providers.ensureDefaultProviders(db);
+    const identity = seedIdentity(db);
+    const authz = seedAuthz(db);
+    seedMissingCatalog(db);
+    seedMissingHierarchy(db);
+    tenants.backfillTenants(db);
+    seedMetadata(db);
+    seedObjects(db);
+    seedLifecycle(db);
+    seedWorkflow(db);
+    seedAudit(db);
+    seedNotifications(db);
+    seedDelivery(db);
+    seedJobs(db);
+    seedJobEngine(db);
+    const searchResult = seedSearch(db);
+    const integrationResult = seedIntegration(db);
+    const eventsResult = seedEvents(db);
+    const numberingResult = withEventSuppression(() => seedNumbering(db));
+    const versioningResult = withEventSuppression(() => seedVersioning(db));
+    const referenceResult = withEventSuppression(() => seedReference(db));
+    const contentResult = withEventSuppression(() => seedContent(db));
+    const dataGovernanceResult = withEventSuppression(() => seedDataGovernance(db));
+    const dataCatalogResult = withEventSuppression(() => seedDataCatalog(db));
+    const dataLifecycleResult = withEventSuppression(() => seedDataLifecycle(db));
+    const dataExchangeResult = withEventSuppression(() => seedDataExchange(db));
+    const migrationResult = withEventSuppression(() => seedMigrationFramework(db));
+    const classificationResult = withEventSuppression(() => seedClassificationFramework(db));
+    const bomResult = withEventSuppression(() => seedBomEngine(db));
+    const pdmResult = withEventSuppression(() => seedPdmDomain(db));
+    const threadResult = withEventSuppression(() => seedThreadDomain(db));
+    const exchangeResult = withEventSuppression(() => seedExchangeDomain(db));
+    const reportingResult = withEventSuppression(() => seedReportingDomain(db));
+    const observabilityResult = withEventSuppression(() => seedObservabilityDomain(db));
+    run(db, "INSERT INTO seed_state (name) VALUES (?) ON CONFLICT DO NOTHING", [TEST_SEED_MARKER]);
+    return { ...identity, ...authz, ...searchResult, ...integrationResult, ...eventsResult, ...numberingResult, ...versioningResult, ...referenceResult, ...contentResult, ...dataGovernanceResult, ...dataCatalogResult, ...dataLifecycleResult, ...dataExchangeResult, ...migrationResult, ...classificationResult, ...bomResult, ...pdmResult, ...threadResult, ...exchangeResult, ...reportingResult, ...observabilityResult };
+  });
 }
 
 // Installs the centralized Data Governance & Data Quality foundation (default
@@ -3455,9 +3672,12 @@ function seedContent(db) {
   }
 }
 
+// Lets the test-database layer build its pre-seeded template without a
+// circular import between db.js and seed.js.
+registerTestSeed(seedDatabase);
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const path = process.env.IAM_DB || join(__dirname, "..", "data", "iam.db");
-  const db = openDatabase(path);
+  const db = openDatabase();
   migrate(db);
   const result = seedDatabase(db);
   console.log(result.seeded || result.authzSeeded ? "Seeded IAM database" : "IAM database already populated");

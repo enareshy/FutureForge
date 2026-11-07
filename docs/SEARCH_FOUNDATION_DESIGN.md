@@ -113,12 +113,12 @@ incremental. Synchronous rebuilds return counts; asynchronous rebuilds submit a
 ## 6. Provider abstraction
 
 `server/services/search/provider.js` owns a provider registry. The built-in
-`relational` provider (also registered as `sqlite`) translates canonical
+`relational` provider translates canonical
 queries into parameterised SQL. A provider must implement the lifecycle
 methods (`assertSearchProvider`): `search`, `count`, `upsertDocument`,
 `deleteDocument`, `reindex`, plus health/status. Provider selection is a
 configuration concern (`search_provider_configuration`); no module branches on
-provider name, and no SQLite syntax appears in the canonical contract.
+provider name, and no storage-engine syntax appears in the canonical contract.
 
 ## 7. Extension points
 

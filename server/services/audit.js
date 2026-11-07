@@ -43,10 +43,15 @@ export {
 
 export {
   capture,
+  captureAsync,
   recordBatch,
+  recordBatchAsync,
   writeAudit,
+  writeAuditAsync,
   recordObjectChange,
+  recordObjectChangeAsync,
   recordStateChange,
+  recordStateChangeAsync,
   recordRelationshipChange,
   recordWorkflowAction,
   recordSecurityEvent,
@@ -64,14 +69,22 @@ export {
 export {
   publicPolicy,
   resolvePolicy,
+  resolvePolicyAsync,
   defaultEffectivePolicy,
   listPolicies,
+  listPoliciesAsync,
   getPolicy,
+  getPolicyAsync,
   getPolicyRow,
+  getPolicyRowAsync,
   createPolicy,
+  createPolicyAsync,
   updatePolicy,
+  updatePolicyAsync,
   deletePolicy,
+  deletePolicyAsync,
   validatePolicy,
+  validatePolicyAsync,
   ensureDefaultPolicies,
 } from "./audit/policies.js";
 
@@ -79,66 +92,108 @@ export {
   buildEventFilters,
   listEvents,
   getEvent,
-  objectHistory,
-  userActivity,
-  attributeHistory,
-  relationshipHistory,
   securityActivity,
+  securityActivityAsync,
   workflowAudit,
+  workflowAuditAsync,
   lifecycleAudit,
+  lifecycleAuditAsync,
   configurationAudit,
+  configurationAuditAsync,
   approvalAudit,
+  approvalAuditAsync,
   documentAudit,
+  documentAuditAsync,
   integrationAudit,
+  integrationAuditAsync,
   backgroundJobAudit,
+  backgroundJobAuditAsync,
   eventFacets,
+  eventFacetsAsync,
   auditSummary,
+  auditSummaryAsync,
+  listEventsAsync,
+  getEventAsync,
+  objectHistory,
+  objectHistoryAsync,
+  userActivity,
+  userActivityAsync,
+  attributeHistory,
+  attributeHistoryAsync,
+  relationshipHistory,
+  relationshipHistoryAsync,
   auditMetrics,
+  auditMetricsAsync,
 } from "./audit/query.js";
 
-export { EXPORT_FORMATS, EXPORT_COLUMNS, toCsv, toExcelXml, exportEvents } from "./audit/export.js";
+export { EXPORT_FORMATS, EXPORT_COLUMNS, toCsv, toExcelXml, exportEvents, exportEventsAsync } from "./audit/export.js";
 
 export {
   publicAuditExport,
   requestAuditExport,
+  requestAuditExportAsync,
   runAuditExport,
+  runAuditExportAsync,
   listAuditExports,
+  listAuditExportsAsync,
   getAuditExport,
+  getAuditExportAsync,
   markAuditExportDownloaded,
+  markAuditExportDownloadedAsync,
   expireAuditExports,
+  expireAuditExportsAsync,
 } from "./audit/exports.js";
 
 export {
   publicActionType,
   listActionTypes,
+  listActionTypesAsync,
   getActionType,
+  getActionTypeAsync,
   createActionType,
+  createActionTypeAsync,
   updateActionType,
+  updateActionTypeAsync,
   deleteActionType,
+  deleteActionTypeAsync,
   ensureSystemActionTypes,
 } from "./audit/actions.js";
 
 export {
   publicSavedFilter,
   listSavedFilters,
+  listSavedFiltersAsync,
   getSavedFilter,
+  getSavedFilterAsync,
   createSavedFilter,
+  createSavedFilterAsync,
   updateSavedFilter,
+  updateSavedFilterAsync,
   deleteSavedFilter,
+  deleteSavedFilterAsync,
 } from "./audit/filters.js";
 
 export {
   publicRetentionPolicy,
   listRetentionPolicies,
+  listRetentionPoliciesAsync,
   getRetentionPolicy,
+  getRetentionPolicyAsync,
   createRetentionPolicy,
+  createRetentionPolicyAsync,
   updateRetentionPolicy,
+  updateRetentionPolicyAsync,
   deleteRetentionPolicy,
+  deleteRetentionPolicyAsync,
   ensureDefaultRetentionPolicies,
   executeRetentionPolicies,
+  executeRetentionPoliciesAsync,
   runRetention,
+  runRetentionAsync,
   listRetentionRuns,
+  listRetentionRunsAsync,
   archiveStats,
+  archiveStatsAsync,
 } from "./audit/retention.js";
 
 export {
@@ -155,17 +210,26 @@ export {
   auditContext,
   captureApiFailures,
   auditRoute,
+  auditRouteAsync,
   auditFromRequest,
 } from "./audit/hooks.js";
 
 export { registerAuditHandlers, runAuditMaintenance } from "./audit/jobs.js";
 
-import { listEvents } from "./audit/query.js";
+import { listEvents, listEventsAsync } from "./audit/query.js";
 
 // Legacy listing used by GET /api/audit-logs. Preserves the original response
 // shape while delegating to the rich query layer.
 export function listAuditLogs(db, { page, pageSize, offset, action, resourceType, q, scope } = {}) {
   return listEvents(
+    db,
+    { page, pageSize, offset, action, objectType: resourceType, q },
+    scope || { scopeAll: true }
+  );
+}
+
+export async function listAuditLogsAsync(db, { page, pageSize, offset, action, resourceType, q, scope } = {}) {
+  return listEventsAsync(
     db,
     { page, pageSize, offset, action, objectType: resourceType, q },
     scope || { scopeAll: true }

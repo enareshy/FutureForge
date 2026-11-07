@@ -6,12 +6,13 @@
 // never duplicates platform seams (IAM, events, jobs, storage, search) — it
 // registers into them.
 import { queryAll, queryOne } from "../../db.js";
-import { tenantIds } from "../search/registry.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { ensureSourceAdapters } from "./source-adapters/index.js";
-import { ensureMigrationJobTypes, registerMigrationHandlers } from "./jobs.js";
-import { ensureMigrationEventTypes } from "./events.js";
-import { ensureMigrationConfig } from "./configuration.js";
-import { ensureMigrationSearch, registerMigrationSources } from "./search.js";
+import { ensureMigrationJobTypes, registerMigrationHandlers, ensureMigrationJobTypesAsync } from "./jobs.js";
+import { ensureMigrationEventTypes, ensureMigrationEventTypesAsync } from "./events.js";
+import { ensureMigrationConfig, ensureMigrationConfigAsync } from "./configuration.js";
+import { ensureMigrationSearch, registerMigrationSources, ensureMigrationSearchAsync } from "./search.js";
 import { SOURCE_MODULE } from "./constants.js";
 
 export function ensureMigrationFoundation(db) {
@@ -45,6 +46,37 @@ export function ensureMigrationFoundation(db) {
   };
 }
 
+export async function ensureMigrationFoundationAsync(db) {
+  const adapters = ensureSourceAdapters();
+  const jobTypes = await ensureMigrationJobTypesAsync(db);
+  const handlers = registerMigrationHandlers();
+  const eventTypes = await ensureMigrationEventTypesAsync(db);
+  registerMigrationSources();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+  let configuration = 0;
+  const search = (await ensureMigrationSearchAsync(db)).created || 0;
+  for (const tenantId of tenants) {
+    configuration += (await ensureMigrationConfigAsync(db, tenantId)).created || 0;
+  }
+
+  return {
+    source_module: SOURCE_MODULE,
+    adapters,
+    job_types: jobTypes.created,
+    handlers,
+    event_types: eventTypes,
+    configuration,
+    search,
+    tenants: tenants.length,
+  };
+}
+
 export function migrationHealth(db, tenantId = null) {
   const scoped = (table, column = "tenant_id") =>
     tenantId
@@ -63,5 +95,26 @@ export function migrationHealth(db, tenantId = null) {
       audit: scoped("mig_audit"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM mig_jobs").length,
+  };
+}
+
+export async function migrationHealthAsync(db, tenantId = null) {
+  const scoped = async (table, column = "tenant_id") =>
+    tenantId
+      ? Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE ${column} = ?`, [Number(tenantId)]))?.c || 0)
+      : Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0);
+  return {
+    source_module: SOURCE_MODULE,
+    counts: {
+      projects: await scoped("mig_projects"),
+      packages: await scoped("mig_packages"),
+      definitions: await scoped("mig_definitions"),
+      jobs: await scoped("mig_jobs"),
+      source_configurations: await scoped("mig_source_configurations"),
+      identifier_mappings: await scoped("mig_identifier_mappings"),
+      file_migrations: await scoped("mig_file_migrations"),
+      audit: await scoped("mig_audit"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM mig_jobs")).length,
   };
 }

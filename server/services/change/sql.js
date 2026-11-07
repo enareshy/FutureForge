@@ -2,11 +2,12 @@
 // keep the update/patch and optimistic-lock patterns in exactly one place
 // (mirrors server/services/pdm/sql.js).
 import { nowIso, run } from "../../db.js";
+import { runAsync } from "../../db-async.js";
 
-export function updateRow(db, table, id, patch, { columns = null, touch = true } = {}) {
+function buildUpdate(table, id, patch, columns, touch) {
   const allowed = columns ? new Set(columns) : null;
   const keys = Object.keys(patch).filter((key) => patch[key] !== undefined && (!allowed || allowed.has(key)));
-  if (!keys.length) return 0;
+  if (!keys.length) return null;
   const assignments = keys.map((key) => `${key} = ?`).join(", ");
   const params = keys.map((key) => patch[key]);
   let sql = `UPDATE ${table} SET ${assignments}`;
@@ -16,7 +17,19 @@ export function updateRow(db, table, id, patch, { columns = null, touch = true }
   }
   sql += " WHERE id = ?";
   params.push(Number(id));
-  return run(db, sql, params).changes || 0;
+  return { sql, params };
+}
+
+export function updateRow(db, table, id, patch, { columns = null, touch = true } = {}) {
+  const built = buildUpdate(table, id, patch, columns, touch);
+  if (!built) return 0;
+  return run(db, built.sql, built.params).changes || 0;
+}
+
+export async function updateRowAsync(db, table, id, patch, { columns = null, touch = true } = {}) {
+  const built = buildUpdate(table, id, patch, columns, touch);
+  if (!built) return 0;
+  return (await runAsync(db, built.sql, built.params)).changes || 0;
 }
 
 export function assertVersion(row, expectedVersion, conflict) {

@@ -3,12 +3,13 @@
 // platform seams (events, jobs, search, security, domains, configuration)
 // without duplicating them.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { tenantIds } from "../search/registry.js";
 import { ensureCatalogEventTypes } from "./events.js";
 import { registerCatalogSources, ensureCatalogSearch } from "./search.js";
 import { registerCatalogHandlers } from "./jobs.js";
 import { ensureDefaultRelationshipTypes } from "./relationships.js";
-import { setConfig, getConfigRow } from "./configuration.js";
+import { setConfig, getConfigRow, setConfigAsync, getConfigRowAsync } from "./configuration.js";
 import { CONFIG_DEFAULTS } from "./constants.js";
 
 export function ensureCatalogConfig(db, tenantId) {
@@ -16,6 +17,16 @@ export function ensureCatalogConfig(db, tenantId) {
   for (const [key, value] of Object.entries(CONFIG_DEFAULTS)) {
     if (getConfigRow(db, tenantId, key)) continue;
     setConfig(db, tenantId, key, value, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
+export async function ensureCatalogConfigAsync(db, tenantId) {
+  let created = 0;
+  for (const [key, value] of Object.entries(CONFIG_DEFAULTS)) {
+    if (await getConfigRowAsync(db, tenantId, key)) continue;
+    await setConfigAsync(db, tenantId, key, value, null, null);
     created += 1;
   }
   return { created };
@@ -67,5 +78,25 @@ export function catalogHealth(db, tenantId = null) {
       classifications: scoped("dc_classifications"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM dc_entries").length,
+  };
+}
+
+export async function catalogHealthAsync(db, tenantId = null) {
+  const scoped = async (table) =>
+    tenantId
+      ? Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ?`, [Number(tenantId)]))?.c || 0)
+      : Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0);
+  return {
+    counts: {
+      entries: await scoped("dc_entries"),
+      terms: await scoped("dc_business_terms"),
+      objects: await scoped("dc_catalog_objects"),
+      attributes: await scoped("dc_catalog_attributes"),
+      sources: await scoped("dc_sources"),
+      consumers: await scoped("dc_consumers"),
+      lineage: await scoped("dc_lineage"),
+      classifications: await scoped("dc_classifications"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM dc_entries")).length,
   };
 }

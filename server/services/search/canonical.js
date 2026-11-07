@@ -1,8 +1,8 @@
 // Canonical, provider-independent Search model.
 //
 // This module owns the public SearchQuery / SearchResult contract defined by
-// the Enterprise Search Foundation. It deliberately knows nothing about SQLite
-// (or any other engine): callers build a canonical query, and the provider
+// the Enterprise Search Foundation. It deliberately knows nothing about the
+// storage engine: callers build a canonical query, and the provider
 // adapter translates it internally. Business modules depend only on this model.
 import { SearchError, SEARCH_ERROR_CODES } from "./errors.js";
 import {
@@ -76,6 +76,7 @@ const OPERATOR_ALIASES = {
   LTE: "LTE",
   CONTAINS: "CONTAINS",
   LIKE: "CONTAINS",
+  ILIKE: "CONTAINS",
   STARTS_WITH: "STARTS_WITH",
   STARTSWITH: "STARTS_WITH",
   STARTS: "STARTS_WITH",

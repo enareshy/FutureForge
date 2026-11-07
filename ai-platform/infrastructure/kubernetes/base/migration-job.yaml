@@ -1,0 +1,106 @@
+# Applies the versioned SQL migrations to the shared PostgreSQL instance.
+#
+# Run this as a pre-deploy step (and again on rollback of schema-affecting
+# releases). Migrations are idempotent: each file is recorded in
+# `ai.schema_migrations` and skipped on subsequent runs. The SQL files are
+# supplied as a generated ConfigMap (`ai-migrations`) by Kustomize.
+#
+# Apply:   kubectl -n enterprise-ai delete job ai-db-migrate --ignore-not-found
+#          kubectl apply -k infrastructure/kubernetes/overlays/production
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ai-db-migrate
+  labels:
+    app.kubernetes.io/name: ai-db-migrate
+    app.kubernetes.io/part-of: enterprise-ai-platform
+    app.kubernetes.io/component: migration
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-db-migrate
+        app.kubernetes.io/part-of: enterprise-ai-platform
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: postgres:16.9-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              export PGPASSWORD="$POSTGRES_PASSWORD"
+              # ai_migrate is a non-owner login that may SET ROLE ai_owner.
+              export PGOPTIONS="-c ai.system_access=on -c role=ai_owner"
+              PSQL="psql -w -v ON_ERROR_STOP=1 -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB"
+              $PSQL -c "CREATE SCHEMA IF NOT EXISTS $AI_DB_SCHEMA;"
+              $PSQL -c "CREATE TABLE IF NOT EXISTS $AI_DB_SCHEMA.schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now(), checksum text NOT NULL, description text);"
+              for f in /migrations/*.sql; do
+                v="$(basename "$f")"
+                if [ -n "${AI_MIGRATION_STOP_AFTER:-}" ] && [ "$v" != "$AI_MIGRATION_STOP_AFTER" ] \
+                  && [ "$(printf '%s\n%s\n' "$AI_MIGRATION_STOP_AFTER" "$v" | sort | head -n1)" = "$AI_MIGRATION_STOP_AFTER" ]; then
+                  echo "stop  after $AI_MIGRATION_STOP_AFTER (fresh-install provisioning window)"
+                  break
+                fi
+                if [ "$($PSQL -tAc "SELECT 1 FROM $AI_DB_SCHEMA.schema_migrations WHERE version='$v'")" = "1" ]; then
+                  echo "skip  $v"
+                  continue
+                fi
+                echo "apply $v"
+                $PSQL --single-transaction -f "$f"
+                c="$(sha256sum "$f" | cut -d' ' -f1)"
+                $PSQL -c "INSERT INTO $AI_DB_SCHEMA.schema_migrations(version, checksum) VALUES ('$v', '$c');"
+              done
+              echo "migrations complete"
+          envFrom:
+            - configMapRef:
+                name: ai-api-config
+            - secretRef:
+                name: ai-api-secrets
+          env:
+            - name: POSTGRES_USER
+              value: ai_migrate
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ai-api-secrets
+                  key: AI_MIGRATION_POSTGRES_PASSWORD
+            - name: AI_DB_ROLE_PROFILE
+              value: migrate
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: migrations
+          configMap:
+            name: ai-migrations
+        - name: tmp
+          emptyDir: {}

@@ -45,7 +45,7 @@ Discovery indexes allocations so identifiers are findable.
         │               │               │           │           │               │
         └───────────────┴───────┬───────┴───────────┴───────────┴───────────────┘
                                 ▼
-        Audit · Event outbox · Search index · Background jobs (SQLite, shared)
+        Audit · Event outbox · Search index · Background jobs (PostgreSQL, shared)
 
 Business modules depend on the flat SDK in `server/services/numbering.js`
 (`generateIdentifier`, `reserveIdentifier`, `previewIdentifier`,

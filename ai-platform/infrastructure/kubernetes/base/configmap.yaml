@@ -1,0 +1,93 @@
+# Non-secret configuration for the AI API and its workers. Secrets live in
+# `ai-api-secrets`.
+# Values here are safe defaults for a cluster where the backing services run
+# in the `data` namespace; override per environment with Kustomize.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-api-config
+  labels:
+    app.kubernetes.io/name: ai-api
+    app.kubernetes.io/part-of: enterprise-ai-platform
+data:
+  # --- Application -----------------------------------------------------
+  AI_ENV: "production"
+  AI_PROMPT_INJECTION_BLOCKING: "true"
+  AI_API_HOST: "0.0.0.0"
+  AI_API_PORT: "8000"
+  AI_API_LOG_LEVEL: "info"
+  AI_REPOSITORY: "postgres"
+  AI_DB_SCHEMA: "ai"
+  AI_RLS_VERIFY: "true"
+
+  # --- Enterprise backend (identity, audit, events, jobs, files) -------
+  ENTERPRISE_API_BASE_URL: "http://enterprise-api.enterprise.svc.cluster.local:3001"
+
+  # --- PostgreSQL / pgvector (internal only) ---------------------------
+  POSTGRES_HOST: "postgres.data.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "helix"
+  # POSTGRES_USER is intentionally not set here. Each workload selects a
+  # distinct least-privilege role (ai_api, ai_worker, ai_backup, ai_migrate)
+  # in its own Deployment/Job so a missing override fails instead of silently
+  # connecting as the owner.
+
+  # --- Cache -----------------------------------------------------------
+  REDIS_URL: "redis://redis.data.svc.cluster.local:6379/0"
+
+  # --- Object storage (S3-compatible) ----------------------------------
+  S3_ENDPOINT: "http://objectstore.data.svc.cluster.local:8333"
+  S3_REGION: "us-east-1"
+  S3_BUCKET: "ai-knowledge"
+  S3_FORCE_PATH_STYLE: "true"
+
+  # --- Search ----------------------------------------------------------
+  SEARCH_PROVIDER: "postgres"
+  OPENSEARCH_URL: "http://opensearch.data.svc.cluster.local:9200"
+
+  # --- Worker topology --------------------------------------------------
+  # Production uses the dedicated indexer Deployment; keep request paths out
+  # of long ingestion jobs. The API still queues jobs, but does not run them.
+  AI_INGEST_INLINE: "false"
+  AI_WORKER_BATCH_SIZE: "10"
+  AI_WORKER_POLL_SECONDS: "5"
+  AI_EVENT_BATCH_SIZE: "20"
+  AI_EVENT_POLL_SECONDS: "5"
+  AI_AGENT_WORKER_BATCH_SIZE: "5"
+  AI_RECONCILE_ENABLED: "true"
+  AI_RECONCILE_DRY_RUN: "false"
+  AI_RECONCILE_PURGE_ORPHANS: "false"
+  AI_RECONCILE_INTERVAL_SECONDS: "300"
+
+  # --- Event streaming -------------------------------------------------
+  EVENT_BUS_PROVIDER: "database"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka.data.svc.cluster.local:9092"
+  AI_EVENT_TOPIC: "ai.platform.events"
+  AI_EVENT_CONSUMER_GROUP: "ai-api-events"
+
+  # --- ML lifecycle ----------------------------------------------------
+  ML_TRACKING_BACKEND: "auto"
+  MLFLOW_TRACKING_URI: "http://mlflow.mlops.svc.cluster.local:5000"
+
+  # --- Provider gateway -------------------------------------------------
+  # Base values are development-safe only. AI_ENV=production enforces at
+  # startup that a real provider and telemetry are configured; the production
+  # overlay overrides LLM_PROVIDER and OTEL_ENABLED explicitly. A bare base
+  # render fails closed until an overlay or operator supplies them.
+  LLM_PROVIDER: "mock"
+  LLM_EMBEDDING_DIMENSIONS: "1536"
+
+  # --- Observability ---------------------------------------------------
+  OTEL_ENABLED: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "ai-api"
+
+  # --- Backup (SEC-20) -------------------------------------------------
+  # The CronJob supplies BACKUP_DIR=/backup. Encryption is mandatory in the
+  # base production posture; supply BACKUP_ENCRYPTION_PASSPHRASE through
+  # `ai-api-secrets` or the backup Job fails closed.
+  BACKUP_DATABASE_SCOPE: "schema"
+  BACKUP_OBJECTS: "true"
+  BACKUP_RETENTION_DAYS: "14"
+  BACKUP_RETENTION_MIN_COUNT: "3"
+  BACKUP_REQUIRE_ENCRYPTION: "true"

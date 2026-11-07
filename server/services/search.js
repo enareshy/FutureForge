@@ -7,7 +7,7 @@
 // history, permission-aware filtering and export.
 //
 // The framework is deliberately provider-based: the default relational provider
-// compiles queries to SQLite, and an alternative engine can be registered
+// compiles queries to PostgreSQL, and an alternative engine can be registered
 // without changing callers.
 
 export * as SearchRegistryService from "./search/registry.js";
@@ -59,6 +59,36 @@ export {
   getMetrics,
   getHealth,
   getMeta,
+  listSearchObjectsAsync,
+  getSearchObjectAsync,
+  listFieldsAsync,
+  listSavedAsync,
+  getSavedAsync,
+  getHistoryAsync,
+  getIndexStatusAsync,
+  getObjectExtractedTextAsync,
+  getMetricsAsync,
+  getHealthAsync,
+  getMetaAsync,
+  executeCanonicalAsync,
+  searchObjectsAsync,
+  countObjectsAsync,
+  bulkSearchAsync,
+  getObjectFacetsAsync,
+  getObjectSuggestionsAsync,
+  runSavedAsync,
+  createFieldAsync,
+  removeFieldAsync,
+  createSavedAsync,
+  updateSavedAsync,
+  removeSavedAsync,
+  removeHistoryEntryAsync,
+  clearHistoryAsync,
+  indexDocumentsAsync,
+  rebuildIndexAsync,
+  retryFailedIndexingAsync,
+  putObjectExtractedTextAsync,
+  removeObjectExtractedTextAsync,
 } from "./search/v1.js";
 export {
   SEARCH_ERROR_CODES,
@@ -82,6 +112,12 @@ export {
   deleteFieldDefinition,
   canonicalFieldCatalog,
   validateCanonicalQuery,
+  listFieldDefinitionsAsync,
+  getFieldDefinitionAsync,
+  canonicalFieldCatalogAsync,
+  validateCanonicalQueryAsync,
+  upsertFieldDefinitionAsync,
+  deleteFieldDefinitionAsync,
 } from "./search/fields.js";
 export {
   registerRankingStrategy,
@@ -94,14 +130,20 @@ export {
   getEffectivityResolver,
   listEffectivityResolvers,
   applyEffectivity,
+  applyEffectivityAsync,
 } from "./search/extensions.js";
 export {
   putExtractedText,
   listExtractedText,
   extractedTextFor,
   deleteExtractedText,
+  listExtractedTextAsync,
+  putExtractedTextAsync,
+  extractedTextForAsync,
+  deleteExtractedTextAsync,
+  purgeExtractedTextAsync,
 } from "./search/extracted-text.js";
-export { reindexOrganization } from "./search/indexing.js";
+export { reindexOrganization, reindexOrganizationAsync } from "./search/indexing.js";
 
 export {
   vocabulary,
@@ -136,6 +178,15 @@ export {
   searchableObjectTypes,
   searchableObjectTypeCodes,
   refreshState,
+  listObjectTypesAsync,
+  getObjectTypeAsync,
+  searchableObjectTypesAsync,
+  searchableObjectTypeCodesAsync,
+  registerObjectTypeAsync,
+  updateObjectTypeAsync,
+  setObjectTypeStatusAsync,
+  deleteObjectTypeAsync,
+  refreshStateAsync,
 } from "./search/registry.js";
 
 export {
@@ -157,6 +208,19 @@ export {
   listSourceResolvers,
   registerSourceResolver,
   getSourceResolver,
+  indexingStatusAsync,
+  listIndexFailuresAsync,
+  buildDocumentAsync,
+  upsertIndexRowAsync,
+  deleteIndexRowAsync,
+  indexRowAsync,
+  applyIndexChangeAsync,
+  drainIndexQueueAsync,
+  retryIndexFailuresAsync,
+  reindexObjectAsync,
+  reindexTypeAsync,
+  reindexTenantAsync,
+  pruneIndexAsync,
 } from "./search/indexing.js";
 
 export {
@@ -170,6 +234,14 @@ export {
   normalizeSearchQuery,
   scoreDocument,
   highlightText,
+  runSearchAsync,
+  searchAsync,
+  advancedSearchAsync,
+  fullTextSearchAsync,
+  searchByTypeAsync,
+  searchByAttributesAsync,
+  searchByRelationshipAsync,
+  getFacetsAsync,
 } from "./search/query.js";
 
 export {
@@ -179,6 +251,12 @@ export {
   updateSavedSearch,
   deleteSavedSearch,
   runSavedSearch,
+  listSavedSearchesAsync,
+  getSavedSearchAsync,
+  runSavedSearchAsync,
+  createSavedSearchAsync,
+  updateSavedSearchAsync,
+  deleteSavedSearchAsync,
 } from "./search/saved.js";
 
 export {
@@ -187,9 +265,12 @@ export {
   deleteSearchHistoryEntry,
   clearSearchHistory,
   pruneSearchHistory,
+  listSearchHistoryAsync,
+  deleteSearchHistoryEntryAsync,
+  clearSearchHistoryAsync,
 } from "./search/history.js";
 
-export { getSuggestions } from "./search/suggestions.js";
+export { getSuggestions, getSuggestionsAsync } from "./search/suggestions.js";
 
 export {
   requestExport,
@@ -198,12 +279,18 @@ export {
   getExport,
   expireExports,
   toCsv,
+  listExportsAsync,
+  getExportAsync,
+  requestExportAsync,
 } from "./search/exports.js";
 
 export {
   ensureConfiguration,
   getConfiguration,
   updateConfiguration,
+  ensureConfigurationAsync,
+  getConfigurationAsync,
+  updateConfigurationAsync,
 } from "./search/config.js";
 
 export {
@@ -213,7 +300,7 @@ export {
   DEFAULT_PROVIDER,
 } from "./search/provider.js";
 
-export { searchMetrics, searchHealth } from "./search/metrics.js";
+export { searchMetrics, searchHealth, searchMetricsAsync, searchHealthAsync } from "./search/metrics.js";
 
 export { registerSearchHandlers, runSearchMaintenance } from "./search/jobs.js";
 

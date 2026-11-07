@@ -106,3 +106,39 @@ export function resolveRefs(db, tenantId, refs, context = {}) {
 export function resetProviders() {
   registry.clear();
 }
+
+// Async twin of `resolveRefs`. Providers expose `resolveManyAsync`/`resolveAsync`
+// alongside their sync methods so traversal can run without blocking the loop.
+export async function resolveRefsAsync(db, tenantId, refs, context = {}) {
+  const byProvider = new Map();
+  for (const ref of refs) {
+    if (!ref?.objectType || !ref?.objectId) continue;
+    const key = nodeRefKey({ objectType: ref.objectType, objectId: ref.objectId });
+    if (context.resolved?.has(key)) continue;
+    for (const provider of providersForType(ref.objectType)) {
+      if (!byProvider.has(provider.code)) byProvider.set(provider.code, { provider, refs: [] });
+      byProvider.get(provider.code).refs.push(ref);
+    }
+  }
+  const nodes = new Map();
+  const unresolved = [];
+  for (const { provider, refs: providerRefs } of byProvider.values()) {
+    let resolved = [];
+    if (typeof provider.resolveManyAsync === "function") {
+      resolved = (await provider.resolveManyAsync(db, tenantId, providerRefs, context)) || [];
+    } else if (typeof provider.resolveAsync === "function") {
+      resolved = (await Promise.all(providerRefs.map((ref) => provider.resolveAsync(db, tenantId, ref, context)))).filter(Boolean);
+    }
+    const found = new Set();
+    for (const node of resolved) {
+      if (!node) continue;
+      nodes.set(node.node_ref, node);
+      found.add(node.node_ref);
+    }
+    for (const ref of providerRefs) {
+      const key = nodeRefKey(ref);
+      if (!found.has(key)) unresolved.push(ref);
+    }
+  }
+  return { nodes, unresolved };
+}

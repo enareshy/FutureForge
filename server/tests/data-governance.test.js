@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as dg from "../services/data-governance/index.js";
 
@@ -14,7 +14,7 @@ function adminActor(db) {
 describe("Data governance foundation and seed", () => {
   let db;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
   });
@@ -86,7 +86,7 @@ describe("Quality evaluation, scoring and exceptions", () => {
   let actor;
   let tenant;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);
@@ -154,7 +154,7 @@ describe("Duplicate detection and remediation", () => {
   let db;
   let actor;
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     actor = adminActor(db);

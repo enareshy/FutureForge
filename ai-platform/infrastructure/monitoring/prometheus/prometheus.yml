@@ -1,0 +1,58 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+  external_labels:
+    platform: enterprise-ai-platform
+
+rule_files:
+  - /etc/prometheus/backup-alerts.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # The OpenTelemetry Collector receives OTLP from the AI API, indexing
+  # workers and Kafka consumers, and re-exposes metrics here.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  # The AI API exposes Prometheus metrics directly at /metrics.
+  #
+  # In the local compose stack the API runs on the host (not as a service),
+  # so it is reached through the host gateway. `docker-compose` adds the
+  # `host.docker.internal` host mapping; in Kubernetes, point this target at
+  # the in-cluster Service (or use a ServiceMonitor) instead.
+  # `/metrics` is bearer-protected. The local token file matches the Compose
+  # default in `.env.example`; Kubernetes must mount its own secret instead.
+  - job_name: ai-api
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics-token
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+
+  # Reliability workers expose the same registry on their health port. In the
+  # local compose stack they run under the `workers` profile and publish these
+  # ports on the host; in Kubernetes scrape each worker pod on port 9100 (or use
+  # a ServiceMonitor).
+  - job_name: ai-workers
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics-token
+    static_configs:
+      - targets: ["event-consumer:9100"]
+        labels:
+          worker: event-consumer
+      - targets: ["reconciler:9100"]
+        labels:
+          worker: reconciler
+      - targets: ["indexer:9100"]
+        labels:
+          worker: indexer
+      - targets: ["agent:9100"]
+        labels:
+          worker: agent

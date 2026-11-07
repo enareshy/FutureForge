@@ -107,9 +107,8 @@ curl -sS -X POST http://localhost:3001/api/numbering/schemes/OLD_SCHEME/retire \
 
 ## Scaling notes
 
-SQLite serialises writers, so the compare-and-swap update and the unique
-`uniqueness_key` index give correctness rather than raw throughput. The design keeps
+PostgreSQL allows concurrent writers, so the compare-and-swap update and the unique
+`uniqueness_key` index give correctness without a global write lock. The design keeps
 all mutable state in narrow, indexed rows and never holds a lock across an HTTP
-request, so moving to a networked database later changes the connection, not the
-algorithm. The `nextNumber` SDK helper performs a full transaction per call; batch
+request, so the algorithm is independent of the database connection. The `nextNumber` SDK helper performs a full transaction per call; batch
 callers should keep transactions short and rely on idempotency keys for retries.

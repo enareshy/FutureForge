@@ -2,6 +2,7 @@
 // for an object, evaluates each definition against the context, and produces
 // scored candidates. Designed to batch-load for bulk resolution (no N+1).
 import { queryAll } from "../../../db.js";
+import { queryAllAsync } from "../../../db-async.js";
 import { safeParse, withinDateRange, withinSerialRange } from "../validation.js";
 
 const DIMENSION_CONTEXT_FIELD = {
@@ -186,6 +187,63 @@ export function loadCandidateDataset(db, { objectType, objectIds, tenantId = nul
   return { revisions, assignmentsByObject, definitions, values, assignments };
 }
 
+// Async twin of loadCandidateDataset; same shape, only async DB helpers.
+export async function loadCandidateDatasetAsync(db, { objectType, objectIds, tenantId = null }) {
+  const ids = [...new Set(objectIds.map(String))];
+  if (!ids.length) return { revisions: [], assignmentsByObject: new Map(), definitions: new Map(), values: new Map() };
+  const placeholders = ids.map(() => "?").join(", ");
+  const tenantSql = tenantId === null || tenantId === undefined ? "" : " AND (tenant_id IS NULL OR tenant_id = ?)";
+  const tenantParams = tenantId === null || tenantId === undefined ? [] : [Number(tenantId)];
+  const assignmentTenantSql = tenantId === null || tenantId === undefined ? "" : " AND (a.tenant_id IS NULL OR a.tenant_id = ?)";
+  const revisions = await queryAllAsync(
+    db,
+    `SELECT * FROM versioning_revisions
+     WHERE object_type = ? AND object_id IN (${placeholders}) AND status != 'archived'${tenantSql}
+     ORDER BY object_id, revision_sequence`,
+    [String(objectType), ...ids, ...tenantParams]
+  );
+  const assignments = await queryAllAsync(
+    db,
+    `SELECT a.*, d.code AS definition_code, d.dimension AS definition_dimension, d.type_code AS definition_type_code,
+            d.effective_from, d.effective_to, d.boundary, d.serial_from, d.serial_to, d.serial_mode,
+            d.priority AS definition_priority, d.overlap_allowed, d.revision_id AS definition_revision_id,
+            d.configuration_context_id, d.organization_id AS definition_organization_id, d.include_json, d.exclude_json
+     FROM versioning_effectivity_assignments a
+     JOIN versioning_effectivity_definitions d ON d.id = a.definition_id
+     WHERE a.object_type = ? AND a.object_id IN (${placeholders}) AND a.status = 'active' AND d.status = 'active'${assignmentTenantSql}`,
+    [String(objectType), ...ids, ...tenantParams]
+  );
+  const definitionIds = [...new Set(assignments.map((a) => a.definition_id))];
+  const definitions = new Map();
+  for (const assignment of assignments) {
+    definitions.set(
+      assignment.definition_id,
+      Object.assign({}, assignment, {
+        id: assignment.definition_id,
+        revised: true,
+      })
+    );
+  }
+  const values = new Map();
+  if (definitionIds.length) {
+    const valuePlaceholders = definitionIds.map(() => "?").join(", ");
+    for (const row of await queryAllAsync(
+      db,
+      `SELECT * FROM versioning_effectivity_values WHERE definition_id IN (${valuePlaceholders})`,
+      definitionIds
+    )) {
+      if (!values.has(row.definition_id)) values.set(row.definition_id, []);
+      values.get(row.definition_id).push(row);
+    }
+  }
+  const assignmentsByObject = new Map();
+  for (const assignment of assignments) {
+    if (!assignmentsByObject.has(assignment.object_id)) assignmentsByObject.set(assignment.object_id, []);
+    assignmentsByObject.get(assignment.object_id).push(assignment);
+  }
+  return { revisions, assignmentsByObject, definitions, values, assignments };
+}
+
 function definitionSummary(assignment, values) {
   return {
     definition_id: assignment.definition_id,
@@ -208,6 +266,105 @@ function definitionSummary(assignment, values) {
 // Build candidates for every revision of one object.
 export function buildCandidates(db, { objectType, objectId, context, dataset = null }) {
   const data = dataset ?? loadCandidateDataset(db, { objectType, objectIds: [objectId], tenantId: context.tenantId });
+  const revisions = data.revisions.filter((r) => String(r.object_id) === String(objectId));
+  const assignments = data.assignmentsByObject.get(String(objectId)) ?? data.assignmentsByObject.get(objectId) ?? [];
+
+  const candidateByRevision = new Map();
+  for (const revision of revisions) {
+    candidateByRevision.set(revision.id, {
+      revision,
+      versionId: null,
+      matchedDimensions: new Set(),
+      reasons: [],
+      priority: Number.POSITIVE_INFINITY,
+      specificity: 0,
+      excluded: false,
+      matchedDefinitions: [],
+    });
+  }
+
+  const objectLevelEvidence = [];
+
+  for (const assignment of assignments) {
+    const targetRevisionId = assignment.revision_id ?? assignment.definition_revision_id ?? null;
+    const defValues = data.values.get(assignment.definition_id) ?? [];
+    const evaluation = evaluateDefinition(assignment, defValues, context, {
+      configurationRowId: context.configurationContextId ?? null,
+      variantRowId: context.variantRowId ?? null,
+    });
+    const targetRevision = targetRevisionId ? candidateByRevision.get(targetRevisionId) : null;
+    if (targetRevisionId && !targetRevision) continue; // foreign revision
+    if (!evaluation.matched && !evaluation.excluded) continue;
+
+    const summary = definitionSummary(assignment, defValues);
+    const precedence = Math.min(
+      Number(assignment.precedence ?? 100),
+      Number(assignment.definition_priority ?? 100)
+    );
+
+    if (evaluation.excluded || assignment.role === "exclusion") {
+      if (targetRevision) targetRevision.excluded = true;
+      if (!targetRevision) objectLevelEvidence.push({ ...summary, excluded: true, reasons: evaluation.reasons });
+      continue;
+    }
+
+    const bucket = {
+      ...summary,
+      reasons: evaluation.reasons,
+      specificity: evaluation.specificity,
+    };
+    if (targetRevision) {
+      for (const reason of evaluation.reasons) targetRevision.matchedDimensions.add(reason.dimension);
+      targetRevision.reasons.push(...evaluation.reasons);
+      targetRevision.matchedDefinitions.push(bucket);
+      targetRevision.priority = Math.min(targetRevision.priority, precedence);
+      targetRevision.specificity += evaluation.specificity;
+      if (assignment.version_id && targetRevision.versionId === null) targetRevision.versionId = assignment.version_id;
+    } else {
+      objectLevelEvidence.push(bucket);
+    }
+  }
+
+  // Intrinsic revision date effectivity (effective_from / effective_to).
+  for (const candidate of candidateByRevision.values()) {
+    const { revision } = candidate;
+    if (revision.effective_from || revision.effective_to) {
+      const result = withinDateRange(context.asOfDate, revision.effective_from, revision.effective_to, "inclusive");
+      if (result.valid) {
+        candidate.matchedDimensions.add("date");
+        candidate.reasons.push({
+          dimension: "date",
+          reason: "DATE_EFFECTIVITY",
+          from: revision.effective_from,
+          to: revision.effective_to,
+          intrinsic: true,
+        });
+        candidate.specificity += 1;
+      } else if (context.asOfDate) {
+        candidate.filtered = true;
+      }
+    }
+  }
+
+  // Object-level evidence applies to all revisions; it is used as fallback
+  // evidence when no revision-specific match exists.
+  const candidates = [...candidateByRevision.values()].filter((c) => !c.excluded && !c.filtered);
+  for (const candidate of candidates) {
+    if (!candidate.matchedDimensions.size && objectLevelEvidence.some((e) => !e.excluded)) {
+      candidate.objectLevel = true;
+    }
+  }
+
+  return {
+    candidates,
+    objectLevelEvidence,
+    definitionIds: [...data.definitions.keys()],
+  };
+}
+
+// Async twin of buildCandidates; the only awaited work is the dataset load.
+export async function buildCandidatesAsync(db, { objectType, objectId, context, dataset = null }) {
+  const data = dataset ?? await loadCandidateDatasetAsync(db, { objectType, objectIds: [objectId], tenantId: context.tenantId });
   const revisions = data.revisions.filter((r) => String(r.object_id) === String(objectId));
   const assignments = data.assignmentsByObject.get(String(objectId)) ?? data.assignmentsByObject.get(objectId) ?? [];
 

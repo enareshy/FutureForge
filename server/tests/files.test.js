@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, queryAll } from "../db.js";
+import { migrate, queryOne, queryAll, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as files from "../services/files.js";
 import { getStorageProvider } from "../services/file-storage.js";
@@ -18,7 +18,7 @@ describe("Document & File Management services", () => {
   let tenantId;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     admin = actorRow(db, "admin");

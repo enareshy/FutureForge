@@ -13,7 +13,7 @@ A reusable, multi-tenant metadata layer for design and manufacturing modules. Mo
 
 ## Architecture
 
-Metadata is a service module under `server/services/metadata/` following the same idioms as the rest of Helix: Express routes, `node:sqlite` persistence, `requirePermission`, `writeAudit`, and tenant/config helpers. It reuses the existing tenant scope and configuration model and adds no runtime dependencies.
+Metadata is a service module under `server/services/metadata/` following the same idioms as the rest of Helix: Express routes, PostgreSQL persistence, `requirePermission`, `writeAudit`, and tenant/config helpers. It reuses the existing tenant scope and configuration model and adds no runtime dependencies.
 
 ```mermaid
 graph TD
@@ -219,5 +219,5 @@ The suite covers types and inheritance (including cycle rejection), attributes a
 - Inherited-attribute override currently supports attach/detach masks and per-field overrides; richer per-attribute validation overrides are a future extension.
 - Rule actions are declarative; computed/derived attributes are represented via `parent_attribute_id` but not yet evaluated server-side.
 - Form layout is field-list based; drag-and-drop ordering and node re-parenting are UI follow-ups.
-- Caching of resolved types/forms is not implemented; resolution is fast enough at SQLite scale and can be cached per tenant when load grows.
+- Caching of resolved types/forms is not implemented; resolution is fast enough at current scale and can be cached per tenant when load grows.
 - Configuration supports `enabled` and `pinned_version`; arbitrary per-artifact settings are stored but not yet surfaced in the renderer.

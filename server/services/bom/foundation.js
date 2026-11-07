@@ -6,14 +6,15 @@
 // platform seams (IAM, events, jobs, search, reference data) and never duplicates
 // them.
 import { queryAll, queryOne } from "../../db.js";
-import { tenantIds } from "../search/registry.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { SOURCE_MODULE } from "./constants.js";
-import { ensureBomUnits } from "./units.js";
-import { ensureBomEventTypes } from "./events.js";
-import { ensureBomJobTypes, registerBomHandlers } from "./jobs.js";
-import { ensureBomSearch, registerBomSources } from "./search.js";
-import { ensureBomConfig } from "./configuration.js";
-import { ensureDefaultValidationRules } from "./validator.js";
+import { ensureBomUnits, ensureBomUnitsAsync } from "./units.js";
+import { ensureBomEventTypes, ensureBomEventTypesAsync } from "./events.js";
+import { ensureBomJobTypes, ensureBomJobTypesAsync, registerBomHandlers } from "./jobs.js";
+import { ensureBomSearch, ensureBomSearchAsync, registerBomSources } from "./search.js";
+import { ensureBomConfig, ensureBomConfigAsync } from "./configuration.js";
+import { ensureDefaultValidationRules, ensureDefaultValidationRulesAsync } from "./validator.js";
 
 export function ensureBomFoundation(db) {
   const units = ensureBomUnits(db);
@@ -50,6 +51,41 @@ export function ensureBomFoundation(db) {
   };
 }
 
+export async function ensureBomFoundationAsync(db) {
+  const units = await ensureBomUnitsAsync(db);
+  const eventTypes = await ensureBomEventTypesAsync(db);
+  const jobTypes = await ensureBomJobTypesAsync(db);
+  const handlers = registerBomHandlers();
+  registerBomSources();
+
+  let tenants = [];
+  try {
+    tenants = await tenantIdsAsync(db);
+  } catch {
+    tenants = [];
+  }
+
+  let configuration = 0;
+  let validationRules = 0;
+  for (const tenantId of tenants) {
+    configuration += (await ensureBomConfigAsync(db, tenantId)).created || 0;
+    validationRules += await ensureDefaultValidationRulesAsync(db, tenantId);
+  }
+  const search = (await ensureBomSearchAsync(db)).created || 0;
+
+  return {
+    source_module: SOURCE_MODULE,
+    units,
+    event_types: eventTypes,
+    job_types: jobTypes.created,
+    handlers,
+    configuration,
+    validation_rules: validationRules,
+    search,
+    tenants: tenants.length,
+  };
+}
+
 export function bomHealth(db, tenantId = null) {
   const scoped = (table) =>
     tenantId
@@ -69,5 +105,28 @@ export function bomHealth(db, tenantId = null) {
       history: scoped("bom_change_history"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM bom_headers").length,
+  };
+}
+
+// Async twin of `bomHealth` for the migrated read route.
+export async function bomHealthAsync(db, tenantId = null) {
+  const scoped = async (table) =>
+    tenantId
+      ? Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ?`, [Number(tenantId)]))?.c || 0)
+      : Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0);
+  return {
+    source_module: SOURCE_MODULE,
+    counts: {
+      boms: await scoped("bom_headers"),
+      revisions: await scoped("bom_revisions"),
+      lines: await scoped("bom_lines"),
+      substitutes: await scoped("bom_substitutes"),
+      baselines: await scoped("bom_baselines"),
+      transformation_definitions: await scoped("bom_transformation_definitions"),
+      validation_rules: await scoped("bom_validation_rules"),
+      comparisons: await scoped("bom_comparisons"),
+      history: await scoped("bom_change_history"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM bom_headers")).length,
   };
 }

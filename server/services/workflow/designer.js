@@ -1,24 +1,38 @@
 import { queryAll, queryOne, run, nowIso, transaction } from "../../db.js";
+import { queryOneAsync, runAsync, transactionAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { assertReadable, assertMutable } from "../metadata/scope.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { assertReadable, assertMutable, assertMutableAsync } from "../metadata/scope.js";
 import { publicGraph, validateGraph, assertValidGraph, autoLayout, slugifyKey, assertNodeType } from "./validation.js";
 import {
   getNodeRow,
+  getNodeRowAsync,
   getTransitionRow,
+  getTransitionRowAsync,
   insertNode,
+  insertNodeAsync,
   updateNode,
+  updateNodeAsync,
   deleteNode,
+  deleteNodeAsync,
   insertTransition,
+  insertTransitionAsync,
   updateTransition,
+  updateTransitionAsync,
   deleteTransition,
+  deleteTransitionAsync,
   readGraph,
+  readGraphAsync,
   readNodes,
+  readNodesAsync,
   readTransitions,
+  readTransitionsAsync,
   replaceGraph,
+  replaceGraphAsync,
   findNodeByKey,
+  findNodeByKeyAsync,
 } from "./graph.js";
-import { getDefinitionRow, publicDefinition, publicVersion } from "./templates.js";
+import { getDefinitionRow, getDefinitionRowAsync, publicDefinition, publicVersion } from "./templates.js";
 
 // The designer works on a single *draft* version. Published versions are
 // immutable snapshots, so every mutation rejects them.
@@ -237,3 +251,179 @@ function publicGraphFromInput(graph) {
 }
 
 export { readGraph, readNodes, readTransitions };
+
+// ── Async twins (read-only) ─────────────────────────────────────────────────
+
+async function draftVersionRowAsync(db, definitionId, versionRef) {
+  if (versionRef !== undefined && versionRef !== null && versionRef !== "") {
+    const row = /^\d+$/.test(String(versionRef))
+      ? (await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE id = ? AND definition_id = ?", [Number(versionRef), Number(definitionId)])) ||
+        (await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? AND version = ?", [Number(definitionId), Number(versionRef)]))
+      : await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? AND status = ? ORDER BY version DESC LIMIT 1", [
+          Number(definitionId),
+          String(versionRef),
+        ]);
+    if (!row) throw new HttpError(404, "Workflow version not found");
+    return row;
+  }
+  return (
+    (await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? AND status = 'draft' ORDER BY version DESC LIMIT 1", [
+      Number(definitionId),
+    ])) ||
+    (await queryOneAsync(db, "SELECT * FROM workflow_versions WHERE definition_id = ? ORDER BY version DESC LIMIT 1", [Number(definitionId)]))
+  );
+}
+
+export async function designerContextAsync(db, definitionId, tenantId, query = {}) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  assertReadable(definition, tenantId, "Workflow template not found");
+  const versionRow = await draftVersionRowAsync(db, definition.id, query.version ?? query.versionId);
+  if (!versionRow) throw new HttpError(404, "Workflow version not found");
+  const graph = await readGraphAsync(db, versionRow.id);
+  return {
+    definition: publicDefinition(definition),
+    version: publicVersion(versionRow),
+    editable: versionRow.status === "draft",
+    graph,
+    validation: validateGraph(graph),
+  };
+}
+
+export async function validateDesignerGraphAsync(db, definitionId, body = {}, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  assertReadable(definition, tenantId, "Workflow template not found");
+  let graph;
+  if (body.graph || body.nodes) {
+    graph = body.graph || { nodes: body.nodes, transitions: body.transitions ?? body.edges };
+    return { definition: publicDefinition(definition), validation: validateGraph(graph), graph: publicGraphFromInput(graph) };
+  }
+  const versionRow = await draftVersionRowAsync(db, definition.id, body.version_id ?? body.versionId ?? body.version);
+  graph = await readGraphAsync(db, versionRow.id);
+  return { definition: publicDefinition(definition), version: publicVersion(versionRow), graph, validation: validateGraph(graph) };
+}
+
+// ── Async twins (writers) ─────────────────────────────────────────────────────
+
+export async function saveDesignerGraphAsync(db, definitionId, body = {}, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  const versionRow = assertDraft(db, await draftVersionRowAsync(db, definition.id, body.version_id ?? body.versionId ?? body.version));
+  const graph = body.graph || { nodes: body.nodes, transitions: body.transitions ?? body.edges };
+  const validation = assertValidGraph(graph);
+  await transactionAsync(db, async () => {
+    await replaceGraphAsync(db, versionRow.id, graph);
+  });
+  await writeAuditAsync(db, {
+    actor,
+    action: "workflow.designer.save",
+    resourceType: "workflow_definition",
+    resourceId: definition.id,
+    details: { version: versionRow.version, nodes: validation.stats.nodes, transitions: validation.stats.transitions },
+    ip,
+  });
+  return designerContextAsync(db, definition.id, tenantId, { version: versionRow.version });
+}
+
+export async function addNodeAsync(db, definitionId, body = {}, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  const versionRow = assertDraft(db, await draftVersionRowAsync(db, definition.id, body.version_id ?? body.versionId ?? body.version));
+  assertNodeType(body.type);
+  let nodeKey = body.node_key || body.key;
+  if (!nodeKey) {
+    nodeKey = slugifyKey(body.type, body.name, `node-${Date.now()}`);
+    let suffix = 1;
+    while (await findNodeByKeyAsync(db, versionRow.id, nodeKey)) {
+      nodeKey = `${slugifyKey(body.type, body.name, `node-${Date.now()}`)}-${suffix++}`;
+    }
+  }
+  const node = await insertNodeAsync(db, versionRow.id, { ...body, node_key: nodeKey });
+  await writeAuditAsync(db, { actor, action: "workflow.designer.node.create", resourceType: "workflow_definition", resourceId: definition.id, details: { node_key: nodeKey }, ip });
+  return node;
+}
+
+export async function patchNodeAsync(db, definitionId, nodeId, body = {}, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  const row = await getNodeRowAsync(db, nodeId);
+  if (!row) throw new HttpError(404, "Workflow node not found");
+  const versionRow = assertDraft(db, await draftVersionRowAsync(db, definition.id, row.version_id));
+  if (body.key || body.node_key) {
+    const key = body.key || body.node_key;
+    const existing = await findNodeByKeyAsync(db, versionRow.id, key);
+    if (existing && existing.id !== row.id) throw new HttpError(409, `Node key "${key}" already exists in this version`);
+  }
+  const node = await updateNodeAsync(db, row.id, body);
+  await writeAuditAsync(db, { actor, action: "workflow.designer.node.update", resourceType: "workflow_definition", resourceId: definition.id, details: { node_key: node.node_key }, ip });
+  return node;
+}
+
+export async function removeNodeAsync(db, definitionId, nodeId, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  const row = await getNodeRowAsync(db, nodeId);
+  if (!row) throw new HttpError(404, "Workflow node not found");
+  assertDraft(db, await draftVersionRowAsync(db, definition.id, row.version_id));
+  await deleteNodeAsync(db, row.id);
+  await writeAuditAsync(db, { actor, action: "workflow.designer.node.delete", resourceType: "workflow_definition", resourceId: definition.id, details: { node_key: row.node_key }, ip });
+  return { deleted: true, id: row.id };
+}
+
+export async function addTransitionAsync(db, definitionId, body = {}, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  let versionRow;
+  if (body.from_node_id || body.fromNodeId || body.from) {
+    const fromRow = await getNodeRowAsync(db, body.from_node_id ?? body.fromNodeId ?? body.from);
+    if (!fromRow) throw new HttpError(400, "Transition source node not found");
+    versionRow = assertDraft(db, await draftVersionRowAsync(db, definition.id, fromRow.version_id));
+  } else {
+    versionRow = assertDraft(db, await draftVersionRowAsync(db, definition.id, body.version_id ?? body.versionId ?? body.version));
+  }
+  const edge = await insertTransitionAsync(db, versionRow.id, body);
+  await writeAuditAsync(db, { actor, action: "workflow.designer.transition.create", resourceType: "workflow_definition", resourceId: definition.id, details: { transition_key: edge.transition_key }, ip });
+  return edge;
+}
+
+export async function patchTransitionAsync(db, definitionId, transitionId, body = {}, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  const row = await getTransitionRowAsync(db, transitionId);
+  if (!row) throw new HttpError(404, "Workflow transition not found");
+  assertDraft(db, await draftVersionRowAsync(db, definition.id, row.version_id));
+  const edge = await updateTransitionAsync(db, row.id, body);
+  await writeAuditAsync(db, { actor, action: "workflow.designer.transition.update", resourceType: "workflow_definition", resourceId: definition.id, details: { transition_key: edge.transition_key }, ip });
+  return edge;
+}
+
+export async function removeTransitionAsync(db, definitionId, transitionId, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  const row = await getTransitionRowAsync(db, transitionId);
+  if (!row) throw new HttpError(404, "Workflow transition not found");
+  assertDraft(db, await draftVersionRowAsync(db, definition.id, row.version_id));
+  await deleteTransitionAsync(db, row.id);
+  await writeAuditAsync(db, { actor, action: "workflow.designer.transition.delete", resourceType: "workflow_definition", resourceId: definition.id, details: { transition_key: row.transition_key }, ip });
+  return { deleted: true, id: row.id };
+}
+
+export async function applyAutoLayoutAsync(db, definitionId, body = {}, actor = null, ip = null, tenantId = null) {
+  const definition = await getDefinitionRowAsync(db, definitionId);
+  await assertMutableAsync(db, definition, tenantId, actor, "Workflow template not found");
+  const versionRow = assertDraft(db, await draftVersionRowAsync(db, definition.id, body.version_id ?? body.versionId ?? body.version));
+  const nodes = await readNodesAsync(db, versionRow.id);
+  const transitions = await readTransitionsAsync(db, versionRow.id);
+  const positions = autoLayout(nodes, transitions, body.options || {});
+  await transactionAsync(db, async () => {
+    for (const position of positions) {
+      await runAsync(db, "UPDATE workflow_nodes SET position_x = ?, position_y = ?, updated_at = ? WHERE id = ?", [
+        position.position_x,
+        position.position_y,
+        nowIso(),
+        position.id,
+      ]);
+    }
+  });
+  await writeAuditAsync(db, { actor, action: "workflow.designer.auto_layout", resourceType: "workflow_definition", resourceId: definition.id, details: { nodes: positions.length }, ip });
+  return designerContextAsync(db, definition.id, tenantId, { version: versionRow.version });
+}

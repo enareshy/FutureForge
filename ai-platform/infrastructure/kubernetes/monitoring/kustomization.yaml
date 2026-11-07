@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Opt-in monitoring stack for the Stage 1-6 backup alerts.
+#
+# This is deliberately NOT part of `overlays/production`. The platform should
+# not ship a Prometheus and an Alertmanager that the operator has not sized,
+# retained or connected to a receiver.
+#
+# The ConfigMaps/Secrets this stack mounts are generated from the canonical
+# repository files by `scripts/k8s-monitoring-config.sh`, mirroring how
+# `scripts/k8s-migrations-configmap.sh` supplies `ai-migrations`:
+#
+#   AI_NAMESPACE=observability ./scripts/k8s-monitoring-config.sh
+#   kubectl apply -k infrastructure/kubernetes/monitoring
+#
+# Generated objects (never committed, because one is a credential):
+#   ConfigMap ai-prometheus-config  <- infrastructure/monitoring/prometheus/prometheus-kubernetes.yml
+#   ConfigMap ai-prometheus-rules   <- infrastructure/monitoring/prometheus/backup-alerts.yml
+#   ConfigMap ai-alertmanager-config<- infrastructure/monitoring/prometheus/alertmanager.yml
+#   Secret    ai-metrics-token      <- AI_METRICS_AUTH_TOKEN copied from ai-api-secrets
+#
+# What it provides: a Prometheus that scrapes the AI API and the four worker
+# Services with the bearer token, evaluates the five backup rules, and forwards
+# firing alerts to an Alertmanager. What it does NOT provide: a notification
+# destination. `alertmanager.yml` has a single receiver with no integration, so
+# alerts are grouped and visible in the Alertmanager UI but are not delivered to
+# a human until an operator adds a real receiver.
+#
+# See docs/kubernetes-rollout.md Section 8 for verification steps.
+
+namespace: observability
+
+resources:
+  - namespace.yaml
+  - prometheus-pvc.yaml
+  - prometheus-deployment.yaml
+  - prometheus-service.yaml
+  - alertmanager-deployment.yaml
+  - alertmanager-service.yaml
+  - networkpolicy.yaml

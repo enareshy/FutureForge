@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as metadata from "../services/metadata.js";
 import * as tenants from "../services/tenants.js";
@@ -10,7 +10,7 @@ const ACTOR = { id: 1, username: "admin" };
 const IP = "127.0.0.1";
 
 function db() {
-  const database = openDatabase(":memory:");
+  const database = openTestDatabase();
   migrate(database);
   seedDatabase(database);
   return database;

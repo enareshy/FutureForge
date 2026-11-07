@@ -1,5 +1,5 @@
 import { randomUuid } from "../../db.js";
-import { capture, structuredLog } from "./events.js";
+import { capture, captureAsync, structuredLog } from "./events.js";
 
 // Express integration for the audit framework: request context propagation,
 // automatic failure capture and a declarative per-route success/failure hook.
@@ -112,6 +112,54 @@ export function auditRoute(db, options = {}) {
       } catch (err) {
         structuredLog("audit.route.failed", { message: err?.message });
       }
+    });
+    next();
+  };
+}
+
+// Async twin of `auditRoute` for routes that run entirely on the async data
+// layer. The finish handler is detached (the response is already sent), so the
+// capture runs off the async pool without blocking the request.
+export function auditRouteAsync(db, options = {}) {
+  const {
+    action,
+    objectType,
+    objectId,
+    objectName,
+    source = "api",
+    reasonFrom = (req) => req.body?.reason ?? req.body?.comment,
+  } = options;
+  return (req, res, next) => {
+    res.on("finish", () => {
+      void (async () => {
+        try {
+          if (req.auditCaptured) return;
+          const status = res.statusCode < 400 ? "success" : "failure";
+          const resolve = (value) => (typeof value === "function" ? value(req, res) : value);
+          const resolvedAction = resolve(action);
+          if (!resolvedAction) return;
+          const result = await captureAsync(db, {
+            actor: req.actor || null,
+            tenant_id: req.tenantId || null,
+            action: resolvedAction,
+            object_type: resolve(objectType) ?? req.params?.objectType ?? req.params?.type ?? "system",
+            object_id: resolve(objectId) ?? req.params?.id ?? null,
+            object_name: resolve(objectName) ?? null,
+            status,
+            error_message: res.locals?.auditError || (status === "failure" ? `HTTP ${res.statusCode}` : null),
+            reason: reasonFrom(req),
+            source,
+            ip: clientIp(req),
+            device: req.headers["user-agent"] || null,
+            request_id: req.auditRequestId,
+            correlation_id: req.auditCorrelationId,
+            duration_ms: req.auditStart ? Date.now() - req.auditStart : null,
+          });
+          req.auditCaptured = !!result;
+        } catch (err) {
+          structuredLog("audit.route.failed", { message: err?.message });
+        }
+      })();
     });
     next();
   };

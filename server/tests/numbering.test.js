@@ -3,7 +3,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 import * as numbering from "../services/numbering.js";
@@ -39,7 +39,7 @@ describe("Numbering token & scope engine", () => {
   let admin;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     admin = actorRow(db, "admin");
@@ -89,7 +89,7 @@ describe("Numbering Service generation & lifecycle", () => {
   let tenantId;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     admin = actorRow(db, "admin");
@@ -263,7 +263,7 @@ describe("Numbering REST API", () => {
   let port;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     const app = createApp(db);

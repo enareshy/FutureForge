@@ -53,7 +53,7 @@ permission resources.
    └────────────┴────────────────┴──────────────┴───────────────┘
                         │
                         ▼
-         reference_* tables (SQLite / node:sqlite)
+         reference_* tables (PostgreSQL)
 ```
 
 ## Domain model

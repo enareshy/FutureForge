@@ -1,13 +1,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import * as orgs from "../services/orgs.js";
 import * as users from "../services/users.js";
 import * as hierarchy from "../services/hierarchy.js";
 import { HttpError } from "../validation.js";
 
 function db() {
-  const database = openDatabase(":memory:");
+  const database = openTestDatabase();
   migrate(database);
   return database;
 }

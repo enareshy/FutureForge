@@ -1,0 +1,20 @@
+# Persistent backup destination for the SEC-20 CronJob.
+#
+# This PVC is the local recovery point. It protects against accidental
+# application/database deletions and pod restarts, but not against loss of the
+# cluster or its storage backend. Production must bind it to a StorageClass with
+# replication/snapshot policy and replicate the encrypted artifacts off-cluster
+# using the organisation's approved backup transport.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ai-backup-data
+  labels:
+    app.kubernetes.io/name: ai-backup
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

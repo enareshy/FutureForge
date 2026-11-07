@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import { ensureNumberingFoundation } from "../services/numbering.js";
 import { ensureVersioningFoundation } from "../services/versioning.js";
 import {
@@ -23,7 +23,7 @@ describe("Change Management domain core services", () => {
   const tenant = 1;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     db.prepare("INSERT INTO organizations (code, name, kind) VALUES ('test-org', 'Test Org', 'organization')").run();
     // Change Management is the first domain to actually depend on the

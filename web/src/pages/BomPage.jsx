@@ -343,10 +343,6 @@ export default function BomPage() {
           <h1>Bill of materials</h1>
           <p className="subtle">Enterprise BOM engine: EBOM/MBOM/BOP, revisions, structure, rollup, compare and transformation.</p>
         </div>
-        <div className="stack-row">
-          {meta?.source_module ? <Badge tone="ok">{meta.source_module}</Badge> : null}
-          {health?.status ? <Badge tone={toneFor(health.status)}>{health.status}</Badge> : null}
-        </div>
       </div>
 
       <div className="tabs">

@@ -327,10 +327,6 @@ export default function ReportingAnalyticsPage() {
             BI integration, versioning, permissions, caching and usage auditing.
           </p>
         </div>
-        <div className="stack-row">
-          {meta?.source_module ? <Badge tone="ok">{meta.source_module}</Badge> : null}
-          {health?.status ? <Badge tone={toneFor(health.status)}>{health.status}</Badge> : null}
-        </div>
       </div>
 
       <div className="tabs">

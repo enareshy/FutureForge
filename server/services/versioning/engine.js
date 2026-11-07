@@ -5,6 +5,7 @@
 // versioning_resolution_results for audit and metrics, and exposes the stable
 // `resolve` / `resolveBulk` SDK used by BOM, PDM and Manufacturing.
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryOneAsync, runAsync } from "../../db-async.js";
 import {
   publicRevision,
   publicVersion,
@@ -14,11 +15,11 @@ import {
 } from "./validation.js";
 import { resultRef } from "./refs.js";
 import { ContextValidator } from "./resolution/context.js";
-import { buildCandidates, loadCandidateDataset } from "./resolution/candidates.js";
+import { buildCandidates, buildCandidatesAsync, loadCandidateDataset, loadCandidateDatasetAsync } from "./resolution/candidates.js";
 import { ResolutionRuleEngine } from "./resolution/rule-engine.js";
 import { ConflictDetector } from "./resolution/conflicts.js";
-import { resolvePolicy } from "./policies.js";
-import { defaultVersionForRevision } from "./versions.js";
+import { resolvePolicy, resolvePolicyAsync } from "./policies.js";
+import { defaultVersionForRevision, defaultVersionForRevisionAsync } from "./versions.js";
 
 function fallbackRevisionFor(db, objectType, objectId, revisions) {
   const pool = revisions.filter((r) => String(r.object_id) === String(objectId));
@@ -51,6 +52,26 @@ function selectVersion(db, winner, context) {
     if (explicit) return explicit;
   }
   return defaultVersionForRevision(db, revision.id);
+}
+
+async function selectVersionAsync(db, winner, context) {
+  const revision = winner.revision;
+  if (!revision) return null;
+  if (winner.versionId) {
+    const explicit = await queryOneAsync(db, "SELECT * FROM versioning_versions WHERE id = ? AND revision_id = ?", [
+      Number(winner.versionId),
+      revision.id,
+    ]);
+    if (explicit) return explicit;
+  }
+  if (context.versionId) {
+    const explicit = await queryOneAsync(db, "SELECT * FROM versioning_versions WHERE id = ? AND revision_id = ?", [
+      Number(context.versionId),
+      revision.id,
+    ]);
+    if (explicit) return explicit;
+  }
+  return defaultVersionForRevisionAsync(db, revision.id);
 }
 
 function buildResult({ objectType, objectId, context, policy, decision, version, durationMs, cacheKey }) {
@@ -94,6 +115,40 @@ function buildResult({ objectType, objectId, context, policy, decision, version,
 function recordResolution(db, result, { actor, tenantId, requestId, correlationId }) {
   try {
     run(
+      db,
+      `INSERT INTO versioning_resolution_results
+        (result_ref, object_type, object_id, policy_code, context_hash, context_json, status, revision_id, version_id,
+         resolution_reason, candidate_scores_json, message, duration_ms, resolved_by, tenant_id, request_id, correlation_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        resultRef(),
+        result.objectType,
+        result.objectId,
+        result.policy,
+        result.cacheKey ?? "",
+        JSON.stringify(result.context ?? {}),
+        result.resolutionStatus,
+        result.revision?.id ?? null,
+        result.version?.id ?? null,
+        result.resolutionReason,
+        JSON.stringify(result.candidates ?? []),
+        result.message,
+        result.durationMs,
+        actor?.id ?? null,
+        tenantId ?? null,
+        requestId ?? null,
+        correlationId ?? null,
+        nowIso(),
+      ]
+    );
+  } catch {
+    // Resolution must never fail because bookkeeping failed.
+  }
+}
+
+async function recordResolutionAsync(db, result, { actor, tenantId, requestId, correlationId }) {
+  try {
+    await runAsync(
       db,
       `INSERT INTO versioning_resolution_results
         (result_ref, object_type, object_id, policy_code, context_hash, context_json, status, revision_id, version_id,
@@ -189,6 +244,70 @@ function resolveOne(db, { objectType, objectId, rawContext, policyRow, actor, te
   return result;
 }
 
+async function resolveOneAsync(db, { objectType, objectId, rawContext, policyRow, actor, tenantId, requestId, correlationId, dataset, record = true }) {
+  const started = Date.now();
+  const contextResult = await ContextValidator.validateAsync(db, rawContext);
+  if (!contextResult.valid) {
+    const result = buildResult({
+      objectType,
+      objectId,
+      context: {},
+      policy: policyRow,
+      decision: { status: "INVALID_CONTEXT", winner: null, reason: "INVALID_EFFECTIVITY_CONTEXT", scored: [], conflicts: [] },
+      version: null,
+      durationMs: Date.now() - started,
+      cacheKey: null,
+    });
+    result.context = rawContext;
+    result.errors = contextResult.errors;
+    result.message = contextResult.errors.join("; ");
+    if (record) await recordResolutionAsync(db, result, { actor, tenantId, requestId, correlationId });
+    return result;
+  }
+
+  const context = contextResult.context;
+  const effectiveTenant = tenantId ?? context.tenantId ?? null;
+  const data = dataset ?? await loadCandidateDatasetAsync(db, { objectType, objectIds: [objectId], tenantId: effectiveTenant });
+  const built = await buildCandidatesAsync(db, { objectType, objectId, context, dataset: data });
+  const revisions = data.revisions;
+
+  const noDiscriminators = ContextValidator.isEmpty(context);
+  const emptyFallback = noDiscriminators || built.candidates.length === 0
+    ? fallbackRevisionFor(db, objectType, objectId, revisions)
+    : null;
+  const fallback = policyRow.fallback_to_default ? emptyFallback : built.candidates.length === 0 ? emptyFallback : null;
+
+  const decision = ResolutionRuleEngine.evaluate(built.candidates, {
+    policy: policyRow,
+    fallbackRevision: fallback,
+  });
+
+  if (decision.status === "RESOLVED" && decision.winner) {
+    const recheck = ConflictDetector.detect([decision.winner], { allowOverlap: Boolean(policyRow.allow_overlap) });
+    if (recheck.conflicting) {
+      decision.status = "CONFLICT";
+      decision.reason = "EFFECTIVITY_CONFLICT";
+      decision.conflicts = recheck.conflicts;
+      decision.winner = null;
+    }
+  }
+
+  const version = decision.status === "RESOLVED" ? await selectVersionAsync(db, decision.winner, context) : null;
+  const result = buildResult({
+    objectType,
+    objectId,
+    context,
+    policy: policyRow,
+    decision,
+    version,
+    durationMs: Date.now() - started,
+    cacheKey: contextCacheKey(objectType, objectId, context, policyRow.code),
+  });
+  result.context = context;
+  if (record) await recordResolutionAsync(db, result, { actor, tenantId: effectiveTenant, requestId, correlationId });
+  return result;
+}
+
 export const EffectivityResolver = {
   resolve(db, input = {}, options = {}) {
     const objectType = normalizeText(input.objectType ?? input.object_type);
@@ -207,6 +326,35 @@ export const EffectivityResolver = {
     }
     const policyRow = resolvePolicy(db, input.policy ?? input.policyCode ?? options.policy);
     return resolveOne(db, {
+      objectType,
+      objectId,
+      rawContext: input.context ?? input.effectivityContext ?? {},
+      policyRow,
+      actor: options.actor ?? null,
+      tenantId: options.tenantId ?? null,
+      requestId: options.requestId ?? null,
+      correlationId: options.correlationId ?? null,
+      record: options.record !== false,
+    });
+  },
+
+  async resolveAsync(db, input = {}, options = {}) {
+    const objectType = normalizeText(input.objectType ?? input.object_type);
+    const objectId = normalizeText(input.objectId ?? input.object_id);
+    if (!objectType || !objectId) {
+      return buildResult({
+        objectType,
+        objectId,
+        context: {},
+        policy: await resolvePolicyAsync(db, input.policy ?? input.policyCode),
+        decision: { status: "INVALID_CONTEXT", winner: null, reason: "INVALID_EFFECTIVITY_CONTEXT", scored: [], conflicts: [] },
+        version: null,
+        durationMs: 0,
+        cacheKey: null,
+      });
+    }
+    const policyRow = await resolvePolicyAsync(db, input.policy ?? input.policyCode ?? options.policy);
+    return resolveOneAsync(db, {
       objectType,
       objectId,
       rawContext: input.context ?? input.effectivityContext ?? {},
@@ -267,6 +415,57 @@ export const EffectivityResolver = {
       policy: policyRow.code,
     };
   },
+
+  async resolveBulkAsync(db, input = {}, options = {}) {
+    const context = input.context ?? input.effectivityContext ?? {};
+    const policyRow = await resolvePolicyAsync(db, input.policy ?? input.policyCode ?? options.policy);
+    const objects = Array.isArray(input.objects) ? input.objects : [];
+    const grouped = new Map();
+    const normalized = objects.map((entry) => {
+      const objectType = normalizeText(entry.objectType ?? entry.object_type);
+      const objectId = normalizeText(entry.objectId ?? entry.object_id ?? entry.id);
+      return { objectType, objectId, entry };
+    });
+    for (const item of normalized) {
+      if (!item.objectType || !item.objectId) continue;
+      if (!grouped.has(item.objectType)) grouped.set(item.objectType, new Set());
+      grouped.get(item.objectType).add(item.objectId);
+    }
+    const contextResult = await ContextValidator.validateAsync(db, context);
+    const effectiveTenant = options.tenantId ?? contextResult.context?.tenantId ?? null;
+    const datasets = new Map();
+    const started = Date.now();
+    for (const [objectType, idSet] of grouped.entries()) {
+      datasets.set(objectType, await loadCandidateDatasetAsync(db, { objectType, objectIds: [...idSet], tenantId: effectiveTenant }));
+    }
+    const results = [];
+    for (const item of normalized) {
+      if (!item.objectType || !item.objectId) {
+        results.push({ objectType: item.objectType, objectId: item.objectId, resolutionStatus: "INVALID_CONTEXT", resolutionReason: "MISSING_OBJECT", message: "objectType and objectId are required" });
+        continue;
+      }
+      const perItemContext = item.entry.context ? { ...context, ...item.entry.context } : context;
+      results.push(await resolveOneAsync(db, {
+        objectType: item.objectType,
+        objectId: item.objectId,
+        rawContext: perItemContext,
+        policyRow,
+        actor: options.actor ?? null,
+        tenantId: options.tenantId ?? null,
+        requestId: options.requestId ?? null,
+        correlationId: options.correlationId ?? null,
+        dataset: datasets.get(item.objectType),
+        record: options.record !== false,
+      }));
+    }
+    return {
+      results,
+      count: results.length,
+      resolved: results.filter((r) => r.resolutionStatus === "RESOLVED").length,
+      duration_ms: Date.now() - started,
+      policy: policyRow.code,
+    };
+  },
 };
 
-export { resolveOne };
+export { resolveOne, resolveOneAsync };

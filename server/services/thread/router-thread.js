@@ -4,6 +4,11 @@
 //
 // Every route is authorized against an IAM permission resource; the client is
 // never trusted to declare its own authorization.
+//
+// This router runs entirely on the asynchronous PostgreSQL data-access layer:
+// the async `authAsync`/`canAsync` middleware and the `*Async` service twins.
+// Only the pure vocabulary endpoints (`/meta`, `/providers`, `/search-meta`) and
+// the synchronous search-source registration (`/search/reindex`) stay sync.
 import {
   Constants,
   Domains,
@@ -31,31 +36,31 @@ import {
 
 const R = Constants.THREAD_RESOURCES;
 
-export function createThreadRouter({ express, db, auth, can, wrap }) {
+export function createThreadRouter({ express, db, auth, authAsync, can, canAsync, wrap }) {
   const router = express.Router();
   const tenantOf = (req) => req.tenantId ?? null;
   const idem = (req) => req.get("Idempotency-Key") || req.body?.idempotency_key || req.body?.idempotencyKey || "";
   const query = (req) => ({ tenantId: tenantOf(req), ...req.query });
 
-  const canOverview = (a) => can(R.overview, a);
-  const canExplorer = (a) => can(R.explorer, a);
-  const canTraceability = (a) => can(R.traceability, a);
-  const canImpact = (a) => can(R.impact, a);
-  const canPaths = (a) => can(R.paths, a);
-  const canDefinitions = (a) => can(R.definitions, a);
-  const canSnapshots = (a) => can(R.snapshots, a);
-  const canBaselines = (a) => can(R.baselines, a);
-  const canCompare = (a) => can(R.compare, a);
-  const canCompleteness = (a) => can(R.completeness, a);
-  const canSearch = (a) => can(R.search, a);
-  const canAudit = (a) => can(R.auditTrail, a);
-  const canMetrics = (a) => can(R.metrics, a);
-  const canAdmin = (a) => can(R.admin, a);
+  const canOverview = (a) => canAsync(R.overview, a);
+  const canExplorer = (a) => canAsync(R.explorer, a);
+  const canTraceability = (a) => canAsync(R.traceability, a);
+  const canImpact = (a) => canAsync(R.impact, a);
+  const canPaths = (a) => canAsync(R.paths, a);
+  const canDefinitions = (a) => canAsync(R.definitions, a);
+  const canSnapshots = (a) => canAsync(R.snapshots, a);
+  const canBaselines = (a) => canAsync(R.baselines, a);
+  const canCompare = (a) => canAsync(R.compare, a);
+  const canCompleteness = (a) => canAsync(R.completeness, a);
+  const canSearch = (a) => canAsync(R.search, a);
+  const canAudit = (a) => canAsync(R.auditTrail, a);
+  const canMetrics = (a) => canAsync(R.metrics, a);
+  const canAdmin = (a) => canAsync(R.admin, a);
 
   // ── Meta, health, metrics ─────────────────────────────────────────────────
   router.get(
     "/meta",
-    auth,
+    authAsync,
     canOverview("read"),
     wrap((_req, res) => {
       res.json({
@@ -89,134 +94,134 @@ export function createThreadRouter({ express, db, auth, can, wrap }) {
     })
   );
 
-  router.get("/health", auth, canMetrics("read"), wrap((req, res) => res.json({ ...Metrics.healthCheck(db, tenantOf(req)), ...Foundation.threadHealth(db, tenantOf(req)) })));
-  router.get("/metrics", auth, canMetrics("read"), wrap((req, res) => res.json(Metrics.metricsSnapshot(db, tenantOf(req)))));
-  router.get("/activity", auth, canMetrics("read"), wrap((req, res) => res.json(Metrics.activitySummary(db, tenantOf(req), { limit: req.query.limit }))));
+  router.get("/health", authAsync, canMetrics("read"), wrap(async (req, res) => res.json({ ...(await Metrics.healthCheckAsync(db, tenantOf(req))), ...(await Foundation.threadHealthAsync(db, tenantOf(req))) })));
+  router.get("/metrics", authAsync, canMetrics("read"), wrap(async (req, res) => res.json(await Metrics.metricsSnapshotAsync(db, tenantOf(req)))));
+  router.get("/activity", authAsync, canMetrics("read"), wrap(async (req, res) => res.json(await Metrics.activitySummaryAsync(db, tenantOf(req), { limit: req.query.limit }))));
 
   // ── Configuration ─────────────────────────────────────────────────────────
-  router.get("/config", auth, canAdmin("read"), wrap((req, res) => res.json(Configuration.listConfig(db, tenantOf(req)))));
-  const setConfig = wrap((req, res) => res.json(Configuration.setConfig(db, tenantOf(req), req.params.key, req.body?.value, req.actor, req.ip)));
-  router.put("/config/:key", auth, canAdmin("update"), setConfig);
-  router.patch("/config/:key", auth, canAdmin("update"), setConfig);
+  router.get("/config", authAsync, canAdmin("read"), wrap(async (req, res) => res.json(await Configuration.listConfigAsync(db, tenantOf(req)))));
+  const setConfig = wrap(async (req, res) => res.json(await Configuration.setConfigAsync(db, tenantOf(req), req.params.key, req.body?.value, req.actor, req.ip)));
+  router.put("/config/:key", authAsync, canAdmin("update"), setConfig);
+  router.patch("/config/:key", authAsync, canAdmin("update"), setConfig);
 
   // ── Domains & providers ───────────────────────────────────────────────────
-  router.get("/domains", auth, canOverview("read"), wrap((req, res) => res.json({ items: Domains.domainCatalog(req.query.definition_code ? Definitions.getDefinition(db, tenantOf(req), req.query.definition_code) : null), source_module: Constants.SOURCE_MODULE })));
-  router.get("/providers", auth, canOverview("read"), wrap((_req, res) => res.json({ items: Providers.listProviders(), source_module: Constants.SOURCE_MODULE })));
+  router.get("/domains", authAsync, canOverview("read"), wrap(async (req, res) => res.json({ items: Domains.domainCatalog(req.query.definition_code ? await Definitions.getDefinitionAsync(db, tenantOf(req), req.query.definition_code) : null), source_module: Constants.SOURCE_MODULE })));
+  router.get("/providers", authAsync, canOverview("read"), wrap((_req, res) => res.json({ items: Providers.listProviders(), source_module: Constants.SOURCE_MODULE })));
 
   // ── Definitions ───────────────────────────────────────────────────────────
-  router.get("/definitions", auth, canDefinitions("read"), wrap((req, res) => res.json(Definitions.listDefinitions(db, tenantOf(req), query(req)))));
-  router.post("/definitions", auth, canDefinitions("create"), wrap((req, res) => res.status(201).json(Definitions.createDefinition(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
-  router.get("/definitions/summary", auth, canDefinitions("read"), wrap((req, res) => res.json(Definitions.definitionSummary(db, tenantOf(req)))));
-  router.get("/definitions/:ref", auth, canDefinitions("read"), wrap((req, res) => res.json(Definitions.getDefinition(db, tenantOf(req), req.params.ref))));
-  const updateDefinition = wrap((req, res) => res.json(Definitions.updateDefinition(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/definitions/:ref", auth, canDefinitions("update"), updateDefinition);
-  router.patch("/definitions/:ref", auth, canDefinitions("update"), updateDefinition);
-  router.post("/definitions/:ref/status", auth, canDefinitions("update"), wrap((req, res) => res.json(Definitions.setDefinitionStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip))));
-  router.delete("/definitions/:ref", auth, canDefinitions("delete"), wrap((req, res) => res.json(Definitions.deleteDefinition(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
+  router.get("/definitions", authAsync, canDefinitions("read"), wrap(async (req, res) => res.json(await Definitions.listDefinitionsAsync(db, tenantOf(req), query(req)))));
+  router.post("/definitions", authAsync, canDefinitions("create"), wrap(async (req, res) => res.status(201).json(await Definitions.createDefinitionAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
+  router.get("/definitions/summary", authAsync, canDefinitions("read"), wrap(async (req, res) => res.json(await Definitions.definitionSummaryAsync(db, tenantOf(req)))));
+  router.get("/definitions/:ref", authAsync, canDefinitions("read"), wrap(async (req, res) => res.json(await Definitions.getDefinitionAsync(db, tenantOf(req), req.params.ref))));
+  const updateDefinition = wrap(async (req, res) => res.json(await Definitions.updateDefinitionAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/definitions/:ref", authAsync, canDefinitions("update"), updateDefinition);
+  router.patch("/definitions/:ref", authAsync, canDefinitions("update"), updateDefinition);
+  router.post("/definitions/:ref/status", authAsync, canDefinitions("update"), wrap(async (req, res) => res.json(await Definitions.setDefinitionStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip))));
+  router.delete("/definitions/:ref", authAsync, canDefinitions("delete"), wrap(async (req, res) => res.json(await Definitions.deleteDefinitionAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
 
   // ── Traceability rules ────────────────────────────────────────────────────
-  router.get("/rules", auth, canDefinitions("read"), wrap((req, res) => res.json(Rules.listRules(db, tenantOf(req), query(req)))));
-  router.post("/rules", auth, canDefinitions("create"), wrap((req, res) => res.status(201).json(Rules.createRule(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
-  router.get("/rules/summary", auth, canDefinitions("read"), wrap((req, res) => res.json(Rules.ruleSummary(db, tenantOf(req)))));
-  router.get("/rules/:ref", auth, canDefinitions("read"), wrap((req, res) => res.json(Rules.getRule(db, tenantOf(req), req.params.ref))));
-  const updateRule = wrap((req, res) => res.json(Rules.updateRule(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/rules/:ref", auth, canDefinitions("update"), updateRule);
-  router.patch("/rules/:ref", auth, canDefinitions("update"), updateRule);
-  router.post("/rules/:ref/status", auth, canDefinitions("update"), wrap((req, res) => res.json(Rules.setRuleStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip))));
-  router.delete("/rules/:ref", auth, canDefinitions("delete"), wrap((req, res) => res.json(Rules.deleteRule(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
+  router.get("/rules", authAsync, canDefinitions("read"), wrap(async (req, res) => res.json(await Rules.listRulesAsync(db, tenantOf(req), query(req)))));
+  router.post("/rules", authAsync, canDefinitions("create"), wrap(async (req, res) => res.status(201).json(await Rules.createRuleAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
+  router.get("/rules/summary", authAsync, canDefinitions("read"), wrap(async (req, res) => res.json(await Rules.ruleSummaryAsync(db, tenantOf(req)))));
+  router.get("/rules/:ref", authAsync, canDefinitions("read"), wrap(async (req, res) => res.json(await Rules.getRuleAsync(db, tenantOf(req), req.params.ref))));
+  const updateRule = wrap(async (req, res) => res.json(await Rules.updateRuleAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/rules/:ref", authAsync, canDefinitions("update"), updateRule);
+  router.patch("/rules/:ref", authAsync, canDefinitions("update"), updateRule);
+  router.post("/rules/:ref/status", authAsync, canDefinitions("update"), wrap(async (req, res) => res.json(await Rules.setRuleStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip))));
+  router.delete("/rules/:ref", authAsync, canDefinitions("delete"), wrap(async (req, res) => res.json(await Rules.deleteRuleAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
 
   // ── Explorer / traversal ──────────────────────────────────────────────────
-  const traverse = wrap((req, res) => {
+  const traverse = wrap(async (req, res) => {
     const options = optionsOf(req.body || {}, req);
-    const { result, definition } = Engine.executeTraversal(db, tenantOf(req), options, req.actor, { action: "TRAVERSAL" });
+    const { result, definition } = await Engine.executeTraversalAsync(db, tenantOf(req), options, req.actor, { action: "TRAVERSAL" });
     res.json(Engine.publicGraph(result, definition));
   });
-  router.post("/traverse", auth, canExplorer("execute"), traverse);
+  router.post("/traverse", authAsync, canExplorer("execute"), traverse);
   router.get(
     "/traverse",
-    auth,
+    authAsync,
     canExplorer("read"),
-    wrap((req, res) => {
-      const { result, definition } = Engine.executeTraversal(db, tenantOf(req), optionsOf(req.query, req), req.actor, { action: "TRAVERSAL" });
+    wrap(async (req, res) => {
+      const { result, definition } = await Engine.executeTraversalAsync(db, tenantOf(req), optionsOf(req.query, req), req.actor, { action: "TRAVERSAL" });
       res.json(Engine.publicGraph(result, definition));
     })
   );
 
   // ── Traceability ──────────────────────────────────────────────────────────
   const traceability = (matrix) =>
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const options = optionsOf(req.body || req.query, req);
-      const output = matrix ? Traceability.traceabilityMatrix(db, tenantOf(req), options, req.actor) : Traceability.traceabilityGraph(db, tenantOf(req), options, req.actor);
+      const output = matrix ? await Traceability.traceabilityMatrixAsync(db, tenantOf(req), options, req.actor) : await Traceability.traceabilityGraphAsync(db, tenantOf(req), options, req.actor);
       res.json(output);
     });
-  router.post("/traceability", auth, canTraceability("read"), traceability(false));
-  router.get("/traceability", auth, canTraceability("read"), traceability(false));
-  router.post("/traceability/matrix", auth, canTraceability("read"), traceability(true));
+  router.post("/traceability", authAsync, canTraceability("read"), traceability(false));
+  router.get("/traceability", authAsync, canTraceability("read"), traceability(false));
+  router.post("/traceability/matrix", authAsync, canTraceability("read"), traceability(true));
 
   // ── Impact & dependency ───────────────────────────────────────────────────
   const impact = (direct) =>
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const options = optionsOf(req.body || req.query, req);
-      res.json(direct ? Impact.directImpact(db, tenantOf(req), options, req.actor) : Impact.impactAnalysis(db, tenantOf(req), options, req.actor));
+      res.json(direct ? await Impact.directImpactAsync(db, tenantOf(req), options, req.actor) : await Impact.impactAnalysisAsync(db, tenantOf(req), options, req.actor));
     });
-  router.post("/impact", auth, canImpact("execute"), impact(false));
-  router.get("/impact", auth, canImpact("read"), impact(false));
-  router.post("/impact/direct", auth, canImpact("read"), impact(true));
+  router.post("/impact", authAsync, canImpact("execute"), impact(false));
+  router.get("/impact", authAsync, canImpact("read"), impact(false));
+  router.post("/impact/direct", authAsync, canImpact("read"), impact(true));
   const dependency = (direct) =>
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const options = optionsOf(req.body || req.query, req);
-      res.json(direct ? Dependency.directDependencyAnalysis(db, tenantOf(req), options, req.actor) : Dependency.dependencyAnalysis(db, tenantOf(req), options, req.actor));
+      res.json(direct ? await Dependency.directDependencyAnalysisAsync(db, tenantOf(req), options, req.actor) : await Dependency.dependencyAnalysisAsync(db, tenantOf(req), options, req.actor));
     });
-  router.post("/dependency", auth, canExplorer("execute"), dependency(false));
-  router.get("/dependency", auth, canExplorer("read"), dependency(false));
-  router.post("/dependency/direct", auth, canExplorer("read"), dependency(true));
+  router.post("/dependency", authAsync, canExplorer("execute"), dependency(false));
+  router.get("/dependency", authAsync, canExplorer("read"), dependency(false));
+  router.post("/dependency/direct", authAsync, canExplorer("read"), dependency(true));
 
   // ── Paths ─────────────────────────────────────────────────────────────────
-  const paths = wrap((req, res) => {
+  const paths = wrap(async (req, res) => {
     const source = req.body?.source ?? req.body?.from ?? req.query.source ?? req.query.from;
     const target = req.body?.target ?? req.body?.to ?? req.query.target ?? req.query.to;
     const options = { ...optionsOf(req.body || req.query, req), source, target };
-    res.json(Paths.findPaths(db, tenantOf(req), options, req.actor));
+    res.json(await Paths.findPathsAsync(db, tenantOf(req), options, req.actor));
   });
-  router.post("/paths", auth, canPaths("execute"), paths);
-  router.get("/paths", auth, canPaths("read"), paths);
+  router.post("/paths", authAsync, canPaths("execute"), paths);
+  router.get("/paths", authAsync, canPaths("read"), paths);
 
   // ── Completeness ──────────────────────────────────────────────────────────
-  const completeness = wrap((req, res) => res.json(Completeness.evaluateCompleteness(db, tenantOf(req), optionsOf(req.body || req.query, req), req.actor)));
-  router.post("/completeness", auth, canCompleteness("execute"), completeness);
-  router.get("/completeness", auth, canCompleteness("read"), completeness);
+  const completeness = wrap(async (req, res) => res.json(await Completeness.evaluateCompletenessAsync(db, tenantOf(req), optionsOf(req.body || req.query, req), req.actor)));
+  router.post("/completeness", authAsync, canCompleteness("execute"), completeness);
+  router.get("/completeness", authAsync, canCompleteness("read"), completeness);
 
   // ── Snapshots ─────────────────────────────────────────────────────────────
-  router.get("/snapshots", auth, canSnapshots("read"), wrap((req, res) => res.json(Snapshots.listSnapshots(db, tenantOf(req), query(req)))));
-  router.post("/snapshots", auth, canSnapshots("create"), wrap((req, res) => res.status(201).json(Snapshots.createSnapshot(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
-  router.get("/snapshots/summary", auth, canSnapshots("read"), wrap((req, res) => res.json(Snapshots.snapshotSummary(db, tenantOf(req)))));
-  router.get("/snapshots/:ref", auth, canSnapshots("read"), wrap((req, res) => res.json(Snapshots.getSnapshot(db, tenantOf(req), req.params.ref, { includeNodes: req.query.include_nodes !== "false", includeEdges: req.query.include_edges !== "false" }))));
-  router.get("/snapshots/:ref/graph", auth, canSnapshots("read"), wrap((req, res) => res.json(Snapshots.snapshotGraph(db, tenantOf(req), req.params.ref))));
-  router.post("/snapshots/:ref/status", auth, canSnapshots("update"), wrap((req, res) => res.json(Snapshots.setSnapshotStatus(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip))));
-  router.delete("/snapshots/:ref", auth, canSnapshots("delete"), wrap((req, res) => res.json(Snapshots.deleteSnapshot(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
+  router.get("/snapshots", authAsync, canSnapshots("read"), wrap(async (req, res) => res.json(await Snapshots.listSnapshotsAsync(db, tenantOf(req), query(req)))));
+  router.post("/snapshots", authAsync, canSnapshots("create"), wrap(async (req, res) => res.status(201).json(await Snapshots.createSnapshotAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
+  router.get("/snapshots/summary", authAsync, canSnapshots("read"), wrap(async (req, res) => res.json(await Snapshots.snapshotSummaryAsync(db, tenantOf(req)))));
+  router.get("/snapshots/:ref", authAsync, canSnapshots("read"), wrap(async (req, res) => res.json(await Snapshots.getSnapshotAsync(db, tenantOf(req), req.params.ref, { includeNodes: req.query.include_nodes !== "false", includeEdges: req.query.include_edges !== "false" }))));
+  router.get("/snapshots/:ref/graph", authAsync, canSnapshots("read"), wrap(async (req, res) => res.json(await Snapshots.snapshotGraphAsync(db, tenantOf(req), req.params.ref))));
+  router.post("/snapshots/:ref/status", authAsync, canSnapshots("update"), wrap(async (req, res) => res.json(await Snapshots.setSnapshotStatusAsync(db, tenantOf(req), req.params.ref, req.body?.status, req.actor, req.ip))));
+  router.delete("/snapshots/:ref", authAsync, canSnapshots("delete"), wrap(async (req, res) => res.json(await Snapshots.deleteSnapshotAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
 
   // ── Baselines ─────────────────────────────────────────────────────────────
-  router.get("/baselines", auth, canBaselines("read"), wrap((req, res) => res.json(Baselines.listBaselines(db, tenantOf(req), query(req)))));
-  router.post("/baselines", auth, canBaselines("create"), wrap((req, res) => res.status(201).json(Baselines.createBaseline(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
-  router.get("/baselines/summary", auth, canBaselines("read"), wrap((req, res) => res.json(Baselines.baselineSummary(db, tenantOf(req)))));
-  router.get("/baselines/:ref", auth, canBaselines("read"), wrap((req, res) => res.json(Baselines.getBaseline(db, tenantOf(req), req.params.ref, { includeMembers: req.query.include_members !== "false" }))));
-  router.get("/baselines/:ref/members", auth, canBaselines("read"), wrap((req, res) => res.json({ items: Baselines.baselineMembers(db, Baselines.requireBaselineRow(db, tenantOf(req), req.params.ref).id) })));
-  router.post("/baselines/:ref/release", auth, canBaselines("update"), wrap((req, res) => res.json(Baselines.releaseBaseline(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
-  router.post("/baselines/:ref/freeze", auth, canBaselines("update"), wrap((req, res) => res.json(Baselines.freezeBaseline(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
-  const updateBaseline = wrap((req, res) => res.json(Baselines.updateBaseline(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
-  router.put("/baselines/:ref", auth, canBaselines("update"), updateBaseline);
-  router.patch("/baselines/:ref", auth, canBaselines("update"), updateBaseline);
-  router.delete("/baselines/:ref", auth, canBaselines("delete"), wrap((req, res) => res.json(Baselines.deleteBaseline(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
+  router.get("/baselines", authAsync, canBaselines("read"), wrap(async (req, res) => res.json(await Baselines.listBaselinesAsync(db, tenantOf(req), query(req)))));
+  router.post("/baselines", authAsync, canBaselines("create"), wrap(async (req, res) => res.status(201).json(await Baselines.createBaselineAsync(db, tenantOf(req), req.body || {}, req.actor, req.ip))));
+  router.get("/baselines/summary", authAsync, canBaselines("read"), wrap(async (req, res) => res.json(await Baselines.baselineSummaryAsync(db, tenantOf(req)))));
+  router.get("/baselines/:ref", authAsync, canBaselines("read"), wrap(async (req, res) => res.json(await Baselines.getBaselineAsync(db, tenantOf(req), req.params.ref, { includeMembers: req.query.include_members !== "false" }))));
+  router.get("/baselines/:ref/members", authAsync, canBaselines("read"), wrap(async (req, res) => res.json({ items: await Baselines.baselineMembersAsync(db, (await Baselines.requireBaselineRowAsync(db, tenantOf(req), req.params.ref)).id) })));
+  router.post("/baselines/:ref/release", authAsync, canBaselines("update"), wrap(async (req, res) => res.json(await Baselines.releaseBaselineAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
+  router.post("/baselines/:ref/freeze", authAsync, canBaselines("update"), wrap(async (req, res) => res.json(await Baselines.freezeBaselineAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
+  const updateBaseline = wrap(async (req, res) => res.json(await Baselines.updateBaselineAsync(db, tenantOf(req), req.params.ref, req.body || {}, req.actor, req.ip)));
+  router.put("/baselines/:ref", authAsync, canBaselines("update"), updateBaseline);
+  router.patch("/baselines/:ref", authAsync, canBaselines("update"), updateBaseline);
+  router.delete("/baselines/:ref", authAsync, canBaselines("delete"), wrap(async (req, res) => res.json(await Baselines.deleteBaselineAsync(db, tenantOf(req), req.params.ref, req.actor, req.ip))));
 
   // ── Compare ───────────────────────────────────────────────────────────────
   router.post(
     "/compare",
-    auth,
+    authAsync,
     canCompare("read"),
-    wrap((req, res) => {
+    wrap(async (req, res) => {
       const body = req.body || {};
       res.json(
-        Compare.compareProjections(
+        await Compare.compareProjectionsAsync(
           db,
           tenantOf(req),
           {
@@ -230,39 +235,39 @@ export function createThreadRouter({ express, db, auth, can, wrap }) {
       );
     })
   );
-  router.post("/compare/snapshots", auth, canCompare("read"), wrap((req, res) => res.json(Compare.compareSnapshots(db, tenantOf(req), req.body || {}, req.actor))));
-  router.post("/compare/baselines", auth, canCompare("read"), wrap((req, res) => res.json(Compare.compareBaselines(db, tenantOf(req), req.body || {}, req.actor))));
+  router.post("/compare/snapshots", authAsync, canCompare("read"), wrap(async (req, res) => res.json(await Compare.compareSnapshotsAsync(db, tenantOf(req), req.body || {}, req.actor))));
+  router.post("/compare/baselines", authAsync, canCompare("read"), wrap(async (req, res) => res.json(await Compare.compareBaselinesAsync(db, tenantOf(req), req.body || {}, req.actor))));
 
   // ── Projection ────────────────────────────────────────────────────────────
-  router.get("/projections", auth, canOverview("read"), wrap((req, res) => res.json(Projection.listProjections(db, tenantOf(req), query(req)))));
-  router.get("/projections/state", auth, canOverview("read"), wrap((req, res) => res.json(Projection.projectionState(db, tenantOf(req)))));
-  router.get("/projections/health", auth, canMetrics("read"), wrap((req, res) => res.json(Projection.projectionHealth(db, tenantOf(req)))));
-  router.get("/projections/:objectType/:objectId", auth, canOverview("read"), wrap((req, res) => res.json(Projection.getProjection(db, tenantOf(req), req.params.objectType, req.params.objectId))));
-  router.post("/projections/rebuild", auth, canAdmin("execute"), wrap((req, res) => res.json(Projection.rebuildProjection(db, tenantOf(req), { objectTypes: req.body?.object_types ?? req.body?.objectTypes ?? null, actor: req.actor }))));
+  router.get("/projections", authAsync, canOverview("read"), wrap(async (req, res) => res.json(await Projection.listProjectionsAsync(db, tenantOf(req), query(req)))));
+  router.get("/projections/state", authAsync, canOverview("read"), wrap(async (req, res) => res.json(await Projection.projectionStateAsync(db, tenantOf(req)))));
+  router.get("/projections/health", authAsync, canMetrics("read"), wrap(async (req, res) => res.json(await Projection.projectionHealthAsync(db, tenantOf(req)))));
+  router.get("/projections/:objectType/:objectId", authAsync, canOverview("read"), wrap(async (req, res) => res.json(await Projection.getProjectionAsync(db, tenantOf(req), req.params.objectType, req.params.objectId))));
+  router.post("/projections/rebuild", authAsync, canAdmin("execute"), wrap(async (req, res) => res.json(await Projection.rebuildProjectionAsync(db, tenantOf(req), { objectTypes: req.body?.object_types ?? req.body?.objectTypes ?? null, actor: req.actor }))));
 
   // ── Search ────────────────────────────────────────────────────────────────
-  router.post("/search/reindex", auth, canSearch("execute"), wrap((_req, res) => res.json({ registered: Search.registerThreadSources() })));
-  router.get("/search-meta", auth, canSearch("read"), wrap((_req, res) => res.json({ object_types: Constants.SEARCH_OBJECT_TYPES })));
+  router.post("/search/reindex", authAsync, canSearch("execute"), wrap((_req, res) => res.json({ registered: Search.registerThreadSources() })));
+  router.get("/search-meta", authAsync, canSearch("read"), wrap((_req, res) => res.json({ object_types: Constants.SEARCH_OBJECT_TYPES })));
 
   // ── History & audit ───────────────────────────────────────────────────────
-  router.get("/history", auth, canAudit("read"), wrap((req, res) => res.json(History.listHistory(db, query(req)))));
-  router.get("/query-history", auth, canAudit("read"), wrap((req, res) => res.json(History.listQueryHistory(db, query(req)))));
-  router.get("/history/:objectType/:objectId", auth, canAudit("read"), wrap((req, res) => res.json({ items: History.objectLineage(db, tenantOf(req), req.params.objectType, req.params.objectId) })));
+  router.get("/history", authAsync, canAudit("read"), wrap(async (req, res) => res.json(await History.listHistoryAsync(db, query(req)))));
+  router.get("/query-history", authAsync, canAudit("read"), wrap(async (req, res) => res.json(await History.listQueryHistoryAsync(db, query(req)))));
+  router.get("/history/:objectType/:objectId", authAsync, canAudit("read"), wrap(async (req, res) => res.json({ items: await History.objectLineageAsync(db, tenantOf(req), req.params.objectType, req.params.objectId) })));
 
   // ── Background jobs ───────────────────────────────────────────────────────
-  router.post("/jobs/traverse", auth, canExplorer("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitTraversalJob(db, { tenantId: tenantOf(req), root: req.body?.root, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/impact", auth, canImpact("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitImpactJob(db, { tenantId: tenantOf(req), root: req.body?.root, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/paths", auth, canPaths("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitPathJob(db, { tenantId: tenantOf(req), source: req.body?.source, target: req.body?.target, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/snapshot", auth, canSnapshots("create"), wrap(async (req, res) => res.status(202).json(await Jobs.submitSnapshotJob(db, { tenantId: tenantOf(req), body: req.body || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/baseline", auth, canBaselines("create"), wrap(async (req, res) => res.status(202).json(await Jobs.submitBaselineJob(db, { tenantId: tenantOf(req), body: req.body || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/completeness", auth, canCompleteness("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitCompletenessJob(db, { tenantId: tenantOf(req), root: req.body?.root, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/reindex", auth, canSearch("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitReindexJob(db, { tenantId: tenantOf(req), objectTypes: req.body?.object_types ?? req.body?.objectTypes ?? null, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/projection-rebuild", auth, canAdmin("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitProjectionRebuildJob(db, { tenantId: tenantOf(req), objectTypes: req.body?.object_types ?? req.body?.objectTypes ?? null, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
-  router.post("/jobs/maintenance", auth, canAdmin("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitMaintenanceJob(db, { tenantId: tenantOf(req), actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/traverse", authAsync, canExplorer("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitTraversalJobAsync(db, { tenantId: tenantOf(req), root: req.body?.root, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/impact", authAsync, canImpact("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitImpactJobAsync(db, { tenantId: tenantOf(req), root: req.body?.root, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/paths", authAsync, canPaths("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitPathJobAsync(db, { tenantId: tenantOf(req), source: req.body?.source, target: req.body?.target, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/snapshot", authAsync, canSnapshots("create"), wrap(async (req, res) => res.status(202).json(await Jobs.submitSnapshotJobAsync(db, { tenantId: tenantOf(req), body: req.body || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/baseline", authAsync, canBaselines("create"), wrap(async (req, res) => res.status(202).json(await Jobs.submitBaselineJobAsync(db, { tenantId: tenantOf(req), body: req.body || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/completeness", authAsync, canCompleteness("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitCompletenessJobAsync(db, { tenantId: tenantOf(req), root: req.body?.root, options: req.body?.options || {}, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/reindex", authAsync, canSearch("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitReindexJobAsync(db, { tenantId: tenantOf(req), objectTypes: req.body?.object_types ?? req.body?.objectTypes ?? null, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/projection-rebuild", authAsync, canAdmin("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitProjectionRebuildJobAsync(db, { tenantId: tenantOf(req), objectTypes: req.body?.object_types ?? req.body?.objectTypes ?? null, actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
+  router.post("/jobs/maintenance", authAsync, canAdmin("execute"), wrap(async (req, res) => res.status(202).json(await Jobs.submitMaintenanceJobAsync(db, { tenantId: tenantOf(req), actor: req.actor, ip: req.ip, idempotencyKey: idem(req) }))));
 
   // ── Foundation & demo seed ────────────────────────────────────────────────
-  router.post("/foundation/ensure", auth, canAdmin("execute"), wrap((_req, res) => res.json(Foundation.ensureThreadFoundation(db))));
-  router.post("/seed", auth, canAdmin("execute"), wrap((req, res) => res.json(Seed.seedThread(db, tenantOf(req)))));
+  router.post("/foundation/ensure", authAsync, canAdmin("execute"), wrap(async (_req, res) => res.json(await Foundation.ensureThreadFoundationAsync(db))));
+  router.post("/seed", authAsync, canAdmin("execute"), wrap(async (req, res) => res.json(await Seed.seedThreadAsync(db, tenantOf(req)))));
 
   return router;
 }

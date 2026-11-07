@@ -1,0 +1,17 @@
+# Production posture overrides. These values are deliberately explicit so the
+# production overlay never inherits the development-oriented base defaults
+# (LLM_PROVIDER=mock / OTEL_ENABLED=false).
+#
+# LLM_PROVIDER must name a real LiteLLM provider and the workload must receive
+# LLM_API_KEY (or LLM_BASE_URL) through `ai-api-secrets`. Startup fails closed
+# if either the provider or the credentials are missing. Set the provider to
+# the one your organisation is licensed to use.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-api-config
+data:
+  LLM_PROVIDER: "openai"
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "ai-api"

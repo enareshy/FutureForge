@@ -1,6 +1,6 @@
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as users from "../services/users.js";
 import * as groups from "../services/groups.js";
@@ -12,7 +12,7 @@ import { validatePasswordAgainstPolicy } from "../validation.js";
 import { hashPassword, verifyPassword } from "../crypto.js";
 
 function db() {
-  const database = openDatabase(":memory:");
+  const database = openTestDatabase();
   migrate(database);
   return database;
 }

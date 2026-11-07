@@ -1,7 +1,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -58,7 +58,7 @@ describe("notification REST APIs", () => {
   let userId;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;
@@ -123,6 +123,9 @@ describe("notification REST APIs", () => {
       assert.equal(res.status, 200);
       const count = await request(port, "GET", "/api/notifications/unread-count", { token: userToken });
       assert.equal(count.body.unread, 0);
+      const archived = await request(port, "POST", "/api/notifications/archive-all-read", { token: userToken });
+      assert.equal(archived.status, 200);
+      assert.ok(Number.isInteger(archived.body.archived));
     });
 
     test("archives and deletes own notification", async () => {

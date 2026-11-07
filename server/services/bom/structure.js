@@ -4,8 +4,9 @@
 // paths and enforces structural invariants (single parent, no cycles, depth
 // limit). It reads lines directly so line and structure services stay acyclic.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { publicLine } from "./repository.js";
-import { getConfig } from "./configuration.js";
+import { getConfig, getConfigAsync } from "./configuration.js";
 import { circularStructure, depthExceeded, revisionNotFound } from "./errors.js";
 import { MAX_STRUCTURE_DEPTH } from "./constants.js";
 
@@ -151,4 +152,83 @@ export function ancestorsOf(db, revisionId, childObjectId, { ownerObjectId = nul
   }
   void ownerObjectId;
   return chain;
+}
+
+// ── Async twins (used by migrated read routes) ───────────────────────────────
+
+export async function linesForRevisionAsync(db, revisionId, { includeInactive = true } = {}) {
+  const statuses = includeInactive ? "" : "AND line_status = 'ACTIVE'";
+  return queryAllAsync(db, `SELECT * FROM bom_lines WHERE bom_revision_id = ? ${statuses} ORDER BY COALESCE(NULLIF(sequence,0), 2147483647), id`, [Number(revisionId)]);
+}
+
+export async function buildTreeAsync(db, tenantId, revisionId, options = {}) {
+  const config = {
+    max_depth: options.maxDepth ?? (await getConfigAsync(db, tenantId, "max_structure_depth")),
+    include_inactive: options.includeInactive ?? true,
+  };
+  const lines = await linesForRevisionAsync(db, revisionId, { includeInactive: config.include_inactive });
+  const owner = await queryOneAsync(db, "SELECT h.owner_object_id, h.bom_number FROM bom_headers h JOIN bom_revisions r ON r.bom_id = h.id WHERE r.id = ?", [Number(revisionId)]);
+  if (owner === undefined || owner === null) {
+    // The revision join returned nothing: confirm the revision exists for a precise error.
+    const exists = await queryOneAsync(db, "SELECT id FROM bom_revisions WHERE id = ?", [Number(revisionId)]);
+    if (!exists) throw revisionNotFound(revisionId);
+  }
+  const { byParent } = buildAdjacency(lines);
+  const ownerObjectId = owner?.owner_object_id != null ? String(owner.owner_object_id) : null;
+  const rootLines = rootsFor(lines, { ownerObjectId });
+  let maxDepth = 0;
+
+  const build = (line, level, path, seen) => {
+    maxDepth = Math.max(maxDepth, level);
+    if (level > Number(config.max_depth || MAX_STRUCTURE_DEPTH)) throw depthExceeded(config.max_depth);
+    const childKey = line.child_object_id ? String(line.child_object_id) : null;
+    if (childKey && seen.has(childKey)) throw circularStructure({ child_object_id: childKey, path });
+    const nextSeen = childKey ? new Set([...seen, childKey]) : seen;
+    const nodePath = path ? `${path}/${line.child_object_id ?? line.id}` : String(line.child_object_id ?? line.id);
+    const children = (childKey ? byParent.get(childKey) || [] : []).map((child) => build(child, level + 1, nodePath, nextSeen));
+    return {
+      line: publicLine(line),
+      level,
+      path: nodePath,
+      child_count: children.length,
+      children,
+    };
+  };
+
+  const nodes = rootLines.map((line) => build(line, 1, "", new Set()));
+  return {
+    revision_id: Number(revisionId),
+    bom_number: owner?.bom_number ?? null,
+    line_count: lines.length,
+    root_count: nodes.length,
+    max_depth: maxDepth,
+    roots: nodes,
+  };
+}
+
+export async function flatStructureAsync(db, tenantId, revisionId, options = {}) {
+  return flattenTree(await buildTreeAsync(db, tenantId, revisionId, options));
+}
+
+// Async twin of `assertNoCycle` for migrated write routes. Pure traversal once
+// the lines are loaded; only the load differs.
+export async function assertNoCycleAsync(db, { revisionId, parentObjectId, childObjectId }) {
+  const parent = parentObjectId != null ? String(parentObjectId) : "";
+  const child = childObjectId != null ? String(childObjectId) : "";
+  if (!child) return;
+  if (child === parent) throw circularStructure({ parent_object_id: parent, child_object_id: child });
+  const lines = await linesForRevisionAsync(db, revisionId, { includeInactive: true });
+  const { byParent } = buildAdjacency(lines);
+  const stack = [child];
+  const visited = new Set();
+  while (stack.length) {
+    const current = stack.pop();
+    if (visited.has(current)) continue;
+    visited.add(current);
+    if (current === parent) throw circularStructure({ parent_object_id: parent, child_object_id: child });
+    for (const next of byParent.get(current) || []) {
+      const key = next.child_object_id ? String(next.child_object_id) : null;
+      if (key) stack.push(key);
+    }
+  }
 }

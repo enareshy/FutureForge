@@ -213,6 +213,22 @@ export const iam = {
   effectivePermissions: (userId, qs) => api(`/api/authorization/effective/${userId}${qs || ""}`),
 };
 
+// Deployment & Edition framework: the deployment posture (Cloud SaaS / Private
+// Cloud / Local), the licensed edition and the feature entitlement ledger.
+export const deployment = {
+  meta: () => api("/api/deployment/meta"),
+  capabilities: () => api("/api/deployment/capabilities"),
+  health: () => api("/api/deployment/health"),
+  profile: () => api("/api/deployment/profile"),
+  updateProfile: (body) => api("/api/deployment/profile", { method: "PUT", body }),
+  features: () => api("/api/deployment/features"),
+  featureSummary: () => api("/api/deployment/features/summary"),
+  feature: (code) => api(`/api/deployment/features/${code}`),
+  updateFeature: (code, body) => api(`/api/deployment/features/${code}`, { method: "PUT", body }),
+  history: (qs) => api(`/api/deployment/history${qs || ""}`),
+  ensureFoundation: () => api("/api/deployment/foundation/ensure", { method: "POST" }),
+};
+
 export const metadata = {
   types: (qs) => api(`/api/metadata/types${qs || ""}`),
   typeTree: (qs) => api(`/api/metadata/types/tree${qs || ""}`),
@@ -2419,6 +2435,236 @@ export const change = {
   relationships: (qs) => api(`/api/v1/change/relationships${qs || ""}`),
 };
 
+// Requirements Manager: requirements, revisions, hierarchy, traceability,
+// baselines and validation built on the shared platform frameworks.
+export const requirements = {
+  meta: () => api("/api/v1/requirements/meta"),
+  health: () => api("/api/v1/requirements/health"),
+  configuration: () => api("/api/v1/requirements/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/requirements/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/requirements/foundation/ensure", { method: "POST" }),
+  seed: () => api("/api/v1/requirements/seed", { method: "POST" }),
+
+  types: (qs) => api(`/api/v1/requirements/types${qs || ""}`),
+  type: (code) => api(`/api/v1/requirements/types/${encodeURIComponent(code)}`),
+  createType: (body) => api("/api/v1/requirements/types", { method: "POST", body }),
+  updateType: (code, body) =>
+    api(`/api/v1/requirements/types/${encodeURIComponent(code)}`, { method: "PUT", body }),
+  setTypeStatus: (code, status) =>
+    api(`/api/v1/requirements/types/${encodeURIComponent(code)}/status`, { method: "POST", body: { status } }),
+
+  list: (qs) => api(`/api/v1/requirements/requirements${qs || ""}`),
+  get: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}`),
+  create: (body) => api("/api/v1/requirements/requirements", { method: "POST", body }),
+  update: (ref, body) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  remove: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  transition: (ref, status, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, reason } }),
+  submit: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/submit`, { method: "POST", body: { reason } }),
+  approve: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/approve`, { method: "POST", body: { reason } }),
+  reject: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/reject`, { method: "POST", body: { reason } }),
+  release: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/release`, { method: "POST", body: { reason } }),
+  obsolete: (ref, reason) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/obsolete`, { method: "POST", body: { reason } }),
+  setVerification: (ref, status) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/verification`, { method: "POST", body: { status } }),
+  revise: (ref, body) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/revise`, { method: "POST", body }),
+  revisions: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/revisions`),
+  compareRevisions: (ref, from, to) =>
+    api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/revisions/compare?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+  history: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/history`),
+  children: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/children`),
+  requirementRelationships: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/relationships`),
+  validateRequirement: (ref) => api(`/api/v1/requirements/requirements/${encodeURIComponent(ref)}/validate`),
+
+  relationships: (qs) => api(`/api/v1/requirements/relationships${qs || ""}`),
+  relationship: (ref) => api(`/api/v1/requirements/relationships/${encodeURIComponent(ref)}`),
+  createRelationship: (body) => api("/api/v1/requirements/relationships", { method: "POST", body }),
+  deleteRelationship: (ref) => api(`/api/v1/requirements/relationships/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  hierarchy: (ref, maxDepth) =>
+    api(`/api/v1/requirements/hierarchy/${encodeURIComponent(ref)}${maxDepth ? `?maxDepth=${maxDepth}` : ""}`),
+
+  baselines: (qs) => api(`/api/v1/requirements/baselines${qs || ""}`),
+  baseline: (ref) => api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}`),
+  createBaseline: (body) => api("/api/v1/requirements/baselines", { method: "POST", body }),
+  baselineMembers: (ref) => api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/members`),
+  addBaselineMember: (ref, body) =>
+    api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/members`, { method: "POST", body }),
+  removeBaselineMember: (ref, memberRef) =>
+    api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/members/${encodeURIComponent(memberRef)}`, { method: "DELETE" }),
+  releaseBaseline: (ref) => api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/release`, { method: "POST" }),
+  compareBaseline: (ref) => api(`/api/v1/requirements/baselines/${encodeURIComponent(ref)}/compare`),
+
+  validationRules: (qs) => api(`/api/v1/requirements/validation-rules${qs || ""}`),
+  validationRule: (ref) => api(`/api/v1/requirements/validation-rules/${encodeURIComponent(ref)}`),
+  createValidationRule: (body) => api("/api/v1/requirements/validation-rules", { method: "POST", body }),
+  updateValidationRule: (ref, body) =>
+    api(`/api/v1/requirements/validation-rules/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  deleteValidationRule: (ref) => api(`/api/v1/requirements/validation-rules/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  runValidation: (body) => api("/api/v1/requirements/validation/run", { method: "POST", body: body || {} }),
+};
+
+// Requirement -> PDM integration: allocations, coverage, compatibility,
+// impact analysis and change synchronization across the digital thread.
+export const requirementPdm = {
+  meta: () => api("/api/v1/requirement-pdm/meta"),
+  health: () => api("/api/v1/requirement-pdm/health"),
+  configuration: () => api("/api/v1/requirement-pdm/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/requirement-pdm/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/requirement-pdm/foundation/ensure", { method: "POST" }),
+
+  targets: () => api("/api/v1/requirement-pdm/targets"),
+  resolveTarget: (targetType, targetId) =>
+    api(`/api/v1/requirement-pdm/targets/resolve?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`),
+
+  allocations: (qs) => api(`/api/v1/requirement-pdm/allocations${qs || ""}`),
+  allocation: (ref) => api(`/api/v1/requirement-pdm/allocations/${encodeURIComponent(ref)}`),
+  createAllocation: (body) => api("/api/v1/requirement-pdm/allocations", { method: "POST", body }),
+  removeAllocation: (ref) => api(`/api/v1/requirement-pdm/allocations/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  checkAllocation: (ref, body) =>
+    api(`/api/v1/requirement-pdm/allocations/${encodeURIComponent(ref)}/check`, { method: "POST", body: body || {} }),
+  synchronizeAllocation: (ref, body) =>
+    api(`/api/v1/requirement-pdm/allocations/${encodeURIComponent(ref)}/synchronize`, { method: "POST", body: body || {} }),
+
+  requirementAllocations: (ref) => api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/allocations`),
+  requirementCoverage: (ref) => api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/coverage`),
+  requirementCompatibilities: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/compatibilities${qs || ""}`),
+  coverage: (requirementId) => api(`/api/v1/requirement-pdm/coverage?requirement_id=${encodeURIComponent(requirementId)}`),
+
+  impact: (qs) => api(`/api/v1/requirement-pdm/impact${qs || ""}`),
+  impactedAllocations: (qs) => api(`/api/v1/requirement-pdm/impact/allocations${qs || ""}`),
+  synchronize: (body) => api("/api/v1/requirement-pdm/synchronize", { method: "POST", body: body || {} }),
+  submitSynchronization: (body) => api("/api/v1/requirement-pdm/synchronize/job", { method: "POST", body: body || {} }),
+  submitImpactSweep: (body) => api("/api/v1/requirement-pdm/impact/sweep", { method: "POST", body: body || {} }),
+  enqueueSynchronization: (body) => api("/api/v1/requirement-pdm/synchronize/enqueue", { method: "POST", body: body || {} }),
+
+  integrationSummary: () => api("/api/v1/requirement-pdm/integration/summary"),
+  metrics: () => api("/api/v1/requirement-pdm/metrics"),
+
+  // Prompt 4 — Requirement / PLM workspace
+  requirementProducts: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/products${qs || ""}`),
+  productLifecycle: (ref) => api(`/api/v1/requirement-pdm/products/${encodeURIComponent(ref)}/lifecycle`),
+  productRequirements: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/products/${encodeURIComponent(ref)}/requirements${qs || ""}`),
+
+  requirementStructures: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/structures${qs || ""}`),
+  requirementStructureCoverage: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/structure-coverage${qs || ""}`),
+  structureTrace: (ref, qs) => api(`/api/v1/requirement-pdm/structures/${encodeURIComponent(ref)}/trace${qs || ""}`),
+  structureRequirements: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/structures/${encodeURIComponent(ref)}/requirements${qs || ""}`),
+
+  requirementDocuments: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/documents${qs || ""}`),
+
+  requirementChanges: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/changes${qs || ""}`),
+  change: (type, id) => api(`/api/v1/requirement-pdm/changes/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
+  changeRequirements: (type, id, qs) =>
+    api(`/api/v1/requirement-pdm/changes/${encodeURIComponent(type)}/${encodeURIComponent(id)}/requirements${qs || ""}`),
+  unlinkChange: (ref) => api(`/api/v1/requirement-pdm/change-links/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  requirementChangeChain: (ref) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/change-chain`),
+
+  requirementImpactAnalysis: (ref, body) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/impact-analysis`, { method: "POST", body: body || {} }),
+  requirementImpactReport: (ref, qs) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/impact-analysis${qs || ""}`),
+  submitRequirementImpactAnalysis: (ref, body) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/impact-analysis/job`, { method: "POST", body: body || {} }),
+
+  requirementChangeInitiation: (ref) => api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/change-initiation`),
+  initiateRequirementChange: (ref, body) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/change-initiation`, { method: "POST", body: body || {} }),
+  submitRequirementChangeInitiation: (ref, body) =>
+    api(`/api/v1/requirement-pdm/requirements/${encodeURIComponent(ref)}/change-initiation/job`, { method: "POST", body: body || {} }),
+
+  plmNodeRequirements: (type, id) =>
+    api(`/api/v1/requirement-pdm/plm-nodes/${encodeURIComponent(type)}/${encodeURIComponent(id)}/requirements`),
+  synchronizeFromPlm: (body) => api("/api/v1/requirement-pdm/plm-sync", { method: "POST", body: body || {} }),
+  submitPlmSynchronization: (body) => api("/api/v1/requirement-pdm/plm-sync/job", { method: "POST", body: body || {} }),
+  enqueuePlmSynchronization: (body) => api("/api/v1/requirement-pdm/plm-sync/enqueue", { method: "POST", body: body || {} }),
+  plmMetrics: () => api("/api/v1/requirement-pdm/plm-metrics"),
+};
+
+// Requirement -> Manufacturing traceability: allocations, EBOM->MBOM trace,
+// BOP/operation/work-center linkage, characteristics/CTQ, matrix/gaps/trace and
+// change impact. Reuses the shared PDM/BOM/Object/Traceability engines.
+export const requirementManufacturing = {
+  meta: () => api("/api/v1/requirement-manufacturing/meta"),
+  health: () => api("/api/v1/requirement-manufacturing/health"),
+  configuration: () => api("/api/v1/requirement-manufacturing/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/requirement-manufacturing/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/requirement-manufacturing/foundation/ensure", { method: "POST" }),
+
+  targets: () => api("/api/v1/requirement-manufacturing/targets"),
+  resolveTarget: (targetType, targetId) =>
+    api(`/api/v1/requirement-manufacturing/targets/resolve?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`),
+
+  allocations: (qs) => api(`/api/v1/requirement-manufacturing/allocations${qs || ""}`),
+  allocation: (ref) => api(`/api/v1/requirement-manufacturing/allocations/${encodeURIComponent(ref)}`),
+  createAllocation: (body) => api("/api/v1/requirement-manufacturing/allocations", { method: "POST", body }),
+  createAllocations: (body) => api("/api/v1/requirement-manufacturing/allocations/batch", { method: "POST", body }),
+  removeAllocation: (ref) => api(`/api/v1/requirement-manufacturing/allocations/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  requirementAllocations: (ref) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/allocations`),
+  requirementCoverage: (ref) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/coverage`),
+  targetRequirements: (targetType, targetId) =>
+    api(`/api/v1/requirement-manufacturing/targets/requirements?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`),
+
+  ebomMbomMappings: (ref, qs) => api(`/api/v1/requirement-manufacturing/ebom/${encodeURIComponent(ref)}/mbom-mappings${qs || ""}`),
+  mbomEbomSources: (ref, qs) => api(`/api/v1/requirement-manufacturing/mbom/${encodeURIComponent(ref)}/ebom-sources${qs || ""}`),
+  bomTransformations: (ref) => api(`/api/v1/requirement-manufacturing/bom-revisions/${encodeURIComponent(ref)}/transformations`),
+
+  bopOperations: (ref, qs) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/operations${qs || ""}`),
+  bopSequence: (ref, qs) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/sequence${qs || ""}`),
+  bopCoverage: (ref) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/coverage`),
+  bopMboms: (ref, qs) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/mboms${qs || ""}`),
+  addOperationToBop: (ref, body) => api(`/api/v1/requirement-manufacturing/bop/${encodeURIComponent(ref)}/operations`, { method: "POST", body }),
+  mbomBops: (ref, qs) => api(`/api/v1/requirement-manufacturing/mbom/${encodeURIComponent(ref)}/bops${qs || ""}`),
+  mbomProcessCoverage: (ref, qs) => api(`/api/v1/requirement-manufacturing/mbom/${encodeURIComponent(ref)}/process-coverage${qs || ""}`),
+  operationWorkCenters: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/work-centers${qs || ""}`),
+  linkOperationWorkCenter: (ref, body) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/work-centers`, { method: "POST", body }),
+  operationMbomItems: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/mbom-items${qs || ""}`),
+  linkOperationMbomItem: (ref, body) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/mbom-items`, { method: "POST", body }),
+  operationPredecessors: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/predecessors${qs || ""}`),
+  linkOperationPrecedence: (ref, body) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/predecessors`, { method: "POST", body }),
+  workCenterOperations: (ref, qs) => api(`/api/v1/requirement-manufacturing/work-centers/${encodeURIComponent(ref)}/operations${qs || ""}`),
+  mbomItemOperations: (ref, qs) => api(`/api/v1/requirement-manufacturing/mbom-items/${encodeURIComponent(ref)}/operations${qs || ""}`),
+
+  operationCharacteristics: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/characteristics${qs || ""}`),
+  operationConstraints: (ref, qs) => api(`/api/v1/requirement-manufacturing/operations/${encodeURIComponent(ref)}/constraints${qs || ""}`),
+  characteristicOperations: (ref, qs) => api(`/api/v1/requirement-manufacturing/characteristics/${encodeURIComponent(ref)}/operations${qs || ""}`),
+  characteristicRequirements: (ref) => api(`/api/v1/requirement-manufacturing/characteristics/${encodeURIComponent(ref)}/requirements`),
+  validateCharacteristic: (ref, body) => api(`/api/v1/requirement-manufacturing/characteristics/${encodeURIComponent(ref)}/validate`, { method: "POST", body: body || {} }),
+  requirementCtqs: (ref, qs) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/ctq${qs || ""}`),
+  ctqCoverage: (qs) => api(`/api/v1/requirement-manufacturing/ctq/coverage${qs || ""}`),
+
+  matrix: (qs) => api(`/api/v1/requirement-manufacturing/matrix${qs || ""}`),
+  coverage: () => api("/api/v1/requirement-manufacturing/coverage"),
+  gaps: (qs) => api(`/api/v1/requirement-manufacturing/gaps${qs || ""}`),
+  trace: (qs) => api(`/api/v1/requirement-manufacturing/trace${qs || ""}`),
+  traceMatrix: (qs) => api(`/api/v1/requirement-manufacturing/trace/matrix${qs || ""}`),
+
+  impactAnalysis: (body) => api("/api/v1/requirement-manufacturing/impact-analysis", { method: "POST", body: body || {} }),
+  requirementImpact: (ref, qs) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/impact${qs || ""}`),
+  nodeImpact: (body) => api("/api/v1/requirement-manufacturing/node-impact", { method: "POST", body: body || {} }),
+  submitImpactJob: (body) => api("/api/v1/requirement-manufacturing/impact-analysis/jobs", { method: "POST", body: body || {} }),
+  requirementGaps: (ref, qs) => api(`/api/v1/requirement-manufacturing/requirements/${encodeURIComponent(ref)}/gaps${qs || ""}`),
+  submitGapSweep: (body) => api("/api/v1/requirement-manufacturing/gaps/sweep", { method: "POST", body: body || {} }),
+};
+
 // P1 Digital Thread: end-to-end Requirement -> Service traceability built on the
 // existing object, PDM and BOM engines.
 export const digitalThread = {
@@ -2523,6 +2769,42 @@ export const digitalThread = {
 
   ensureFoundation: () => api("/api/v1/digital-thread/foundation/ensure", { method: "POST" }),
   seed: () => api("/api/v1/digital-thread/seed", { method: "POST" }),
+};
+
+// Generic Traceability Engine: a thin, reusable composition layer over the
+// Object & Relationship Framework and the Digital Thread. Nothing here is
+// specific to Requirement/Product/EBOM — object types and rules are data.
+export const traceability = {
+  meta: () => api("/api/v1/traceability/meta"),
+  health: () => api("/api/v1/traceability/health"),
+  configuration: () => api("/api/v1/traceability/config"),
+  setConfiguration: (key, value) =>
+    api(`/api/v1/traceability/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+
+  links: (qs) => api(`/api/v1/traceability/links${qs || ""}`),
+  link: (id) => api(`/api/v1/traceability/links/${encodeURIComponent(id)}`),
+  createLink: (body) => api("/api/v1/traceability/links", { method: "POST", body }),
+  updateLink: (id, body) => api(`/api/v1/traceability/links/${encodeURIComponent(id)}`, { method: "PUT", body }),
+  deleteLink: (id) => api(`/api/v1/traceability/links/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  graph: (qs) => api(`/api/v1/traceability/graph${qs || ""}`),
+  path: (qs) => api(`/api/v1/traceability/path${qs || ""}`),
+  impact: (body) => api("/api/v1/traceability/impact-analysis", { method: "POST", body }),
+  matrix: (qs) => api(`/api/v1/traceability/matrix${qs || ""}`),
+  coverage: (qs) => api(`/api/v1/traceability/coverage${qs || ""}`),
+  orphans: (qs) => api(`/api/v1/traceability/orphans${qs || ""}`),
+  brokenLinks: (qs) => api(`/api/v1/traceability/broken-links${qs || ""}`),
+
+  objectLinks: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/links${qs || ""}`),
+  forward: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/forward${qs || ""}`),
+  backward: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/backward${qs || ""}`),
+  children: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/children${qs || ""}`),
+  parents: (objectType, objectId, qs) =>
+    api(`/api/v1/traceability/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}/parents${qs || ""}`),
 };
 
 // P2 Standards & Exchange: standards-based import/export built on the shared
@@ -2938,4 +3220,213 @@ export const observability = {
 
   ensureFoundation: () => api("/api/v1/observability/seed", { method: "POST" }),
   seed: () => api("/api/v1/observability/seed", { method: "POST" }),
+};
+
+// P1 Verification & Validation: Requirement -> Method -> Test Case -> Procedure
+// -> Execution -> Result -> Evidence -> Requirement Status on the shared
+// Digital Thread, reusing Content / Classification / Lifecycle / Workflow /
+// Events / Jobs / Audit.
+export const verificationValidation = {
+  meta: () => api("/api/v1/verification-validation/meta"),
+  health: () => api("/api/v1/verification-validation/health"),
+  audit: (qs) => api(`/api/v1/verification-validation/audit${qs || ""}`),
+  subscriptions: () => api("/api/v1/verification-validation/subscriptions"),
+  config: () => api("/api/v1/verification-validation/config"),
+  setConfig: (key, value) =>
+    api(`/api/v1/verification-validation/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/verification-validation/foundation/ensure", { method: "POST" }),
+
+  methods: (qs) => api(`/api/v1/verification-validation/methods${qs || ""}`),
+  method: (ref) => api(`/api/v1/verification-validation/methods/${encodeURIComponent(ref)}`),
+  createMethod: (body) => api("/api/v1/verification-validation/methods", { method: "POST", body }),
+  updateMethod: (ref, body) =>
+    api(`/api/v1/verification-validation/methods/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+
+  testCases: (qs) => api(`/api/v1/verification-validation/test-cases${qs || ""}`),
+  testCase: (ref) => api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}`),
+  createTestCase: (body) => api("/api/v1/verification-validation/test-cases", { method: "POST", body }),
+  updateTestCase: (ref, body) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  transitionTestCase: (ref, status, reason) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, reason } }),
+  reviseTestCase: (ref, body) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/revise`, { method: "POST", body }),
+  testCaseRequirements: (ref, qs) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/requirements${qs || ""}`),
+  linkRequirement: (ref, body) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/requirements`, { method: "POST", body }),
+  unlinkRequirement: (ref, relationshipRef) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/requirements/${encodeURIComponent(relationshipRef)}`, { method: "DELETE" }),
+
+  procedures: (qs) => api(`/api/v1/verification-validation/procedures${qs || ""}`),
+  testCaseProcedures: (ref, qs) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/procedures${qs || ""}`),
+  createProcedure: (ref, body) =>
+    api(`/api/v1/verification-validation/test-cases/${encodeURIComponent(ref)}/procedures`, { method: "POST", body }),
+  procedure: (ref) => api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}`),
+  updateProcedure: (ref, body) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  transitionProcedure: (ref, status, reason) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, reason } }),
+  procedureSteps: (ref) => api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/steps`),
+  addProcedureStep: (ref, body) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/steps`, { method: "POST", body }),
+  updateProcedureStep: (ref, stepRef, body) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/steps/${encodeURIComponent(stepRef)}`, { method: "PUT", body }),
+  removeProcedureStep: (ref, stepRef) =>
+    api(`/api/v1/verification-validation/procedures/${encodeURIComponent(ref)}/steps/${encodeURIComponent(stepRef)}`, { method: "DELETE" }),
+
+  executions: (qs) => api(`/api/v1/verification-validation/executions${qs || ""}`),
+  execution: (ref) => api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}`),
+  createExecution: (body) => api("/api/v1/verification-validation/executions", { method: "POST", body }),
+  updateExecution: (ref, body) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  transitionExecution: (ref, status, reason) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, reason } }),
+  requestRetest: (ref, body) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/retest`, { method: "POST", body }),
+  executionRequirements: (ref) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/requirements`),
+  evaluateExecution: (ref, body) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/evaluate`, { method: "POST", body: body || {} }),
+
+  results: (qs) => api(`/api/v1/verification-validation/results${qs || ""}`),
+  result: (ref) => api(`/api/v1/verification-validation/results/${encodeURIComponent(ref)}`),
+  recordResult: (executionRef, body) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(executionRef)}/results`, { method: "POST", body }),
+  updateResult: (ref, body) =>
+    api(`/api/v1/verification-validation/results/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  evaluateResult: (ref, body) =>
+    api(`/api/v1/verification-validation/results/${encodeURIComponent(ref)}/evaluate`, { method: "POST", body: body || {} }),
+
+  evidence: (qs) => api(`/api/v1/verification-validation/evidence${qs || ""}`),
+  attachEvidence: (body) => api("/api/v1/verification-validation/evidence", { method: "POST", body }),
+  detachEvidence: (ref) =>
+    api(`/api/v1/verification-validation/evidence/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+
+  coverageRequirements: (qs) => api(`/api/v1/verification-validation/coverage/requirements${qs || ""}`),
+  coverageSummary: () => api("/api/v1/verification-validation/coverage/summary"),
+  requirementCoverage: (ref, qs) =>
+    api(`/api/v1/verification-validation/requirements/${encodeURIComponent(ref)}/coverage${qs || ""}`),
+  recalculateRequirement: (ref) =>
+    api(`/api/v1/verification-validation/requirements/${encodeURIComponent(ref)}/coverage/recalculate`, { method: "POST" }),
+  submitCoverageJob: (body) =>
+    api("/api/v1/verification-validation/coverage/recalculate/job", { method: "POST", body: body || {} }),
+
+  waivers: (qs) => api(`/api/v1/verification-validation/waivers${qs || ""}`),
+  waiverSummary: () => api("/api/v1/verification-validation/waivers/summary"),
+  expireOverdueWaivers: () => api("/api/v1/verification-validation/waivers/expire-overdue", { method: "POST" }),
+  createWaiver: (body) => api("/api/v1/verification-validation/waivers", { method: "POST", body }),
+  waiver: (ref) => api(`/api/v1/verification-validation/waivers/${encodeURIComponent(ref)}`),
+  updateWaiver: (ref, body) =>
+    api(`/api/v1/verification-validation/waivers/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  transitionWaiver: (ref, status, body) =>
+    api(`/api/v1/verification-validation/waivers/${encodeURIComponent(ref)}/transition`, { method: "POST", body: { status, ...(body || {}) } }),
+
+  retestChain: (ref) => api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/retest-chain`),
+  retestPlan: (ref, qs) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/retest-plan${qs || ""}`),
+
+  failures: (qs) => api(`/api/v1/verification-validation/failures${qs || ""}`),
+  failureSummary: () => api("/api/v1/verification-validation/failures/summary"),
+  raiseQualityException: (body) =>
+    api("/api/v1/verification-validation/quality-exceptions", { method: "POST", body }),
+  linkFailureRecords: (body) =>
+    api("/api/v1/verification-validation/failures/link-records", { method: "POST", body }),
+
+  executionApplicability: (ref) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/applicability`),
+  flagStaleExecution: (ref, reason) =>
+    api(`/api/v1/verification-validation/executions/${encodeURIComponent(ref)}/flag-stale`, { method: "POST", body: { reason } }),
+  staleEvidence: (qs) => api(`/api/v1/verification-validation/stale-evidence${qs || ""}`),
+  scanStaleEvidence: (body) =>
+    api("/api/v1/verification-validation/stale-evidence/scan", { method: "POST", body: body || {} }),
+  submitStaleScanJob: (body) =>
+    api("/api/v1/verification-validation/stale-evidence/scan/job", { method: "POST", body: body || {} }),
+
+  requirementImpact: (ref, qs) =>
+    api(`/api/v1/verification-validation/requirements/${encodeURIComponent(ref)}/impact${qs || ""}`),
+  requirementTrace: (ref, qs) =>
+    api(`/api/v1/verification-validation/requirements/${encodeURIComponent(ref)}/trace${qs || ""}`),
+};
+
+export const manufacturingQuality = {
+  meta: () => api("/api/v1/manufacturing-quality/meta"),
+  health: () => api("/api/v1/manufacturing-quality/health"),
+  config: () => api("/api/v1/manufacturing-quality/config"),
+  setConfig: (key, value) =>
+    api(`/api/v1/manufacturing-quality/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/manufacturing-quality/foundation/ensure", { method: "POST" }),
+
+  issues: (qs) => api(`/api/v1/manufacturing-quality/issues${qs || ""}`),
+  issue: (ref) => api(`/api/v1/manufacturing-quality/issues/${encodeURIComponent(ref)}`),
+  createIssue: (body) => api("/api/v1/manufacturing-quality/issues", { method: "POST", body }),
+  updateIssue: (ref, body) =>
+    api(`/api/v1/manufacturing-quality/issues/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+
+  inspections: (qs) => api(`/api/v1/manufacturing-quality/inspections${qs || ""}`),
+  createInspection: (body) => api("/api/v1/manufacturing-quality/inspections", { method: "POST", body }),
+
+  correctiveActions: (qs) => api(`/api/v1/manufacturing-quality/corrective-actions${qs || ""}`),
+  createCorrectiveAction: (body) =>
+    api("/api/v1/manufacturing-quality/corrective-actions", { method: "POST", body }),
+  updateCorrectiveAction: (ref, body) =>
+    api(`/api/v1/manufacturing-quality/corrective-actions/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+
+  readiness: (qs) => api(`/api/v1/manufacturing-quality/readiness${qs || ""}`),
+  readinessEvaluation: (ref) => api(`/api/v1/manufacturing-quality/readiness/${encodeURIComponent(ref)}`),
+  evaluateReadiness: (body) =>
+    api("/api/v1/manufacturing-quality/readiness/evaluate", { method: "POST", body }),
+  markReadinessStale: (ref, reason) =>
+    api(`/api/v1/manufacturing-quality/readiness/${encodeURIComponent(ref)}/stale`, { method: "POST", body: { reason } }),
+
+  productSummary: (ref, qs) =>
+    api(`/api/v1/manufacturing-quality/summaries/product/${encodeURIComponent(ref)}${qs || ""}`),
+  recurrence: (qs) => api(`/api/v1/manufacturing-quality/summaries/recurrence${qs || ""}`),
+  gaps: (qs) => api(`/api/v1/manufacturing-quality/summaries/gaps${qs || ""}`),
+  metrics: () => api("/api/v1/manufacturing-quality/metrics"),
+};
+
+export const predictiveIntelligence = {
+  meta: () => api("/api/v1/predictive-intelligence/meta"),
+  health: () => api("/api/v1/predictive-intelligence/health"),
+  config: () => api("/api/v1/predictive-intelligence/config"),
+  setConfig: (key, value) =>
+    api(`/api/v1/predictive-intelligence/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/predictive-intelligence/foundation/ensure", { method: "POST" }),
+
+  useCases: (qs) => api(`/api/v1/predictive-intelligence/use-cases${qs || ""}`),
+  useCase: (ref) => api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}`),
+  createUseCase: (body) => api("/api/v1/predictive-intelligence/use-cases", { method: "POST", body }),
+  updateUseCase: (ref, body) =>
+    api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  seedUseCases: () => api("/api/v1/predictive-intelligence/use-cases/seed", { method: "POST" }),
+  modelStatus: (ref) => api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}/model`),
+  evaluations: (qs) => api(`/api/v1/predictive-intelligence/evaluations${qs || ""}`),
+  useCaseEvaluations: (ref, qs) =>
+    api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}/evaluations${qs || ""}`),
+  createEvaluation: (ref, body) =>
+    api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}/evaluations`, { method: "POST", body }),
+
+  predictions: (qs) => api(`/api/v1/predictive-intelligence/predictions${qs || ""}`),
+  prediction: (ref) => api(`/api/v1/predictive-intelligence/predictions/${encodeURIComponent(ref)}`),
+  executePrediction: (body) =>
+    api("/api/v1/predictive-intelligence/predictions", { method: "POST", body }),
+  explanation: (ref) =>
+    api(`/api/v1/predictive-intelligence/predictions/${encodeURIComponent(ref)}/explanation`),
+  markPredictionStale: (ref, reason) =>
+    api(`/api/v1/predictive-intelligence/predictions/${encodeURIComponent(ref)}/stale`, { method: "POST", body: { reason } }),
+  recordFeedback: (ref, body) =>
+    api(`/api/v1/predictive-intelligence/predictions/${encodeURIComponent(ref)}/feedback`, { method: "POST", body }),
+
+  recommendations: (qs) => api(`/api/v1/predictive-intelligence/recommendations${qs || ""}`),
+  recommendation: (ref) => api(`/api/v1/predictive-intelligence/recommendations/${encodeURIComponent(ref)}`),
+  createRecommendation: (body) =>
+    api("/api/v1/predictive-intelligence/recommendations", { method: "POST", body }),
+  generateRecommendations: (body) =>
+    api("/api/v1/predictive-intelligence/recommendations/generate", { method: "POST", body }),
+  transitionRecommendation: (ref, body) =>
+    api(`/api/v1/predictive-intelligence/recommendations/${encodeURIComponent(ref)}/transition`, { method: "POST", body }),
+
+  monitoring: () => api("/api/v1/predictive-intelligence/monitoring"),
 };

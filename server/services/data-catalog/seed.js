@@ -253,6 +253,7 @@ function resolveTenantId(db, tenantId) {
 }
 
 export function ensureDataCatalogSeed(db, tenantId) {
+  withEventSuppression(() => ensureCatalogFoundation(db));
   const tenant = resolveTenantId(db, tenantId);
   if (!tenant) return { seeded: false, reason: "no_tenant" };
   const existing = queryOne(db, "SELECT id FROM dc_business_terms WHERE tenant_id = ? AND code = 'CUSTOMER'", [tenant]);

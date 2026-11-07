@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate, queryOne, queryAll } from "../db.js";
+import { migrate, queryOne, queryAll, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import * as events from "../services/events.js";
 import * as objects from "../services/objects.js";
@@ -21,7 +21,7 @@ describe("event framework domain integration", () => {
   let tenantId;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;

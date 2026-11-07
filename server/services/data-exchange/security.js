@@ -6,11 +6,11 @@
 // are rejected; on export, fields are hidden/masked and results are filtered
 // before serialization, so unauthorized data never reaches the output file
 // (spec §49, §50).
-import { buildSecurityContext } from "../security/context.js";
-import { evaluateFields, maskDocument } from "../security/engine.js";
-import { authorizeRequest } from "../security/index.js";
-import { getObjectType } from "../security/repository.js";
-import { checkPermission } from "../authorization.js";
+import { buildSecurityContext, buildSecurityContextAsync } from "../security/context.js";
+import { evaluateFields, evaluateFieldsAsync, maskDocument } from "../security/engine.js";
+import { authorizeRequest, authorizeRequestAsync } from "../security/index.js";
+import { getObjectType, getObjectTypeAsync } from "../security/repository.js";
+import { checkPermission, checkPermissionAsync } from "../authorization.js";
 import { securityBlocked } from "./errors.js";
 
 // Object instances are governed by the object & relationship framework's IAM
@@ -84,6 +84,67 @@ function fallbackAllows(db, actor, { objectType, action, tenantId, organizationI
 // against the object type's registered permission resource.
 export function authorizeExchangeAction(db, actor, { objectType, action, tenantId, organizationId = null, ip = null }) {
   return authorizeRequest(db, actor, {
+    action,
+    resource: { type: objectType, organization_id: organizationId },
+    options: { tenantId, organizationId, ip, audit: false },
+  });
+}
+
+export async function buildExchangeContextAsync(db, actor, { tenantId, organizationId = null, ip = null, correlationId = null } = {}) {
+  return await buildSecurityContextAsync(db, actor, { tenantId, organizationId, ip, correlationId });
+}
+
+export async function fieldDecisionsForAsync(db, actor, objectType, action, options = {}) {
+  const context = options.context || (await buildExchangeContextAsync(db, actor, options));
+  const { fields } = await evaluateFieldsAsync(db, context, objectType, String(action).toLowerCase(), {}, options);
+  return { context, fields };
+}
+
+export async function enforceRecordFieldsAsync(db, actor, { objectType, record, action = "read", tenantId, organizationId, ip, context }) {
+  const decision = await fieldDecisionsForAsync(db, actor, objectType, action, { tenantId, organizationId, ip, context });
+  if (!decision.fields.length) return { record, masked: [], denied: [], decisions: [] };
+  const safe = maskDocument({ ...record }, decision.fields, {});
+  delete safe.__masked;
+  const denied = decision.fields.filter((field) => field.effect === "deny" || field.effect === "hide").map((field) => field.field);
+  const masked = decision.fields.filter((field) => field.effect === "mask").map((field) => field.field);
+  return { record: safe, masked, denied, decisions: decision.fields };
+}
+
+export async function authorizeRecordAsync(db, actor, { objectType, objectId = null, action, tenantId, organizationId = null, classification = "", ip = null, context = null }) {
+  const decision = await authorizeRequestAsync(db, actor, {
+    action,
+    resource: {
+      type: objectType,
+      id: objectId,
+      organization_id: organizationId,
+      classification,
+    },
+    options: { tenantId, organizationId, ip, context, audit: false },
+  });
+  if (!decision.allowed) {
+    if (await fallbackAllowsAsync(db, actor, { objectType, action, tenantId, organizationId })) {
+      return { ...decision, allowed: true, reason: "RBAC_ALLOWED", fallback: true };
+    }
+    throw securityBlocked({ action, object_type: objectType, reason: decision.reason });
+  }
+  return decision;
+}
+
+async function fallbackAllowsAsync(db, actor, { objectType, action, tenantId, organizationId }) {
+  if (!actor?.id) return false;
+  const registration = await getObjectTypeAsync(db, Number(tenantId), objectType);
+  const resourceCode = registration?.permission_resource || DEFAULT_OBJECT_RESOURCE;
+  const iamAction = IAM_ACTIONS[String(action).toLowerCase()] || "read";
+  try {
+    const result = await checkPermissionAsync(db, { id: actor.id }, resourceCode, iamAction, { organizationId: organizationId || 0 });
+    return Boolean(result?.allowed);
+  } catch {
+    return false;
+  }
+}
+
+export async function authorizeExchangeActionAsync(db, actor, { objectType, action, tenantId, organizationId = null, ip = null }) {
+  return await authorizeRequestAsync(db, actor, {
     action,
     resource: { type: objectType, organization_id: organizationId },
     options: { tenantId, organizationId, ip, audit: false },

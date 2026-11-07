@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
 import { assertFrequency, safeParse } from "./validation.js";
 
 // User notification preferences. Defaults are created lazily on first read so a
@@ -63,6 +64,28 @@ export function getPreferenceRow(db, userId, tenantId) {
 
 export function getPreferences(db, userId, tenantId = null) {
   return publicPreferences(getPreferenceRow(db, userId, tenantId));
+}
+
+export async function getPreferenceRowAsync(db, userId, tenantId) {
+  const row = await queryOneAsync(
+    db,
+    "SELECT * FROM notification_preferences WHERE user_id = ? AND COALESCE(tenant_id, 0) = COALESCE(?, 0)",
+    [Number(userId), tenantId ? Number(tenantId) : null]
+  );
+  if (row) return row;
+  const ts = nowIso();
+  await runAsync(
+    db,
+    `INSERT INTO notification_preferences
+      (user_id, tenant_id, in_app, email, frequency, language, quiet_hours_json, reminders, escalations, self_notify, event_preferences_json, created_at, updated_at)
+     VALUES (?, ?, 1, 1, 'immediate', 'en', '{}', 1, 1, 1, '{}', ?, ?)`,
+    [Number(userId), tenantId ? Number(tenantId) : null, ts, ts]
+  );
+  return queryOneAsync(
+    db,
+    "SELECT * FROM notification_preferences WHERE user_id = ? AND COALESCE(tenant_id, 0) = COALESCE(?, 0)",
+    [Number(userId), tenantId ? Number(tenantId) : null]
+  );
 }
 
 export function updatePreferences(db, userId, body = {}, actor = null, ip = null, tenantId = null) {
@@ -172,4 +195,105 @@ export function isReminderAllowed(db, recipientId, tenantId) {
 export function isEscalationAllowed(db, recipientId, tenantId) {
   const prefs = publicPreferences(getPreferenceRow(db, recipientId, tenantId));
   return prefs.escalations;
+}
+
+// ---------------------------------------------------------------------------
+// Asynchronous twins. They mirror the synchronous behaviour so preference
+// filtering yields identical decisions on either layer.
+// ---------------------------------------------------------------------------
+
+export async function evaluatePreferenceAsync(db, recipient, channel, eventType, tenantId, { now = new Date(), mandatory = false } = {}) {
+  const row = await getPreferenceRowAsync(db, recipient.id, tenantId);
+  const prefs = publicPreferences(row);
+  if (mandatory) return { allowed: true, preference: prefs, reason: "mandatory", quiet: false };
+
+  if (!prefs.self_notify && recipient.isInitiator) {
+    return { allowed: false, preference: prefs, reason: "self_initiated" };
+  }
+
+  const eventPref = prefs.event_preferences?.[eventType] || prefs.event_preferences?.["*"];
+  if (eventPref) {
+    if (eventPref.enabled === false) return { allowed: false, preference: prefs, reason: "event_disabled" };
+    if (channel && eventPref.channels && Array.isArray(eventPref.channels) && !eventPref.channels.includes(channel)) {
+      return { allowed: false, preference: prefs, reason: "event_channel_disabled" };
+    }
+  }
+
+  if (channel === "email" && !prefs.email) return { allowed: false, preference: prefs, reason: "email_disabled" };
+  if (channel === "in_app" && !prefs.in_app) return { allowed: false, preference: prefs, reason: "in_app_disabled" };
+  if (prefs.frequency === "off" && channel !== "in_app") {
+    return { allowed: false, preference: prefs, reason: "frequency_off" };
+  }
+
+  const quiet = inQuietHours(prefs.quiet_hours, now);
+  if (quiet && channel === "email") {
+    return { allowed: false, preference: prefs, reason: "quiet_hours", quiet: true };
+  }
+  return { allowed: true, preference: prefs, reason: "allowed", quiet };
+}
+
+export async function isReminderAllowedAsync(db, recipientId, tenantId) {
+  const prefs = publicPreferences(await getPreferenceRowAsync(db, recipientId, tenantId));
+  return prefs.reminders;
+}
+
+export async function isEscalationAllowedAsync(db, recipientId, tenantId) {
+  const prefs = publicPreferences(await getPreferenceRowAsync(db, recipientId, tenantId));
+  return prefs.escalations;
+}
+
+export async function getPreferencesAsync(db, userId, tenantId = null) {
+  return publicPreferences(await getPreferenceRowAsync(db, userId, tenantId));
+}
+
+export async function updatePreferencesAsync(db, userId, body = {}, actor = null, ip = null, tenantId = null) {
+  const row = await getPreferenceRowAsync(db, userId, tenantId);
+  const frequency = body.frequency ?? row.frequency;
+  assertFrequency(frequency);
+  const bool = (value, fallback) => (value === undefined ? fallback : value ? 1 : 0);
+  await runAsync(
+    db,
+    `UPDATE notification_preferences SET
+       in_app = ?, email = ?, frequency = ?, language = ?, quiet_hours_json = ?,
+       reminders = ?, escalations = ?, self_notify = ?, event_preferences_json = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      bool(body.in_app ?? body.inApp, row.in_app),
+      bool(body.email, row.email),
+      frequency,
+      body.language ?? row.language,
+      JSON.stringify(body.quiet_hours ?? body.quietHours ?? safeParse(row.quiet_hours_json, {})),
+      bool(body.reminders, row.reminders),
+      bool(body.escalations, row.escalations),
+      bool(body.self_notify ?? body.selfNotify, row.self_notify),
+      JSON.stringify(body.event_preferences ?? body.eventPreferences ?? safeParse(row.event_preferences_json, {})),
+      nowIso(),
+      row.id,
+    ]
+  );
+  if (actor && Number(actor.id) === Number(userId)) {
+    await writeAuditAsync(db, {
+      actor,
+      action: "notification.preferences.update",
+      resourceType: "notification_preference",
+      resourceId: row.id,
+      details: { frequency },
+      ip,
+    });
+  }
+  return publicPreferences(await queryOneAsync(db, "SELECT * FROM notification_preferences WHERE id = ?", [row.id]));
+}
+
+export async function mandatoryEventsAsync(db, tenantId) {
+  const rows = await queryAllAsync(
+    db,
+    `SELECT DISTINCT event_type FROM notification_rules
+      WHERE status = 'active' AND mandatory = 1 AND (tenant_id IS NULL OR tenant_id = ?)`,
+    [tenantId ? Number(tenantId) : -1]
+  );
+  return rows.map((row) => row.event_type).filter((type) => type && type !== "*");
+}
+
+export async function ensureDefaultPreferencesAsync(db, userId, tenantId) {
+  await getPreferenceRowAsync(db, userId, tenantId);
 }

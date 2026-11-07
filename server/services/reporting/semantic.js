@@ -10,9 +10,10 @@
 // tables (object model, PDM, BOM, workflow) through fixed, parameterized
 // queries and always applies centralized authorization before returning rows.
 import { queryAll } from "../../db.js";
+import { queryAllAsync } from "../../db-async.js";
 import { SEMANTIC_ENTITIES } from "./constants.js";
 import { unknownEntity, unknownAttribute } from "./errors.js";
-import { createRecordAuthorizer } from "./security.js";
+import { createRecordAuthorizer, createRecordAuthorizerAsync } from "./security.js";
 import { parseJson } from "./repository.js";
 
 const ENTITY_BY_CODE = new Map(SEMANTIC_ENTITIES.map((entry) => [entry.code, entry]));
@@ -106,6 +107,36 @@ export function resolveEntityRows(db, entityCode, { tenantId, actor, organizatio
   return { records: authorizer.filter(projected), denied: authorizer.deniedCount(projected), total_before_security: projected.length };
 }
 
+export async function resolveEntityRowsAsync(db, entityCode, { tenantId, actor, organizationId = null, ip = null, context = null, limit = 50000, system = false } = {}) {
+  const entity = getEntity(entityCode);
+  const tenant = Number(tenantId);
+  const cappedLimit = Math.min(100000, Math.max(1, Number(limit) || 50000));
+  const rawRows = await readSourceAsync(db, entity, tenant, cappedLimit);
+
+  const records = rawRows.map((row) => baseRecord(entity, row));
+  await attachDerivedAsync(db, entity, tenant, rawRows, records);
+
+  const attributes = entityAttributeMap(entity.code);
+  const projected = records.map((record) => {
+    const values = {};
+    for (const attribute of attributes.values()) values[attribute.code] = normalizeValue(attribute.derived ? record._derived?.[attribute.derived] : readAttribute(record._row, attribute), attribute);
+    return {
+      object_type: record.object_type,
+      object_id: record.object_id,
+      organization_id: record.organization_id,
+      classification: record.classification,
+      attributes: values,
+    };
+  });
+
+  // The read-model builder runs as the platform, not as a subject: it copies
+  // every row; per-subject authorization is applied when the model is queried.
+  if (system) return { records: projected, denied: 0, total_before_security: projected.length };
+
+  const authorizer = await createRecordAuthorizerAsync(db, actor, { tenantId: tenant, action: "read", organizationId, ip, context });
+  return { records: await authorizer.filter(projected), denied: await authorizer.deniedCount(projected), total_before_security: projected.length };
+}
+
 function readSource(db, entity, tenant, limit) {
   if (entity.source === "object") {
     if (entity.object_type) {
@@ -139,6 +170,39 @@ function readSource(db, entity, tenant, limit) {
   return [];
 }
 
+async function readSourceAsync(db, entity, tenant, limit) {
+  if (entity.source === "object") {
+    if (entity.object_type) {
+      return await queryAllAsync(
+        db,
+        `SELECT o.*, t.code AS type_code FROM objects o
+           JOIN metadata_types t ON t.id = o.object_type_id
+          WHERE o.tenant_id = ? AND o.deleted_at IS NULL AND t.code = ?
+          ORDER BY o.id LIMIT ?`,
+        [tenant, entity.object_type, limit]
+      );
+    }
+    return await queryAllAsync(
+      db,
+      `SELECT o.*, t.code AS type_code FROM objects o
+         JOIN metadata_types t ON t.id = o.object_type_id
+        WHERE o.tenant_id = ? AND o.deleted_at IS NULL
+        ORDER BY o.id LIMIT ?`,
+      [tenant, limit]
+    );
+  }
+  if (entity.source === "pdm_item") {
+    return await queryAllAsync(db, "SELECT * FROM pdm_items WHERE tenant_id = ? ORDER BY id LIMIT ?", [tenant, limit]);
+  }
+  if (entity.source === "bom_line") {
+    return await queryAllAsync(db, "SELECT * FROM bom_lines WHERE tenant_id = ? ORDER BY id LIMIT ?", [tenant, limit]);
+  }
+  if (entity.source === "workflow_instance") {
+    return await queryAllAsync(db, "SELECT * FROM workflow_instances WHERE tenant_id = ? ORDER BY id LIMIT ?", [tenant, limit]);
+  }
+  return [];
+}
+
 function attachDerived(db, entity, tenant, rawRows, records) {
   const dataValues = rawRows.map((row) => parseJson(row.data_json, {}));
   rawRows.forEach((row, index) => {
@@ -166,6 +230,38 @@ function attachDerived(db, entity, tenant, rawRows, records) {
         "SELECT object_id AS oid, COUNT(*) AS c FROM workflow_instances WHERE tenant_id = ? AND status IN ('running','paused','pending') GROUP BY object_id",
         [tenant]
       ).map((row) => [String(row.oid), Number(row.c)])
+    );
+    for (const record of records) record._derived.open_change_count = counts.get(record.object_id) ?? 0;
+  }
+}
+
+async function attachDerivedAsync(db, entity, tenant, rawRows, records) {
+  const dataValues = rawRows.map((row) => parseJson(row.data_json, {}));
+  rawRows.forEach((row, index) => {
+    if (row.data_json !== undefined) row.data_values = dataValues[index];
+  });
+
+  const derivedCodes = new Set(entity.attributes.filter((attribute) => attribute.derived).map((attribute) => attribute.derived));
+  if (!derivedCodes.size) return;
+  if (derivedCodes.has("object_type")) {
+    for (const record of records) record._derived.object_type = record._row.type_code || entity.object_type || entity.source;
+  }
+  if (derivedCodes.has("bom_component_count")) {
+    const counts = new Map(
+      (await queryAllAsync(db, "SELECT parent_object_id AS pid, COUNT(*) AS c FROM bom_lines WHERE tenant_id = ? GROUP BY parent_object_id", [tenant])).map((row) => [
+        String(row.pid),
+        Number(row.c),
+      ])
+    );
+    for (const record of records) record._derived.bom_component_count = counts.get(record.object_id) ?? 0;
+  }
+  if (derivedCodes.has("open_change_count")) {
+    const counts = new Map(
+      (await queryAllAsync(
+        db,
+        "SELECT object_id AS oid, COUNT(*) AS c FROM workflow_instances WHERE tenant_id = ? AND status IN ('running','paused','pending') GROUP BY object_id",
+        [tenant]
+      )).map((row) => [String(row.oid), Number(row.c)])
     );
     for (const record of records) record._derived.open_change_count = counts.get(record.object_id) ?? 0;
   }

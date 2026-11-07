@@ -142,10 +142,6 @@ export default function ClassificationPage() {
           <h1>Enterprise classification</h1>
           <p className="subtle">Centralized classification engine for parts, documents, suppliers, processes and products.</p>
         </div>
-        <div className="stack-row">
-          {meta?.source_module ? <Badge tone="ok">{meta.source_module}</Badge> : null}
-          {health?.status ? <Badge tone={toneFor(health.status)}>{health.status}</Badge> : null}
-        </div>
       </div>
 
       <div className="tabs">

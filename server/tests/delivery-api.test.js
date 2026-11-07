@@ -1,7 +1,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { openDatabase, migrate, queryOne } from "../db.js";
+import { migrate, queryOne, openTestDatabase } from "../db.js";
 import { seedDatabase } from "../seed.js";
 import { createApp } from "../app.js";
 
@@ -60,7 +60,7 @@ describe("delivery REST APIs", () => {
   let requestId;
 
   before(async () => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     seedDatabase(db);
     tenantId = queryOne(db, "SELECT id FROM organizations WHERE code = 'helix'").id;
@@ -179,6 +179,36 @@ describe("delivery REST APIs", () => {
       const status = await request(port, "PUT", `/api/delivery/providers/${providerId}/status`, { token: adminToken, body: { status: "inactive" } });
       assert.equal(status.status, 200);
       assert.equal(status.body.enabled, false);
+    });
+
+    test("updates and deletes a provider", async () => {
+      const created = await request(port, "POST", "/api/delivery/providers", {
+        token: adminToken,
+        body: {
+          code: "api-webhook-tmp",
+          name: "Temp Webhook",
+          channel: "webhook",
+          type: "webhook",
+          config: { webhook_url: "https://example.com/tmp" },
+        },
+      });
+      assert.equal(created.status, 201);
+      const id = created.body.id;
+
+      const updated = await request(port, "PUT", `/api/delivery/providers/${id}`, {
+        token: adminToken,
+        body: { name: "Temp Webhook Renamed", priority: 7 },
+      });
+      assert.equal(updated.status, 200);
+      assert.equal(updated.body.name, "Temp Webhook Renamed");
+      assert.equal(updated.body.priority, 7);
+
+      const deleted = await request(port, "DELETE", `/api/delivery/providers/${id}`, { token: adminToken });
+      assert.equal(deleted.status, 200);
+      assert.equal(deleted.body.deleted, true);
+
+      const missing = await request(port, "GET", `/api/delivery/providers/${id}`, { token: adminToken });
+      assert.equal(missing.status, 404);
     });
 
     test("exposes provider health and failures", async () => {

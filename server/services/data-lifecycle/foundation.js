@@ -5,6 +5,7 @@
 // without duplicating them, and installs the default per-tenant state model,
 // transition graph and tier mapping.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { tenantIds } from "../search/registry.js";
 import { ensureLifecycleEventTypes } from "./events.js";
 import { registerLifecycleSources, ensureLifecycleSearch } from "./search.js";
@@ -64,5 +65,24 @@ export function lifecycleHealth(db, tenantId = null) {
       history: scoped("lc_history"),
     },
     tenant_count: queryAll(db, "SELECT DISTINCT tenant_id FROM lc_object_lifecycle").length,
+  };
+}
+
+export async function lifecycleHealthAsync(db, tenantId = null) {
+  const scoped = async (table, column = "tenant_id") =>
+    tenantId ? Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table} WHERE ${column} = ?`, [Number(tenantId)]))?.c || 0) : Number((await queryOneAsync(db, `SELECT COUNT(*) AS c FROM ${table}`))?.c || 0);
+  return {
+    counts: {
+      objects: await scoped("lc_object_lifecycle"),
+      policies: await scoped("lc_policies"),
+      legal_holds: await scoped("lc_legal_holds"),
+      archives: await scoped("lc_archive_records"),
+      restores: await scoped("lc_restore_records"),
+      recoveries: await scoped("lc_recovery_records"),
+      purges: await scoped("lc_purge_records"),
+      jobs: await scoped("lc_lifecycle_jobs"),
+      history: await scoped("lc_history"),
+    },
+    tenant_count: (await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM lc_object_lifecycle")).length,
   };
 }

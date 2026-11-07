@@ -1,14 +1,16 @@
 // Facade for the centralized Data Security & Entitlement Model. Business
 // modules import from here and never reimplement authorization.
 import { HttpError } from "../../validation.js";
-import { writeAudit } from "../audit.js";
-import { emitDomainEvent } from "../events/emit.js";
+import { writeAudit, writeAuditAsync } from "../audit.js";
+import { emitDomainEvent, emitDomainEventAsync } from "../events/emit.js";
 import { DECISION_REASONS } from "./constants.js";
-import { buildSecurityContext, publicSecurityContext } from "./context.js";
-import { authorize as evaluate, evaluateFields, maskDocument as applyMaskDocument } from "./engine.js";
+import { buildSecurityContext, buildSecurityContextAsync, publicSecurityContext } from "./context.js";
+import { authorize as evaluate, authorizeAsync as evaluateAsync, evaluateFields, evaluateFieldsAsync, maskDocument as applyMaskDocument } from "./engine.js";
 import {
   bumpEpoch,
+  bumpEpochAsync,
   recordDecision,
+  recordDecisionAsync,
 } from "./repository.js";
 import {
   clearDecisionCache,
@@ -28,7 +30,9 @@ export {
   authorize as evaluateAuthorization,
   buildEvaluationContext,
   effectiveEnforcement,
+  effectiveEnforcementAsync,
   evaluateFields,
+  evaluateFieldsAsync,
   maskDocument,
 } from "./engine.js";
 export { decisionCacheSize, clearDecisionCache } from "./cache.js";
@@ -92,6 +96,95 @@ export function authorizeRequest(db, actor, { action = "read", resource = {}, op
     });
   }
   return stripInternal(decision);
+}
+
+export async function authorizeRequestAsync(db, actor, { action = "read", resource = {}, options = {} } = {}) {
+  const context =
+    options.context ||
+    (await buildSecurityContextAsync(db, actor, {
+      tenantId: options.tenantId,
+      organizationId: options.organizationId,
+      authenticationMethod: options.authenticationMethod,
+      sessionId: options.sessionId,
+      clientApplication: options.clientApplication,
+      correlationId: options.correlationId,
+      ip: options.ip,
+      attributes: options.attributes,
+    }));
+
+  const tenantId = Number(options.tenantId ?? context.tenantId ?? 0);
+  const resourceType = String(resource.type ?? resource.resource_type ?? "");
+  const useCache = options.cache !== false && context.anonymous !== true;
+  const cacheKey = decisionCacheKey(tenantId, context, action, resourceType, resource.id);
+
+  if (useCache) {
+    const cached = getCachedDecision(db, tenantId, context, action, resourceType, resource.id);
+    if (cached) return { ...stripInternal(cached), cached: true };
+  }
+
+  const decision = await evaluateAsync(db, context, { action, resource, options });
+  if (useCache) {
+    setCachedDecision(db, tenantId, context, action, resourceType, resource.id, decision);
+  }
+
+  if (options.audit !== false && !decision.allowed) {
+    await auditDeniedAsync(db, { context, decision, resource, action, options });
+  }
+  if (options.journal) {
+    await recordDecisionAsync(db, {
+      tenantId,
+      userId: context.userId,
+      action,
+      resourceType,
+      resourceId: resource.id ?? "",
+      decision: decision.decision,
+      reason: decision.reason,
+      allowed: decision.allowed,
+      organizationId: resource.organizationId ?? resource.organization_id ?? null,
+      plantId: resource.plantId ?? resource.plant_id ?? null,
+      classification: resource.classification ?? "",
+      durationMs: decision.durationMs,
+      cached: decision.cached,
+      correlationId: options.correlationId,
+      steps: decision.steps,
+      context: publicSecurityContext(context),
+    });
+  }
+  return stripInternal(decision);
+}
+
+export async function authorizeBatchAsync(db, actor, requests = [], options = {}) {
+  const list = Array.isArray(requests) ? requests : [];
+  const maxBatch = Number(options.maxBatch) || 500;
+  if (list.length > maxBatch) {
+    throw new HttpError(400, `Batch size ${list.length} exceeds the maximum of ${maxBatch}`);
+  }
+  const output = [];
+  for (const request of list) {
+    output.push(
+      await authorizeRequestAsync(db, actor, {
+        action: request?.action ?? "read",
+        resource: request?.resource || {},
+        options,
+      })
+    );
+  }
+  return output;
+}
+
+export async function requireAuthorizedAsync(db, actor, { action = "read", resource = {}, options = {} } = {}) {
+  const decision = await authorizeRequestAsync(db, actor, { action, resource, options });
+  if (!decision.allowed) {
+    const error = new HttpError(403, decision.message || "Access denied");
+    error.code = decision.reason;
+    error.details = {
+      reason: decision.reason,
+      action,
+      resource: decision.resource,
+    };
+    throw error;
+  }
+  return decision;
 }
 
 export function authorizeBatch(db, actor, requests = [], options = {}) {
@@ -161,6 +254,34 @@ export function maskDocumentsByType(db, actor, documents, { action = "read", opt
   });
 }
 
+export async function maskDocumentsByTypeAsync(db, actor, documents, { action = "read", options = {} } = {}) {
+  if (!Array.isArray(documents) || !documents.length) return documents;
+  const context =
+    options.context ||
+    (await buildSecurityContextAsync(db, actor, {
+      tenantId: options.tenantId,
+      organizationId: options.organizationId,
+      correlationId: options.correlationId,
+      ip: options.ip,
+    }));
+  const decisions = new Map();
+  const output = [];
+  for (const document of documents) {
+    const objectType = document.object_type || document.objectType;
+    if (!objectType) {
+      output.push(document);
+      continue;
+    }
+    if (!decisions.has(objectType)) {
+      const evaluated = await evaluateFieldsAsync(db, context, objectType, action, {}, options);
+      decisions.set(objectType, evaluated.fields);
+    }
+    const fieldDecisions = decisions.get(objectType);
+    output.push(fieldDecisions.length ? applyMaskDocument(document, fieldDecisions, options) : document);
+  }
+  return output;
+}
+
 function auditDenied(db, { context, decision, resource, action, options }) {
   try {
     writeAudit(db, {
@@ -201,11 +322,68 @@ function auditDenied(db, { context, decision, resource, action, options }) {
   }
 }
 
+async function auditDeniedAsync(db, { context, decision, resource, action, options }) {
+  try {
+    await writeAuditAsync(db, {
+      actor: { id: context?.userId, username: context?.username },
+      action: "authz.deny",
+      resourceType: "security",
+      resourceId: String(resource.id ?? resource.type ?? "resource"),
+      details: {
+        action,
+        reason: decision.reason,
+        resourceType: resource.type ?? null,
+        organizationId: resource.organizationId ?? null,
+        plantId: resource.plantId ?? null,
+        classification: resource.classification ?? null,
+      },
+      ip: options.ip,
+    });
+  } catch {
+    /* audit must never mask the authorization outcome */
+  }
+  try {
+    await emitDomainEventAsync(db, {
+      event_type_code: "SecurityAccessDenied",
+      aggregate_type: "security",
+      aggregate_id: String(resource.id ?? resource.type ?? "resource"),
+      tenant_id: context?.tenantId ?? 0,
+      organization_id: resource.organizationId ?? null,
+      correlation_id: options.correlationId ?? null,
+      payload: {
+        action,
+        reason: decision.reason,
+        resource_type: resource.type ?? null,
+        user_id: context?.userId ?? null,
+      },
+    });
+  } catch {
+    /* events are best effort */
+  }
+}
+
 export function invalidateSecurity(db, tenantId, scope = "all") {
   const epoch = bumpEpoch(db, tenantId, scope);
   clearDecisionCache();
   try {
     emitDomainEvent(db, {
+      event_type_code: "SecurityPolicyChanged",
+      aggregate_type: "security",
+      aggregate_id: `${scope}`,
+      tenant_id: Number(tenantId),
+      payload: { scope, epoch },
+    });
+  } catch {
+    /* events are best effort */
+  }
+  return { tenantId: Number(tenantId), scope, epoch };
+}
+
+export async function invalidateSecurityAsync(db, tenantId, scope = "all") {
+  const epoch = await bumpEpochAsync(db, tenantId, scope);
+  clearDecisionCache();
+  try {
+    await emitDomainEventAsync(db, {
       event_type_code: "SecurityPolicyChanged",
       aggregate_type: "security",
       aggregate_id: `${scope}`,

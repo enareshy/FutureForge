@@ -2,7 +2,7 @@ process.env.FILE_STORAGE_PROVIDER = "memory";
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase, migrate } from "../db.js";
+import { migrate, openTestDatabase } from "../db.js";
 import {
   Items,
   Revisions,
@@ -34,7 +34,7 @@ describe("PDM domain analytical services", () => {
   let baseline;
 
   before(() => {
-    db = openDatabase(":memory:");
+    db = openTestDatabase();
     migrate(db);
     db.prepare("INSERT INTO organizations (code, name, kind) VALUES ('pdm-org', 'PDM Org', 'organization')").run();
     db.prepare("UPDATE organizations SET tenant_id = id WHERE code = 'pdm-org'").run();

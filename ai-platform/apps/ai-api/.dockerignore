@@ -1,0 +1,18 @@
+# Build context exclusions for the AI API image.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+tests/
+scripts/
+Dockerfile
+.dockerignore
+*.md

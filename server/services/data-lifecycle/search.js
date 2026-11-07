@@ -4,9 +4,10 @@
 // in the centralized Search & Discovery engine as read-only object types.
 // Indexing, querying, authorization and saved searches are reused, not rebuilt.
 import { queryAll, queryOne } from "../../db.js";
-import { registerObjectType, tenantIds } from "../search/registry.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
+import { registerObjectType, tenantIds, tenantIdsAsync } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
-import { getObjectType, registerObjectType as registerSecurityObjectType } from "../security/repository.js";
+import { getObjectType, getObjectTypeAsync, registerObjectType as registerSecurityObjectType, registerObjectTypeAsync } from "../security/repository.js";
 
 export const SEARCH_REGISTRATIONS = [
   {
@@ -91,6 +92,19 @@ function makeResolver(def, mapper) {
     },
     listIds(db, { tenantId, afterId = 0, limit = 200 } = {}) {
       return queryAll(db, `SELECT id, tenant_id FROM ${def.source_table} WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?`, [
+        Number(tenantId),
+        Number(afterId),
+        Number(limit),
+      ]);
+    },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, `SELECT * FROM ${def.source_table} WHERE id = ?`, [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return mapper(row);
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(db, `SELECT id, tenant_id FROM ${def.source_table} WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?`, [
         Number(tenantId),
         Number(afterId),
         Number(limit),
@@ -192,6 +206,28 @@ export function ensureLifecycleSearch(db) {
       }
       if (!getObjectType(db, tenantId, def.code)) {
         registerSecurityObjectType(
+          db,
+          { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource },
+          null,
+          tenantId
+        );
+      }
+    }
+  }
+  return { created };
+}
+
+export async function ensureLifecycleSearchAsync(db) {
+  let created = 0;
+  for (const tenantId of await tenantIdsAsync(db)) {
+    for (const def of SEARCH_REGISTRATIONS) {
+      const existing = await queryOneAsync(db, "SELECT id FROM search_object_types WHERE code = ? AND tenant_id = ?", [def.code, Number(tenantId)]);
+      if (!existing) {
+        registerObjectType(db, def, null, tenantId, null);
+        created += 1;
+      }
+      if (!(await getObjectTypeAsync(db, tenantId, def.code))) {
+        await registerObjectTypeAsync(
           db,
           { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource },
           null,

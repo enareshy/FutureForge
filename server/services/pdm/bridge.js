@@ -7,10 +7,10 @@
 // tenant without a registered object type) degrades gracefully instead of
 // failing the business write. The bridge is the single place that knows the
 // platform interfaces, keeping the domain services decoupled from their layout.
-import { createObject } from "../objects/objects.js";
-import { createRelationshipType } from "../objects/relationship-types.js";
-import { createRelationship as createObjectRelationship } from "../objects/relationships.js";
-import { transitionObject } from "../lifecycle.js";
+import { createObject, createObjectAsync } from "../objects/objects.js";
+import { createRelationshipType, createRelationshipTypeAsync } from "../objects/relationship-types.js";
+import { createRelationship as createObjectRelationship, createRelationshipAsync as createObjectRelationshipAsync } from "../objects/relationships.js";
+import { transitionObject, transitionObjectAsync } from "../lifecycle.js";
 import { getEventTypeRow } from "../events/registry.js";
 
 const RELATIONSHIP_TYPES_REGISTERED = new Set();
@@ -20,6 +20,32 @@ const RELATIONSHIP_TYPES_REGISTERED = new Set();
 export function bridgeCreateObject(db, { type, code, name, description, data, status, organizationId }, actor, tenantId, ip) {
   try {
     const created = createObject(
+      db,
+      {
+        type,
+        code,
+        name,
+        description,
+        data: data || {},
+        status: mapObjectStatus(status),
+        organization_id: organizationId ?? undefined,
+      },
+      actor,
+      Number(tenantId),
+      ip
+    );
+    return created?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Async twin of `bridgeCreateObject` for migrated write routes. Same
+// best-effort semantics: a platform seam that is unavailable never fails the
+// business write.
+export async function bridgeCreateObjectAsync(db, { type, code, name, description, data, status, organizationId }, actor, tenantId, ip) {
+  try {
+    const created = await createObjectAsync(
       db,
       {
         type,
@@ -73,6 +99,38 @@ function ensureRelationshipType(db, code, actor) {
   RELATIONSHIP_TYPES_REGISTERED.add(code);
 }
 
+// Async twin of `bridgeCreateRelationship` for migrated write routes.
+export async function bridgeCreateRelationshipAsync(db, { type, sourceId, targetId, attributes }, actor, tenantId, ip) {
+  try {
+    await ensureRelationshipTypeAsync(db, type, actor);
+    const created = await createObjectRelationshipAsync(
+      db,
+      {
+        relationship_type: type,
+        source_object_id: Number(sourceId) || sourceId,
+        target_object_id: Number(targetId) || targetId,
+        attributes: attributes || {},
+      },
+      actor,
+      Number(tenantId),
+      ip
+    );
+    return created?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureRelationshipTypeAsync(db, code, actor) {
+  if (RELATIONSHIP_TYPES_REGISTERED.has(code)) return;
+  try {
+    await createRelationshipTypeAsync(db, { code, name: code, source_type: "object", target_type: "object" }, actor, null, null);
+  } catch {
+    // Already present or unavailable; the generic relationship call will decide.
+  }
+  RELATIONSHIP_TYPES_REGISTERED.add(code);
+}
+
 // Bridges a lifecycle transition onto the generic object when the PDM entity is
 // backed by a generic object. Best-effort: the PDM status machine is
 // authoritative and this only mirrors the state change.
@@ -80,6 +138,16 @@ export function bridgeTransitionObject(db, reference, body, actor, tenantId, ip)
   if (!reference) return null;
   try {
     return transitionObject(db, reference, body, actor, Number(tenantId), ip) || null;
+  } catch {
+    return null;
+  }
+}
+
+// Async twin of `bridgeTransitionObject` for migrated write routes.
+export async function bridgeTransitionObjectAsync(db, reference, body, actor, tenantId, ip) {
+  if (!reference) return null;
+  try {
+    return (await transitionObjectAsync(db, reference, body, actor, Number(tenantId), ip)) || null;
   } catch {
     return null;
   }

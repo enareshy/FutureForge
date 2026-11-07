@@ -1,0 +1,87 @@
+# Stable scrape endpoints for the background workers.
+#
+# The workers only serve /healthz, /readyz and /metrics on 9100. Without a
+# Service there is no DNS name and no load-balanced endpoint for Prometheus,
+# so the `prometheus.io/scrape` pod annotations in worker-deployments.yaml are
+# inert. These Services give the in-cluster Prometheus one fixed target per
+# worker and keep the metrics path off the pod network.
+#
+# The metrics endpoints require the bearer token from `AI_METRICS_AUTH_TOKEN`;
+# the scraping Prometheus reads it from the `metrics-token` Secret in the
+# observability namespace.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-event-consumer
+  labels:
+    app.kubernetes.io/name: ai-event-consumer
+    app.kubernetes.io/part-of: enterprise-ai-platform
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/worker: event-consumer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ai-event-consumer
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-reconciler
+  labels:
+    app.kubernetes.io/name: ai-reconciler
+    app.kubernetes.io/part-of: enterprise-ai-platform
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/worker: reconciler
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ai-reconciler
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-indexer
+  labels:
+    app.kubernetes.io/name: ai-indexer
+    app.kubernetes.io/part-of: enterprise-ai-platform
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/worker: indexer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ai-indexer
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-agent-worker
+  labels:
+    app.kubernetes.io/name: ai-agent-worker
+    app.kubernetes.io/part-of: enterprise-ai-platform
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/worker: agent
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ai-agent-worker
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+      protocol: TCP

@@ -41,7 +41,7 @@ export function textSearch(clauses, params, columns, q) {
   const term = String(q || "").trim();
   if (!term) return;
   const like = `%${term.toLowerCase()}%`;
-  clauses.push(`(${columns.map((c) => `LOWER(${c}) LIKE ?`).join(" OR ")})`);
+  clauses.push(`(${columns.map((c) => `LOWER(${c}) ILIKE ?`).join(" OR ")})`);
   for (let i = 0; i < columns.length; i += 1) params.push(like);
 }
 

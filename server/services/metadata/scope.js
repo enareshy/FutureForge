@@ -87,3 +87,61 @@ export function assertMutable(db, row, tenantId, actor, message = "Metadata not 
 export function isGlobal(row) {
   return row?.tenant_id === null || row?.tenant_id === undefined;
 }
+
+// ── Async twins ─────────────────────────────────────────────────────────────
+// Tenant-scope resolution for the migrated metadata read routes.
+
+export async function isPlatformAdminAsync(db, actor) {
+  return tenants.isPlatformAdminAsync(db, actor?.id);
+}
+
+export async function homeTenantIdAsync(db, actor) {
+  return tenants.homeTenantIdAsync(db, actor);
+}
+
+export async function readTenantAsync(db, actor, query = {}, reqTenantId = null) {
+  const requested = query?.tenantId ?? query?.tenant_id;
+  if (requested === undefined || requested === null || requested === "" || requested === "auto") {
+    return reqTenantId ? Number(reqTenantId) : null;
+  }
+  if (requested === "global" || requested === "system" || requested === 0 || requested === "0") {
+    if (!(await isPlatformAdminAsync(db, actor))) throw new HttpError(403, "Cannot read global metadata");
+    return null;
+  }
+  if (!(await isPlatformAdminAsync(db, actor))) throw new HttpError(403, "Cannot target another tenant");
+  return Number(requested);
+}
+
+export async function writeTenantAsync(db, actor, body = {}, reqTenantId = null) {
+  let requested = body?.tenantId ?? body?.tenant_id;
+  if (requested === undefined && body?.scope !== undefined) {
+    requested = body.scope === "system" || body.scope === "global" ? null : reqTenantId;
+  }
+  if (requested === undefined) return reqTenantId ? Number(reqTenantId) : null;
+  if (requested === null || requested === "" || requested === 0 || requested === "0" || requested === "system" || requested === "global") {
+    if (!(await isPlatformAdminAsync(db, actor))) {
+      throw new HttpError(403, "Only platform administrators can manage global metadata");
+    }
+    return null;
+  }
+  if (!(await isPlatformAdminAsync(db, actor))) {
+    const home = await homeTenantIdAsync(db, actor);
+    if (!home || Number(home) !== Number(requested)) {
+      throw new HttpError(403, "Cannot write metadata for another tenant");
+    }
+  }
+  return Number(requested);
+}
+
+export async function assertMutableAsync(db, row, tenantId, actor, message = "Metadata not found") {
+  if (!row) throw new HttpError(404, message);
+  if (row.tenant_id === null || row.tenant_id === undefined) {
+    if (!(await isPlatformAdminAsync(db, actor))) {
+      throw new HttpError(403, "Only platform administrators can modify global metadata");
+    }
+    return row;
+  }
+  if (await isPlatformAdminAsync(db, actor)) return row;
+  if (tenantId && Number(row.tenant_id) === Number(tenantId)) return row;
+  throw new HttpError(404, message);
+}

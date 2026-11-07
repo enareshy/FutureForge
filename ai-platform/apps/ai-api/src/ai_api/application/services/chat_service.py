@@ -1,0 +1,338 @@
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any
+
+from ai_api.application.ports import AiRepository
+from ai_api.application.services.audit_service import AuditService
+from ai_api.application.services.event_service import EventPublisher
+from ai_api.application.services.governance_service import GovernanceService
+from ai_api.application.services.model_gateway import ModelGateway
+from ai_api.application.services.prompt_security import blocking_enabled, screen_input
+from ai_api.config.settings import Settings
+from ai_api.domain.errors import ValidationError
+from ai_api.domain.models.provider import (
+    ChatRequest,
+    ChatResponse,
+    Message,
+    Role,
+    TokenUsage,
+)
+from ai_api.infrastructure.providers.registry import default_chat_model
+from ai_api.security.prompt_safety import PromptGuard
+from ai_api.telemetry.logging import get_logger, request_id_var
+
+logger = get_logger("chat")
+
+SUMMARIZE_SYSTEM_PROMPT = (
+    "You are a precise enterprise summarization assistant. Summarize only the "
+    "provided content, preserve key facts and figures, and never invent details. "
+    "If the content is insufficient, say so."
+)
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    """Format a Server-Sent Event frame."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@dataclass(slots=True)
+class ChatService:
+    gateway: ModelGateway
+    repository: AiRepository
+    audit: AuditService
+    governance: GovernanceService
+    settings: Settings
+    events: EventPublisher | None = None
+
+    async def chat(self, principal, payload) -> dict[str, Any]:
+        model = payload.model or default_chat_model(self.settings)
+        prompt_text = "\n".join(msg.content for msg in payload.messages)
+
+        policy = await self.governance.enforce(
+            principal, operation="chat", model=model, prompt_text=prompt_text, feature="chat"
+        )
+        guard = PromptGuard(block=blocking_enabled(policy, self.settings))
+        scan = await screen_input(
+            self.audit,
+            principal,
+            guard=guard,
+            texts=[prompt_text],
+            feature="chat",
+            model=model,
+        )
+
+        messages = [
+            Message(role=Role.system, content=guard.harden_system_prompt(None)),
+            *(Message(role=Role(msg.role), content=msg.content) for msg in payload.messages),
+        ]
+        request = ChatRequest(
+            messages=tuple(messages),
+            model=model,
+            temperature=payload.temperature,
+            max_output_tokens=payload.max_output_tokens,
+            response_format=payload.response_format,
+            json_schema=payload.json_schema,
+        )
+
+        started = time.perf_counter()
+        response = await self.gateway.chat(request)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+
+        await self._persist(principal, "chat", response, latency_ms)
+        await self.audit.record(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.actor_id,
+            action="ai.chat",
+            resource_type="model",
+            resource_id=response.model,
+            request_id=request_id_var.get(),
+            detail={
+                "is_mock": response.is_mock,
+                "provider": response.provider,
+                "injection_findings": len(scan.findings),
+            },
+        )
+        return self._serialize(response)
+
+    async def prepare_stream(self, principal, payload) -> dict[str, Any]:
+        """Authorize and validate a streaming request before the SSE response.
+
+        Raises the normal domain errors (403/422/429) *before* any stream bytes
+        are sent, so the client still receives a structured error envelope.
+        """
+        model = payload.model or default_chat_model(self.settings)
+        prompt_text = "\n".join(msg.content for msg in payload.messages)
+
+        policy = await self.governance.enforce(
+            principal, operation="chat", model=model, prompt_text=prompt_text, feature="chat"
+        )
+        guard = PromptGuard(block=blocking_enabled(policy, self.settings))
+        scan = await screen_input(
+            self.audit,
+            principal,
+            guard=guard,
+            texts=[prompt_text],
+            feature="chat_stream",
+            model=model,
+        )
+        if not self.gateway.supports_streaming(model):
+            raise ValidationError(
+                "the selected model does not support streaming",
+                details={"model": model},
+            )
+
+        messages = [
+            Message(role=Role.system, content=guard.harden_system_prompt(None)),
+            *(Message(role=Role(msg.role), content=msg.content) for msg in payload.messages),
+        ]
+        request = ChatRequest(
+            messages=tuple(messages),
+            model=model,
+            temperature=payload.temperature,
+            max_output_tokens=payload.max_output_tokens,
+        )
+        return {"request": request, "model": model, "injection_findings": len(scan.findings)}
+
+    async def stream_events(self, principal, prepared: dict[str, Any]) -> AsyncIterator[str]:
+        """Yield SSE frames: `delta` per chunk, then `done` (or `error`)."""
+        request: ChatRequest = prepared["request"]
+        model: str = prepared["model"]
+        is_mock = self.settings.llm_provider.strip().lower() in ("", "mock")
+        started = time.perf_counter()
+        chunks: list[str] = []
+        try:
+            async for chunk in self.gateway.stream_chat(request):
+                chunks.append(chunk)
+                yield _sse("delta", {"content": chunk})
+        except Exception as exc:  # noqa: BLE001 - report failure as an SSE event
+            logger.warning("chat.stream_failed", error=str(exc))
+            yield _sse(
+                "error",
+                {"code": getattr(exc, "code", "provider_error"), "message": str(exc)},
+            )
+            return
+
+        content = "".join(chunks)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        response = ChatResponse(
+            content=content,
+            model=model,
+            provider=self.settings.llm_provider or "mock",
+            usage=TokenUsage.create(
+                sum(len(m.content.split()) for m in request.messages),
+                len(content.split()),
+            ),
+            finish_reason="stop",
+            is_mock=is_mock,
+        )
+        await self._persist(principal, "chat", response, latency_ms)
+        await self.audit.record(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.actor_id,
+            action="ai.chat.stream",
+            resource_type="model",
+            resource_id=response.model,
+            request_id=request_id_var.get(),
+            detail={
+                "is_mock": response.is_mock,
+                "provider": response.provider,
+                "injection_findings": prepared.get("injection_findings", 0),
+            },
+        )
+        yield _sse(
+            "done",
+            {
+                "content": content,
+                "model": response.model,
+                "provider": response.provider,
+                "is_mock": response.is_mock,
+                "finish_reason": response.finish_reason,
+                "usage": {
+                    "input_tokens": response.usage.input_tokens,
+                    "output_tokens": response.usage.output_tokens,
+                    "total_tokens": response.usage.total_tokens,
+                },
+                "estimated_cost_usd": response.estimated_cost_usd,
+                "latency_ms": latency_ms,
+                "request_id": request_id_var.get(),
+            },
+        )
+
+    async def summarize(self, principal, payload) -> dict[str, Any]:
+        if not payload.text.strip():
+            raise ValidationError("text must not be empty")
+        model = payload.model or default_chat_model(self.settings)
+
+        policy = await self.governance.enforce(
+            principal,
+            operation="summarize",
+            model=model,
+            prompt_text=payload.text,
+            feature="summarize",
+        )
+        guard = PromptGuard(block=blocking_enabled(policy, self.settings))
+        scan = await screen_input(
+            self.audit,
+            principal,
+            guard=guard,
+            texts=[payload.text],
+            feature="summarize",
+            model=model,
+        )
+
+        request = ChatRequest(
+            messages=(
+                Message(
+                    role=Role.system,
+                    content=guard.harden_system_prompt(SUMMARIZE_SYSTEM_PROMPT),
+                ),
+                Message(role=Role.user, content=payload.text),
+            ),
+            model=model,
+            temperature=0.0,
+        )
+
+        started = time.perf_counter()
+        response = await self.gateway.chat(request)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+
+        await self._persist(principal, "chat", response, latency_ms)
+        await self.audit.record(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.actor_id,
+            action="ai.summarize",
+            resource_type="model",
+            resource_id=response.model,
+            request_id=request_id_var.get(),
+            detail={
+                "is_mock": response.is_mock,
+                "provider": response.provider,
+                "injection_findings": len(scan.findings),
+            },
+        )
+        result = self._serialize(response)
+        result["summary"] = result.pop("content")
+        return result
+
+    async def _persist(
+        self, principal, operation: str, response: ChatResponse, latency_ms: int
+    ) -> None:
+        if principal.tenant_id is None:
+            return
+        try:
+            execution = await self.repository.record_execution(
+                principal.tenant_id,
+                {
+                    "actor_id": principal.actor_id,
+                    "operation": operation,
+                    "status": "succeeded",
+                    "input": {},
+                    "token_usage": {
+                        "input_tokens": response.usage.input_tokens,
+                        "output_tokens": response.usage.output_tokens,
+                        "total_tokens": response.usage.total_tokens,
+                    },
+                    "latency_ms": latency_ms,
+                    "request_id": request_id_var.get(),
+                },
+            )
+            await self.repository.record_usage(
+                principal.tenant_id,
+                {
+                    "execution_id": execution["id"],
+                    "provider_code": response.provider,
+                    "model_code": response.model,
+                    "kind": "input",
+                    "quantity": response.usage.input_tokens,
+                    "unit": "tokens",
+                },
+            )
+            await self.repository.record_usage(
+                principal.tenant_id,
+                {
+                    "execution_id": execution["id"],
+                    "provider_code": response.provider,
+                    "model_code": response.model,
+                    "kind": "output",
+                    "quantity": response.usage.output_tokens,
+                    "unit": "tokens",
+                    "total_cost": response.estimated_cost_usd,
+                },
+            )
+            if self.events is not None:
+                await self.events.ai_request_completed(
+                    tenant_id=principal.tenant_id,
+                    actor_id=principal.actor_id,
+                    operation=operation,
+                    model=response.model,
+                    provider=response.provider,
+                    status="succeeded",
+                    is_mock=response.is_mock,
+                    latency_ms=latency_ms,
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                    total_tokens=response.usage.total_tokens,
+                )
+        except Exception as exc:  # noqa: BLE001 - persistence must not fail the request
+            logger.warning("chat.persist_failed", error=str(exc))
+
+    @staticmethod
+    def _serialize(response: ChatResponse) -> dict[str, Any]:
+        return {
+            "content": response.content,
+            "model": response.model,
+            "provider": response.provider,
+            "is_mock": response.is_mock,
+            "finish_reason": response.finish_reason,
+            "usage": {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "total_tokens": response.usage.total_tokens,
+            },
+            "estimated_cost_usd": response.estimated_cost_usd,
+            "request_id": request_id_var.get(),
+        }

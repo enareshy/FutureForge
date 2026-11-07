@@ -6,15 +6,16 @@
 // operational ledger; a handler simply drives the engine core against it, which
 // makes runs resumable, retryable and observable (spec §19, §24, §25).
 import { queryAll, queryOne, run, nowIso } from "../../db.js";
+import { queryAllAsync, queryOneAsync, runAsync } from "../../db-async.js";
 import { registerHandler } from "../job-execution/handlers.js";
-import { submitJob } from "../jobs/jobs.js";
-import { getJobTypeRow, createJobType } from "../jobs/types.js";
+import { submitJob, submitJobAsync } from "../jobs/jobs.js";
+import { getJobTypeRow, createJobType, getJobTypeRowAsync, createJobTypeAsync } from "../jobs/types.js";
 import { MIGRATION_HANDLER_CODES, MIGRATION_JOB_TYPES, CONFIG_DEFAULTS, SOURCE_MODULE } from "./constants.js";
-import { runMigrationJob, retryMigrationJob, getJobRow, listMigrationJobs } from "./execution.js";
+import { runMigrationJob, retryMigrationJob, getJobRow, listMigrationJobs, listMigrationJobsAsync } from "./execution.js";
 import { reconcileJob } from "./reconciliation.js";
 import { generatePlan } from "./planning.js";
-import { resolveDependencies, markDependentsSatisfied } from "./dependencies.js";
-import { listConfig } from "./configuration.js";
+import { resolveDependencies, markDependentsSatisfied, markDependentsSatisfiedAsync } from "./dependencies.js";
+import { listConfig, listConfigAsync } from "./configuration.js";
 import { paginate } from "./validation.js";
 
 // ── Job-type registration ────────────────────────────────────────────────────
@@ -24,6 +25,16 @@ export function ensureMigrationJobTypes(db) {
   for (const def of MIGRATION_JOB_TYPES) {
     if (getJobTypeRow(db, def.code)) continue;
     createJobType(db, { ...def }, null, null);
+    created += 1;
+  }
+  return { created };
+}
+
+export async function ensureMigrationJobTypesAsync(db) {
+  let created = 0;
+  for (const def of MIGRATION_JOB_TYPES) {
+    if (await getJobTypeRowAsync(db, def.code)) continue;
+    await createJobTypeAsync(db, { ...def }, null, null);
     created += 1;
   }
   return { created };
@@ -46,34 +57,77 @@ function submit(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority 
   );
 }
 
+async function submitAsync(db, { tenantId, jobTypeCode, handlerParams, actor, ip, priority = "normal", queue = "migrations", idempotencyKey = null }) {
+  return submitJobAsync(
+    db,
+    {
+      job_type_code: jobTypeCode,
+      input: { tenant_id: Number(tenantId), ...handlerParams },
+      tenant_id: Number(tenantId),
+      priority,
+      queue,
+      idempotency_key: idempotencyKey || undefined,
+    },
+    { actor, ip }
+  );
+}
+
 export function submitMigrationJob(db, { tenantId, migrationJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_MIGRATION", handlerParams: { migration_job_id: Number(migrationJobId) }, actor, ip, idempotencyKey });
+}
+
+export async function submitMigrationJobAsync(db, { tenantId, migrationJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "DATA_MIGRATION", handlerParams: { migration_job_id: Number(migrationJobId) }, actor, ip, idempotencyKey });
 }
 
 export function submitValidateJob(db, { tenantId, migrationJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_MIGRATION_VALIDATE", handlerParams: { migration_job_id: Number(migrationJobId) }, actor, ip, idempotencyKey });
 }
 
+export async function submitValidateJobAsync(db, { tenantId, migrationJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "DATA_MIGRATION_VALIDATE", handlerParams: { migration_job_id: Number(migrationJobId) }, actor, ip, idempotencyKey });
+}
+
 export function submitReconcileJob(db, { tenantId, migrationJobId, strategy = "COUNT", actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_MIGRATION_RECONCILE", handlerParams: { migration_job_id: Number(migrationJobId), strategy }, actor, ip, queue: "default", idempotencyKey });
+}
+
+export async function submitReconcileJobAsync(db, { tenantId, migrationJobId, strategy = "COUNT", actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "DATA_MIGRATION_RECONCILE", handlerParams: { migration_job_id: Number(migrationJobId), strategy }, actor, ip, queue: "default", idempotencyKey });
 }
 
 export function submitRetryJob(db, { tenantId, migrationJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_MIGRATION_RETRY", handlerParams: { migration_job_id: Number(migrationJobId) }, actor, ip, priority: "high", idempotencyKey });
 }
 
+export async function submitRetryJobAsync(db, { tenantId, migrationJobId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "DATA_MIGRATION_RETRY", handlerParams: { migration_job_id: Number(migrationJobId) }, actor, ip, priority: "high", idempotencyKey });
+}
+
 export function submitReplanJob(db, { tenantId, projectId, packageId = null, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_MIGRATION_REPLAN", handlerParams: { project_id: Number(projectId), package_id: packageId != null ? Number(packageId) : null }, actor, ip, queue: "default", idempotencyKey });
+}
+
+export async function submitReplanJobAsync(db, { tenantId, projectId, packageId = null, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "DATA_MIGRATION_REPLAN", handlerParams: { project_id: Number(projectId), package_id: packageId != null ? Number(packageId) : null }, actor, ip, queue: "default", idempotencyKey });
 }
 
 export function submitMaintenanceJob(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
   return submit(db, { tenantId, jobTypeCode: "DATA_MIGRATION_MAINTENANCE", handlerParams: {}, actor, ip, queue: "default", priority: "low", idempotencyKey });
 }
 
+export async function submitMaintenanceJobAsync(db, { tenantId, actor = null, ip = null, idempotencyKey = null } = {}) {
+  return submitAsync(db, { tenantId, jobTypeCode: "DATA_MIGRATION_MAINTENANCE", handlerParams: {}, actor, ip, queue: "default", priority: "low", idempotencyKey });
+}
+
 // ── Job ledger query (re-exported convenience) ───────────────────────────────
 
 export function listJobs(db, options = {}) {
   return listMigrationJobs(db, options);
+}
+
+export async function listJobsAsync(db, options = {}) {
+  return listMigrationJobsAsync(db, options);
 }
 
 // ── Maintenance ──────────────────────────────────────────────────────────────
@@ -116,12 +170,57 @@ export function runMigrationMaintenance(db, { tenantId = null, limit = 2000 } = 
   return summary;
 }
 
+export async function runMigrationMaintenanceAsync(db, { tenantId = null, limit = 2000 } = {}) {
+  const tenantRows = tenantId
+    ? [{ tenant_id: Number(tenantId) }]
+    : await queryAllAsync(db, "SELECT DISTINCT tenant_id FROM mig_jobs WHERE tenant_id IS NOT NULL");
+  const summary = { tenants: tenantRows.length, checkpoints_pruned: 0, errors_archived: 0, dependencies_promoted: 0, ran_at: nowIso() };
+  const cap = Number(limit) || 2000;
+  for (const row of tenantRows) {
+    const tenant = Number(row.tenant_id);
+    const config = await listConfigAsync(db, tenant);
+    const keep = Math.max(1, Number(config.max_checkpoints ?? 50));
+    const jobs = await queryAllAsync(db, "SELECT id FROM mig_jobs WHERE tenant_id = ? ORDER BY id DESC LIMIT ?", [tenant, cap]);
+    for (const job of jobs) {
+      const checkpoints = await queryAllAsync(db, "SELECT id FROM mig_checkpoints WHERE job_id = ? ORDER BY checkpoint_number DESC", [job.id]);
+      for (const stale of checkpoints.slice(keep)) {
+        await runAsync(db, "DELETE FROM mig_checkpoints WHERE id = ?", [stale.id]);
+        summary.checkpoints_pruned += 1;
+      }
+    }
+    // Archive old, non-retryable errors so the queue reflects current work.
+    const staleBefore = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    summary.errors_archived += (await runAsync(
+      db,
+      "UPDATE mig_errors SET status = 'IGNORED', updated_at = ? WHERE tenant_id = ? AND status = 'OPEN' AND retryable = 0 AND created_at < ?",
+      [nowIso(), tenant, staleBefore]
+    )).changes || 0;
+    // Promote dependents of packages that have since completed.
+    const completed = await queryAllAsync(db, "SELECT id FROM mig_packages WHERE tenant_id = ? AND status = 'COMPLETED' LIMIT ?", [tenant, cap]);
+    for (const pkg of completed) {
+      summary.dependencies_promoted += Number(await markDependentsSatisfiedAsync(db, tenant, pkg.id)) || 0;
+    }
+  }
+  void CONFIG_DEFAULTS;
+  return summary;
+}
+
 // ── Handler registration ─────────────────────────────────────────────────────
 
 function loadJobContext(context) {
   const tenantId = Number(context.input.tenant_id ?? context.tenant_id);
   const jobId = Number(context.input.migration_job_id);
   const job = queryOne(context.db, "SELECT * FROM mig_jobs WHERE id = ?", [jobId]);
+  // Background workers do not carry a request actor; authorize as the operator
+  // who created the migration run so Data Security policy is still enforced.
+  const actor = context.actor || (job?.created_by ? { id: job.created_by } : null);
+  return { tenantId, jobId, job, actor };
+}
+
+async function loadJobContextAsync(context) {
+  const tenantId = Number(context.input.tenant_id ?? context.tenant_id);
+  const jobId = Number(context.input.migration_job_id);
+  const job = await queryOneAsync(context.db, "SELECT * FROM mig_jobs WHERE id = ?", [jobId]);
   // Background workers do not carry a request actor; authorize as the operator
   // who created the migration run so Data Security policy is still enforced.
   const actor = context.actor || (job?.created_by ? { id: job.created_by } : null);

@@ -1,4 +1,4 @@
-import { listEvents } from "./query.js";
+import { listEvents, listEventsAsync } from "./query.js";
 
 // Audit export. Dependency-free CSV and SpreadsheetML (Excel 2003 XML, opened
 // natively by Excel) generation over the same filtered event stream.
@@ -93,6 +93,33 @@ export function exportEvents(db, { filters = {}, scope = {}, format = "csv", lim
   }
   const pageSize = Math.min(5000, Math.max(1, Number(limit) || 10000));
   const { items, total } = listEvents(db, { ...filters, page: 1, pageSize, sort: "created_at", order: "desc" }, scope);
+  const filename = `audit-events-${stamp()}.${normalized === "excel" ? "xls" : "csv"}`;
+  const content = normalized === "excel" ? toExcelXml(items) : toCsv(items);
+  return {
+    filename,
+    content,
+    count: items.length,
+    total,
+    truncated: items.length < total,
+    content_type:
+      normalized === "excel"
+        ? "application/vnd.ms-excel; charset=utf-8"
+        : "text/csv; charset=utf-8",
+  };
+}
+
+// Asynchronous twin of `exportEvents` over the async query layer.
+export async function exportEventsAsync(db, { filters = {}, scope = {}, format = "csv", limit = 10000 } = {}) {
+  const normalized = String(format || "csv").toLowerCase();
+  if (!EXPORT_FORMATS.includes(normalized)) {
+    throw new Error(`Unsupported export format: ${format}`);
+  }
+  const pageSize = Math.min(5000, Math.max(1, Number(limit) || 10000));
+  const { items, total } = await listEventsAsync(
+    db,
+    { ...filters, page: 1, pageSize, sort: "created_at", order: "desc" },
+    scope
+  );
   const filename = `audit-events-${stamp()}.${normalized === "excel" ? "xls" : "csv"}`;
   const content = normalized === "excel" ? toExcelXml(items) : toCsv(items);
   return {

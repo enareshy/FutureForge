@@ -2,7 +2,7 @@
 // is idempotent and safe on every boot; emission is best-effort through the
 // shared Event & Messaging Framework (transactional outbox), so an event hiccup
 // never fails a governed write.
-import { emitDomainEvent } from "../events/emit.js";
+import { emitDomainEvent, emitDomainEventAsync } from "../events/emit.js";
 import { createEventType, getEventTypeRow } from "../events/registry.js";
 
 export const REFERENCE_EVENT_TYPES = [
@@ -62,6 +62,52 @@ export function emitReferenceEvent(db, { code, eventType, payload = {}, domainId
 export function emitItemEvent(db, eventTypeCode, item, payload = {}, actor = null) {
   if (!item) return null;
   return emitReferenceEvent(
+    db,
+    {
+      eventType: eventTypeCode,
+      domainId: item.domain_id ?? null,
+      itemId: item.id ?? null,
+      tenantId: item.tenant_id ?? null,
+      organizationId: item.organization_id ?? null,
+      payload: {
+        item_ref: item.item_ref,
+        code: item.code,
+        name: item.name,
+        status: item.status,
+        scope_key: item.scope_key,
+        version: item.current_version_number ?? item.version,
+        ...payload,
+      },
+    },
+    actor
+  );
+}
+
+export async function emitReferenceEventAsync(db, { code, eventType, payload = {}, domainId = null, itemId = null, tenantId = null, organizationId = null }, actor = null) {
+  const eventTypeCode = eventType || code;
+  if (!eventTypeCode) return null;
+  return emitDomainEventAsync(
+    db,
+    {
+      source_module: "reference",
+      source_object_type: itemId ? "reference_item" : "reference_domain",
+      source_object_id: itemId || domainId || null,
+      tenant_id: tenantId ?? null,
+      organization_id: organizationId ?? null,
+      event_type_code: eventTypeCode,
+      payload: {
+        domain_id: domainId,
+        item_id: itemId,
+        ...payload,
+      },
+    },
+    actor
+  );
+}
+
+export async function emitItemEventAsync(db, eventTypeCode, item, payload = {}, actor = null) {
+  if (!item) return null;
+  return emitReferenceEventAsync(
     db,
     {
       eventType: eventTypeCode,

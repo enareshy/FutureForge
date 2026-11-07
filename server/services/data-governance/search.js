@@ -2,12 +2,13 @@
 // & Discovery engine as read-only object types; the search machinery (indexing,
 // querying, authorization, saved searches) is entirely reused, not rebuilt.
 import { queryAll, queryOne } from "../../db.js";
+import { queryAllAsync, queryOneAsync } from "../../db-async.js";
 import { registerObjectType } from "../search/registry.js";
 import { registerSourceResolver } from "../search/sources.js";
 import { safeParse } from "../search/repository.js";
-import { tenantIds } from "../search/registry.js";
-import { getObjectType } from "../security/repository.js";
-import { registerObjectType as registerSecurityObjectType } from "../security/repository.js";
+import { tenantIds, tenantIdsAsync } from "../search/registry.js";
+import { getObjectType, getObjectTypeAsync } from "../security/repository.js";
+import { registerObjectType as registerSecurityObjectType, registerObjectTypeAsync } from "../security/repository.js";
 
 export const SEARCH_REGISTRATIONS = [
   {
@@ -91,6 +92,43 @@ export function registerDataGovernanceSources() {
         [Number(tenantId), Number(afterId), Number(limit)]
       );
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM dg_quality_exceptions WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "data_quality_exception",
+        objectId: String(row.id),
+        code: row.exception_ref,
+        title: row.exception_ref,
+        subtitle: row.rule_code || "",
+        summary: row.description || "",
+        searchableText: joinText([row.exception_ref, row.rule_code, row.object_type, row.object_id, row.description, row.dimension, row.severity, row.status]),
+        status: row.status,
+        ownerId: row.assignee_user_id ?? row.owner_user_id ?? null,
+        classification: "internal",
+        tags: [row.dimension, row.severity].filter(Boolean),
+        attributes: {
+          rule_code: row.rule_code,
+          dimension: row.dimension,
+          severity: row.severity,
+          priority: row.priority,
+          status: row.status,
+          object_type: row.object_type,
+          object_id: row.object_id,
+        },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(
+        db,
+        `SELECT id, tenant_id FROM dg_quality_exceptions WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?`,
+        [Number(tenantId), Number(afterId), Number(limit)]
+      );
+    },
   });
 
   registerSourceResolver("data_domain", {
@@ -125,6 +163,35 @@ export function registerDataGovernanceSources() {
         [Number(tenantId), Number(afterId), Number(limit)]
       );
     },
+    async resolveAsync(db, objectId, { tenantId } = {}) {
+      const row = await queryOneAsync(db, "SELECT * FROM dg_domains WHERE id = ?", [Number(objectId)]);
+      if (!row) return null;
+      if (tenantId && Number(row.tenant_id) !== Number(tenantId)) return null;
+      return {
+        tenantId: row.tenant_id,
+        organizationId: row.organization_id ?? null,
+        objectType: "data_domain",
+        objectId: String(row.id),
+        code: row.code,
+        title: row.name || row.code,
+        subtitle: row.code,
+        summary: row.description || "",
+        searchableText: joinText([row.code, row.name, row.description, row.category, row.status]),
+        status: row.status,
+        ownerId: row.owner_user_id ?? null,
+        classification: "internal",
+        tags: [row.category, row.status].filter(Boolean),
+        attributes: { code: row.code, category: row.category, status: row.status, parent_id: row.parent_id },
+        scoreWeight: 1,
+      };
+    },
+    async listIdsAsync(db, { tenantId, afterId = 0, limit = 200 } = {}) {
+      return queryAllAsync(
+        db,
+        `SELECT id, tenant_id FROM dg_domains WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?`,
+        [Number(tenantId), Number(afterId), Number(limit)]
+      );
+    },
   });
   return SEARCH_REGISTRATIONS.map((entry) => entry.code);
 }
@@ -143,6 +210,28 @@ export function ensureDataGovernanceSearch(db) {
       }
       if (!getObjectType(db, tenantId, def.code)) {
         registerSecurityObjectType(
+          db,
+          { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource },
+          null,
+          tenantId
+        );
+      }
+    }
+  }
+  return { created };
+}
+
+export async function ensureDataGovernanceSearchAsync(db) {
+  let created = 0;
+  for (const tenantId of await tenantIdsAsync(db)) {
+    for (const def of SEARCH_REGISTRATIONS) {
+      const existing = await queryOneAsync(db, "SELECT id FROM search_object_types WHERE code = ? AND tenant_id = ?", [def.code, Number(tenantId)]);
+      if (!existing) {
+        registerObjectType(db, def, null, tenantId, null);
+        created += 1;
+      }
+      if (!(await getObjectTypeAsync(db, tenantId, def.code))) {
+        await registerObjectTypeAsync(
           db,
           { object_type: def.code, enforcement: "tenant", permission_resource: def.permission_resource },
           null,
