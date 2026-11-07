@@ -1,0 +1,33 @@
+# Trivy image-scan exceptions for the ai-api container image.
+#
+# Every entry is a precise, purl-scoped exception with a written justification
+# so the exception stays visible and auditable. Remove an entry as soon as the
+# underlying condition no longer holds. OS-package and Python build-tool CVEs
+# are NOT listed here; they are fixed at build time in the Dockerfile
+# (apt-get upgrade plus upgraded pip/setuptools/wheel).
+
+vulnerabilities:
+  # Upstream-blocked transitive dependency. litellm hard-pins
+  # `filelock<4.0,>=3.16.1`, while every advisory affecting filelock is only
+  # fixed in >=4.2.1, so no installable version satisfies both litellm and the
+  # advisory database. filelock is used only by litellm's proxy CLI, which this
+  # service never runs (mock provider by default; real providers use the
+  # in-process adapter). Re-evaluate when litellm relaxes the pin.
+  - id: CVE-2026-112940
+    purls:
+      - pkg:pypi/filelock@3.32.7
+    statement: >-
+      Upstream-blocked: litellm pins filelock<4.0; the fix requires >=4.2.1.
+      Only reaches litellm's proxy CLI, which this service does not run.
+
+  # False positive. pip vendors a CycloneDX BOM (pip/_vendor/bom.cdx.json) that
+  # names setuptools 70.3.0 as a build-time dependency; the Dockerfile upgrades
+  # the actually-installed setuptools to 84.2.1 in both the virtualenv and the
+  # system site-packages. The listed version is the stale vendored metadata, not
+  # an installed package.
+  - id: CVE-2025-47273
+    purls:
+      - pkg:pypi/setuptools@70.3.0
+    statement: >-
+      False positive: pip's vendored bom.cdx.json references setuptools 70.3.0;
+      the installed setuptools is 84.2.1.

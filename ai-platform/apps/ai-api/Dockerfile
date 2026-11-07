@@ -28,6 +28,12 @@ WORKDIR /build
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# The venv created by `python -m venv` seeds an old setuptools (65.5.0), and the
+# base image ships an old wheel; both carry HIGH CVEs (CVE-2022-40897,
+# CVE-2024-6345, CVE-2025-47273, CVE-2026-24049). Upgrade the build tooling in
+# the venv so the runtime image carries patched metadata.
+RUN pip install --no-cache-dir --upgrade "pip>=24.0" "setuptools>=84.2.1" "wheel>=0.48.0"
+
 # Install runtime dependencies first so this layer is cached across source
 # changes. Requirements are fully pinned in requirements.txt.
 COPY requirements.txt ./
@@ -40,6 +46,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}" \
     PYTHONPATH=/app/src
+
+# Pull the latest security patches for the base OS packages. The pinned
+# python:3.11-slim-bookworm tag still ships an older Debian snapshot whose
+# openssl/gnutls/pcre2/perl/apt packages carry HIGH/CRITICAL CVEs; upgrading at
+# build time refreshes them from the current bookworm security repo. Result
+# caches are removed in the same layer so they do not bloat the image.
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/*
+
+# The base image's system site-packages ships setuptools 65.5.1 and wheel 0.45.1,
+# both with HIGH CVEs. They are not used at runtime (the virtualenv on PATH is),
+# but they are still part of the image, so upgrade them for a clean scan.
+RUN python -m pip install --no-cache-dir --upgrade "setuptools>=84.2.1" "wheel>=0.48.0"
 
 # Dedicated unprivileged account (no shell, no home directory).
 RUN groupadd --system --gid 10001 app \
