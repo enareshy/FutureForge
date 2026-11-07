@@ -23,14 +23,30 @@ from ai_api.telemetry.metrics import (
 )
 
 
-def test_metrics_endpoint_exposes_prometheus_text(client: TestClient) -> None:
+def test_metrics_endpoint_exposes_prometheus_text(
+    client: TestClient, metrics_headers: dict[str, str]
+) -> None:
     client.get("/healthz")
-    response = client.get("/metrics")
+    response = client.get("/metrics", headers=metrics_headers)
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
     body = response.text
     assert "ai_http_requests_total" in body
     assert "ai_model_calls_total" in body
+
+
+def test_metrics_requires_a_bearer_token(client: TestClient) -> None:
+    missing = client.get("/metrics")
+    assert missing.status_code == 401
+    assert missing.headers["www-authenticate"] == "Bearer"
+    assert "ai_http_requests_total" not in missing.text
+
+    wrong_scheme = client.get("/metrics", headers={"Authorization": "Basic dGVzdA=="})
+    assert wrong_scheme.status_code == 401
+
+    wrong_token = client.get("/metrics", headers={"Authorization": "Bearer not-the-token"})
+    assert wrong_token.status_code == 401
+    assert "ai_http_requests_total" not in wrong_token.text
 
 
 def test_liveness_and_readiness(client: TestClient) -> None:

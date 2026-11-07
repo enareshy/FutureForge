@@ -23,6 +23,14 @@ fail **closed**: a missing mapping or missing grant denies the request.
 
 Tenant isolation is mandatory: every query and mutation is scoped to the
 principal's `tenant_id`. Cross-tenant reads are impossible through the API.
+PostgreSQL row-level security (migration 0018) enforces the same ownership at
+the database for all 43 protected tables, using a transaction-local tenant
+context; see `docs/tenant-isolation.md` for the policy model, system-access
+paths, role requirements and limitations. Migration 0019 ties system-wide reads
+to the `ai_system_access` database role, which the API role does not hold.
+Least-privilege role provisioning is in `infrastructure/db/roles/`; it is not
+yet applied in this development environment. RLS is a backstop, not a
+replacement for the API authorization described here.
 
 ### Retrieval and tool authorization
 
@@ -45,6 +53,13 @@ agent tool call:
   injected HTML/scripts as literal text (`web/src/aiMarkdown.jsx`).
 - The default provider is a clearly-labelled mock, so development never sends
   data to a third party.
+- Citation support is checked before an answer is treated as grounded. Missing,
+  malformed, out-of-range or unmatched references are not silently accepted:
+  the response is downgraded to `answer_status: citation_warning` with opaque
+  warning codes, and the same status/warnings are persisted for assistant and
+  agent messages. Citation validation is structural (well-formed, in-range and
+  backed by this request's evidence), not a guarantee of sentence-level
+  entailment.
 
 ## Data protection
 

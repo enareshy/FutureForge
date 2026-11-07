@@ -26,6 +26,10 @@ patches:
     target:
       kind: Deployment
       name: ai-api
+  - path: configmap-patch.yaml
+    target:
+      kind: ConfigMap
+      name: ai-api-config
 
 commonAnnotations:
   platform.monkeycode.ai/release: "0.1.0"

@@ -9,17 +9,17 @@ the user is no longer allowed to access. Citations are persisted as snapshots
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ai_api.application.ports import AiRepository
 from ai_api.application.services.audit_service import AuditService
-from ai_api.application.services.context import require_tenant
+from ai_api.application.services.context import require_actor_id, require_tenant
 from ai_api.application.services.retrieval_service import RetrievalService
 from ai_api.config.settings import Settings
-from ai_api.domain.errors import NotFoundError, ValidationError
+from ai_api.domain.errors import AuthorizationError, NotFoundError, ValidationError
 from ai_api.schemas.retrieval import RagQueryRequest
-from ai_api.security.policies import Principal
+from ai_api.security.policies import Policy, Principal
 from ai_api.telemetry.logging import request_id_var
 
 # How many sources to retrieve/attach for a single assistant answer.
@@ -32,15 +32,17 @@ class AssistantService:
     retrieval: RetrievalService
     audit: AuditService
     settings: Settings
+    policy: Policy = field(default_factory=Policy)
 
     async def create_conversation(
         self, principal: Principal, payload: Any
     ) -> dict[str, Any]:
         tenant_id = require_tenant(principal)
+        actor_id = require_actor_id(principal)
         conversation = await self.repository.create_conversation(
             tenant_id,
             {
-                "actor_id": principal.actor_id,
+                "actor_id": actor_id,
                 "title": payload.title,
                 "metadata": payload.metadata,
             },
@@ -64,7 +66,13 @@ class AssistantService:
         offset: int,
     ) -> tuple[list[dict[str, Any]], int]:
         tenant_id = require_tenant(principal)
-        actor_id = principal.actor_id if mine else None
+        actor_id = require_actor_id(principal)
+        if not mine:
+            if not self.policy.is_superuser(principal):
+                raise AuthorizationError(
+                    "listing other actors' conversations requires platform administration"
+                )
+            actor_id = None
         items, total = await self.repository.list_conversations(
             tenant_id, actor_id, limit=limit, offset=offset
         )
@@ -135,11 +143,20 @@ class AssistantService:
                 query=payload.content,
                 limit=_ASSISTANT_RETRIEVAL_LIMIT,
                 model=payload.model,
+                mode=payload.mode,
+                filters=list(payload.filters),
             ),
         )
         insufficient = bool(result.get("insufficient_evidence"))
-        answer_status = "insufficient_evidence" if insufficient else "answered"
+        answer_status = result.get("answer_status") or (
+            "insufficient_evidence" if insufficient else "answered"
+        )
         citations = result.get("citations") or []
+        warnings = list(result.get("warnings") or [])
+        citations_required = bool(result.get("citations_required", bool(citations)))
+        citation_status = result.get("citation_status") or (
+            "not_required" if not citations_required else "valid"
+        )
         usage = result.get("usage") or {}
 
         message = await self.repository.add_message(
@@ -149,6 +166,9 @@ class AssistantService:
                 "role": "assistant",
                 "content": result.get("answer", ""),
                 "answer_status": answer_status,
+                "warnings": warnings,
+                "citations_required": citations_required,
+                "citation_status": citation_status,
                 "confidence": result.get("confidence"),
                 "is_mock": result.get("is_mock"),
                 "model_code": result.get("model"),
@@ -168,15 +188,21 @@ class AssistantService:
             resource_type="assistant_message",
             resource_id=str(message["id"]),
             request_id=request_id_var.get(),
-            detail={"answer_status": answer_status, "citations": len(sources)},
+            detail={
+                "answer_status": answer_status,
+                "citation_status": citation_status,
+                "citation_warnings": len(warnings),
+                "citations": len(sources),
+            },
         )
         return self._message_out(message, sources)
 
     async def submit_feedback(self, principal: Principal, payload: Any) -> dict[str, Any]:
         tenant_id = require_tenant(principal)
         comment = payload.comment.strip() if payload.comment else None
-        if payload.rating is None and not comment:
-            raise ValidationError("provide a rating or a comment")
+        category = getattr(payload, "category", None)
+        if payload.rating is None and not comment and category is None:
+            raise ValidationError("provide a rating, category or comment")
         message = await self.repository.get_message(tenant_id, payload.message_id)
         if message is None:
             raise NotFoundError(
@@ -191,6 +217,7 @@ class AssistantService:
                 "actor_id": principal.actor_id,
                 "rating": payload.rating,
                 "comment": comment,
+                "category": category,
             },
         )
         await self.audit.record(
@@ -200,7 +227,7 @@ class AssistantService:
             resource_type="assistant_message",
             resource_id=str(message["id"]),
             request_id=request_id_var.get(),
-            detail={"rating": payload.rating},
+            detail={"rating": payload.rating, "category": category},
         )
         return record
 
@@ -208,13 +235,19 @@ class AssistantService:
         self, principal: Principal, conversation_id: int
     ) -> dict[str, Any]:
         tenant_id = require_tenant(principal)
+        actor_id = require_actor_id(principal)
         conversation = await self.repository.get_conversation(tenant_id, conversation_id)
         if conversation is None:
             raise NotFoundError(
                 "conversation not found", details={"conversation_id": conversation_id}
             )
         owner = conversation.get("actor_id")
-        if owner is not None and principal.actor_id is not None and owner != principal.actor_id:
+        if (
+            isinstance(owner, bool)
+            or not isinstance(owner, int)
+            or owner <= 0
+            or owner != actor_id
+        ):
             raise NotFoundError(
                 "conversation not found", details={"conversation_id": conversation_id}
             )
@@ -245,6 +278,9 @@ class AssistantService:
             "role": message["role"],
             "content": message["content"],
             "answer_status": message.get("answer_status"),
+            "warnings": list(message.get("warnings") or []),
+            "citations_required": bool(message.get("citations_required", False)),
+            "citation_status": message.get("citation_status"),
             "confidence": (
                 float(message["confidence"])
                 if message.get("confidence") is not None

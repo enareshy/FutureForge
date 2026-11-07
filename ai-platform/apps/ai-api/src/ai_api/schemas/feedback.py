@@ -9,6 +9,7 @@ class FeedbackCreate(BaseModel):
     execution_id: int | None = None
     rating: int | None = Field(default=None, ge=-1, le=5)
     comment: str | None = Field(default=None, max_length=2000)
+    category: str | None = Field(default=None, max_length=64)
 
 
 class FeedbackOut(BaseModel):
@@ -17,4 +18,5 @@ class FeedbackOut(BaseModel):
     actor_id: int | None = None
     rating: int | None = None
     comment: str | None = None
+    category: str | None = None
     created_at: datetime

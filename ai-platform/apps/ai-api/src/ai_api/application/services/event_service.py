@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,11 +26,17 @@ from ai_api.domain.events import (
     KNOWLEDGE_INDEX_FAILED,
     KNOWLEDGE_INDEX_REQUESTED,
     KNOWLEDGE_SOURCE_REGISTERED,
+    KNOWLEDGE_SOURCE_SECURITY_UPDATED,
     EventEnvelope,
     build_envelope,
 )
+from ai_api.infrastructure.db.tenant_context import system_scope, tenant_scope
 from ai_api.telemetry.logging import get_logger, request_id_var
-from ai_api.telemetry.metrics import record_event_consumed, record_event_published
+from ai_api.telemetry.metrics import (
+    record_event_consumed,
+    record_event_publish_failed,
+    record_event_published,
+)
 
 logger = get_logger("events")
 
@@ -57,6 +64,7 @@ class EventPublisher:
                     event_id=envelope.event_id,
                     error=str(exc),
                 )
+                record_event_publish_failed(event_type=envelope.type)
         if published:
             record_event_published(event_type=envelope.type)
 
@@ -103,6 +111,31 @@ class EventPublisher:
                 "code": source["code"],
                 "kind": source["kind"],
                 "classification": source.get("classification", "internal"),
+            },
+        )
+
+    async def knowledge_source_security_updated(
+        self,
+        *,
+        tenant_id: int,
+        source: dict[str, Any],
+        actor_id: int | None,
+        change: str,
+    ) -> None:
+        version = int(source.get("version", 1))
+        await self.emit(
+            KNOWLEDGE_SOURCE_SECURITY_UPDATED,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            subject_type="knowledge_source",
+            subject_id=str(source["id"]),
+            idempotency_key=f"knowledge-source-{source['id']}-security-v{version}",
+            data={
+                "source_id": source["id"],
+                "version": version,
+                "classification": source.get("classification", "internal"),
+                "acl": source.get("acl") or {},
+                "change": change,
             },
         )
 
@@ -222,35 +255,74 @@ class EventConsumer:
     handlers: Mapping[str, EventHandler] = field(default_factory=dict)
     max_attempts: int = 5
     batch_size: int = 20
+    retry_base_seconds: float = 0.0
+    retry_max_seconds: float = 60.0
+    retry_jitter: float = 0.1
+    worker_id: str = "event-consumer"
+    claim_lease_seconds: float = 300.0
 
     async def process_batch(self) -> int:
-        rows = await self.store.list_undelivered(self.consumer_group, limit=self.batch_size)
+        # Claim rather than peek: two replicas of the same group must never
+        # process the same event, so selection and ownership are one step.
+        with system_scope():
+            rows = await self.store.claim_undelivered(
+                self.consumer_group,
+                limit=self.batch_size,
+                claimed_by=self.worker_id,
+                lease_seconds=self.claim_lease_seconds,
+            )
         delivered = 0
         for row in rows:
             envelope = EventEnvelope.from_record(row)
             handler = self.handlers.get(envelope.type)
-            try:
-                if handler is not None:
-                    await handler(envelope)
-            except Exception as exc:  # noqa: BLE001 - bounded retry then dead-letter
-                status = await self.store.record_failure(
-                    envelope.event_id,
-                    self.consumer_group,
-                    str(exc)[:500],
-                    max_attempts=self.max_attempts,
+            with tenant_scope(envelope.tenant_id):
+                try:
+                    if handler is not None:
+                        await handler(envelope)
+                except Exception as exc:  # noqa: BLE001 - bounded retry then dead-letter
+                    attempts = int(row.get("delivery_attempts", 0) or 0)
+                    delay = min(
+                        self.retry_max_seconds,
+                        self.retry_base_seconds * (2**attempts),
+                    )
+                    if self.retry_jitter:
+                        delay *= 1 + random.uniform(
+                            -self.retry_jitter, self.retry_jitter
+                        )
+                    try:
+                        status = await self.store.record_failure(
+                            envelope.event_id,
+                            self.consumer_group,
+                            str(exc)[:500],
+                            max_attempts=self.max_attempts,
+                            retry_delay_seconds=max(0.0, delay),
+                        )
+                    except Exception:  # noqa: BLE001 - bookkeeping must not crash the worker
+                        logger.exception(
+                            "event.failure_record_failed",
+                            event_type=envelope.type,
+                            event_id=envelope.event_id,
+                            consumer_group=self.consumer_group,
+                        )
+                        continue
+                    record_event_consumed(
+                        consumer_group=self.consumer_group, outcome=status
+                    )
+                    logger.warning(
+                        "event.handler_failed",
+                        event_type=envelope.type,
+                        event_id=envelope.event_id,
+                        consumer_group=self.consumer_group,
+                        outcome=status,
+                        error=str(exc)[:500],
+                    )
+                    continue
+                await self.store.mark_delivered(
+                    envelope.event_id, self.consumer_group
                 )
-                record_event_consumed(consumer_group=self.consumer_group, outcome=status)
-                logger.warning(
-                    "event.handler_failed",
-                    event_type=envelope.type,
-                    event_id=envelope.event_id,
-                    consumer_group=self.consumer_group,
-                    outcome=status,
-                    error=str(exc),
-                )
-                continue
-            await self.store.mark_delivered(envelope.event_id, self.consumer_group)
-            record_event_consumed(consumer_group=self.consumer_group, outcome="delivered")
+            record_event_consumed(
+                consumer_group=self.consumer_group, outcome="delivered"
+            )
             delivered += 1
         if delivered:
             logger.info(

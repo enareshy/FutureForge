@@ -4,7 +4,8 @@
 #   - DNS egress (cluster DNS),
 #   - ingress to the console from the ingress controller,
 #   - ingress to the AI API from the console,
-#   - AI API egress to the backing data/services namespaces.
+#   - API and worker egress to the backing data/services namespaces,
+#   - metrics scraping of API/workers from the observability namespace.
 #
 # Backing services are assumed to live in separate namespaces. The
 # `kubernetes.io/metadata.name` label is added automatically by Kubernetes, so
@@ -132,3 +133,101 @@ spec:
           port: 4317
         - protocol: TCP
           port: 3001
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-egress-backends
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mlops
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: enterprise
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 8333
+        - protocol: TCP
+          port: 9333
+        - protocol: TCP
+          port: 9200
+        - protocol: TCP
+          port: 9092
+        - protocol: TCP
+          port: 5000
+        - protocol: TCP
+          port: 4317
+        - protocol: TCP
+          port: 3001
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-scrape
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - backend
+          - worker
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 9100
+---
+# The backup Job needs PostgreSQL and S3-compatible object storage only. It has
+# no ingress, no Kubernetes API token and no access to the enterprise backend.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backup-egress-backends
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ai-backup
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8333

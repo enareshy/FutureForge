@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class KnowledgeSourceCreate(BaseModel):
@@ -25,8 +25,19 @@ class KnowledgeSourceOut(BaseModel):
     classification: str
     acl: dict[str, Any] = Field(default_factory=dict)
     status: str
+    version: int = 1
     created_at: datetime
     updated_at: datetime
+
+
+class KnowledgeSourceAclUpdate(BaseModel):
+    acl: dict[str, Any] = Field(default_factory=dict)
+    expected_version: int = Field(ge=1)
+
+
+class KnowledgeSourceClassificationUpdate(BaseModel):
+    classification: Literal["public", "internal", "confidential", "restricted"]
+    expected_version: int = Field(ge=1)
 
 
 class KnowledgeIndexRequest(BaseModel):
@@ -52,14 +63,13 @@ class JobOut(BaseModel):
 
 
 class KnowledgeDocumentIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     external_id: str = Field(min_length=1, max_length=512)
     title: str | None = Field(default=None, max_length=512)
     mime_type: str | None = Field(default=None, max_length=128)
     text: str | None = Field(default=None, max_length=5_000_000)
     content_base64: str | None = Field(default=None, max_length=8_000_000)
-    # Original stored in object storage (preferred for uploads). When present the
-    # bytes are fetched from storage instead of being sent inline.
-    object_key: str | None = Field(default=None, max_length=1024)
     # Content checksum/size of the original upload. Carried through so dedup
     # compares like-for-like (original bytes) rather than re-deriving a checksum
     # from extracted text, which can differ from the raw bytes.
@@ -70,11 +80,21 @@ class KnowledgeDocumentIn(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class KnowledgeIngestRequest(BaseModel):
+class StoredKnowledgeDocumentIn(KnowledgeDocumentIn):
+    """Internal input for an object already written by the upload endpoint.
+
+    This model is never accepted by a public route. The key is generated
+    server-side and revalidated against the tenant before it reaches storage.
+    """
+
+    object_key: str | None = Field(default=None, max_length=1024)
+
+
+class KnowledgeIngestExecution(BaseModel):
+    """Internal worker payload carrying server-issued object keys."""
+
     source_id: int = Field(ge=1)
-    documents: list[KnowledgeDocumentIn] = Field(min_length=1)
-    idempotency_key: str | None = Field(default=None, max_length=200)
-    force: bool = False
+    documents: list[StoredKnowledgeDocumentIn] = Field(min_length=1)
 
 
 class KnowledgeIngestBody(BaseModel):
@@ -89,6 +109,8 @@ class KnowledgeIngestResponse(BaseModel):
 
 
 class DocumentOut(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     id: int
     source_id: int
     external_id: str
@@ -98,10 +120,36 @@ class DocumentOut(BaseModel):
     status: str
     size_bytes: int | None = None
     checksum: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    version: int = 1
     indexed_at: datetime | None = None
     search_indexed_at: datetime | None = None
     error_class: str | None = None
     created_at: datetime
+    updated_at: datetime | None = None
+
+
+class DocumentMetadataUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=512)
+    metadata: dict[str, Any] | None = None
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class DocumentVersionOut(BaseModel):
+    document_id: int
+    source_id: int
+    external_id: str
+    version: int
+    title: str | None = None
+    mime_type: str | None = None
+    checksum: str | None = None
+    size_bytes: int | None = None
+    classification: str
+    status: str
+    reason: str
+    superseded_at: datetime
 
 
 class UploadedDocumentOut(BaseModel):

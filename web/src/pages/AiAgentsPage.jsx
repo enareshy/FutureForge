@@ -30,6 +30,7 @@ export default function AiAgentsPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [rated, setRated] = useState(null);
+  const [delegations, setDelegations] = useState([]);
 
   async function loadExecutions() {
     try {
@@ -49,6 +50,7 @@ export default function AiAgentsPage() {
     setSelected(agent);
     setResult(null);
     setVersion(null);
+    setDelegations([]);
     try {
       const versions = await ai.agentVersions(agent.id);
       setVersion(versions?.[0] || null);
@@ -67,6 +69,7 @@ export default function AiAgentsPage() {
     try {
       const res = await ai.executeAgent(selected.id, { input });
       setResult(res);
+      setDelegations([]);
       await loadExecutions();
     } catch (err) {
       setError(describe(err));
@@ -105,7 +108,7 @@ export default function AiAgentsPage() {
           <div className="panel-head"><h3>Registry</h3></div>
           <table>
             <thead>
-              <tr><th>Code</th><th>Name</th><th>Kind</th><th>Enabled</th></tr>
+              <tr><th>Code</th><th>Name</th><th>Kind</th><th>Lifecycle</th></tr>
             </thead>
             <tbody>
               {agents.map((a) => (
@@ -115,7 +118,9 @@ export default function AiAgentsPage() {
                   </td>
                   <td>{a.name}</td>
                   <td>{a.kind}</td>
-                  <td><span className={`badge ${a.enabled ? "active" : "inactive"}`}>{a.enabled ? "yes" : "no"}</span></td>
+                  <td>
+                    <span className="badge">{a.lifecycle_status || (a.enabled ? "active" : "disabled")}</span>
+                  </td>
                 </tr>
               ))}
               {agents.length === 0 ? (
@@ -167,7 +172,22 @@ export default function AiAgentsPage() {
                     required
                   />
                 </label>
-                <button className="btn" disabled={busy}>{busy ? "Running…" : "Run"}</button>
+                <button
+                  className="btn"
+                  disabled={
+                    busy ||
+                    (selected.lifecycle_status &&
+                      !["active", "published"].includes(selected.lifecycle_status))
+                  }
+                >
+                  {busy ? "Running…" : "Run"}
+                </button>
+                {selected.lifecycle_status &&
+                !["active", "published"].includes(selected.lifecycle_status) ? (
+                  <p className="muted">
+                    This agent is {selected.lifecycle_status}; execution is unavailable.
+                  </p>
+                ) : null}
               </form>
               {result ? (
                 <div className="notice">
@@ -219,6 +239,22 @@ export default function AiAgentsPage() {
                       <button
                         type="button"
                         className="btn ghost"
+                        onClick={async () => {
+                          try {
+                            const data = await ai.agentExecutionDelegations(
+                              result.execution_id,
+                            );
+                            setDelegations(data.delegations || []);
+                          } catch (err) {
+                            setError(describe(err));
+                          }
+                        }}
+                      >
+                        Show delegations
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost"
                         disabled={rated != null}
                         onClick={() => rate(1)}
                       >
@@ -232,6 +268,14 @@ export default function AiAgentsPage() {
                       >
                         {rated === -1 ? "Rated unhelpful" : "Not helpful"}
                       </button>
+                    </div>
+                  ) : null}
+                  {delegations.length ? (
+                    <div className="result-sub">
+                      delegated:{" "}
+                      {delegations
+                        .map((d) => `${d.step_key}->agent ${d.child_agent_id}`)
+                        .join(", ")}
                     </div>
                   ) : null}
                 </div>

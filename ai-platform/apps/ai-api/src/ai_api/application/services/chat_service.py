@@ -11,8 +11,9 @@ from ai_api.application.services.audit_service import AuditService
 from ai_api.application.services.event_service import EventPublisher
 from ai_api.application.services.governance_service import GovernanceService
 from ai_api.application.services.model_gateway import ModelGateway
+from ai_api.application.services.prompt_security import blocking_enabled, screen_input
 from ai_api.config.settings import Settings
-from ai_api.domain.errors import AuthorizationError, ValidationError
+from ai_api.domain.errors import ValidationError
 from ai_api.domain.models.provider import (
     ChatRequest,
     ChatResponse,
@@ -54,14 +55,15 @@ class ChatService:
         policy = await self.governance.enforce(
             principal, operation="chat", model=model, prompt_text=prompt_text, feature="chat"
         )
-        guard = PromptGuard(block=policy.block_prompt_injection)
-        scan = guard.scan(prompt_text)
-        if guard.block and scan.suspicious:
-            await self._audit_denied(principal, "ai.chat", model, scan.findings)
-            raise AuthorizationError(
-                "request rejected by content security policy",
-                details={"findings": len(scan.findings)},
-            )
+        guard = PromptGuard(block=blocking_enabled(policy, self.settings))
+        scan = await screen_input(
+            self.audit,
+            principal,
+            guard=guard,
+            texts=[prompt_text],
+            feature="chat",
+            model=model,
+        )
 
         messages = [
             Message(role=Role.system, content=guard.harden_system_prompt(None)),
@@ -108,14 +110,15 @@ class ChatService:
         policy = await self.governance.enforce(
             principal, operation="chat", model=model, prompt_text=prompt_text, feature="chat"
         )
-        guard = PromptGuard(block=policy.block_prompt_injection)
-        scan = guard.scan(prompt_text)
-        if guard.block and scan.suspicious:
-            await self._audit_denied(principal, "ai.chat.stream", model, scan.findings)
-            raise AuthorizationError(
-                "request rejected by content security policy",
-                details={"findings": len(scan.findings)},
-            )
+        guard = PromptGuard(block=blocking_enabled(policy, self.settings))
+        scan = await screen_input(
+            self.audit,
+            principal,
+            guard=guard,
+            texts=[prompt_text],
+            feature="chat_stream",
+            model=model,
+        )
         if not self.gateway.supports_streaming(model):
             raise ValidationError(
                 "the selected model does not support streaming",
@@ -211,14 +214,15 @@ class ChatService:
             prompt_text=payload.text,
             feature="summarize",
         )
-        guard = PromptGuard(block=policy.block_prompt_injection)
-        scan = guard.scan(payload.text)
-        if guard.block and scan.suspicious:
-            await self._audit_denied(principal, "ai.summarize", model, scan.findings)
-            raise AuthorizationError(
-                "request rejected by content security policy",
-                details={"findings": len(scan.findings)},
-            )
+        guard = PromptGuard(block=blocking_enabled(policy, self.settings))
+        scan = await screen_input(
+            self.audit,
+            principal,
+            guard=guard,
+            texts=[payload.text],
+            feature="summarize",
+            model=model,
+        )
 
         request = ChatRequest(
             messages=(
@@ -253,20 +257,6 @@ class ChatService:
         result = self._serialize(response)
         result["summary"] = result.pop("content")
         return result
-
-    async def _audit_denied(
-        self, principal, action: str, model: str, findings: tuple[str, ...]
-    ) -> None:
-        await self.audit.record(
-            tenant_id=principal.tenant_id,
-            actor_id=principal.actor_id,
-            action=action,
-            resource_type="model",
-            resource_id=model,
-            outcome="denied",
-            request_id=request_id_var.get(),
-            detail={"reason": "prompt_injection", "findings": len(findings)},
-        )
 
     async def _persist(
         self, principal, operation: str, response: ChatResponse, latency_ms: int

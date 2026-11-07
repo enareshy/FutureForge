@@ -65,12 +65,19 @@ Replay is bounded by `AI_EVENT_REPLAY_MAX_AGE_DAYS` (default 7).
 # Drain the current backlog once (idempotent, safe to re-run)
 python -m ai_api.workers.event_consumer --once
 
-# Poll continuously
-python -m ai_api.workers.event_consumer --watch
+# Poll continuously, serving health and metrics on :9100
+python -m ai_api.workers.event_consumer --watch --metrics-port 9100
 ```
 
 The consumer records `event.observed` per event and a `event.batch_processed`
-summary, propagates correlation IDs, and shuts down gracefully.
+summary, propagates correlation IDs, and shuts down gracefully after the current
+batch (deliveries are marked only after the handler returns, so interrupted work
+is redelivered).
+
+Run exactly one consumer per database event log. Delivery rows are unique per
+`(event_id, consumer_group)` but there is no atomic claim, so concurrent
+consumers can process the same due row. Deployment, probes, metrics and the
+scaling limits are in `WORKER_DEPLOYMENT.md`.
 
 ## Configuration
 

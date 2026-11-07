@@ -1169,6 +1169,16 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.verification-validation.quality", name: "V&V quality integration", parentCode: "iam.verification-validation" },
     { applicationCode: "iam", code: "iam.verification-validation.metrics", name: "V&V metrics & health", parentCode: "iam.verification-validation" },
     { applicationCode: "iam", code: "iam.verification-validation.admin", name: "Verification & Validation administration", parentCode: "iam.verification-validation" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality", name: "Manufacturing & Quality Intelligence service", kind: "module" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.overview", name: "Manufacturing & Quality overview", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.issues", name: "Quality issues & non-conformances", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.inspections", name: "Quality inspections", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.corrective-actions", name: "Corrective & preventive actions", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.readiness", name: "Release readiness evaluations", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.impact", name: "Manufacturing & quality impact analysis", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.summaries", name: "Manufacturing & quality summaries", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.metrics", name: "Manufacturing & quality metrics & health", parentCode: "iam.manufacturing-quality" },
+    { applicationCode: "iam", code: "iam.manufacturing-quality.admin", name: "Manufacturing & Quality administration", parentCode: "iam.manufacturing-quality" },
     { applicationCode: "iam", code: "iam.thread", name: "Digital Thread service", kind: "module" },
     { applicationCode: "iam", code: "iam.thread.overview", name: "Digital Thread overview & registry", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.explorer", name: "Digital Thread explorer & traversal", parentCode: "iam.thread" },
@@ -1185,6 +1195,16 @@ function seedMissingCatalog(db) {
     { applicationCode: "iam", code: "iam.thread.audit", name: "Digital Thread audit trail & lineage", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.metrics", name: "Digital Thread metrics & health", parentCode: "iam.thread" },
     { applicationCode: "iam", code: "iam.thread.admin", name: "Digital Thread administration & configuration", parentCode: "iam.thread" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence", name: "Predictive Intelligence & Recommendations service", kind: "module" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.overview", name: "Predictive intelligence overview & health", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.use-cases", name: "Prediction use-case registry", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.predictions", name: "Prediction requests & history", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.explanations", name: "Prediction explanations", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.recommendations", name: "Ranked recommendations", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.feedback", name: "Prediction & recommendation feedback", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.evaluations", name: "Model evaluations", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.monitoring", name: "Model monitoring, drift & freshness", parentCode: "iam.predictive-intelligence" },
+    { applicationCode: "iam", code: "iam.predictive-intelligence.admin", name: "Predictive Intelligence administration", parentCode: "iam.predictive-intelligence" },
     { applicationCode: "iam", code: "iam.exchange", name: "Standards & Exchange service", kind: "module" },
     { applicationCode: "iam", code: "iam.exchange.dashboard", name: "Standards & Exchange overview & dashboard", parentCode: "iam.exchange" },
     { applicationCode: "iam", code: "iam.exchange.formats", name: "Standards & Exchange formats & adapters", parentCode: "iam.exchange" },
@@ -1670,6 +1690,18 @@ function seedMissingCatalog(db) {
     "iam.verification-validation.metrics",
     "iam.verification-validation.admin",
   ];
+  const manufacturingQualityResourceCodes = [
+    "iam.manufacturing-quality",
+    "iam.manufacturing-quality.overview",
+    "iam.manufacturing-quality.issues",
+    "iam.manufacturing-quality.inspections",
+    "iam.manufacturing-quality.corrective-actions",
+    "iam.manufacturing-quality.readiness",
+    "iam.manufacturing-quality.impact",
+    "iam.manufacturing-quality.summaries",
+    "iam.manufacturing-quality.metrics",
+    "iam.manufacturing-quality.admin",
+  ];
   const threadResourceCodes = [
     "iam.thread",
     "iam.thread.overview",
@@ -1687,6 +1719,18 @@ function seedMissingCatalog(db) {
     "iam.thread.audit",
     "iam.thread.metrics",
     "iam.thread.admin",
+  ];
+  const predictiveResourceCodes = [
+    "iam.predictive-intelligence",
+    "iam.predictive-intelligence.overview",
+    "iam.predictive-intelligence.use-cases",
+    "iam.predictive-intelligence.predictions",
+    "iam.predictive-intelligence.explanations",
+    "iam.predictive-intelligence.recommendations",
+    "iam.predictive-intelligence.feedback",
+    "iam.predictive-intelligence.evaluations",
+    "iam.predictive-intelligence.monitoring",
+    "iam.predictive-intelligence.admin",
   ];
   const exchangeResourceCodes = [
     "iam.exchange",
@@ -1747,7 +1791,7 @@ function seedMissingCatalog(db) {
     "iam.observability.audit",
     "iam.observability.admin",
   ];
-  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...requirementPdmResourceCodes, ...requirementManufacturingResourceCodes, ...verificationValidationResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
+  for (const code of [...notificationResourceCodes, ...deliveryResourceCodes, ...jobResourceCodes, ...fileResourceCodes, ...searchResourceCodes, ...securityResourceCodes, ...integrationResourceCodes, ...eventResourceCodes, ...numberingResourceCodes, ...versioningResourceCodes, ...referenceResourceCodes, ...contentResourceCodes, ...dataGovernanceResourceCodes, ...dataCatalogResourceCodes, ...dataLifecycleResourceCodes, ...dataExchangeResourceCodes, ...dataMigrationResourceCodes, ...classificationResourceCodes, ...bomResourceCodes, ...pdmResourceCodes, ...changeResourceCodes, ...requirementsResourceCodes, ...requirementPdmResourceCodes, ...requirementManufacturingResourceCodes, ...verificationValidationResourceCodes, ...manufacturingQualityResourceCodes, ...predictiveResourceCodes, ...threadResourceCodes, ...exchangeResourceCodes, ...reportingResourceCodes, ...observabilityResourceCodes]) {
     const resource = queryOne(db, "SELECT * FROM resources WHERE code = ?", [code]);
     if (!resource) continue;
     const owners = [platform, iamAdmin].filter(Boolean);

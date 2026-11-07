@@ -359,4 +359,25 @@ describe("event & messaging framework async twins mirror the sync layer", () => 
     assert.ok(stats.subscriptions >= 1);
     assert.ok(Array.isArray(stats.top_event_types));
   });
+
+  test("async claim only returns the deliveries it just claimed", async () => {
+    await events.Handlers.registerHandler("test.async.claim.isolated", async () => ({ ok: true }), { module: "test" });
+    await events.Registry.createEventTypeAsync(db, { code: "AsyncWidgetClaimShared" }, actor);
+    await events.Subscriptions.createSubscriptionAsync(
+      db,
+      { code: "async-widget-claim-shared-sub", event_type_code: "AsyncWidgetClaimShared", subscriber: "test", handler: "test.async.claim.isolated" },
+      actor
+    );
+    await events.Subscriptions.setSubscriptionStatusAsync(db, "async-widget-claim-shared-sub", "active", actor);
+    await events.Publisher.publishEventAsync(db, { event_type_code: "AsyncWidgetClaimShared", payload: {} }, actor, { useOutbox: false });
+    await events.Publisher.publishEventAsync(db, { event_type_code: "AsyncWidgetClaimShared", payload: {} }, actor, { useOutbox: false });
+
+    const first = await events.Consumer.claimDeliveriesAsync(db, { worker: "async-shared-worker", limit: 1 });
+    assert.equal(first.length, 1, "the first sweep claims exactly one delivery");
+    const firstId = first[0].id;
+
+    const second = await events.Consumer.claimDeliveriesAsync(db, { worker: "async-shared-worker", limit: 5 });
+    assert.ok(!second.some((d) => d.id === firstId), "an in-flight delivery is not re-claimed by the same worker name");
+    assert.ok(second.length >= 1, "the second sweep still claims the remaining due delivery");
+  });
 });

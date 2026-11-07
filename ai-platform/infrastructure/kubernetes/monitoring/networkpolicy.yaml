@@ -1,0 +1,153 @@
+# Network policies for the observability namespace.
+#
+# Default-deny, then allow only:
+#   * DNS egress for all pods,
+#   * Prometheus egress to the AI API (:8000) and worker (:9100) Services in
+#     enterprise-ai -- the matching ingress rule is `allow-metrics-scrape` in
+#     infrastructure/kubernetes/base/networkpolicy.yaml,
+#   * Prometheus egress to the local Alertmanager (:9093),
+#   * Alertmanager ingress from Prometheus on :9093.
+#
+# The Alertmanager ingress rule is required in both directions. A NetworkPolicy
+# is additive per direction: the egress rule above only permits Prometheus to
+# open the connection, while `default-deny` still drops the packet at the
+# Alertmanager pod unless an ingress rule admits it. Without
+# `allow-alertmanager-ingress`, Prometheus reports
+# `activeAlertmanagers` as reachable at the DNS/TCP level only by accident and
+# delivery silently fails; Prometheus would log send failures.
+#
+# There is intentionally no other ingress rule: operators reach the UIs with
+# `kubectl port-forward`, which bypasses the pod network, and no Ingress
+# exposes these consoles.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-egress
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: enterprise-ai
+          podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - backend
+                  - worker
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 9100
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alertmanager
+      ports:
+        - protocol: TCP
+          port: 9093
+---
+# Prometheus -> Alertmanager is denied by `default-deny` unless this policy
+# exists. NetworkPolicy allows are per-direction, so the egress rule above is
+# not sufficient on its own.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-alertmanager-ingress
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9093
+---
+# Notification egress. `default-deny` also blocks Alertmanager's *outbound*
+# traffic, so adding a real receiver still delivers nothing unless this policy
+# admits the destination. A webhook/PagerDuty/Slack receiver needs HTTPS (443)
+# to an address outside the cluster; email needs the relay's port instead.
+#
+# This permits public destinations only and excludes the private and
+# link-local ranges, so a misconfigured receiver cannot be used to reach
+# cluster-internal services or cloud metadata. When the approved receiver lives
+# on a private address, replace the ipBlock with that exact CIDR (and add the
+# relay port for SMTP) rather than widening this rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-alertmanager-egress
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80

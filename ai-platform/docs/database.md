@@ -6,7 +6,10 @@ introduce a second database. Vectors are stored with the `pgvector` extension;
 no additional vector database is used in V1.
 
 - Host/port: `POSTGRES_HOST` / `POSTGRES_PORT` (default `127.0.0.1:5432`).
-- Database/user: `POSTGRES_DB` / `POSTGRES_USER` (default `helix`).
+- Database/user: `POSTGRES_DB` / `POSTGRES_USER` (development default `helix`).
+- Production roles: non-owner `ai_api`, `ai_worker`, `ai_backup`, `ai_restore`,
+  and `ai_migrate`; `ai_owner` owns `ai` objects but has no login. Provision and
+  verify with `infrastructure/db/roles/`; see `docs/tenant-isolation.md`.
 - Schema: `AI_DB_SCHEMA` (default `ai`).
 - Migrations: `ai-platform/migrations/`, applied by `scripts/migrate.sh`
   (`make migrate`). Each file runs in a single transaction and is recorded in
@@ -14,11 +17,17 @@ no additional vector database is used in V1.
 
 ## Data model
 
-All tables carry `tenant_id bigint NOT NULL`. Tenant scoping aligns with the
-enterprise `organizations.id` value, but the `ai` schema does **not** declare a
-cross-schema foreign key to `organizations`; this keeps the AI schema portable.
-The application enforces tenant isolation. Timestamps are `timestamptz`
-(stored UTC).
+Tenant-owned tables carry `tenant_id bigint NOT NULL`; a few child tables
+inherit ownership through an authoritative parent, and two operational tables
+are intentionally global (see `docs/tenant-isolation.md`). Tenant scoping aligns
+with the enterprise `organizations.id` value, but the `ai` schema does **not**
+declare a cross-schema foreign key to `organizations`; this keeps the AI schema
+portable. The application enforces tenant predicates and PostgreSQL RLS
+(migration 0018, `FORCE ROW LEVEL SECURITY`) provides a fail-closed backstop.
+Migration 0019 additionally requires membership in `ai_system_access` before
+the transaction-local system flag is honored; it fails closed if the split roles
+have not been provisioned.
+Timestamps are `timestamptz` (stored UTC).
 
 ### Configuration (0002)
 
@@ -53,6 +62,17 @@ vectors never remain after deletion or re-indexing.
 | `feedback` | User feedback on an execution |
 | `audit_events` | Local audit mirror referencing the enterprise audit service |
 | `jobs` | Background job / indexing status, with `(tenant_id, idempotency_key)` uniqueness |
+
+### Backup operations (0017)
+
+| Table | Purpose |
+|---|---|
+| `ai.backup_runs` | Metadata for each backup and restore-drill run: run id, kind (`backup`/`restore_drill`), status (`running`/`succeeded`/`failed`), timestamps, duration, schema, artifact size/hash, encryption and integrity flags, bounded error code/details, and a drill report reference |
+
+The table contains no payloads, object keys, tenant ids, passwords, passphrases,
+or document content. It feeds the `ai_backup_*` metrics and the Prometheus
+alerts; it is not a backup catalog and does not make the backup itself
+authoritative. Backup artifacts remain the source of recovery truth.
 
 ### Events (0006)
 
@@ -100,7 +120,7 @@ than duplicating them.
 | Table | Purpose |
 |---|---|
 | `ai.assistant_conversations` | Conversation scoped to tenant + actor, with `title`, `status` and `metadata` |
-| `ai.assistant_messages` | Ordered user/assistant/system messages with answer status, confidence, model/provider and token usage |
+| `ai.assistant_messages` | Ordered user/assistant/system messages with answer status, confidence, model/provider, token usage and citation diagnostics (`warnings`, `citations_required`, `citation_status`) |
 | `ai.assistant_message_sources` | Citation **snapshots** (rank, source/document/chunk, page/section, score, snippet) captured at answer time |
 
 Column additions:

@@ -73,7 +73,7 @@ def check_pod_spec(path: Path, doc: dict, spec: dict) -> None:
             fail(path, f"{kind}/{cname} must set allowPrivilegeEscalation: false")
         if not (sec.get("capabilities") or {}).get("drop"):
             fail(path, f"{kind}/{cname} must drop capabilities")
-        is_job = kind == "Job"
+        is_job = kind in {"Job", "CronJob"}
         if not is_job:
             if "readinessProbe" not in container:
                 fail(path, f"{kind}/{cname} missing readinessProbe")
@@ -98,19 +98,18 @@ def check_document(path: Path, doc: dict) -> None:
         check_metadata(path, doc)
         return
     check_metadata(path, doc)
-    if kind == "Deployment":
+    if kind in ("Deployment", "Job"):
         check_pod_spec(path, doc, doc["spec"]["template"]["spec"])
-    elif kind == "Job":
-        check_pod_spec(path, doc, doc["spec"]["template"]["spec"])
+    elif kind == "CronJob":
+        check_pod_spec(path, doc, doc["spec"]["jobTemplate"]["spec"]["template"]["spec"])
     elif kind == "NetworkPolicy":
         spec = doc["spec"]
         if "podSelector" not in spec:
             fail(path, "NetworkPolicy missing podSelector")
         if not spec.get("policyTypes"):
             fail(path, "NetworkPolicy missing policyTypes")
-    elif kind == "Ingress":
-        if not doc["spec"].get("tls"):
-            fail(path, "Ingress must terminate TLS")
+    elif kind == "Ingress" and not doc["spec"].get("tls"):
+        fail(path, "Ingress must terminate TLS")
 
 
 def main() -> int:

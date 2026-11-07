@@ -1,6 +1,7 @@
 import { queryAll, queryOne, run, nowIso } from "../db.js";
 import { queryAllAsync, queryOneAsync, runAsync } from "../db-async.js";
 import { randomToken } from "../crypto.js";
+import { hashSessionToken } from "../session-tokens.js";
 import { HttpError, pagination } from "../validation.js";
 import { writeAudit, writeAuditAsync } from "./audit.js";
 import { getSetting, getSettingAsync } from "./hierarchy.js";
@@ -15,7 +16,7 @@ export async function sessionHoursAsync(db) {
 
 export function publicSession(row) {
   if (!row) return null;
-  const { token, ...rest } = row;
+  const { token, token_hash, ...rest } = row;
   return rest;
 }
 
@@ -31,11 +32,11 @@ export function createSession(db, userId, meta = {}) {
   run(
     db,
     `INSERT INTO sessions (
-      token, user_id, expires_at, created_at, public_id, ip, user_agent,
+      token_hash, user_id, expires_at, created_at, public_id, ip, user_agent,
       provider_code, mfa_verified, last_seen_at, tenant_id
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      token,
+      hashSessionToken(token),
       userId,
       expires,
       ts,
@@ -73,11 +74,11 @@ export async function createSessionAsync(db, userId, meta = {}) {
   await runAsync(
     db,
     `INSERT INTO sessions (
-      token, user_id, expires_at, created_at, public_id, ip, user_agent,
+      token_hash, user_id, expires_at, created_at, public_id, ip, user_agent,
       provider_code, mfa_verified, last_seen_at, tenant_id
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      token,
+      hashSessionToken(token),
       userId,
       expires,
       ts,
@@ -119,22 +120,23 @@ function lastSeenMillis(value) {
 }
 
 export function getSessionByToken(db, token) {
-  if (!token) return null;
-  const session = queryOne(db, "SELECT * FROM sessions WHERE token = ?", [token]);
+  const tokenHash = hashSessionToken(token);
+  if (!tokenHash) return null;
+  const session = queryOne(db, "SELECT * FROM sessions WHERE token_hash = ?", [tokenHash]);
   if (!session) return null;
   if (session.revoked_at) return null;
   if (new Date(session.expires_at.replace(" ", "T") + "Z") < new Date()) {
-    run(db, "UPDATE sessions SET revoked_at = ? WHERE token = ?", [nowIso(), token]);
+    run(db, "UPDATE sessions SET revoked_at = ? WHERE token_hash = ?", [nowIso(), tokenHash]);
     return null;
   }
   if (!session.public_id) {
     const publicId = randomToken(16);
-    run(db, "UPDATE sessions SET public_id = ? WHERE token = ?", [publicId, token]);
+    run(db, "UPDATE sessions SET public_id = ? WHERE token_hash = ?", [publicId, tokenHash]);
     session.public_id = publicId;
   }
   if (Date.now() - lastSeenMillis(session.last_seen_at) >= SESSION_TOUCH_MS) {
     const ts = nowIso();
-    run(db, "UPDATE sessions SET last_seen_at = ? WHERE token = ?", [ts, token]);
+    run(db, "UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", [ts, tokenHash]);
     session.last_seen_at = ts;
   }
   return session;
@@ -142,22 +144,23 @@ export function getSessionByToken(db, token) {
 
 // Async twin of `getSessionByToken`, used by the asynchronous auth middleware.
 export async function getSessionByTokenAsync(db, token) {
-  if (!token) return null;
-  const session = await queryOneAsync(db, "SELECT * FROM sessions WHERE token = ?", [token]);
+  const tokenHash = hashSessionToken(token);
+  if (!tokenHash) return null;
+  const session = await queryOneAsync(db, "SELECT * FROM sessions WHERE token_hash = ?", [tokenHash]);
   if (!session) return null;
   if (session.revoked_at) return null;
   if (new Date(session.expires_at.replace(" ", "T") + "Z") < new Date()) {
-    await runAsync(db, "UPDATE sessions SET revoked_at = ? WHERE token = ?", [nowIso(), token]);
+    await runAsync(db, "UPDATE sessions SET revoked_at = ? WHERE token_hash = ?", [nowIso(), tokenHash]);
     return null;
   }
   if (!session.public_id) {
     const publicId = randomToken(16);
-    await runAsync(db, "UPDATE sessions SET public_id = ? WHERE token = ?", [publicId, token]);
+    await runAsync(db, "UPDATE sessions SET public_id = ? WHERE token_hash = ?", [publicId, tokenHash]);
     session.public_id = publicId;
   }
   if (Date.now() - lastSeenMillis(session.last_seen_at) >= SESSION_TOUCH_MS) {
     const ts = nowIso();
-    await runAsync(db, "UPDATE sessions SET last_seen_at = ? WHERE token = ?", [ts, token]);
+    await runAsync(db, "UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", [ts, tokenHash]);
     session.last_seen_at = ts;
   }
   return session;
@@ -252,8 +255,8 @@ export function revokeAllSessions(db, userId, actor, ip, { exceptToken } = {}) {
   if (exceptToken) {
     run(
       db,
-      "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND token != ? AND revoked_at IS NULL",
-      [nowIso(), userId, exceptToken]
+      "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND token_hash != ? AND revoked_at IS NULL",
+      [nowIso(), userId, hashSessionToken(exceptToken)]
     );
   } else {
     run(db, "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", [nowIso(), userId]);
@@ -269,9 +272,11 @@ export function revokeAllSessions(db, userId, actor, ip, { exceptToken } = {}) {
 }
 
 export function logoutToken(db, token, actor, ip) {
-  const session = queryOne(db, "SELECT * FROM sessions WHERE token = ?", [token]);
+  const tokenHash = hashSessionToken(token);
+  if (!tokenHash) return { ok: true };
+  const session = queryOne(db, "SELECT * FROM sessions WHERE token_hash = ?", [tokenHash]);
   if (session && !session.revoked_at) {
-    run(db, "UPDATE sessions SET revoked_at = ? WHERE token = ?", [nowIso(), token]);
+    run(db, "UPDATE sessions SET revoked_at = ? WHERE token_hash = ?", [nowIso(), tokenHash]);
     writeAudit(db, {
       actor,
       action: "auth.logout",
@@ -310,8 +315,8 @@ export async function revokeAllSessionsAsync(db, userId, actor, ip, { exceptToke
   if (exceptToken) {
     await runAsync(
       db,
-      "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND token != ? AND revoked_at IS NULL",
-      [nowIso(), userId, exceptToken]
+      "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND token_hash != ? AND revoked_at IS NULL",
+      [nowIso(), userId, hashSessionToken(exceptToken)]
     );
   } else {
     await runAsync(db, "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", [nowIso(), userId]);
@@ -327,9 +332,11 @@ export async function revokeAllSessionsAsync(db, userId, actor, ip, { exceptToke
 }
 
 export async function logoutTokenAsync(db, token, actor, ip) {
-  const session = await queryOneAsync(db, "SELECT * FROM sessions WHERE token = ?", [token]);
+  const tokenHash = hashSessionToken(token);
+  if (!tokenHash) return { ok: true };
+  const session = await queryOneAsync(db, "SELECT * FROM sessions WHERE token_hash = ?", [tokenHash]);
   if (session && !session.revoked_at) {
-    await runAsync(db, "UPDATE sessions SET revoked_at = ? WHERE token = ?", [nowIso(), token]);
+    await runAsync(db, "UPDATE sessions SET revoked_at = ? WHERE token_hash = ?", [nowIso(), tokenHash]);
     await writeAuditAsync(db, {
       actor,
       action: "auth.logout",

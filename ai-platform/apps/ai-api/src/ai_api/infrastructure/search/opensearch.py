@@ -37,10 +37,25 @@ _MAPPING: dict[str, Any] = {
             "section": {"type": "keyword"},
             "classification": {"type": "keyword"},
             "acl": {"type": "object", "enabled": False},
+            "title": {"type": "text"},
+            "mime_type": {"type": "keyword"},
+            "external_id": {"type": "keyword"},
+            "document_status": {"type": "keyword"},
+            "document_created_at": {"type": "date"},
+            "document_updated_at": {"type": "date"},
+            "document_metadata": {"type": "object", "enabled": False},
             "content": {"type": "text"},
         }
     },
 }
+
+
+def _iso(value: Any) -> str | None:
+    """Best-effort ISO-8601 string for a datetime-like value (or None)."""
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else str(value)
 
 
 class OpenSearchBackend:
@@ -112,6 +127,13 @@ class OpenSearchBackend:
                         "section",
                         "classification",
                         "acl",
+                        "title",
+                        "mime_type",
+                        "external_id",
+                        "document_status",
+                        "document_created_at",
+                        "document_updated_at",
+                        "document_metadata",
                         "content",
                     ],
                 },
@@ -139,8 +161,15 @@ class OpenSearchBackend:
         await self._ensure_index()
         client = self._ensure_client()
         document_id = document["id"]
-        # Replace any prior chunks for this document so re-indexing is clean.
-        await self.delete_document(tenant_id, document_id)
+        # Replace any prior chunks for this document, including chunks left
+        # behind by an earlier reindex that assigned the document a new id. The
+        # stable identity is (source_id, external_id), not document_id.
+        await self.delete_document(
+            tenant_id,
+            document_id,
+            source_id=document.get("source_id"),
+            external_id=document.get("external_id"),
+        )
         operations: list[dict[str, Any]] = []
         for chunk in chunks:
             operations.append(
@@ -164,6 +193,13 @@ class OpenSearchBackend:
                     "section": chunk.get("section"),
                     "classification": chunk.get("classification"),
                     "acl": chunk.get("acl") or {},
+                    "title": document.get("title"),
+                    "mime_type": document.get("mime_type"),
+                    "external_id": document.get("external_id"),
+                    "document_status": document.get("status"),
+                    "document_created_at": _iso(document.get("created_at")),
+                    "document_updated_at": _iso(document.get("updated_at")),
+                    "document_metadata": document.get("metadata") or {},
                     "content": chunk.get("content", ""),
                 }
             )
@@ -174,23 +210,109 @@ class OpenSearchBackend:
         except Exception as exc:  # noqa: BLE001 - reported as dependency failure
             raise ServiceUnavailableError("OpenSearch indexing failed") from exc
 
-    async def delete_document(self, tenant_id: int, document_id: int) -> None:
+    async def delete_document(
+        self,
+        tenant_id: int,
+        document_id: int,
+        *,
+        source_id: int | None = None,
+        external_id: str | None = None,
+    ) -> None:
+        filters: list[dict[str, Any]] = [{"term": {"tenant_id": tenant_id}}]
+        if source_id is not None and external_id is not None:
+            filters.extend(
+                [
+                    {"term": {"source_id": source_id}},
+                    {"term": {"external_id": external_id}},
+                ]
+            )
+        else:
+            filters.append({"term": {"document_id": document_id}})
+        await self._delete_by_query(filters)
+
+    async def delete_source(self, tenant_id: int, source_id: int) -> None:
+        await self._delete_by_query(
+            [
+                {"term": {"tenant_id": tenant_id}},
+                {"term": {"source_id": source_id}},
+            ]
+        )
+
+    async def delete_documents(
+        self, tenant_id: int, document_ids: list[int]
+    ) -> None:
+        if not document_ids:
+            return
+        await self._delete_by_query(
+            [
+                {"term": {"tenant_id": tenant_id}},
+                {"terms": {"document_id": document_ids}},
+            ]
+        )
+
+    async def scan_documents(
+        self,
+        tenant_id: int,
+        *,
+        limit: int,
+        after: list[Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[Any] | None]:
+        """Bounded, tenant-scoped scan of distinct indexed document identities.
+
+        Returns at most ``limit`` documents plus a ``search_after`` cursor. Used
+        only by reconciliation; it is not an authorization pathway.
+        """
+        client = self._ensure_client()
+        found: dict[int, dict[str, Any]] = {}
+        cursor = after
+        page_size = min(max(limit * 4, 100), 1000)
+        pages = 0
+        while len(found) < limit and pages < 20:
+            pages += 1
+            body: dict[str, Any] = {
+                "size": page_size,
+                "query": {"term": {"tenant_id": tenant_id}},
+                "sort": [{"document_id": "asc"}, {"chunk_id": "asc"}],
+                "_source": ["document_id", "source_id", "external_id"],
+            }
+            if cursor is not None:
+                body["search_after"] = cursor
+            try:
+                response = await client.search(index=self._index, body=body)
+            except Exception as exc:  # noqa: BLE001 - reported as dependency failure
+                raise ServiceUnavailableError("OpenSearch scan failed") from exc
+            hits = response.get("hits", {}).get("hits", [])
+            if not hits:
+                cursor = None
+                break
+            for hit in hits:
+                source = hit.get("_source") or {}
+                document_id = source.get("document_id")
+                if document_id is None:
+                    continue
+                found.setdefault(
+                    int(document_id),
+                    {
+                        "document_id": int(document_id),
+                        "source_id": source.get("source_id"),
+                        "external_id": source.get("external_id"),
+                    },
+                )
+            cursor = hits[-1].get("sort")
+            if len(hits) < page_size:
+                cursor = None
+                break
+        rows = list(found.values())[:limit]
+        return rows, cursor
+
+    async def _delete_by_query(self, filters: list[dict[str, Any]]) -> None:
         client = self._ensure_client()
         try:
             if not await client.indices.exists(index=self._index):
                 return
             await client.delete_by_query(
                 index=self._index,
-                body={
-                    "query": {
-                        "bool": {
-                            "filter": [
-                                {"term": {"tenant_id": tenant_id}},
-                                {"term": {"document_id": document_id}},
-                            ]
-                        }
-                    }
-                },
+                body={"query": {"bool": {"filter": filters}}},
                 refresh=True,
                 conflicts="proceed",
             )

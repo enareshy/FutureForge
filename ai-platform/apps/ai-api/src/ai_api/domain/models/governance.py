@@ -18,7 +18,7 @@ class GovernancePolicy:
     max_prompt_chars: int = 20000
     retention_days: int = 90
     data_classification_ceiling: str = "internal"
-    block_prompt_injection: bool = False
+    block_prompt_injection: bool = True
     features: dict[str, bool] = field(default_factory=dict)
 
     @classmethod
@@ -31,7 +31,7 @@ class GovernancePolicy:
             max_prompt_chars=int(data.get("max_prompt_chars", 20000) or 20000),
             retention_days=int(data.get("retention_days", 90) or 0),
             data_classification_ceiling=str(data.get("data_classification_ceiling", "internal")),
-            block_prompt_injection=bool(data.get("block_prompt_injection", False)),
+            block_prompt_injection=bool(data.get("block_prompt_injection", True)),
             features=dict(data.get("features", {}) or {}),
         )
 

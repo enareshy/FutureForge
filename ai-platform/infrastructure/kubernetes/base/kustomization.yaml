@@ -17,11 +17,20 @@ resources:
   # secret (Sealed Secrets / External Secrets) before any production apply.
   - secret.example.yaml
   - ai-api-deployment.yaml
+  - worker-deployments.yaml
+  - worker-services.yaml
   - ai-api-service.yaml
   - ai-api-hpa.yaml
   - ai-api-pdb.yaml
   - web-deployment.yaml
   - web-service.yaml
   - migration-job.yaml
+  - backup-pvc.yaml
+  - backup-cronjob.yaml
+  - restore-drill-cronjob.yaml
+  # Placeholder for the isolated drill/restore credential. It is a separate
+  # Secret so `envFrom: ai-api-secrets` never hands serving pods a role that
+  # can create databases. Replace it like secret.example.yaml.
+  - restore-secret.example.yaml
   - ingress.yaml
   - networkpolicy.yaml

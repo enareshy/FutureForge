@@ -35,10 +35,16 @@ graph LR
 
 - The consumer runs in its own process:
   `python -m ai_api.workers.event_consumer --watch`.
-- Attempts are bounded by `AI_EVENT_MAX_ATTEMPTS` with backoff; exhausted events
-  move to the dead-letter set.
-- Replay is bounded by age (`AI_EVENT_REPLAY_MAX_AGE_DAYS`, default 7) to avoid
-  re-applying stale events.
+- Attempts are bounded by `AI_EVENT_MAX_ATTEMPTS`; delays use persisted
+  exponential backoff with jitter (`AI_EVENT_RETRY_*`) so a worker restart does
+  not reset the schedule. Exhausted events move to the dead-letter set.
+- Replay is tenant-scoped, bounded by age (`AI_EVENT_REPLAY_MAX_AGE_DAYS`,
+  default 7), removes the matching dead letter, and is audited as
+  `ai.events.replay` with actor, event and consumer group.
+- `KnowledgeSourceSecurityUpdated` is an invalidation signal, not an authority.
+  Its consumer re-reads the source and enqueues an idempotent refresh for the
+  current state; it ignores stale versions and never resurrects deleted or
+  disabled sources. Malformed/unsupported events fail into the dead-letter set.
 
 ## API
 
@@ -60,9 +66,16 @@ graph LR
 | `AI_EVENT_MAX_ATTEMPTS` | 5 | Retries before dead-lettering. |
 | `AI_EVENT_BATCH_SIZE` | 20 | Batch size. |
 | `AI_EVENT_POLL_SECONDS` | 5.0 | Poll interval. |
+| `AI_EVENT_RETRY_BASE_SECONDS` | 2.0 | First retry delay. |
+| `AI_EVENT_RETRY_MAX_SECONDS` | 60.0 | Retry delay cap. |
+| `AI_EVENT_RETRY_JITTER` | 0.1 | Fractional jitter. |
 | `AI_EVENT_REPLAY_MAX_AGE_DAYS` | 7 | Replay safety window. |
 
 ## Observability
 
-Event processing exposes `ai_events_published_total` and
-`ai_events_consumed_total{consumer_group,outcome}` (see `observability.md`).
+Event processing exposes `ai_events_published_total`,
+`ai_events_publish_failed_total{event_type}`,
+`ai_events_consumed_total{consumer_group,outcome}` and
+`ai_event_delivery_backlog{state="pending|delayed|dead"}` (see
+`observability.md`). Dead letters are also available at
+`GET /events/dead-letters`; use `/events/stats` for per-tenant counts.

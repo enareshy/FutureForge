@@ -25,11 +25,30 @@ from ai_api.domain.errors import ValidationError
 
 # --- AI event types (initial set) ---------------------------------------
 KNOWLEDGE_SOURCE_REGISTERED = "KnowledgeSourceRegistered"
+KNOWLEDGE_SOURCE_SECURITY_UPDATED = "KnowledgeSourceSecurityUpdated"
 KNOWLEDGE_INDEX_REQUESTED = "KnowledgeIndexRequested"
 KNOWLEDGE_INDEX_COMPLETED = "KnowledgeIndexCompleted"
 KNOWLEDGE_INDEX_FAILED = "KnowledgeIndexFailed"
 AI_REQUEST_COMPLETED = "AIRequestCompleted"
 AI_EVALUATION_COMPLETED = "AIEvaluationCompleted"
+GRAPH_ENTITY_UPSERTED = "GraphEntityUpserted"
+GRAPH_ENTITY_DELETED = "GraphEntityDeleted"
+GRAPH_RELATIONSHIP_CHANGED = "GraphRelationshipChanged"
+PRODUCT_ITEM_UPSERTED = "ProductItemUpserted"
+BOM_HEADER_UPSERTED = "BomHeaderUpserted"
+BOM_LINE_CHANGED = "BomLineChanged"
+BOM_RECONCILIATION_COMPLETED = "BomReconciliationCompleted"
+MANUFACTURING_STRUCTURE_CHANGED = "ManufacturingStructureChanged"
+MANUFACTURING_PROCESS_CHANGED = "ManufacturingProcessChanged"
+MANUFACTURING_OPERATION_CHANGED = "ManufacturingOperationChanged"
+QUALITY_ISSUE_CHANGED = "QualityIssueChanged"
+QUALITY_INSPECTION_CHANGED = "QualityInspectionChanged"
+QUALITY_ACTION_CHANGED = "QualityActionChanged"
+PREDICTION_EXECUTED = "PredictionExecuted"
+PREDICTION_STALE = "PredictionStale"
+RECOMMENDATION_GENERATED = "RecommendationGenerated"
+RECOMMENDATION_STATUS_CHANGED = "RecommendationStatusChanged"
+RECOMMENDATION_OUTCOME_RECORDED = "RecommendationOutcomeRecorded"
 
 # --- Reserved enterprise event types (adapters only; schemas not fabricated)
 ENTERPRISE_EVENT_TYPES = (
@@ -44,11 +63,30 @@ ENTERPRISE_EVENT_TYPES = (
 
 AI_EVENT_TYPES = (
     KNOWLEDGE_SOURCE_REGISTERED,
+    KNOWLEDGE_SOURCE_SECURITY_UPDATED,
     KNOWLEDGE_INDEX_REQUESTED,
     KNOWLEDGE_INDEX_COMPLETED,
     KNOWLEDGE_INDEX_FAILED,
     AI_REQUEST_COMPLETED,
     AI_EVALUATION_COMPLETED,
+    GRAPH_ENTITY_UPSERTED,
+    GRAPH_ENTITY_DELETED,
+    GRAPH_RELATIONSHIP_CHANGED,
+    PRODUCT_ITEM_UPSERTED,
+    BOM_HEADER_UPSERTED,
+    BOM_LINE_CHANGED,
+    BOM_RECONCILIATION_COMPLETED,
+    MANUFACTURING_STRUCTURE_CHANGED,
+    MANUFACTURING_PROCESS_CHANGED,
+    MANUFACTURING_OPERATION_CHANGED,
+    QUALITY_ISSUE_CHANGED,
+    QUALITY_INSPECTION_CHANGED,
+    QUALITY_ACTION_CHANGED,
+    PREDICTION_EXECUTED,
+    PREDICTION_STALE,
+    RECOMMENDATION_GENERATED,
+    RECOMMENDATION_STATUS_CHANGED,
+    RECOMMENDATION_OUTCOME_RECORDED,
 )
 
 
@@ -82,6 +120,25 @@ REGISTRY: dict[str, EventDefinition] = {
                 "classification": {"type": "string"},
             },
             ["source_id", "code", "kind"],
+        ),
+    ),
+    KNOWLEDGE_SOURCE_SECURITY_UPDATED: EventDefinition(
+        type=KNOWLEDGE_SOURCE_SECURITY_UPDATED,
+        version="v1",
+        description=(
+            "A knowledge source ACL or classification changed. Consumers must "
+            "treat the authoritative store as current and use version ordering; "
+            "the event is an invalidation signal, not an authority."
+        ),
+        schema=_object(
+            {
+                "source_id": {"type": "integer"},
+                "version": {"type": "integer", "minimum": 1},
+                "classification": {"type": "string"},
+                "acl": {"type": "object"},
+                "change": {"type": "string", "enum": ["acl", "classification"]},
+            },
+            ["source_id", "version", "classification", "acl", "change"],
         ),
     ),
     KNOWLEDGE_INDEX_REQUESTED: EventDefinition(
@@ -156,6 +213,261 @@ REGISTRY: dict[str, EventDefinition] = {
                 "metrics": {"type": "object"},
             },
             ["code"],
+        ),
+    ),
+    GRAPH_ENTITY_UPSERTED: EventDefinition(
+        type=GRAPH_ENTITY_UPSERTED,
+        version="v1",
+        description="A knowledge graph entity was created or updated.",
+        schema=_object(
+            {
+                "entity_id": {"type": "integer"},
+                "entity_type": {"type": "string"},
+                "stable_key": {"type": "string"},
+                "version": {"type": "integer", "minimum": 1},
+            },
+            ["entity_id", "entity_type", "stable_key"],
+        ),
+    ),
+    GRAPH_ENTITY_DELETED: EventDefinition(
+        type=GRAPH_ENTITY_DELETED,
+        version="v1",
+        description="A knowledge graph entity was archived.",
+        schema=_object(
+            {
+                "entity_id": {"type": "integer"},
+                "entity_type": {"type": "string"},
+            },
+            ["entity_id", "entity_type"],
+        ),
+    ),
+    GRAPH_RELATIONSHIP_CHANGED: EventDefinition(
+        type=GRAPH_RELATIONSHIP_CHANGED,
+        version="v1",
+        description="A knowledge graph relationship was created, updated or archived.",
+        schema=_object(
+            {
+                "relationship_id": {"type": "integer"},
+                "relationship_type": {"type": "string"},
+                "source_entity_id": {"type": "integer"},
+                "target_entity_id": {"type": "integer"},
+            },
+            ["relationship_id", "relationship_type"],
+        ),
+    ),
+    PRODUCT_ITEM_UPSERTED: EventDefinition(
+        type=PRODUCT_ITEM_UPSERTED,
+        version="v1",
+        description="A product/part/assembly item was created or updated.",
+        schema=_object(
+            {
+                "item_id": {"type": "integer"},
+                "item_type": {"type": "string"},
+                "item_key": {"type": "string"},
+                "created": {"type": "boolean"},
+            },
+            ["item_id", "item_type", "item_key"],
+        ),
+    ),
+    BOM_HEADER_UPSERTED: EventDefinition(
+        type=BOM_HEADER_UPSERTED,
+        version="v1",
+        description="A BOM header was created or updated.",
+        schema=_object(
+            {
+                "header_id": {"type": "integer"},
+                "bom_type": {"type": "string"},
+                "bom_key": {"type": "string"},
+                "created": {"type": "boolean"},
+            },
+            ["header_id", "bom_type", "bom_key"],
+        ),
+    ),
+    BOM_LINE_CHANGED: EventDefinition(
+        type=BOM_LINE_CHANGED,
+        version="v1",
+        description="A BOM line was created, updated or soft-deleted.",
+        schema=_object(
+            {
+                "header_id": {"type": "integer"},
+                "line_id": {"type": "integer"},
+                "child_item_id": {"type": "integer"},
+                "deleted": {"type": "boolean"},
+            },
+            ["header_id", "line_id"],
+        ),
+    ),
+    BOM_RECONCILIATION_COMPLETED: EventDefinition(
+        type=BOM_RECONCILIATION_COMPLETED,
+        version="v1",
+        description="An EBOM->MBOM reconciliation completed.",
+        schema=_object(
+            {
+                "reconciliation_id": {"type": "integer"},
+                "source_header_id": {"type": "integer"},
+                "target_header_id": {"type": ["integer", "null"]},
+                "status": {"type": "string"},
+                "exceptions": {"type": "integer", "minimum": 0},
+            },
+            ["reconciliation_id", "source_header_id", "status"],
+        ),
+    ),
+    MANUFACTURING_STRUCTURE_CHANGED: EventDefinition(
+        type=MANUFACTURING_STRUCTURE_CHANGED,
+        version="v1",
+        description="A manufacturing structure record (plant/line/work centre) changed.",
+        schema=_object(
+            {
+                "kind": {"type": "string"},
+                "entity_id": {"type": "integer"},
+                "key": {"type": "string"},
+                "created": {"type": "boolean"},
+            },
+            ["kind", "entity_id", "key"],
+        ),
+    ),
+    MANUFACTURING_PROCESS_CHANGED: EventDefinition(
+        type=MANUFACTURING_PROCESS_CHANGED,
+        version="v1",
+        description="A manufacturing process or process revision changed.",
+        schema=_object(
+            {
+                "process_id": {"type": "integer"},
+                "process_key": {"type": "string"},
+                "created": {"type": "boolean"},
+            },
+            ["process_id", "process_key"],
+        ),
+    ),
+    MANUFACTURING_OPERATION_CHANGED: EventDefinition(
+        type=MANUFACTURING_OPERATION_CHANGED,
+        version="v1",
+        description="A manufacturing operation or its sequencing changed.",
+        schema=_object(
+            {
+                "operation_id": {"type": "integer"},
+                "process_id": {"type": "integer"},
+                "created": {"type": "boolean"},
+            },
+            ["operation_id", "process_id"],
+        ),
+    ),
+    QUALITY_ISSUE_CHANGED: EventDefinition(
+        type=QUALITY_ISSUE_CHANGED,
+        version="v1",
+        description="A quality issue/nonconformance was created or updated.",
+        schema=_object(
+            {
+                "issue_id": {"type": "integer"},
+                "issue_key": {"type": "string"},
+                "issue_type": {"type": "string"},
+                "status": {"type": "string"},
+                "severity": {"type": "string"},
+                "created": {"type": "boolean"},
+            },
+            ["issue_id", "issue_key", "status"],
+        ),
+    ),
+    QUALITY_INSPECTION_CHANGED: EventDefinition(
+        type=QUALITY_INSPECTION_CHANGED,
+        version="v1",
+        description="A quality inspection was created or updated.",
+        schema=_object(
+            {
+                "inspection_id": {"type": "integer"},
+                "inspection_key": {"type": "string"},
+                "status": {"type": "string"},
+                "created": {"type": "boolean"},
+            },
+            ["inspection_id", "status"],
+        ),
+    ),
+    QUALITY_ACTION_CHANGED: EventDefinition(
+        type=QUALITY_ACTION_CHANGED,
+        version="v1",
+        description="A corrective/preventive (CAPA) action was created or updated.",
+        schema=_object(
+            {
+                "action_id": {"type": "integer"},
+                "action_key": {"type": "string"},
+                "issue_id": {"type": "integer"},
+                "status": {"type": "string"},
+                "action_type": {"type": "string"},
+                "created": {"type": "boolean"},
+            },
+            ["action_id", "status"],
+        ),
+    ),
+    PREDICTION_EXECUTED: EventDefinition(
+        type=PREDICTION_EXECUTED,
+        version="v1",
+        description="A prediction or rule-based risk assessment was produced.",
+        schema=_object(
+            {
+                "prediction_id": {"type": "integer"},
+                "prediction_key": {"type": "string"},
+                "prediction_type": {"type": "string"},
+                "method": {"type": "string"},
+                "risk_category": {"type": "string"},
+                "status": {"type": "string"},
+            },
+            ["prediction_id", "prediction_type", "method", "risk_category"],
+        ),
+    ),
+    PREDICTION_STALE: EventDefinition(
+        type=PREDICTION_STALE,
+        version="v1",
+        description="A prediction became stale after expiry or a source change.",
+        schema=_object(
+            {
+                "prediction_id": {"type": "integer"},
+                "prediction_type": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            ["prediction_id", "reason"],
+        ),
+    ),
+    RECOMMENDATION_GENERATED: EventDefinition(
+        type=RECOMMENDATION_GENERATED,
+        version="v1",
+        description="A recommendation was generated from observed evidence.",
+        schema=_object(
+            {
+                "recommendation_id": {"type": "integer"},
+                "recommendation_key": {"type": "string"},
+                "prediction_id": {"type": "integer"},
+                "severity": {"type": "string"},
+                "priority": {"type": "string"},
+            },
+            ["recommendation_id", "recommendation_key"],
+        ),
+    ),
+    RECOMMENDATION_STATUS_CHANGED: EventDefinition(
+        type=RECOMMENDATION_STATUS_CHANGED,
+        version="v1",
+        description="A recommendation changed lifecycle status.",
+        schema=_object(
+            {
+                "recommendation_id": {"type": "integer"},
+                "recommendation_key": {"type": "string"},
+                "from_status": {"type": "string"},
+                "to_status": {"type": "string"},
+            },
+            ["recommendation_id", "to_status"],
+        ),
+    ),
+    RECOMMENDATION_OUTCOME_RECORDED: EventDefinition(
+        type=RECOMMENDATION_OUTCOME_RECORDED,
+        version="v1",
+        description="The measured outcome of a completed recommendation was recorded.",
+        schema=_object(
+            {
+                "recommendation_id": {"type": "integer"},
+                "recommendation_key": {"type": "string"},
+                "outcome": {"type": "string"},
+                "risk_reduced": {"type": "boolean"},
+            },
+            ["recommendation_id"],
         ),
     ),
 }

@@ -22,6 +22,7 @@ pytestmark = pytest.mark.live
 
 _BASE_URL = os.environ.get("AI_E2E_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 _TOKEN = os.environ.get("AI_E2E_TOKEN", "")
+_METRICS_TOKEN = os.environ.get("AI_METRICS_AUTH_TOKEN", "")
 
 
 def _require_live() -> None:
@@ -49,8 +50,23 @@ def test_readiness(client: httpx.Client) -> None:
     assert response.json()["checks"]["database"] in ("ok", "in_memory")
 
 
-def test_metrics_exposed(client: httpx.Client) -> None:
-    response = client.get("/metrics")
+def test_metrics_requires_authentication() -> None:
+    _require_live()
+    with httpx.Client(base_url=_BASE_URL, timeout=10.0) as anon:
+        response = anon.get("/metrics")
+    assert response.status_code == 401
+
+
+def test_metrics_exposed_with_bearer_token() -> None:
+    _require_live()
+    if not _METRICS_TOKEN:
+        pytest.skip("set AI_METRICS_AUTH_TOKEN to verify the metrics scrape")
+    with httpx.Client(
+        base_url=_BASE_URL,
+        headers={"Authorization": f"Bearer {_METRICS_TOKEN}"},
+        timeout=10.0,
+    ) as metrics_client:
+        response = metrics_client.get("/metrics")
     assert response.status_code == 200
     assert "ai_http_requests_total" in response.text
 

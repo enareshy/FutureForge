@@ -26,9 +26,12 @@ graph LR
   `AI_UPLOAD_MAX_BYTES`, sniffs the content signature (never trusts the file
   extension or declared MIME) and rejects unsupported/empty payloads with
   `422`. Documents are deduplicated by content checksum within a tenant.
-- **Object storage** returns a tenant-scoped `object_key`
-  (`ai.documents.object_key`); the platform never exposes a public object URL.
-  Downloads stream through the authorization-gated API
+- **Object storage** keys are server-issued as
+  `knowledge/{tenant}/{YYYY}/{MM}/{uuid}/{filename}` and stored in
+  `ai.documents.object_key`. Clients cannot supply or override an object key;
+  reads, downloads, reindex and deletion resolve the key from the
+  tenant-scoped document record. The platform never exposes a public object
+  URL. Downloads stream through the authorization-gated API
   (`/knowledge/documents/{document_id}/download`).
 - **Chunking** uses `AI_CHUNK_SIZE` / `AI_CHUNK_OVERLAP` and preserves each
   segment's page (PDF) and section (markdown), surfaced on citations.
@@ -66,6 +69,12 @@ graph LR
 - Otherwise the answer carries `citations[]` (source, document, chunk index,
   page, section, score, snippet) rendered by the console as links back to the
   source.
+- Required citations are validated structurally before the response is
+  accepted: `[n]` references must be well-formed and in range, and every
+  citation must map back to a chunk from this request. Failures are reported as
+  opaque codes in `warnings` and set `answer_status` to `citation_warning`
+  (`citation_status` is `missing` or `invalid`) instead of `answered`. No source
+  text or identifiers are added to diagnostics.
 
 ## Assistant conversations
 
@@ -73,6 +82,12 @@ graph LR
   and actor; `POST /assistant/conversations/{id}/messages` runs a grounded
   answer and persists both messages and the citation **snapshots**
   (`ai.assistant_message_sources`).
+- Conversation access fails closed: the authenticated principal must have a
+  valid actor ID, and read, update, delete, messages, streaming, cancel and
+  feedback require an exact owner match within the tenant. Missing or malformed
+  actor IDs are rejected; owner mismatch and a missing conversation are
+  indistinguishable. Listing is actor-scoped, and cross-actor tenant listing
+  requires explicit platform administration.
 - Authorization is re-validated on every request: a conversation stored earlier
   never widens access to documents the caller can no longer see.
 - Feedback (`POST /assistant/feedback`) references the answered message

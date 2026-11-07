@@ -32,6 +32,8 @@ const RequirementsPage = React.lazy(() => import("./pages/RequirementsPage.jsx")
 const RequirementPdmPage = React.lazy(() => import("./pages/RequirementPdmPage.jsx"));
 const RequirementManufacturingPage = React.lazy(() => import("./pages/RequirementManufacturingPage.jsx"));
 const VerificationValidationPage = React.lazy(() => import("./pages/VerificationValidationPage.jsx"));
+const ManufacturingQualityPage = React.lazy(() => import("./pages/ManufacturingQualityPage.jsx"));
+const PredictiveIntelligencePage = React.lazy(() => import("./pages/PredictiveIntelligencePage.jsx"));
 const DigitalThreadPage = React.lazy(() => import("./pages/DigitalThreadPage.jsx"));
 const TraceabilityPage = React.lazy(() => import("./pages/TraceabilityPage.jsx"));
 const StandardsExchangePage = React.lazy(() => import("./pages/StandardsExchangePage.jsx"));
@@ -83,12 +85,22 @@ const AiChatPage = React.lazy(() => import("./pages/AiChatPage.jsx"));
 const AiKnowledgePage = React.lazy(() => import("./pages/AiKnowledgePage.jsx"));
 const AiJobsPage = React.lazy(() => import("./pages/AiJobsPage.jsx"));
 const AiAgentsPage = React.lazy(() => import("./pages/AiAgentsPage.jsx"));
+const AiAgentAdminPage = React.lazy(() => import("./pages/AiAgentAdminPage.jsx"));
+const AiKnowledgeGraphPage = React.lazy(() => import("./pages/AiKnowledgeGraphPage.jsx"));
+const AiProductBomPage = React.lazy(() => import("./pages/AiProductBomPage.jsx"));
+const AiManufacturingQualityPage = React.lazy(() =>
+  import("./pages/AiManufacturingQualityPage.jsx"),
+);
+const AiPredictiveIntelligencePage = React.lazy(() =>
+  import("./pages/AiPredictiveIntelligencePage.jsx"),
+);
 const AiModelsPage = React.lazy(() => import("./pages/AiModelsPage.jsx"));
 const AiEvaluationsPage = React.lazy(() => import("./pages/AiEvaluationsPage.jsx"));
 const AiExperimentsPage = React.lazy(() => import("./pages/AiExperimentsPage.jsx"));
 const AiUsagePage = React.lazy(() => import("./pages/AiUsagePage.jsx"));
 const AiEventsPage = React.lazy(() => import("./pages/AiEventsPage.jsx"));
 const AiAuditPage = React.lazy(() => import("./pages/AiAuditPage.jsx"));
+const AiSearchPage = React.lazy(() => import("./pages/AiSearchPage.jsx"));
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState("admin");
@@ -224,6 +236,8 @@ const NAV_SECTIONS = [
       { to: "/requirement-pdm", label: "Requirement / PDM" },
       { to: "/requirement-manufacturing", label: "Requirement / Manufacturing" },
       { to: "/verification-validation", label: "Verification & validation" },
+      { to: "/manufacturing-quality", label: "Manufacturing & quality" },
+      { to: "/predictive-intelligence", label: "Predictive intelligence" },
       { to: "/bom", label: "Bill of materials", feature: "bom" },
       { to: "/change", label: "Change management (ECR/ECO/ECN)", feature: "change_management" },
       { to: "/classification", label: "Classification", feature: "classification" },
@@ -247,9 +261,15 @@ const NAV_SECTIONS = [
     items: [
       { to: "/ai", label: "AI dashboard", end: true },
       { to: "/ai/chat", label: "Enterprise Copilot" },
+      { to: "/ai/search", label: "AI search & intelligence" },
       { to: "/ai/knowledge", label: "Knowledge sources" },
       { to: "/ai/jobs", label: "Indexing jobs" },
       { to: "/ai/agents", label: "Agents" },
+      { to: "/ai/agents/admin", label: "Agent platform" },
+      { to: "/ai/graph", label: "Knowledge graph" },
+      { to: "/ai/product", label: "Product & BOM" },
+      { to: "/ai/manufacturing-quality", label: "Manufacturing & Quality" },
+      { to: "/ai/predictive", label: "Predictive intelligence" },
       { to: "/ai/models", label: "Models & providers" },
       { to: "/ai/experiments", label: "Experiments & models" },
       { to: "/ai/evaluations", label: "Evaluation & feedback" },
@@ -592,6 +612,8 @@ export default function App() {
         <Route path="/requirement-pdm" element={<RequirementPdmPage />} />
         <Route path="/requirement-manufacturing" element={<RequirementManufacturingPage />} />
         <Route path="/verification-validation" element={<VerificationValidationPage />} />
+        <Route path="/manufacturing-quality" element={<ManufacturingQualityPage />} />
+        <Route path="/predictive-intelligence" element={<PredictiveIntelligencePage />} />
         <Route path="/digital-thread" element={<DigitalThreadPage />} />
         <Route path="/traceability" element={<TraceabilityPage />} />
         <Route path="/standards-exchange" element={<StandardsExchangePage />} />
@@ -631,9 +653,21 @@ export default function App() {
         <Route path="/reference-data" element={<ReferenceDataPage />} />
         <Route path="/ai" element={<AiDashboardPage />} />
         <Route path="/ai/chat" element={<AiChatPage />} />
+        <Route path="/ai/search" element={<AiSearchPage />} />
         <Route path="/ai/knowledge" element={<AiKnowledgePage />} />
         <Route path="/ai/jobs" element={<AiJobsPage />} />
         <Route path="/ai/agents" element={<AiAgentsPage />} />
+        <Route path="/ai/agents/admin" element={<AiAgentAdminPage />} />
+        <Route path="/ai/graph" element={<AiKnowledgeGraphPage />} />
+        <Route path="/ai/product" element={<AiProductBomPage />} />
+        <Route
+          path="/ai/manufacturing-quality"
+          element={<AiManufacturingQualityPage />}
+        />
+        <Route
+          path="/ai/predictive"
+          element={<AiPredictiveIntelligencePage />}
+        />
         <Route path="/ai/models" element={<AiModelsPage />} />
         <Route path="/ai/experiments" element={<AiExperimentsPage />} />
         <Route path="/ai/evaluations" element={<AiEvaluationsPage />} />

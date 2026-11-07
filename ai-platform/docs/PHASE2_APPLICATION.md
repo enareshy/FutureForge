@@ -17,7 +17,7 @@ the goal is a verified foundation the later phases build on.
 - Uniform error envelope + handlers for domain errors, validation errors, and Starlette
   HTTP errors (`api/errors.py`).
 - Health endpoints: `/healthz` (liveness) and `/api/v1/ai/health` (readiness detail).
-- OpenAPI served at `/docs` and `/openapi.json`.
+- OpenAPI schema served at `/api/v1/ai/docs` and `/api/v1/ai/openapi.json` in development; both are disabled in production unless `AI_DOCS_ENABLED=true`.
 
 ### `apps/web-ai` (React 19 + TypeScript + Vite 8)
 

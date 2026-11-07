@@ -243,7 +243,7 @@ export function resolveDeadLetter(db, id, { action = "resolve", reason = "", act
         run(
           db,
           `UPDATE event_deliveries SET status = 'pending', attempts = 0, next_retry_at = NULL, available_at = ?, locked_by = '', locked_at = NULL,
-             visibility_expires_at = NULL, last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
+             visibility_expires_at = NULL, lease_token = '', last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
           [ts, ts, delivery.id]
         );
       }
@@ -252,7 +252,7 @@ export function resolveDeadLetter(db, id, { action = "resolve", reason = "", act
       if (delivery) {
         run(
           db,
-          `UPDATE event_deliveries SET status = 'pending', attempts = 0, available_at = ?, last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
+          `UPDATE event_deliveries SET status = 'pending', attempts = 0, available_at = ?, lease_token = '', last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
           [ts, ts, delivery.id]
         );
       }
@@ -291,7 +291,7 @@ export async function resolveDeadLetterAsync(db, id, { action = "resolve", reaso
         await runAsync(
           db,
           `UPDATE event_deliveries SET status = 'pending', attempts = 0, next_retry_at = NULL, available_at = ?, locked_by = '', locked_at = NULL,
-             visibility_expires_at = NULL, last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
+             visibility_expires_at = NULL, lease_token = '', last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
           [ts, ts, delivery.id]
         );
       }
@@ -300,7 +300,7 @@ export async function resolveDeadLetterAsync(db, id, { action = "resolve", reaso
       if (delivery) {
         await runAsync(
           db,
-          `UPDATE event_deliveries SET status = 'pending', attempts = 0, available_at = ?, last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
+          `UPDATE event_deliveries SET status = 'pending', attempts = 0, available_at = ?, lease_token = '', last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
           [ts, ts, delivery.id]
         );
       }

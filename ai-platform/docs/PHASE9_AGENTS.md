@@ -128,6 +128,10 @@ Response:
   "answer": "...",
   "citations": [{ "rank": 1, "source_code": "maintenance", "snippet": "..." }],
   "insufficient_evidence": false,
+  "answer_status": "answered",
+  "citation_status": "valid",
+  "citations_required": true,
+  "warnings": [],
   "confidence": 0.246183,
   "is_mock": true,
   "provider": "mock",
@@ -137,6 +141,11 @@ Response:
   "request_id": "..."
 }
 ```
+
+Required citations are validated before the run is reported as grounded.
+Missing or invalid citations keep the answer but set `answer_status` to
+`citation_warning` with `citation_status` `missing`/`invalid` and opaque
+`warnings`; the same fields are persisted on the execution result.
 
 ## Configuration
 
@@ -158,7 +167,8 @@ Response:
 
 - `tests/test_agents.py` — registry auto-registration, grounded answers with
   citations, insufficient-evidence path, capability enforcement, tool-level
-  authorization, approval checkpoint, prompt-injection blocking, and trace.
+  authorization, approval checkpoint, prompt-injection blocking, poisoned
+  evidence abstention, and trace.
 - `tests/test_api_v1.py` — list/get/execute smoke coverage.
 
 Run from `apps/ai-api`:

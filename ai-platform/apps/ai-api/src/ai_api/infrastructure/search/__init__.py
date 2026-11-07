@@ -47,7 +47,33 @@ class RepositoryLexicalSearch:
         # Postgres is the source of truth; the chunk rows already are the index.
         return None
 
-    async def delete_document(self, tenant_id: int, document_id: int) -> None:
+    async def delete_document(
+        self,
+        tenant_id: int,
+        document_id: int,
+        *,
+        source_id: int | None = None,
+        external_id: str | None = None,
+    ) -> None:
+        return None
+
+    async def delete_source(self, tenant_id: int, source_id: int) -> None:
+        return None
+
+    async def scan_documents(
+        self,
+        tenant_id: int,
+        *,
+        limit: int,
+        after: list[Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[Any] | None]:
+        # The repository itself is authoritative; there is no external index to
+        # scan for orphans or to reconcile.
+        return [], None
+
+    async def delete_documents(
+        self, tenant_id: int, document_ids: list[int]
+    ) -> None:
         return None
 
     async def status(self) -> dict[str, Any]:

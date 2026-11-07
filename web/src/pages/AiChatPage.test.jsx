@@ -11,18 +11,25 @@ vi.mock("../aiApi.js", async (importActual) => {
       chat: vi.fn(),
       rag: vi.fn(),
       createFeedback: vi.fn(),
+      search: vi.fn(),
       conversations: vi.fn(),
       createConversation: vi.fn(),
+      updateConversation: vi.fn(),
+      cancelGeneration: vi.fn(),
       conversation: vi.fn(),
       deleteConversation: vi.fn(),
       sendAssistantMessage: vi.fn(),
       assistantFeedback: vi.fn(),
+      approveAssistantAction: vi.fn(),
+      rejectAssistantAction: vi.fn(),
+      executeAssistantAction: vi.fn(),
     },
     streamChat: vi.fn(),
+    streamAssistantMessage: vi.fn(),
   };
 });
 
-import { AiApiError, ai, streamChat } from "../aiApi.js";
+import { AiApiError, ai, streamAssistantMessage, streamChat } from "../aiApi.js";
 import AiChatPage from "./AiChatPage.jsx";
 
 function renderPage() {
@@ -159,6 +166,28 @@ describe("AiChatPage", () => {
       updated_at: new Date().toISOString(),
     });
     ai.sendAssistantMessage.mockResolvedValue({ id: 12 });
+    streamAssistantMessage.mockImplementation(async (_id, _body, opts) => {
+      opts.onEvent({
+        type: "start",
+        message_id: 12,
+        citations: [
+          {
+            rank: 1,
+            source_id: 1,
+            document_id: 7,
+            chunk_id: 2,
+            source_code: "SRC-1",
+            chunk_index: 0,
+            page: 3,
+            section: "Intro",
+            score: 0.9,
+            snippet: "excerpt",
+          },
+        ],
+      });
+      opts.onEvent({ type: "delta", content: "X is grounded" });
+      return { message_id: 12, answer_status: "answered" };
+    });
     ai.conversation.mockResolvedValue({
       conversation: {
         id: 5,
@@ -207,9 +236,147 @@ describe("AiChatPage", () => {
 
     await screen.findByText("X is grounded");
     expect(ai.createConversation).toHaveBeenCalledWith({ title: "What is X?" });
-    expect(ai.sendAssistantMessage).toHaveBeenCalledWith(5, { content: "What is X?" });
+    expect(streamAssistantMessage).toHaveBeenCalledWith(
+      5,
+      { content: "What is X?" },
+      expect.any(Object),
+    );
     expect(screen.getByText(/SRC-1 · document 7/)).toBeInTheDocument();
     expect(container.textContent).toContain("page 3");
     expect(container.textContent).toContain("Intro");
   });
+
+  it("attaches authorized context and sends the selected task", async () => {
+    ai.conversations.mockResolvedValue({ items: [], meta: { total: 0 } });
+    ai.search.mockResolvedValue({
+      results: [{ document_id: 7, title: "Pump manual", source_code: "SRC-1" }],
+    });
+    ai.createConversation.mockResolvedValue({
+      id: 5,
+      title: "Compare",
+      status: "active",
+      message_count: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    ai.sendAssistantMessage.mockResolvedValue({ id: 13 });
+    ai.conversation.mockResolvedValue({
+      conversation: { id: 5, title: "Compare", status: "active", message_count: 2 },
+      messages: [],
+    });
+
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    await user.type(screen.getByPlaceholderText(/Search documents/i), "pump");
+    await user.click(screen.getByRole("button", { name: "Find" }));
+    await user.click(await screen.findByRole("button", { name: "Attach" }));
+    await user.selectOptions(screen.getByLabelText("Task"), "compare");
+    await user.type(
+      screen.getByPlaceholderText(/grounded assistant/i),
+      "Compare the intervals",
+    );
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(ai.sendAssistantMessage).toHaveBeenCalledWith(5, {
+      content: "Compare the intervals",
+      task: "compare",
+      context: [{ type: "knowledge_document", id: "7" }],
+    });
+    expect(streamAssistantMessage).not.toHaveBeenCalled();
+  });
+
+  it("shows tool execution indicators and proposed actions", async () => {
+    ai.conversations.mockResolvedValue({ items: [], meta: { total: 0 } });
+    ai.createConversation.mockResolvedValue({
+      id: 8,
+      title: "Find pump",
+      status: "active",
+      message_count: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    ai.sendAssistantMessage.mockResolvedValue({ id: 21 });
+    ai.conversation.mockResolvedValue({
+      conversation: { id: 8, title: "Find pump", status: "active", message_count: 2 },
+      messages: [
+        { id: 20, conversation_id: 8, role: "user", content: "Find pump", created_at: new Date().toISOString() },
+        {
+          id: 21,
+          conversation_id: 8,
+          role: "assistant",
+          content: "Found the pump [1].",
+          answer_status: "answered",
+          created_at: new Date().toISOString(),
+          tools: [
+            { tool_code: "enterprise.search", status: "succeeded", read_only: true },
+            { tool_code: "bom.lookup", status: "denied", read_only: true, error_class: "authorization_denied" },
+          ],
+          actions: [
+            {
+              id: 4,
+              action_type: "change_request.create",
+              target: "ECR-1000",
+              summary: "Open a change request",
+              status: "proposed",
+              risk_class: "controlled_mutation",
+              requested_by_name: "reader",
+            },
+          ],
+          sources: [],
+        },
+      ],
+    });
+    ai.approveAssistantAction.mockResolvedValue({ id: 4, status: "approved" });
+
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    await user.type(screen.getByPlaceholderText(/grounded assistant/i), "Find pump");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await screen.findByText("Found the pump [1].");
+    expect(screen.getByText(/enterprise\.search/)).toBeInTheDocument();
+    expect(screen.getByText(/authorization_denied/)).toBeInTheDocument();
+    expect(screen.getByText(/Open a change request/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+    expect(ai.approveAssistantAction).toHaveBeenCalledWith(4, { reason: "Approved in Copilot" });
+  });
+
+  it("stops an assistant stream and requests server-side cancellation", async () => {
+    ai.conversations.mockResolvedValue({ items: [], meta: { total: 0 } });
+    ai.createConversation.mockResolvedValue({
+      id: 5,
+      title: "Stop",
+      status: "active",
+      message_count: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    streamAssistantMessage.mockImplementation(
+      (_id, _body, opts) =>
+        new Promise((_resolve, reject) => {
+          opts.signal.addEventListener("abort", () =>
+            reject(new AiApiError(0, "aborted", "stream cancelled")),
+          );
+        }),
+    );
+    ai.cancelGeneration.mockResolvedValue({ cancelled: true });
+    ai.conversation.mockResolvedValue({
+      conversation: { id: 5, title: "Stop", status: "active", message_count: 2 },
+      messages: [],
+    });
+
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    await user.type(screen.getByPlaceholderText(/grounded assistant/i), "Long answer");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await user.click(await screen.findByRole("button", { name: "Stop" }));
+
+    expect(ai.cancelGeneration).toHaveBeenCalledWith(5);
+    expect(await screen.findByText("Cancelled.")).toBeInTheDocument();
+  });
+
 });

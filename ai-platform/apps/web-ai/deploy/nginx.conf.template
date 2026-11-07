@@ -11,6 +11,11 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Allow uploads proxied to the AI API. Must stay >= the API transport cap
+    # (AI_MAX_REQUEST_BYTES, 32 MiB) which in turn covers the 25 MiB upload
+    # limit plus multipart framing. nginx defaults to 1m otherwise.
+    client_max_body_size 32m;
+
     # Security headers for a single-origin SPA.
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
@@ -21,6 +26,12 @@ server {
         access_log off;
         add_header Content-Type text/plain always;
         return 200 "ok\n";
+    }
+
+    # Metrics are cluster-internal and token-protected. Never proxy the root
+    # endpoint or fall back to the SPA for it.
+    location = /metrics {
+        return 404;
     }
 
     # Reverse proxy API traffic to the AI API (and enterprise backend when

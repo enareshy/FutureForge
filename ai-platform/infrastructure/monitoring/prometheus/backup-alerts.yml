@@ -1,0 +1,47 @@
+groups:
+  - name: ai-backup
+    rules:
+      - alert: AIBackupFailed
+        expr: ai_backup_last_run_status{kind="backup"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The latest AI platform backup run failed.
+          description: Inspect the ai-backup CronJob and ai.backup_runs.error_code; the previous verified artifact remains the recovery point.
+
+      - alert: AIBackupStale
+        expr: time() - ai_backup_last_success_timestamp_seconds{kind="backup"} > 129600
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: No successful AI platform backup in the last 36 hours.
+          description: The backup CronJob may be suspended, failing before it can record a run, or the API cannot read ai.backup_runs.
+
+      - alert: AIBackupIntegrityFailed
+        expr: ai_backup_last_integrity_ok{kind="backup"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The latest AI platform backup artifact did not verify.
+          description: Do not rely on the newest artifact. Preserve it for investigation and use the previous verified recovery point.
+
+      - alert: AIBackupUnencrypted
+        expr: ai_backup_last_encrypted{kind="backup"} == 0 and ai_backup_last_run_status{kind="backup"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: The latest AI platform backup is not encrypted.
+          description: Production requires BACKUP_REQUIRE_ENCRYPTION=true and a passphrase from the secret manager.
+
+      - alert: AIRestoreDrillStale
+        expr: time() - ai_backup_last_success_timestamp_seconds{kind="restore_drill"} > 7776000
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: No successful restore drill in the last 90 days.
+          description: Run `python scripts/backup_restore.py drill --start-app --run-workers` in a controlled environment and record the report.

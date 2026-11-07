@@ -38,7 +38,9 @@ echo "trusted = true" >> /usr/share/postgresql/15/extension/vector.control
 ```
 
 The extension itself is created by migration `0001_init.sql` via
-`make migrate`, which runs as the `helix` database owner.
+`make migrate`. Local development runs this as the `helix` login. Provisioned
+deployments use the `ai_migrate` login, which enters the `ai_owner` session
+role (see `infrastructure/db/roles/README.md`).
 
 Verify:
 
@@ -100,6 +102,24 @@ PROFILES=search,events ./scripts/up.sh
 # LLM tracing (requires >= 4 GiB RAM)
 PROFILES=llmops ./scripts/up.sh
 ```
+
+## Backup profile
+
+The backup/restore tool is a separate image and does not run as part of the
+lean stack. Create an encrypted backup manually:
+
+```bash
+# BACKUP_ENCRYPTION_PASSPHRASE must be set in .env
+docker compose --profile backup run --rm backup backup
+
+# Verify the newest artifact
+docker compose --profile backup run --rm backup verify
+```
+
+Artifacts are stored in the `backup-data` volume at `/backup`. This profile is
+a manual runner, not a scheduler. Kubernetes uses the daily `ai-backup`
+CronJob. Full restore and drill procedures, RPO/RTO, and known limitations are
+documented in `docs/backup-recovery.md`.
 
 ## Resource constraints
 

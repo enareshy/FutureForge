@@ -65,6 +65,7 @@ New settings (see `ai-platform/.env.example`):
 | `AI_DEFAULT_PAGE_LIMIT` | `50` | Default page size |
 | `AI_MAX_PAGE_LIMIT` | `200` | Maximum page size |
 | `AI_DEV_TENANT_ID` | `1` | Tenant used by the development identity |
+| `AI_DEV_ACTOR_ID` | `1` | Actor ID used by the development identity for ownership-scoped resources |
 | `AI_DEV_PERMISSIONS` | `*:*` | Permissions used by the development identity |
 
 The settings loader discovers `.env` from the current directory, its parent, or its

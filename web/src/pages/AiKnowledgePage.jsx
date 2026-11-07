@@ -24,6 +24,12 @@ export default function AiKnowledgePage() {
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
   const [loadingSources, setLoadingSources] = useState(true);
+  const [selectedDoc, setSelectedDoc] = useState(null);
+  const [docTitle, setDocTitle] = useState("");
+  const [docMetadata, setDocMetadata] = useState("");
+  const [metadataError, setMetadataError] = useState("");
+  const [versions, setVersions] = useState([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
   const [searchParams] = useSearchParams();
   const wantSource = searchParams.get("source");
   const wantDocument = searchParams.get("document");
@@ -50,7 +56,79 @@ export default function AiKnowledgePage() {
   useEffect(() => {
     if (selected) loadDocuments(selected.id);
     else setDocuments([]);
+    setSelectedDoc(null);
+    setVersions([]);
   }, [selected]);
+
+  function parseMetadata(text) {
+    if (!text.trim()) return {};
+    const parsed = JSON.parse(text);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Metadata must be a JSON object");
+    }
+    return parsed;
+  }
+
+  function editDocument(doc) {
+    setSelectedDoc(doc);
+    setDocTitle(doc.title || "");
+    setDocMetadata(JSON.stringify(doc.metadata || {}, null, 2));
+    setMetadataError("");
+    setVersions([]);
+    loadVersions(doc.id);
+  }
+
+  function loadVersions(documentId) {
+    setVersionsLoading(true);
+    ai.documentVersions(documentId, { limit: 20 })
+      .then((page) => setVersions(page.items))
+      .catch((e) => setMetadataError(describe(e)))
+      .finally(() => setVersionsLoading(false));
+  }
+
+  async function saveMetadata(e) {
+    e.preventDefault();
+    if (!selectedDoc) return;
+    setError("");
+    setNote("");
+    setMetadataError("");
+    let metadata;
+    try {
+      metadata = parseMetadata(docMetadata);
+    } catch (err) {
+      setMetadataError(`Invalid metadata JSON: ${err.message}`);
+      return;
+    }
+    try {
+      const updated = await ai.updateDocument(selectedDoc.id, {
+        title: docTitle || null,
+        metadata,
+        expected_version: selectedDoc.version,
+      });
+      setSelectedDoc(updated);
+      setDocTitle(updated.title || "");
+      setDocMetadata(JSON.stringify(updated.metadata || {}, null, 2));
+      loadDocuments(selected.id);
+      loadVersions(updated.id);
+      setNote(`Document updated to version ${updated.version}.`);
+    } catch (err) {
+      setMetadataError(describe(err));
+    }
+  }
+
+  async function reindexDocument(doc) {
+    setError("");
+    setNote("");
+    try {
+      const res = await ai.reindexDocument(doc.id);
+      loadDocuments(selected.id);
+      setNote(`Reindexed "${doc.title || doc.external_id}" (${res.documents ?? 0} documents).`);
+      if (selectedDoc?.id === doc.id) setSelectedDoc(null);
+      setVersions([]);
+    } catch (err) {
+      setError(describe(err));
+    }
+  }
 
   useEffect(() => {
     if (appliedDeepLink.current || !wantSource || sources.length === 0) return;
@@ -259,7 +337,7 @@ export default function AiKnowledgePage() {
             <>
               <table>
                 <thead>
-                  <tr><th>External ID</th><th>Title</th><th>Status</th><th>Search</th><th>Size (bytes)</th><th></th></tr>
+                  <tr><th>External ID</th><th>Title</th><th>Version</th><th>Status</th><th>Search</th><th>Size (bytes)</th><th></th></tr>
                 </thead>
                 <tbody>
                   {documents.map((d) => (
@@ -269,6 +347,7 @@ export default function AiKnowledgePage() {
                     >
                       <td className="mono">{d.external_id}</td>
                       <td>{d.title || "—"}</td>
+                      <td className="mono">v{d.version ?? 1}</td>
                       <td><span className="badge">{d.status}</span></td>
                       <td>
                         {d.error_class ? (
@@ -282,11 +361,17 @@ export default function AiKnowledgePage() {
                       <td>{d.size_bytes ?? "—"}</td>
                       <td>
                         <div className="row" style={{ gap: 8 }}>
+                          <button className="btn ghost" onClick={() => editDocument(d)}>
+                            Manage
+                          </button>
                           <button
                             className="btn ghost"
                             onClick={() => downloadDocument(d).catch((e) => setError(describe(e)))}
                           >
                             Download
+                          </button>
+                          <button className="btn ghost" onClick={() => reindexDocument(d)}>
+                            Reindex
                           </button>
                           <button className="btn ghost" onClick={() => removeDocument(d)}>
                             Delete
@@ -296,10 +381,70 @@ export default function AiKnowledgePage() {
                     </tr>
                   ))}
                   {documents.length === 0 ? (
-                    <tr><td colSpan={6} className="muted">No documents indexed.</td></tr>
+                    <tr><td colSpan={7} className="muted">No documents indexed.</td></tr>
                   ) : null}
                 </tbody>
               </table>
+
+              {selectedDoc ? (
+                <div className="panel" style={{ marginTop: 12 }}>
+                  <div className="panel-head">
+                    <h3>Document — {selectedDoc.external_id}</h3>
+                    <button className="btn ghost" onClick={() => setSelectedDoc(null)}>
+                      Close
+                    </button>
+                  </div>
+                  {metadataError ? <div className="error">{metadataError}</div> : null}
+                  <form onSubmit={saveMetadata}>
+                    <label className="field">
+                      <span>Title</span>
+                      <input value={docTitle} onChange={(e) => setDocTitle(e.target.value)} />
+                    </label>
+                    <label className="field">
+                      <span>Metadata (JSON)</span>
+                      <textarea
+                        rows={6}
+                        className="mono"
+                        value={docMetadata}
+                        onChange={(e) => setDocMetadata(e.target.value)}
+                        placeholder='{"product": "P-100", "part_number": "PN-42", "revision": "B"}'
+                      />
+                    </label>
+                    <p className="sub">
+                      Current version v{selectedDoc.version ?? 1}. Saving creates a new version and
+                      refreshes the search copy; chunk content is unchanged.
+                    </p>
+                    <button className="btn">Save metadata</button>
+                  </form>
+
+                  <h3>Version history</h3>
+                  <table>
+                    <thead>
+                      <tr><th>Version</th><th>Title</th><th>Reason</th><th>Status</th><th>Superseded</th></tr>
+                    </thead>
+                    <tbody>
+                      {versions.map((v) => (
+                        <tr key={`${v.document_id}-${v.version}`}>
+                          <td className="mono">v{v.version}</td>
+                          <td>{v.title || "—"}</td>
+                          <td><span className="badge">{v.reason}</span></td>
+                          <td>{v.status}</td>
+                          <td className="muted">
+                            {v.superseded_at ? new Date(v.superseded_at).toLocaleString() : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                      {versions.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="muted">
+                            {versionsLoading ? "Loading versions…" : "No superseded versions yet."}
+                          </td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
 
               <form onSubmit={upload}>
                 <h3>Upload file</h3>

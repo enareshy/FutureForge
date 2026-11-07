@@ -18,6 +18,11 @@ from ai_api.application.agents.knowledge_assistant import (
     build_knowledge_assistant_graph,
 )
 from ai_api.application.agents.tools import ToolCallContext, ToolRegistry
+from ai_api.application.services.audit_service import AuditService
+from ai_api.application.services.citation_validation import (
+    ANSWER_STATUS_ANSWERED,
+    ANSWER_STATUS_INSUFFICIENT,
+)
 from ai_api.application.services.model_gateway import ModelGateway
 from ai_api.application.services.retrieval_service import RetrievalService
 from ai_api.config.settings import Settings
@@ -41,6 +46,8 @@ class AgentExecutionContext:
     settings: Settings
     approvals: frozenset[str] = frozenset()
     max_tool_calls: int = 6
+    block_prompt_injection: bool = True
+    audit: AuditService | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: int = 0
 
@@ -78,6 +85,10 @@ class AgentRunResult:
     provider: str | None
     usage: dict[str, Any]
     trace: list[dict[str, Any]]
+    answer_status: str
+    warnings: list[str]
+    citations_required: bool
+    citation_status: str
 
 
 @dataclass(slots=True)
@@ -125,14 +136,29 @@ class AgentRuntime:
             logger.warning("agent.run.timeout", kind=kind, timeout_seconds=timeout)
             raise
         context.record("finalize", insufficient=bool(final.get("insufficient_evidence")))
+        insufficient = bool(final.get("insufficient_evidence"))
         return AgentRunResult(
             status="succeeded",
             answer=str(final.get("answer") or ""),
             citations=list(final.get("citations") or []),
-            insufficient_evidence=bool(final.get("insufficient_evidence")),
+            insufficient_evidence=insufficient,
             confidence=float(final.get("confidence") or 0.0),
             is_mock=bool(final.get("is_mock", True)),
             provider=final.get("provider"),
             usage=dict(final.get("usage") or {}),
             trace=list(context.trace),
+            answer_status=str(
+                final.get("answer_status")
+                or (
+                    ANSWER_STATUS_INSUFFICIENT
+                    if insufficient
+                    else ANSWER_STATUS_ANSWERED
+                )
+            ),
+            warnings=list(final.get("warnings") or []),
+            citations_required=bool(final.get("citations_required", False)),
+            citation_status=str(
+                final.get("citation_status")
+                or ("not_required" if insufficient else "valid")
+            ),
         )

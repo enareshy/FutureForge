@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
 
 from ai_api.api.deps import (
+    DuplicateServiceDep,
     IndexingServiceDep,
     IngestionServiceDep,
     KnowledgeServiceDep,
     PaginationDep,
     PrincipalDep,
+    SearchServiceDep,
     SettingsDep,
     enforce_rate_limit,
     require_capability,
@@ -17,21 +21,34 @@ from ai_api.domain.errors import NotFoundError
 from ai_api.infrastructure.storage import sanitize_filename
 from ai_api.schemas.common import Page, PageMeta
 from ai_api.schemas.knowledge import (
+    DocumentMetadataUpdate,
     DocumentOut,
+    DocumentVersionOut,
     JobOut,
-    KnowledgeDocumentIn,
     KnowledgeIndexRequest,
     KnowledgeIngestBody,
     KnowledgeIngestResponse,
     KnowledgeReindexResponse,
+    KnowledgeSourceAclUpdate,
+    KnowledgeSourceClassificationUpdate,
     KnowledgeSourceCreate,
     KnowledgeSourceOut,
     KnowledgeUploadResponse,
+    StoredKnowledgeDocumentIn,
     UploadedDocumentOut,
+)
+from ai_api.schemas.search import (
+    DuplicateFindingOut,
+    DuplicateReviewRequest,
+    DuplicateScanResponse,
+    IndexStatusResponse,
+    ReconcileRequest,
+    ReconcileResponse,
 )
 from ai_api.security.permissions import (
     CAP_KNOWLEDGE_INDEX,
     CAP_KNOWLEDGE_READ,
+    CAP_KNOWLEDGE_SECURITY,
     CAP_KNOWLEDGE_WRITE,
 )
 
@@ -67,6 +84,59 @@ async def create_source(
     return KnowledgeSourceOut(**await service.create_source(principal, payload))
 
 
+@router.get(
+    "/knowledge/sources/{source_id}",
+    response_model=KnowledgeSourceOut,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_READ))],
+)
+async def get_source(
+    source_id: int, principal: PrincipalDep, service: KnowledgeServiceDep
+) -> KnowledgeSourceOut:
+    return KnowledgeSourceOut(**await service.get_source(principal, source_id))
+
+
+@router.put(
+    "/knowledge/sources/{source_id}/acl",
+    response_model=KnowledgeSourceOut,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_SECURITY))],
+)
+async def update_source_acl(
+    source_id: int,
+    payload: KnowledgeSourceAclUpdate,
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+) -> KnowledgeSourceOut:
+    return KnowledgeSourceOut(
+        **await service.update_source_acl(
+            principal,
+            source_id,
+            acl=payload.acl,
+            expected_version=payload.expected_version,
+        )
+    )
+
+
+@router.put(
+    "/knowledge/sources/{source_id}/classification",
+    response_model=KnowledgeSourceOut,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_SECURITY))],
+)
+async def update_source_classification(
+    source_id: int,
+    payload: KnowledgeSourceClassificationUpdate,
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+) -> KnowledgeSourceOut:
+    return KnowledgeSourceOut(
+        **await service.update_source_classification(
+            principal,
+            source_id,
+            classification=payload.classification,
+            expected_version=payload.expected_version,
+        )
+    )
+
+
 @router.post(
     "/knowledge/index",
     response_model=JobOut,
@@ -77,6 +147,102 @@ async def request_index(
     payload: KnowledgeIndexRequest, principal: PrincipalDep, service: KnowledgeServiceDep
 ) -> JobOut:
     return JobOut(**await service.request_index(principal, payload))
+
+
+@router.get(
+    "/knowledge/index-status",
+    response_model=IndexStatusResponse,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_READ))],
+)
+async def index_status(
+    principal: PrincipalDep, service: SearchServiceDep
+) -> IndexStatusResponse:
+    return IndexStatusResponse(**await service.index_status(principal))
+
+
+@router.post(
+    "/knowledge/reconcile",
+    response_model=ReconcileResponse,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_INDEX))],
+)
+async def reconcile_index(
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+    payload: ReconcileRequest | None = None,
+) -> ReconcileResponse:
+    options = payload or ReconcileRequest()
+    return ReconcileResponse(
+        **await service.reconcile_index(
+            principal,
+            limit=options.limit,
+            scan_orphans=options.scan_orphans,
+            purge_orphans=options.purge_orphans,
+        )
+    )
+
+
+@router.post(
+    "/knowledge/duplicates/scan",
+    response_model=DuplicateScanResponse,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_INDEX))],
+)
+async def scan_duplicates(
+    principal: PrincipalDep, service: DuplicateServiceDep
+) -> DuplicateScanResponse:
+    return DuplicateScanResponse(**await service.scan(principal))
+
+
+@router.get(
+    "/knowledge/duplicates",
+    response_model=Page[DuplicateFindingOut],
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_INDEX))],
+)
+async def list_duplicates(
+    principal: PrincipalDep,
+    service: DuplicateServiceDep,
+    pagination: PaginationDep,
+    status_filter: str | None = Query(default=None, alias="status", max_length=16),
+    kind: str | None = Query(default=None, max_length=16),
+) -> Page[DuplicateFindingOut]:
+    items, total = await service.list_findings(
+        principal,
+        status=status_filter,
+        kind=kind,
+        limit=pagination.limit,
+        offset=pagination.offset,
+    )
+    return Page[DuplicateFindingOut](
+        items=[DuplicateFindingOut(**item) for item in items],
+        meta=PageMeta(total=total, limit=pagination.limit, offset=pagination.offset),
+    )
+
+
+@router.get(
+    "/knowledge/duplicates/{finding_id}",
+    response_model=DuplicateFindingOut,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_INDEX))],
+)
+async def get_duplicate(
+    finding_id: int, principal: PrincipalDep, service: DuplicateServiceDep
+) -> DuplicateFindingOut:
+    return DuplicateFindingOut(**await service.get_finding(principal, finding_id))
+
+
+@router.post(
+    "/knowledge/duplicates/{finding_id}/review",
+    response_model=DuplicateFindingOut,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_INDEX))],
+)
+async def review_duplicate(
+    finding_id: int,
+    payload: DuplicateReviewRequest,
+    principal: PrincipalDep,
+    service: DuplicateServiceDep,
+) -> DuplicateFindingOut:
+    updated = await service.review(
+        principal, finding_id, status=payload.status, note=payload.note
+    )
+    return DuplicateFindingOut(**updated)
 
 
 @router.get(
@@ -180,6 +346,18 @@ async def reindex_source(
 
 
 @router.post(
+    "/knowledge/documents/{document_id}/reindex",
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_INDEX))],
+)
+async def reindex_document(
+    document_id: int,
+    principal: PrincipalDep,
+    ingestion: IngestionServiceDep,
+) -> dict[str, Any]:
+    return await ingestion.reindex_document(principal, document_id)
+
+
+@router.post(
     "/knowledge/jobs/{job_id}/retry",
     response_model=JobOut,
     dependencies=[Depends(require_capability(CAP_KNOWLEDGE_INDEX))],
@@ -229,19 +407,15 @@ async def upload_document(
     if descriptor["deduplicated"]:
         return KnowledgeUploadResponse(document=UploadedDocumentOut(**descriptor))
 
-    body = KnowledgeIngestBody(
-        documents=[
-            KnowledgeDocumentIn(
-                external_id=descriptor["external_id"],
-                title=descriptor["title"],
-                mime_type=descriptor["mime_type"],
-                object_key=descriptor["object_key"],
-                checksum=descriptor["checksum"],
-                size_bytes=descriptor["size_bytes"],
-            )
-        ]
+    stored = StoredKnowledgeDocumentIn(
+        external_id=descriptor["external_id"],
+        title=descriptor["title"],
+        mime_type=descriptor["mime_type"],
+        object_key=descriptor["object_key"],
+        checksum=descriptor["checksum"],
+        size_bytes=descriptor["size_bytes"],
     )
-    job = await ingestion.enqueue(principal, source_id, body)
+    job = await ingestion.enqueue_stored(principal, source_id, [stored])
     result = None
     if settings.ai_ingest_inline:
         processed = await indexing.process_job(require_tenant(principal), job["id"])
@@ -266,6 +440,59 @@ async def download_document(
         content=data,
         media_type=document.get("mime_type") or "application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get(
+    "/knowledge/documents/{document_id}",
+    response_model=DocumentOut,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_READ))],
+)
+async def get_document(
+    document_id: int, principal: PrincipalDep, service: KnowledgeServiceDep
+) -> DocumentOut:
+    return DocumentOut(**await service.get_document(principal, document_id))
+
+
+@router.patch(
+    "/knowledge/documents/{document_id}",
+    response_model=DocumentOut,
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_WRITE))],
+)
+async def update_document(
+    document_id: int,
+    payload: DocumentMetadataUpdate,
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+) -> DocumentOut:
+    return DocumentOut(
+        **await service.update_document(
+            principal,
+            document_id,
+            title=payload.title,
+            metadata=payload.metadata,
+            expected_version=payload.expected_version,
+        )
+    )
+
+
+@router.get(
+    "/knowledge/documents/{document_id}/versions",
+    response_model=Page[DocumentVersionOut],
+    dependencies=[Depends(require_capability(CAP_KNOWLEDGE_READ))],
+)
+async def list_document_versions(
+    document_id: int,
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+    pagination: PaginationDep,
+) -> Page[DocumentVersionOut]:
+    items, total = await service.list_document_versions(
+        principal, document_id, limit=pagination.limit, offset=pagination.offset
+    )
+    return Page[DocumentVersionOut](
+        items=[DocumentVersionOut(**item) for item in items],
+        meta=PageMeta(total=total, limit=pagination.limit, offset=pagination.offset),
     )
 
 

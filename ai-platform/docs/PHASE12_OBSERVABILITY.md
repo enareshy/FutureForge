@@ -68,6 +68,15 @@ at `GET /metrics`.
 | `ai_events_published_total` | counter | `event_type` | Events published. |
 | `ai_events_consumed_total` | counter | `consumer_group`, `outcome` | Events processed (delivered/retrying/dead). |
 | `ai_index_jobs_total` | counter | `status` | Indexing jobs reaching a terminal status. |
+| `ai_worker_cycles_total` | counter | `worker`, `outcome` | Completed/failed worker cycles. |
+| `ai_worker_last_success_timestamp_seconds` | gauge | `worker` | Last successful cycle (0 = never). |
+| `ai_worker_consecutive_failures` | gauge | `worker` | Consecutive failed cycles. |
+| `ai_worker_shutdowns_total` | counter | `worker` | Graceful worker shutdowns. |
+| `ai_event_delivery_backlog` | gauge | `state` | Pending/delayed/dead deliveries. |
+| `ai_event_delivery_oldest_pending_seconds` | gauge | — | Age of the oldest due event. |
+| `ai_index_jobs_current` | gauge | `status` | Index queue by status. |
+| `ai_security_refresh_overdue` | gauge | — | Security refreshes past the staleness window. |
+| `ai_index_reconcile_runs_total` | counter | `outcome` | Reconciliation passes by outcome. |
 
 `normalize_path()` is a defensive fallback that collapses UUID/numeric/hex id
 segments; the middleware prefers Starlette's matched route template.
@@ -105,7 +114,7 @@ context is cleared at the end of each request.
 | `GET /healthz` | Liveness | Always `{"status": "ok"}`. |
 | `GET /readyz` | Readiness | Reports repository, vector store, search index, event bus, ML tracking and telemetry config; probes the database when `AI_REPOSITORY=postgres` and returns `503` when it is unavailable. |
 | `GET /api/v1/ai/health` | Detailed health | `HealthResponse` with component summary. |
-| `GET /metrics` | Prometheus scrape | Not shown in the OpenAPI schema. |
+| `GET /metrics` | Prometheus scrape | Bearer token required; not shown in the OpenAPI schema. |
 
 Probes and `/metrics` are excluded from HTTP request metrics and access logs to
 avoid self-instrumentation noise.
@@ -119,9 +128,16 @@ Grafana is provisioned file-based from
 - `ai-platform-overview.json` — HTTP rate/latency, model calls and latency, tokens,
   cost, retrieval, tool executions, event processing and indexing jobs.
 
-Prometheus scrapes the OTel collector (`otel-collector:8889`) and the AI API
-directly (`ai-api:8000`, `/metrics`) as configured in
-`infrastructure/monitoring/prometheus/prometheus.yml`.
+Prometheus scrapes the OTel collector (`otel-collector:8889`), the AI API
+directly (`ai-api:8000`, `/metrics`) and each worker on port 9100
+(`ai-event-consumer`, `ai-reconciler`, `ai-indexer`, `ai-agent-worker`) as
+configured in `infrastructure/monitoring/prometheus/prometheus.yml`. The AI API
+and worker jobs send `Authorization: Bearer <AI_METRICS_AUTH_TOKEN>`; the local
+Compose profile reads the token from
+`infrastructure/monitoring/prometheus/local-metrics-token` and publishes the
+same endpoints on host ports 9101-9104. Kubernetes scrape jobs must attach the
+same bearer token (for example a `ServiceMonitor` `authorization` block backed by
+the `ai-api-secrets` token).
 
 ## Configuration
 
@@ -133,23 +149,40 @@ directly (`ai-api:8000`, `/metrics`) as configured in
 | `LANGFUSE_HOST` | — | Langfuse host; tracing off unless set with both keys. |
 | `LANGFUSE_PUBLIC_KEY` | — | Langfuse public key. |
 | `LANGFUSE_SECRET_KEY` | — | Langfuse secret key. |
+| `AI_METRICS_AUTH_TOKEN` | empty | Bearer token for `/metrics`; empty fails closed with 503. Production/staging require >= 32 characters. |
 
-Prometheus metrics require no configuration and are always available.
+`/metrics` is never anonymous. Without a configured token it returns 503; with
+a missing or wrong bearer token it returns 401. `/healthz` and `/readyz` remain
+unauthenticated probe endpoints.
 
-Background workers run in separate processes and can expose the same registry on
-a port of their choice:
+Background workers run in separate processes and expose the same registry plus
+`/healthz` and `/readyz`:
 
+```bash
+python -m ai_api.workers.event_consumer --watch --metrics-port 9100
+python -m ai_api.workers.reconciler --watch --metrics-port 9100
+python -m ai_api.workers.indexer --watch --metrics-port 9100
+python -m ai_api.workers.agent --watch --metrics-port 9100
 ```
-python -m ai_api.workers.event_consumer --watch --metrics-port 9101
-python -m ai_api.workers.indexer --watch --metrics-port 9102
-```
+
+Readiness fails closed: it is 503 until the first successful cycle and again
+when the last success exceeds `--health-stale-seconds` (per-worker default).
+Liveness stays 200 while the process is alive. Worker `/metrics` uses the same
+bearer token; probes stay anonymous. In Kubernetes each Deployment
+uses port 9100; scaling and alerting recommendations are in
+`WORKER_DEPLOYMENT.md`. An opt-in Prometheus/Alertmanager stack exists in
+`infrastructure/kubernetes/monitoring/`, but its shipped receiver has no
+integration, so no notification path to a human is verified.
 
 ## Testing
 
-`tests/test_observability.py` verifies the `/metrics` exposition, liveness and
-readiness (including the in-memory database path), request-id echo, path
-normalization, that every metric helper records without error, and the
-disabled/enabled behavior of the Langfuse publisher.
+`tests/test_observability.py` verifies the authenticated `/metrics` exposition,
+that missing/wrong tokens are rejected, liveness and readiness (including the
+in-memory database path), request-id echo, path normalization, that every metric
+helper records without error, and the disabled/enabled behavior of the Langfuse
+publisher. `tests/test_worker_runtime.py` covers worker token enforcement, and
+`tests/test_production_config.py` verifies production startup requirements and
+disabled docs.
 
 ## Running the stack
 
@@ -158,7 +191,7 @@ disabled/enabled behavior of the Langfuse publisher.
 docker compose --profile observability up -d
 
 # Scrape check.
-curl -s localhost:8000/metrics | head
+curl -s -H "Authorization: Bearer $AI_METRICS_AUTH_TOKEN" localhost:8000/metrics | head
 
 # Readiness.
 curl -s localhost:8000/readyz

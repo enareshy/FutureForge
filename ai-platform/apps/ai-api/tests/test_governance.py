@@ -20,6 +20,7 @@ async def test_defaults_allow_when_no_policy_row() -> None:
         _principal(), operation="chat", model="mock-chat", prompt_text="hello", feature="chat"
     )
     assert policy.max_prompt_chars == 20000
+    assert policy.block_prompt_injection is True
 
 
 async def test_model_allow_list_is_enforced() -> None:

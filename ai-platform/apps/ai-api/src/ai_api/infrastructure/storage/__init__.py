@@ -22,8 +22,9 @@ from typing import Any
 from ai_api.config.settings import Settings
 from ai_api.domain.errors import ConfigurationError, ServiceUnavailableError
 
-_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/_.\-]*$")
+_KEY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_OBJECT_KEY_MAX_LENGTH = 1024
 
 
 def _storage_unavailable(exc: Exception) -> ServiceUnavailableError:
@@ -49,14 +50,54 @@ def sanitize_filename(filename: str, *, default: str = "document") -> str:
 
 
 def validate_object_key(key: str) -> str:
-    value = str(key or "")
-    if (
-        not value
-        or not _KEY_RE.match(value)
-        or ".." in value
-        or value.startswith("/")
+    """Validate a canonical, provider-neutral object key.
+
+    Keys are rejected rather than normalized so S3-compatible providers cannot
+    disagree about ``.``/``..`` segments, duplicate separators or URL-encoded
+    characters. Tenant ownership is checked separately by
+    :func:`validate_tenant_object_key`; syntax alone is never authorization.
+    """
+
+    if not isinstance(key, str) or not key or len(key) > _OBJECT_KEY_MAX_LENGTH:
+        raise ConfigurationError("invalid object storage key")
+    if key.startswith("/") or key.endswith("/") or "//" in key:
+        raise ConfigurationError("invalid object storage key")
+    segments = key.split("/")
+    if any(
+        segment in {".", ".."} or not _KEY_SEGMENT_RE.fullmatch(segment)
+        for segment in segments
     ):
         raise ConfigurationError("invalid object storage key")
+    return key
+
+
+def tenant_object_prefix(tenant_id: int) -> str:
+    return f"knowledge/{int(tenant_id)}/"
+
+
+def validate_tenant_object_key(key: str, tenant_id: int) -> str:
+    """Require a server-generated key inside the caller's tenant namespace."""
+
+    value = validate_object_key(key)
+    if not value.startswith(tenant_object_prefix(tenant_id)):
+        raise ConfigurationError("object storage key is outside the tenant namespace")
+    return value
+
+
+def validate_document_object_key(key: str, tenant_id: int) -> str:
+    """Validate a key resolved from an authoritative document row.
+
+    New objects always use :func:`build_object_key`. Legacy rows may carry a
+    syntactically safe key without the tenant prefix; those are readable only
+    through the tenant-scoped document record that owns them. A key that claims
+    a different tenant's ``knowledge/`` namespace is always rejected.
+    """
+
+    value = validate_object_key(key)
+    segments = value.split("/")
+    if segments[0] == "knowledge":
+        if len(segments) < 3 or segments[1] != str(int(tenant_id)):
+            raise ConfigurationError("object storage key is outside the tenant namespace")
     return value
 
 
@@ -240,5 +281,8 @@ __all__ = [
     "build_object_storage",
     "content_checksum",
     "sanitize_filename",
+    "tenant_object_prefix",
+    "validate_document_object_key",
     "validate_object_key",
+    "validate_tenant_object_key",
 ]

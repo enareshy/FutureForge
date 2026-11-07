@@ -8,20 +8,10 @@ from ai_api.api.deps import (
     enforce_rate_limit,
     require_capability,
 )
-from ai_api.schemas.retrieval import RagQueryRequest, SearchRequest
-from ai_api.security.permissions import CAP_RETRIEVAL_RAG, CAP_RETRIEVAL_SEARCH
+from ai_api.schemas.retrieval import RagQueryRequest
+from ai_api.security.permissions import CAP_RETRIEVAL_RAG
 
 router = APIRouter(tags=["retrieval"], dependencies=[Depends(enforce_rate_limit)])
-
-
-@router.post(
-    "/search",
-    dependencies=[Depends(require_capability(CAP_RETRIEVAL_SEARCH))],
-)
-async def search(
-    payload: SearchRequest, principal: PrincipalDep, service: RetrievalServiceDep
-) -> dict:
-    return await service.search(principal, payload)
 
 
 @router.post(

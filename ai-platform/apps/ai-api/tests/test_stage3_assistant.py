@@ -38,7 +38,11 @@ def _client(repository: InMemoryAiRepository) -> Iterator[TestClient]:
 
 def _principal(username: str = "tester") -> Principal:
     return Principal(
-        user_id=username, username=username, tenant_id=TENANT, permissions=POWER_USER
+        user_id=username,
+        username=username,
+        tenant_id=TENANT,
+        actor_id=1,
+        permissions=POWER_USER,
     )
 
 

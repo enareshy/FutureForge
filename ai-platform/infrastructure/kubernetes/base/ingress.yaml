@@ -15,7 +15,9 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+    # Transport cap. Must stay >= AI_MAX_REQUEST_BYTES (32 MiB) and above the
+    # 25 MiB upload limit plus multipart framing so uploads reach the app.
+    nginx.ingress.kubernetes.io/proxy-body-size: "32m"
     # Server-Sent Events (chat streaming) need a long read timeout and no
     # response buffering.
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"

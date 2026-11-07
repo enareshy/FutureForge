@@ -73,6 +73,10 @@ import * as requirementManufacturing from "./services/requirement-manufacturing/
 import { createRequirementManufacturingRouter } from "./services/requirement-manufacturing/router-requirement-manufacturing.js";
 import * as verificationValidation from "./services/verification-validation/index.js";
 import { createVerificationValidationRouter } from "./services/verification-validation/router-verification-validation.js";
+import * as manufacturingQuality from "./services/manufacturing-quality/index.js";
+import { createManufacturingQualityRouter } from "./services/manufacturing-quality/router-manufacturing-quality.js";
+import * as predictiveIntelligence from "./services/predictive-intelligence/index.js";
+import { createPredictiveRouter } from "./services/predictive-intelligence/router-predictive-intelligence.js";
 import * as deployment from "./services/deployment/index.js";
 import { createDeploymentRouter } from "./services/deployment/router-deployment.js";
 import * as thread from "./services/thread/index.js";
@@ -385,6 +389,16 @@ export function createApp(db) {
     verificationValidation.Foundation.ensureVvFoundation(db);
   } catch {
     /* Verification & Validation foundation is idempotent and must never block application boot */
+  }
+  try {
+    manufacturingQuality.Foundation.ensureManufacturingQualityFoundation(db);
+  } catch {
+    /* Manufacturing & Quality foundation is idempotent and must never block application boot */
+  }
+  try {
+    predictiveIntelligence.Foundation.ensurePredictiveFoundation(db);
+  } catch {
+    /* Predictive Intelligence foundation is idempotent and must never block application boot */
   }
   try {
     thread.ensureThreadFoundation(db);
@@ -4529,19 +4543,68 @@ export function createApp(db) {
     })
   );
 
+  // SEC-09: the legacy authorization inspection routes must not become an
+  // enumeration oracle. Self-inspection is always allowed; inspecting another
+  // principal requires the IAM user-read permission and the request tenant.
+  const parseAuthorizationSubjectId = (value) => {
+    const id = Number(value);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new HttpError(400, "Invalid user id");
+    }
+    return id;
+  };
+  const assertAuthorizationSubjectInScope = async (req, subjectId) => {
+    if (Number(req.actor?.id) === subjectId) return;
+    if (!req.actor?.id) throw new HttpError(401, "Authentication required");
+    const allowed = await authorization.checkPermissionAsync(
+      db,
+      req.actor.id,
+      "iam.users",
+      "read",
+      { organizationId: 0 }
+    );
+    if (!allowed.allowed) throw new HttpError(403, "Forbidden");
+    // A subject outside the caller's tenant is reported exactly like an
+    // unknown user so the route cannot be used to probe tenant membership.
+    await users.getUserAsync(db, subjectId, tenantFilter(req));
+  };
+  const scopeAuthorizationContext = async (req, organizationId) => {
+    if (
+      organizationId === undefined ||
+      organizationId === null ||
+      organizationId === "" ||
+      organizationId === "global"
+    ) {
+      return 0;
+    }
+    const orgId = Number(organizationId);
+    if (!Number.isInteger(orgId) || orgId <= 0) {
+      throw new HttpError(400, "Invalid organization id");
+    }
+    await scopedOrgAsync(db, req, orgId);
+    return orgId;
+  };
+
   app.post(
     "/api/authorization/check",
     authAsync,
+    canAsync("iam.security.decisions", "read"),
     wrap(async (req, res) => {
       const { userId, user, resource, action, context, organizationId } = req.body || {};
-      const subject = userId || user;
+      const subject = userId ?? user;
       if (!subject || !resource || !action) {
         throw new HttpError(400, "userId, resource and action are required");
       }
-      const ctx = { ...(context || {}), organizationId: organizationId ?? context?.organizationId };
+      const subjectId = parseAuthorizationSubjectId(subject);
+      await assertAuthorizationSubjectInScope(req, subjectId);
+      const contextOrganizationId = await scopeAuthorizationContext(
+        req,
+        organizationId ?? context?.organizationId
+      );
+      const ctx = { ...(context || {}), organizationId: contextOrganizationId };
       const result = await authorization.checkPermissionAuditedAsync(
         db,
-        subject,
+        subjectId,
         resource,
         action,
         ctx,
@@ -4556,9 +4619,15 @@ export function createApp(db) {
     "/api/authorization/effective/:userId",
     authAsync,
     wrap(async (req, res) => {
+      const subjectId = parseAuthorizationSubjectId(req.params.userId);
+      await assertAuthorizationSubjectInScope(req, subjectId);
+      const organizationId = await scopeAuthorizationContext(
+        req,
+        req.query.organizationId
+      );
       res.json(
-        await authorization.effectivePermissionsAsync(db, req.params.userId, {
-          organizationId: req.query.organizationId,
+        await authorization.effectivePermissionsAsync(db, subjectId, {
+          organizationId,
         })
       );
     })
@@ -10424,6 +10493,15 @@ export function createApp(db) {
   const verificationValidationRouter = createVerificationValidationRouter({ express, db, auth, can, authAsync, canAsync, wrap });
   app.use("/api/verification-validation", verificationValidationRouter);
   app.use("/api/v1/verification-validation", verificationValidationRouter);
+
+  // ── P3 Manufacturing & Quality Intelligence ────────────────────────────────
+  const manufacturingQualityRouter = createManufacturingQualityRouter({ express, db, auth, can, authAsync, canAsync, wrap });
+  app.use("/api/manufacturing-quality", manufacturingQualityRouter);
+  app.use("/api/v1/manufacturing-quality", manufacturingQualityRouter);
+
+  const predictiveRouter = createPredictiveRouter({ express, db, auth, can, authAsync, canAsync, wrap });
+  app.use("/api/predictive-intelligence", predictiveRouter);
+  app.use("/api/v1/predictive-intelligence", predictiveRouter);
 
   // ── P1 Digital Thread ─────────────────────────────────────────────────────
   const threadRouter = createThreadRouter({ express, db, auth, can, authAsync, canAsync, wrap });

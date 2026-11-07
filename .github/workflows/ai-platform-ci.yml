@@ -5,6 +5,7 @@ on:
     branches: [postgres, main]
     paths:
       - "ai-platform/**"
+      - "server/**"
       - "web/**"
       - "vite.config.js"
       - "package.json"
@@ -13,7 +14,10 @@ on:
   pull_request:
     paths:
       - "ai-platform/**"
+      - "server/**"
       - "web/**"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/ai-platform-ci.yml"
   workflow_dispatch:
 
@@ -50,6 +54,189 @@ jobs:
         run: ruff check src tests scripts
       - name: "Tests (hermetic: unit + e2e + AI evaluation)"
         run: PYTHONPATH=src python -m pytest
+
+  postgres-integration:
+    name: PostgreSQL integration + fresh-install migrations
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-platform/apps/ai-api
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ai_ci
+      AI_API_LOG_LEVEL: critical
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: ai-platform/apps/ai-api/requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Apply migrations in the documented fresh-install order
+        working-directory: ai-platform
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -d postgres -c "CREATE DATABASE ${POSTGRES_DB};"
+          # Phase 1: 0001-0018 (creates the ai schema, helpers and FORCE RLS).
+          POSTGRES_HOST="$PGHOST" POSTGRES_PORT="$PGPORT" POSTGRES_USER=postgres \
+            POSTGRES_PASSWORD=postgres POSTGRES_DB="$POSTGRES_DB" AI_DB_SCHEMA=ai \
+            AI_MIGRATION_STOP_AFTER=0018_tenant_row_level_security.sql \
+            bash scripts/migrate.sh
+          # Provision the least-privilege roles between 0018 and 0019.
+          psql -d "$POSTGRES_DB" --single-transaction -v ON_ERROR_STOP=1 \
+            -f infrastructure/db/roles/provision_roles.sql
+          psql -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+            -c "ALTER ROLE ai_migrate PASSWORD 'mig';" \
+            -c "ALTER ROLE ai_worker PASSWORD 'worker';" \
+            -c "ALTER ROLE ai_api PASSWORD 'api';" \
+            -c "ALTER ROLE ai_backup PASSWORD 'backup';" \
+            -c "ALTER ROLE ai_restore PASSWORD 'restore';"
+          # Phase 2: 0019-0026 through the non-owner migration login.
+          POSTGRES_HOST="$PGHOST" POSTGRES_PORT="$PGPORT" POSTGRES_DB="$POSTGRES_DB" \
+            AI_DB_SCHEMA=ai AI_DB_ROLE_PROFILE=migrate AI_MIGRATION_DB_USER=ai_migrate \
+            AI_MIGRATION_DB_PASSWORD=mig bash scripts/migrate.sh
+          # Refresh grants for objects created after provisioning.
+          psql -d "$POSTGRES_DB" --single-transaction -v ON_ERROR_STOP=1 \
+            -f infrastructure/db/roles/provision_roles.sql
+          # The ledger must record every migration exactly once.
+          total=$(find migrations -maxdepth 1 -name '*.sql' | wc -l | tr -d ' ')
+          applied=$(psql -d "$POSTGRES_DB" -tAc "SELECT count(*) FROM ai.schema_migrations" | tr -d ' ')
+          echo "migration files: $total, ledger rows: $applied"
+          test "$applied" -eq "$total"
+      - name: Run PostgreSQL integration suite as the least-privilege worker role
+        env:
+          AI_TEST_POSTGRES: "1"
+          POSTGRES_USER: ai_worker
+          POSTGRES_PASSWORD: worker
+        run: PYTHONPATH=src python -m pytest -o addopts="" -q -m integration
+
+  migrations-validate:
+    name: migration files (sequence + documentation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert migrations are contiguous and documented
+        run: |
+          set -euo pipefail
+          cd ai-platform
+          expected=1
+          for f in $(find migrations -maxdepth 1 -name '0*.sql' | sort); do
+            base=$(basename "$f")
+            num=$(printf '%s' "$base" | cut -d_ -f1 | sed 's/^0*//')
+            if [ "$num" -ne "$expected" ]; then
+              echo "::error::migration sequence gap: expected $(printf '%04d' "$expected"), got $base"
+              exit 1
+            fi
+            if ! grep -q "\`$base\`" migrations/README.md; then
+              echo "::error::$base is missing from migrations/README.md"
+              exit 1
+            fi
+            expected=$((expected + 1))
+          done
+          echo "migrations 0001..$(printf '%04d' $((expected - 1))) are contiguous and documented"
+
+  enterprise-node-coverage:
+    name: enterprise Node coverage guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert shard plan covers every test file
+        run: |
+          set -euo pipefail
+          total=$(find server/tests -maxdepth 1 -name '*.test.js' | wc -l | tr -d ' ')
+          shards=12
+          per_shard=$(( (total + shards - 1) / shards ))
+          echo "test files: $total, shards: $shards, per shard: $per_shard"
+          if [ "$per_shard" -eq 0 ]; then
+            echo "::error::no Node test files found"
+            exit 1
+          fi
+          if [ "$((per_shard * shards))" -lt "$total" ]; then
+            echo "::error::Node shard plan covers $((per_shard * shards)) files but $total exist"
+            exit 1
+          fi
+
+  enterprise-node:
+    name: enterprise Node (shard ${{ matrix.shard }}/12)
+    runs-on: ubuntu-latest
+    needs: enterprise-node-coverage
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Run shard (serial)
+        run: |
+          set -euo pipefail
+          files=(server/tests/*.test.js)
+          total=${#files[@]}
+          shards=12
+          per_shard=$(( (total + shards - 1) / shards ))
+          start=$(( ${{ matrix.shard }} * per_shard ))
+          chunk=( "${files[@]:start:per_shard}" )
+          if [ "${#chunk[@]}" -eq 0 ]; then
+            echo "::error::shard ${{ matrix.shard }} selected 0 files"
+            exit 1
+          fi
+          node --test --test-concurrency=1 --test-reporter=spec "${chunk[@]}" \
+            | tee "node-shard-${{ matrix.shard }}.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-shard-${{ matrix.shard }}
+          path: node-shard-${{ matrix.shard }}.log
+          if-no-files-found: error
 
   web-console:
     name: enterprise console (test + build)
@@ -96,6 +283,7 @@ jobs:
         run: |
           python -m pip install pyyaml
           python ai-platform/scripts/validate-k8s.py
+          python ai-platform/scripts/validate-monitoring.py
       - name: Install kustomize and kubeconform
         run: |
           curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz" \
@@ -106,7 +294,7 @@ jobs:
           sudo mv kubeconform /usr/local/bin/
       - name: Render and schema-validate
         run: |
-          for target in base overlays/production; do
+          for target in base overlays/production monitoring; do
             echo "::group::kustomize build $target"
             kustomize build "ai-platform/infrastructure/kubernetes/$target" > "/tmp/rendered-$(echo "$target" | tr / -).yaml"
             kubeconform -strict -ignore-missing-schemas -summary "/tmp/rendered-$(echo "$target" | tr / -).yaml"
@@ -134,6 +322,17 @@ jobs:
           push: false
           load: true
           tags: enterprise-ai-platform/web-ai:${{ github.sha }}
+      - name: Build backup image
+        uses: docker/build-push-action@v6
+        with:
+          context: ai-platform
+          file: ai-platform/infrastructure/backup/Dockerfile
+          push: false
+          load: true
+          tags: enterprise-ai-platform/ai-backup:${{ github.sha }}
+      - name: Validate Compose configuration
+        working-directory: ai-platform
+        run: docker compose -f compose.yaml config -q
       - name: Trivy image scan (fail on HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@0.28.0
         with:
@@ -154,6 +353,12 @@ jobs:
           image: enterprise-ai-platform/web-ai:${{ github.sha }}
           format: cyclonedx-json
           output-file: sbom-web-ai.cdx.json
+      - name: SBOM (CycloneDX) for ai-backup
+        uses: anchore/sbom-action@v0.17.9
+        with:
+          image: enterprise-ai-platform/ai-backup:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom-ai-backup.cdx.json
       - uses: actions/upload-artifact@v4
         with:
           name: sbom
@@ -168,11 +373,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Validate Prometheus config
+      - name: Validate Prometheus/Alertmanager configs
         run: |
           curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v2.53.5/prometheus-2.53.5.linux-amd64.tar.gz" \
             | tar -xz --strip-components=1 -C /tmp prometheus-2.53.5.linux-amd64/promtool
-          /tmp/promtool check config ai-platform/infrastructure/monitoring/prometheus/prometheus.yml
+          curl -fsSL "https://github.com/prometheus/alertmanager/releases/download/v0.27.0/alertmanager-0.27.0.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C /tmp alertmanager-0.27.0.linux-amd64/amtool
+          PATH="/tmp:$PATH" bash ai-platform/scripts/check-prometheus-configs.sh
+      - name: Validate alerting wiring
+        run: |
+          python -m pip install pyyaml
+          python ai-platform/scripts/validate-monitoring.py
       - name: Validate OTel collector config
         run: |
           docker run --rm \

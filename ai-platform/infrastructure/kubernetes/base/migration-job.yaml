@@ -42,11 +42,18 @@ spec:
             - |
               set -euo pipefail
               export PGPASSWORD="$POSTGRES_PASSWORD"
-              PSQL="psql -v ON_ERROR_STOP=1 -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB"
+              # ai_migrate is a non-owner login that may SET ROLE ai_owner.
+              export PGOPTIONS="-c ai.system_access=on -c role=ai_owner"
+              PSQL="psql -w -v ON_ERROR_STOP=1 -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB"
               $PSQL -c "CREATE SCHEMA IF NOT EXISTS $AI_DB_SCHEMA;"
               $PSQL -c "CREATE TABLE IF NOT EXISTS $AI_DB_SCHEMA.schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now(), checksum text NOT NULL, description text);"
               for f in /migrations/*.sql; do
                 v="$(basename "$f")"
+                if [ -n "${AI_MIGRATION_STOP_AFTER:-}" ] && [ "$v" != "$AI_MIGRATION_STOP_AFTER" ] \
+                  && [ "$(printf '%s\n%s\n' "$AI_MIGRATION_STOP_AFTER" "$v" | sort | head -n1)" = "$AI_MIGRATION_STOP_AFTER" ]; then
+                  echo "stop  after $AI_MIGRATION_STOP_AFTER (fresh-install provisioning window)"
+                  break
+                fi
                 if [ "$($PSQL -tAc "SELECT 1 FROM $AI_DB_SCHEMA.schema_migrations WHERE version='$v'")" = "1" ]; then
                   echo "skip  $v"
                   continue
@@ -62,6 +69,16 @@ spec:
                 name: ai-api-config
             - secretRef:
                 name: ai-api-secrets
+          env:
+            - name: POSTGRES_USER
+              value: ai_migrate
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ai-api-secrets
+                  key: AI_MIGRATION_POSTGRES_PASSWORD
+            - name: AI_DB_ROLE_PROFILE
+              value: migrate
           resources:
             requests:
               cpu: 50m

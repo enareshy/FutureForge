@@ -23,6 +23,13 @@ spec:
         app.kubernetes.io/name: ai-api
         app.kubernetes.io/part-of: enterprise-ai-platform
         app.kubernetes.io/component: backend
+      annotations:
+        # /metrics is served on the same port as the API and requires the
+        # AI_METRICS_AUTH_TOKEN bearer token. Scraping is restricted to the
+        # observability namespace by the allow-metrics-scrape NetworkPolicy.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: ai-api
       automountServiceAccountToken: false
@@ -46,6 +53,18 @@ spec:
                 name: ai-api-config
             - secretRef:
                 name: ai-api-secrets
+          env:
+            - name: POSTGRES_USER
+              value: ai_api
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ai-api-secrets
+                  key: AI_API_POSTGRES_PASSWORD
+            - name: AI_DB_ROLE_PROFILE
+              value: api
+            - name: AI_DB_EXPECTED_ROLE
+              value: ai_api
           livenessProbe:
             httpGet:
               path: /healthz

@@ -79,6 +79,12 @@ honest degradation, not an error.
 
 ## Observability
 
+**`/metrics` returns 401 or 503**
+`/metrics` requires `Authorization: Bearer <AI_METRICS_AUTH_TOKEN>`. A missing or
+wrong token returns 401; an unconfigured token returns 503. Production/staging
+refuse to start when the token is shorter than 32 characters. `/healthz` and
+`/readyz` stay anonymous.
+
 **`/metrics` has no `ai_*` series yet**
 Metrics appear after the first matching call. Note that `/metrics`, `/healthz`
 and `/readyz` are intentionally excluded from HTTP metrics.

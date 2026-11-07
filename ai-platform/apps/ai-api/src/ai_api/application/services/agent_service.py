@@ -25,6 +25,7 @@ from ai_api.application.services.context import require_tenant
 from ai_api.application.services.event_service import EventPublisher
 from ai_api.application.services.governance_service import GovernanceService
 from ai_api.application.services.model_gateway import ModelGateway
+from ai_api.application.services.prompt_security import blocking_enabled, screen_input
 from ai_api.application.services.retrieval_service import RetrievalService
 from ai_api.config.settings import Settings
 from ai_api.domain.errors import (
@@ -120,9 +121,26 @@ class AgentService:
         agent = await self.get_agent(principal, agent_id)
         if not agent.get("enabled", True):
             raise ValidationError("agent is disabled", details={"agent_id": agent_id})
+        if payload.approvals:
+            raise ValidationError(
+                "client-supplied approvals are not accepted; use the governed "
+                "agent execution API",
+                details={"agent_id": agent_id},
+            )
 
-        version = await self.repository.get_active_agent_version(tenant_id, agent_id)
+        version = None
+        if agent.get("current_version_id"):
+            version = await self.repository.get_agent_version(
+                tenant_id, agent_id, int(agent["current_version_id"])
+            )
+        if version is None:
+            version = await self.repository.get_active_agent_version(tenant_id, agent_id)
         definition = dict((version or {}).get("definition") or {})
+        if definition.get("steps"):
+            raise FeatureUnavailableError(
+                "workflow agents must be executed through the governed execution API",
+                details={"agent_id": agent_id, "endpoint": "/agent-executions"},
+            )
         kind = str(definition.get("kind") or agent.get("kind") or KNOWLEDGE_ASSISTANT_KIND)
         version_number = int((version or {}).get("version") or 0)
         if definition and definition.get("read_only") is not True:
@@ -140,19 +158,16 @@ class AgentService:
             prompt_text=query,
             feature="agents_execute",
         )
-        guard = PromptGuard(block=policy.block_prompt_injection)
-        scan = guard.scan(query)
-        if guard.block and scan.suspicious:
-            await self._audit(
-                principal,
-                agent_id,
-                "denied",
-                {"reason": "prompt_injection", "findings": len(scan.findings)},
-            )
-            raise AuthorizationError(
-                "request rejected by content security policy",
-                details={"findings": len(scan.findings)},
-            )
+        guard = PromptGuard(block=blocking_enabled(policy, self.settings))
+        await screen_input(
+            self.audit,
+            principal,
+            guard=guard,
+            texts=[query],
+            feature="agents_execute",
+            model=model,
+            resource_type="agent",
+        )
 
         tools = ToolRegistry(
             tools=build_default_tools(self.retrieval, self.settings),
@@ -168,8 +183,10 @@ class AgentService:
             retrieval=self.retrieval,
             gateway=self.gateway,
             settings=self.settings,
-            approvals=frozenset(payload.approvals or ()),
+            approvals=frozenset(),
             max_tool_calls=self.settings.ai_agent_max_tool_calls,
+            block_prompt_injection=guard.block,
+            audit=self.audit,
         )
 
         logger.info("agent.execute.start", agent_id=agent_id, kind=kind)
@@ -221,7 +238,11 @@ class AgentService:
         latency_ms = int((time.perf_counter() - started) * 1000)
         output = {
             "answer": result.answer,
+            "answer_status": result.answer_status,
             "citations": result.citations,
+            "citations_required": result.citations_required,
+            "citation_status": result.citation_status,
+            "warnings": result.warnings,
             "insufficient_evidence": result.insufficient_evidence,
             "confidence": result.confidence,
             "trace": result.trace,
@@ -247,6 +268,9 @@ class AgentService:
             {
                 "insufficient_evidence": result.insufficient_evidence,
                 "citations": len(result.citations),
+                "answer_status": result.answer_status,
+                "citation_status": result.citation_status,
+                "warnings": len(result.warnings),
                 "confidence": result.confidence,
             },
         )
@@ -259,6 +283,10 @@ class AgentService:
             "citations": result.citations,
             "insufficient_evidence": result.insufficient_evidence,
             "confidence": result.confidence,
+            "answer_status": result.answer_status,
+            "warnings": result.warnings,
+            "citations_required": result.citations_required,
+            "citation_status": result.citation_status,
             "is_mock": result.is_mock,
             "provider": result.provider,
             "usage": result.usage,

@@ -26,8 +26,9 @@ class FeedbackService:
     async def create(self, principal: Principal, payload: Any) -> dict[str, Any]:
         tenant_id = require_tenant(principal)
         comment = payload.comment.strip() if payload.comment else None
-        if payload.rating is None and not comment:
-            raise ValidationError("provide a rating or a comment")
+        category = getattr(payload, "category", None)
+        if payload.rating is None and not comment and category is None:
+            raise ValidationError("provide a rating, category or comment")
         if payload.execution_id is not None:
             execution = await self.repository.get_execution(
                 tenant_id, payload.execution_id
@@ -44,6 +45,7 @@ class FeedbackService:
                 "actor_id": principal.actor_id,
                 "rating": payload.rating,
                 "comment": comment,
+                "category": category,
             },
         )
         await self.audit.record(

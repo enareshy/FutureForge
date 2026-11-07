@@ -1,0 +1,62 @@
+# In-cluster Prometheus configuration for the AI platform.
+#
+# This is the Kubernetes counterpart of `prometheus.yml`. Differences:
+#   * targets are the in-cluster Services (ai-api:8000, ai-*:9100), not the
+#     Compose host-gateway names;
+#   * the bearer token is read from the projected Secret `ai-metrics-token`;
+#   * alerts are forwarded to the in-cluster Alertmanager Service.
+#
+# It is generated into the `ai-prometheus-config` ConfigMap by
+# `scripts/k8s-monitoring-config.sh`. Do not also mount the Compose file.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+  external_labels:
+    platform: enterprise-ai-platform
+    cluster: production
+
+rule_files:
+  - /etc/prometheus/rules/backup-alerts.yml
+
+alerting:
+  alertmanagers:
+    - api_version: v2
+      static_configs:
+        - targets: ["alertmanager.observability.svc.cluster.local:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # The AI API serves /metrics on its HTTP port. It requires the bearer token
+  # from `AI_METRICS_AUTH_TOKEN`; the allow-metrics-scrape NetworkPolicy admits
+  # only this namespace.
+  - job_name: ai-api
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics/metrics-token
+    static_configs:
+      - targets: ["ai-api.enterprise-ai.svc.cluster.local:8000"]
+
+  # One stable target per worker. The values match the Services in
+  # infrastructure/kubernetes/base/worker-services.yaml.
+  - job_name: ai-workers
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics/metrics-token
+    static_configs:
+      - targets: ["ai-event-consumer.enterprise-ai.svc.cluster.local:9100"]
+        labels:
+          worker: event-consumer
+      - targets: ["ai-reconciler.enterprise-ai.svc.cluster.local:9100"]
+        labels:
+          worker: reconciler
+      - targets: ["ai-indexer.enterprise-ai.svc.cluster.local:9100"]
+        labels:
+          worker: indexer
+      - targets: ["ai-agent-worker.enterprise-ai.svc.cluster.local:9100"]
+        labels:
+          worker: agent

@@ -17,7 +17,7 @@ import {
   normalizeRetryPolicy,
   DELIVERY_TERMINAL,
 } from "./validation.js";
-import { publicAttempt, publicDelivery } from "./repository.js";
+import { publicAttempt, publicDelivery, eventUuid } from "./repository.js";
 import { invokeHandler, hasHandler } from "./handlers.js";
 import { getSubscriptionRow } from "./subscriptions.js";
 import { getSubscriptionRowAsync } from "./subscriptions.js";
@@ -41,6 +41,13 @@ function withTimeout(promise, seconds) {
       setTimeout(() => reject(error), limit * 1000).unref?.();
     }),
   ]);
+}
+
+// A delivery transition that lost its lease must not write the terminal state
+// or any side effects (idempotency, counts, dead-letter). Returning this result
+// lets a batch summary record it without claiming work the newer worker owns.
+function staleLeaseResult(delivery) {
+  return { status: "stale_lease", delivery_id: delivery.id };
 }
 
 // Atomically claims a batch of due deliveries. Priority is respected (critical
@@ -73,14 +80,23 @@ export function claimDeliveries(db, { limit = 25, worker = DEFAULT_WORKER, queue
   if (!candidate.length) return [];
   const ids = candidate.map((r) => r.id);
   const placeholders = ids.map(() => "?").join(",");
+  const leaseToken = eventUuid();
   run(
     db,
     `UPDATE event_deliveries
-       SET status = 'processing', locked_by = ?, locked_at = ?, visibility_expires_at = ?, updated_at = ?
+       SET status = 'processing', locked_by = ?, locked_at = ?, visibility_expires_at = ?, lease_token = ?, updated_at = ?
      WHERE id IN (${placeholders}) AND status IN ('pending','retry')`,
-    [worker, ts, addSecondsIso(300), ts, ...ids]
+    [worker, ts, addSecondsIso(300), leaseToken, ts, ...ids]
   );
-  return queryAll(db, `SELECT * FROM event_deliveries WHERE locked_by = ? AND status = 'processing' ORDER BY id`, [worker]);
+  // Return only the rows this exact call transitioned, identified by the unique
+  // lease token. Filtering by worker name (or even the candidate id set) would
+  // also return rows an overlapping sweep claimed, letting the same delivery be
+  // processed twice.
+  return queryAll(
+    db,
+    `SELECT * FROM event_deliveries WHERE id IN (${placeholders}) AND lease_token = ? AND status = 'processing' ORDER BY id`,
+    [...ids, leaseToken]
+  );
 }
 
 // Async twin of `claimDeliveries`.
@@ -111,14 +127,20 @@ export async function claimDeliveriesAsync(db, { limit = 25, worker = DEFAULT_WO
   if (!candidate.length) return [];
   const ids = candidate.map((r) => r.id);
   const placeholders = ids.map(() => "?").join(",");
+  const leaseToken = eventUuid();
   await runAsync(
     db,
     `UPDATE event_deliveries
-       SET status = 'processing', locked_by = ?, locked_at = ?, visibility_expires_at = ?, updated_at = ?
+       SET status = 'processing', locked_by = ?, locked_at = ?, visibility_expires_at = ?, lease_token = ?, updated_at = ?
      WHERE id IN (${placeholders}) AND status IN ('pending','retry')`,
-    [worker, ts, addSecondsIso(300), ts, ...ids]
+    [worker, ts, addSecondsIso(300), leaseToken, ts, ...ids]
   );
-  return await queryAllAsync(db, `SELECT * FROM event_deliveries WHERE locked_by = ? AND status = 'processing' ORDER BY id`, [worker]);
+  // Mirror the sync twin: only rows carrying this call's lease token.
+  return await queryAllAsync(
+    db,
+    `SELECT * FROM event_deliveries WHERE id IN (${placeholders}) AND lease_token = ? AND status = 'processing' ORDER BY id`,
+    [...ids, leaseToken]
+  );
 }
 
 // Reclaims deliveries whose worker lease expired (crashed consumer).
@@ -131,15 +153,20 @@ export function releaseStaleDeliveries(db, { limit = 200 } = {}) {
   );
   if (stale.length) {
     const placeholders = stale.map(() => "?").join(",");
-    run(
+    // Re-check the lease and status in the UPDATE so a delivery that completed
+    // (or was re-claimed) between the SELECT and this statement is not yanked
+    // back to `retry` by a stale reaper — that would redeliver completed work.
+    const result = run(
       db,
-      `UPDATE event_deliveries SET status = 'retry', locked_by = '', locked_at = NULL, visibility_expires_at = NULL,
+      `UPDATE event_deliveries SET status = 'retry', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, lease_token = '',
          last_error = 'worker lease expired', error_category = 'timeout', available_at = ?, updated_at = ?
-       WHERE id IN (${placeholders})`,
-      [ts, ts, ...stale.map((r) => r.id)]
+       WHERE id IN (${placeholders}) AND status = 'processing'
+         AND visibility_expires_at IS NOT NULL AND visibility_expires_at <= ?`,
+      [ts, ts, ...stale.map((r) => r.id), ts]
     );
+    return { reclaimed: Number(result.changes) || 0 };
   }
-  return { reclaimed: stale.length };
+  return { reclaimed: 0 };
 }
 
 // Async twin of `releaseStaleDeliveries`.
@@ -152,15 +179,17 @@ export async function releaseStaleDeliveriesAsync(db, { limit = 200 } = {}) {
   );
   if (stale.length) {
     const placeholders = stale.map(() => "?").join(",");
-    await runAsync(
+    const result = await runAsync(
       db,
-      `UPDATE event_deliveries SET status = 'retry', locked_by = '', locked_at = NULL, visibility_expires_at = NULL,
+      `UPDATE event_deliveries SET status = 'retry', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, lease_token = '',
          last_error = 'worker lease expired', error_category = 'timeout', available_at = ?, updated_at = ?
-       WHERE id IN (${placeholders})`,
-      [ts, ts, ...stale.map((r) => r.id)]
+       WHERE id IN (${placeholders}) AND status = 'processing'
+         AND visibility_expires_at IS NOT NULL AND visibility_expires_at <= ?`,
+      [ts, ts, ...stale.map((r) => r.id), ts]
     );
+    return { reclaimed: Number(result.changes) || 0 };
   }
-  return { reclaimed: stale.length };
+  return { reclaimed: 0 };
 }
 
 function recordAttempt(db, delivery, { status, step = "", durationMs = null, error = null, startedAt, finishedAt = null }) {
@@ -232,7 +261,12 @@ export async function processDelivery(db, delivery, { worker = DEFAULT_WORKER, i
   if (!ignoreIdempotency && delivery.idempotency_key) {
     const consumed = queryOne(db, "SELECT * FROM event_idempotency WHERE key = ?", [delivery.idempotency_key]);
     if (consumed && Number(consumed.delivery_id) !== Number(delivery.id)) {
-      run(db, "UPDATE event_deliveries SET status = 'duplicate', last_error = 'duplicate message', updated_at = ? WHERE id = ?", [nowIso(), delivery.id]);
+      const dedup = run(
+        db,
+        "UPDATE event_deliveries SET status = 'duplicate', last_error = 'duplicate message', updated_at = ? WHERE id = ? AND lease_token = ?",
+        [nowIso(), delivery.id, delivery.lease_token ?? ""]
+      );
+      if (!dedup.changes) return staleLeaseResult(delivery);
       recordAttempt(db, delivery, { status: "duplicate", step: "idempotency", startedAt, finishedAt: nowIso() });
       return { status: "duplicate", delivery_id: delivery.id };
     }
@@ -244,12 +278,13 @@ export async function processDelivery(db, delivery, { worker = DEFAULT_WORKER, i
   if (orderingRequired && !ignoreIdempotency) {
     const decision = orderingDecision(db, delivery, { timeoutSeconds: subscription?.ordering_timeout_seconds || 30 });
     if (!decision.ok) {
-      run(
+      const buffered = run(
         db,
         `UPDATE event_deliveries SET status = 'out_of_order', attempts = attempts, last_processing_step = 'ordering',
-           last_error = ?, error_category = 'ordering', available_at = ?, updated_at = ? WHERE id = ?`,
-        [decision.reason, decision.available_at, nowIso(), delivery.id]
+           last_error = ?, error_category = 'ordering', available_at = ?, updated_at = ? WHERE id = ? AND lease_token = ?`,
+        [decision.reason, decision.available_at, nowIso(), delivery.id, delivery.lease_token ?? ""]
       );
+      if (!buffered.changes) return staleLeaseResult(delivery);
       recordAttempt(db, delivery, { status: "out_of_order", step: "ordering", startedAt, finishedAt: nowIso() });
       return { status: "out_of_order", delivery_id: delivery.id, blocking: decision.blocking?.id ?? null };
     }
@@ -276,11 +311,12 @@ export async function processDelivery(db, delivery, { worker = DEFAULT_WORKER, i
 
   // Unbound deliveries (no handler) are recorded as ignored rather than failing.
   if (!delivery.handler) {
-    run(db, "UPDATE event_deliveries SET status = 'ignored', last_processing_step = 'unbound', delivered_at = ?, updated_at = ? WHERE id = ?", [
-      nowIso(),
-      nowIso(),
-      delivery.id,
-    ]);
+    const ignored = run(
+      db,
+      "UPDATE event_deliveries SET status = 'ignored', last_processing_step = 'unbound', delivered_at = ?, updated_at = ? WHERE id = ? AND lease_token = ?",
+      [nowIso(), nowIso(), delivery.id, delivery.lease_token ?? ""]
+    );
+    if (!ignored.changes) return staleLeaseResult(delivery);
     recordAttempt(db, delivery, { status: "ignored", step: "unbound", startedAt, finishedAt: nowIso() });
     return { status: "ignored", delivery_id: delivery.id };
   }
@@ -297,13 +333,20 @@ export async function processDelivery(db, delivery, { worker = DEFAULT_WORKER, i
     const durationMs = Date.now() - startMs;
     const finish = nowIso();
     const attempts = Number(delivery.attempts) + 1;
-    run(
+    // Fence on the lease token: if this worker's lease was reclaimed while the
+    // handler ran, a newer worker now owns the delivery. Return without writing
+    // the terminal state or any authoritative side effects.
+    const delivered = run(
       db,
       `UPDATE event_deliveries SET status = 'delivered', attempts = ?, delivered_at = ?, duration_ms = ?, locked_by = '', locked_at = NULL,
-         visibility_expires_at = NULL, last_error = '', error_code = '', error_category = '', last_processing_step = 'completed', updated_at = ?
-       WHERE id = ?`,
-      [attempts, finish, durationMs, finish, delivery.id]
+         visibility_expires_at = NULL, lease_token = '', last_error = '', error_code = '', error_category = '', last_processing_step = 'completed', updated_at = ?
+       WHERE id = ? AND lease_token = ?`,
+      [attempts, finish, durationMs, finish, delivery.id, delivery.lease_token ?? ""]
     );
+    if (!delivered.changes) {
+      log("warn", "event.delivery.stale_lease", { delivery_id: delivery.id, handler: delivery.handler, step: "completed" });
+      return staleLeaseResult(delivery);
+    }
     if (delivery.idempotency_key) {
       run(db, "INSERT INTO event_idempotency (key, delivery_id, event_id, consumer, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", [
         delivery.idempotency_key,
@@ -324,27 +367,36 @@ export async function processDelivery(db, delivery, { worker = DEFAULT_WORKER, i
     const durationMs = Date.now() - startMs;
     const finish = nowIso();
     const attempts = Number(delivery.attempts) + 1;
-    recordAttempt(db, delivery, { status: "failed", step: "handler", durationMs, error, startedAt, finishedAt: finish });
     const canRetry = shouldRetry(retryPolicy, attempts, info.category);
     if (canRetry) {
       const delay = computeBackoffSeconds(retryPolicy, attempts);
-      run(
+      const retried = run(
         db,
         `UPDATE event_deliveries SET status = 'retry', attempts = ?, next_retry_at = ?, available_at = ?, last_error = ?, error_code = ?,
-           error_category = ?, last_processing_step = 'handler', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, updated_at = ?
-         WHERE id = ?`,
-        [attempts, addSecondsIso(delay), addSecondsIso(delay), info.message, info.code, info.category, finish, delivery.id]
+           error_category = ?, last_processing_step = 'handler', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, lease_token = '', updated_at = ?
+         WHERE id = ? AND lease_token = ?`,
+        [attempts, addSecondsIso(delay), addSecondsIso(delay), info.message, info.code, info.category, finish, delivery.id, delivery.lease_token ?? ""]
       );
+      if (!retried.changes) {
+        log("warn", "event.delivery.stale_lease", { delivery_id: delivery.id, handler: delivery.handler, step: "retry" });
+        return staleLeaseResult(delivery);
+      }
+      recordAttempt(db, delivery, { status: "failed", step: "handler", durationMs, error, startedAt, finishedAt: finish });
       log("warn", "event.delivery.retry", { delivery_id: delivery.id, handler: delivery.handler, attempts, category: info.category, delay_seconds: delay });
       return { status: "retry", delivery_id: delivery.id, attempts, error: info };
     }
-    run(
+    const deadLettered = run(
       db,
       `UPDATE event_deliveries SET status = 'dead_letter', attempts = ?, last_error = ?, error_code = ?, error_category = ?,
-         last_processing_step = 'handler', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, updated_at = ?
-       WHERE id = ?`,
-      [attempts, info.message, info.code, info.category, finish, delivery.id]
+         last_processing_step = 'handler', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, lease_token = '', updated_at = ?
+       WHERE id = ? AND lease_token = ?`,
+      [attempts, info.message, info.code, info.category, finish, delivery.id, delivery.lease_token ?? ""]
     );
+    if (!deadLettered.changes) {
+      log("warn", "event.delivery.stale_lease", { delivery_id: delivery.id, handler: delivery.handler, step: "dead_letter" });
+      return staleLeaseResult(delivery);
+    }
+    recordAttempt(db, delivery, { status: "failed", step: "handler", durationMs, error, startedAt, finishedAt: finish });
     if (delivery.event_id) {
       run(db, "UPDATE event_records SET failed_count = failed_count + 1, updated_at = ? WHERE id = ?", [finish, delivery.event_id]);
     }
@@ -385,7 +437,12 @@ export async function processDeliveryAsync(db, delivery, { worker = DEFAULT_WORK
   if (!ignoreIdempotency && delivery.idempotency_key) {
     const consumed = await queryOneAsync(db, "SELECT * FROM event_idempotency WHERE key = ?", [delivery.idempotency_key]);
     if (consumed && Number(consumed.delivery_id) !== Number(delivery.id)) {
-      await runAsync(db, "UPDATE event_deliveries SET status = 'duplicate', last_error = 'duplicate message', updated_at = ? WHERE id = ?", [nowIso(), delivery.id]);
+      const dedup = await runAsync(
+        db,
+        "UPDATE event_deliveries SET status = 'duplicate', last_error = 'duplicate message', updated_at = ? WHERE id = ? AND lease_token = ?",
+        [nowIso(), delivery.id, delivery.lease_token ?? ""]
+      );
+      if (!dedup.changes) return staleLeaseResult(delivery);
       await recordAttemptAsync(db, delivery, { status: "duplicate", step: "idempotency", startedAt, finishedAt: nowIso() });
       return { status: "duplicate", delivery_id: delivery.id };
     }
@@ -397,12 +454,13 @@ export async function processDeliveryAsync(db, delivery, { worker = DEFAULT_WORK
   if (orderingRequired && !ignoreIdempotency) {
     const decision = orderingDecision(db, delivery, { timeoutSeconds: subscription?.ordering_timeout_seconds || 30 });
     if (!decision.ok) {
-      await runAsync(
+      const buffered = await runAsync(
         db,
         `UPDATE event_deliveries SET status = 'out_of_order', attempts = attempts, last_processing_step = 'ordering',
-           last_error = ?, error_category = 'ordering', available_at = ?, updated_at = ? WHERE id = ?`,
-        [decision.reason, decision.available_at, nowIso(), delivery.id]
+           last_error = ?, error_category = 'ordering', available_at = ?, updated_at = ? WHERE id = ? AND lease_token = ?`,
+        [decision.reason, decision.available_at, nowIso(), delivery.id, delivery.lease_token ?? ""]
       );
+      if (!buffered.changes) return staleLeaseResult(delivery);
       await recordAttemptAsync(db, delivery, { status: "out_of_order", step: "ordering", startedAt, finishedAt: nowIso() });
       return { status: "out_of_order", delivery_id: delivery.id, blocking: decision.blocking?.id ?? null };
     }
@@ -429,11 +487,12 @@ export async function processDeliveryAsync(db, delivery, { worker = DEFAULT_WORK
 
   // Unbound deliveries (no handler) are recorded as ignored rather than failing.
   if (!delivery.handler) {
-    await runAsync(db, "UPDATE event_deliveries SET status = 'ignored', last_processing_step = 'unbound', delivered_at = ?, updated_at = ? WHERE id = ?", [
-      nowIso(),
-      nowIso(),
-      delivery.id,
-    ]);
+    const ignored = await runAsync(
+      db,
+      "UPDATE event_deliveries SET status = 'ignored', last_processing_step = 'unbound', delivered_at = ?, updated_at = ? WHERE id = ? AND lease_token = ?",
+      [nowIso(), nowIso(), delivery.id, delivery.lease_token ?? ""]
+    );
+    if (!ignored.changes) return staleLeaseResult(delivery);
     await recordAttemptAsync(db, delivery, { status: "ignored", step: "unbound", startedAt, finishedAt: nowIso() });
     return { status: "ignored", delivery_id: delivery.id };
   }
@@ -450,13 +509,17 @@ export async function processDeliveryAsync(db, delivery, { worker = DEFAULT_WORK
     const durationMs = Date.now() - startMs;
     const finish = nowIso();
     const attempts = Number(delivery.attempts) + 1;
-    await runAsync(
+    const delivered = await runAsync(
       db,
       `UPDATE event_deliveries SET status = 'delivered', attempts = ?, delivered_at = ?, duration_ms = ?, locked_by = '', locked_at = NULL,
-         visibility_expires_at = NULL, last_error = '', error_code = '', error_category = '', last_processing_step = 'completed', updated_at = ?
-       WHERE id = ?`,
-      [attempts, finish, durationMs, finish, delivery.id]
+         visibility_expires_at = NULL, lease_token = '', last_error = '', error_code = '', error_category = '', last_processing_step = 'completed', updated_at = ?
+       WHERE id = ? AND lease_token = ?`,
+      [attempts, finish, durationMs, finish, delivery.id, delivery.lease_token ?? ""]
     );
+    if (!delivered.changes) {
+      log("warn", "event.delivery.stale_lease", { delivery_id: delivery.id, handler: delivery.handler, step: "completed" });
+      return staleLeaseResult(delivery);
+    }
     if (delivery.idempotency_key) {
       await runAsync(db, "INSERT INTO event_idempotency (key, delivery_id, event_id, consumer, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", [
         delivery.idempotency_key,
@@ -477,27 +540,36 @@ export async function processDeliveryAsync(db, delivery, { worker = DEFAULT_WORK
     const durationMs = Date.now() - startMs;
     const finish = nowIso();
     const attempts = Number(delivery.attempts) + 1;
-    await recordAttemptAsync(db, delivery, { status: "failed", step: "handler", durationMs, error, startedAt, finishedAt: finish });
     const canRetry = shouldRetry(retryPolicy, attempts, info.category);
     if (canRetry) {
       const delay = computeBackoffSeconds(retryPolicy, attempts);
-      await runAsync(
+      const retried = await runAsync(
         db,
         `UPDATE event_deliveries SET status = 'retry', attempts = ?, next_retry_at = ?, available_at = ?, last_error = ?, error_code = ?,
-           error_category = ?, last_processing_step = 'handler', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, updated_at = ?
-         WHERE id = ?`,
-        [attempts, addSecondsIso(delay), addSecondsIso(delay), info.message, info.code, info.category, finish, delivery.id]
+           error_category = ?, last_processing_step = 'handler', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, lease_token = '', updated_at = ?
+         WHERE id = ? AND lease_token = ?`,
+        [attempts, addSecondsIso(delay), addSecondsIso(delay), info.message, info.code, info.category, finish, delivery.id, delivery.lease_token ?? ""]
       );
+      if (!retried.changes) {
+        log("warn", "event.delivery.stale_lease", { delivery_id: delivery.id, handler: delivery.handler, step: "retry" });
+        return staleLeaseResult(delivery);
+      }
+      await recordAttemptAsync(db, delivery, { status: "failed", step: "handler", durationMs, error, startedAt, finishedAt: finish });
       log("warn", "event.delivery.retry", { delivery_id: delivery.id, handler: delivery.handler, attempts, category: info.category, delay_seconds: delay });
       return { status: "retry", delivery_id: delivery.id, attempts, error: info };
     }
-    await runAsync(
+    const deadLettered = await runAsync(
       db,
       `UPDATE event_deliveries SET status = 'dead_letter', attempts = ?, last_error = ?, error_code = ?, error_category = ?,
-         last_processing_step = 'handler', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, updated_at = ?
-       WHERE id = ?`,
-      [attempts, info.message, info.code, info.category, finish, delivery.id]
+         last_processing_step = 'handler', locked_by = '', locked_at = NULL, visibility_expires_at = NULL, lease_token = '', updated_at = ?
+       WHERE id = ? AND lease_token = ?`,
+      [attempts, info.message, info.code, info.category, finish, delivery.id, delivery.lease_token ?? ""]
     );
+    if (!deadLettered.changes) {
+      log("warn", "event.delivery.stale_lease", { delivery_id: delivery.id, handler: delivery.handler, step: "dead_letter" });
+      return staleLeaseResult(delivery);
+    }
+    await recordAttemptAsync(db, delivery, { status: "failed", step: "handler", durationMs, error, startedAt, finishedAt: finish });
     if (delivery.event_id) {
       await runAsync(db, "UPDATE event_records SET failed_count = failed_count + 1, updated_at = ? WHERE id = ?", [finish, delivery.event_id]);
     }
@@ -528,7 +600,7 @@ export async function processDeliveryAsync(db, delivery, { worker = DEFAULT_WORK
 // sequence; independent partitions are still drained in one pass.
 export async function processDeliveries(db, { limit = 25, worker = DEFAULT_WORKER, queueCode = null, consumerGroup = null, tenantId = null, ignoreIdempotency = false } = {}) {
   const deliveries = claimDeliveries(db, { limit, worker, queueCode, consumerGroup, tenantId });
-  const summary = { claimed: deliveries.length, delivered: 0, retried: 0, dead_lettered: 0, buffered: 0, ignored: 0, duplicated: 0, failures: [] };
+  const summary = { claimed: deliveries.length, delivered: 0, retried: 0, dead_lettered: 0, buffered: 0, ignored: 0, duplicated: 0, stale_lease: 0, failures: [] };
   for (const delivery of deliveries) {
     const result = await processDelivery(db, delivery, { worker, ignoreIdempotency });
     switch (result.status) {
@@ -551,6 +623,9 @@ export async function processDeliveries(db, { limit = 25, worker = DEFAULT_WORKE
       case "duplicate":
         summary.duplicated += 1;
         break;
+      case "stale_lease":
+        summary.stale_lease += 1;
+        break;
       default:
         break;
     }
@@ -561,7 +636,7 @@ export async function processDeliveries(db, { limit = 25, worker = DEFAULT_WORKE
 // Async twin of `processDeliveries`.
 export async function processDeliveriesAsync(db, { limit = 25, worker = DEFAULT_WORKER, queueCode = null, consumerGroup = null, tenantId = null, ignoreIdempotency = false } = {}) {
   const deliveries = await claimDeliveriesAsync(db, { limit, worker, queueCode, consumerGroup, tenantId });
-  const summary = { claimed: deliveries.length, delivered: 0, retried: 0, dead_lettered: 0, buffered: 0, ignored: 0, duplicated: 0, failures: [] };
+  const summary = { claimed: deliveries.length, delivered: 0, retried: 0, dead_lettered: 0, buffered: 0, ignored: 0, duplicated: 0, stale_lease: 0, failures: [] };
   for (const delivery of deliveries) {
     const result = await processDeliveryAsync(db, delivery, { worker, ignoreIdempotency });
     switch (result.status) {
@@ -584,6 +659,9 @@ export async function processDeliveriesAsync(db, { limit = 25, worker = DEFAULT_
       case "duplicate":
         summary.duplicated += 1;
         break;
+      case "stale_lease":
+        summary.stale_lease += 1;
+        break;
       default:
         break;
     }
@@ -601,7 +679,7 @@ export function retryDelivery(db, id, actor = null) {
   run(
     db,
     `UPDATE event_deliveries SET status = 'pending', attempts = 0, next_retry_at = NULL, available_at = ?, locked_by = '', locked_at = NULL,
-       visibility_expires_at = NULL, last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
+       visibility_expires_at = NULL, lease_token = '', last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
     [nowIso(), nowIso(), row.id]
   );
   auditEvent(db, { actor, action: "event.delivery.retry", resourceType: "event_delivery", resourceId: row.id, details: { event_ref: row.event_ref, handler: row.handler } });
@@ -618,7 +696,7 @@ export async function retryDeliveryAsync(db, id, actor = null) {
   await runAsync(
     db,
     `UPDATE event_deliveries SET status = 'pending', attempts = 0, next_retry_at = NULL, available_at = ?, locked_by = '', locked_at = NULL,
-       visibility_expires_at = NULL, last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
+       visibility_expires_at = NULL, lease_token = '', last_error = '', error_code = '', error_category = '', updated_at = ? WHERE id = ?`,
     [nowIso(), nowIso(), row.id]
   );
   await auditEventAsync(db, { actor, action: "event.delivery.retry", resourceType: "event_delivery", resourceId: row.id, details: { event_ref: row.event_ref, handler: row.handler } });

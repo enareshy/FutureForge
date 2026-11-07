@@ -17,6 +17,7 @@ import {
   bridgeTimeout,
   bootstrapTimeout,
 } from "./db-config.js";
+import { migrateLegacySessionTokens } from "./session-tokens.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_SQL =
@@ -27,7 +28,7 @@ const SCHEMA_SQL =
   readFileSync(join(__dirname, "schema-search-indexes.sql"), "utf8");
 
 // Bumped whenever the schema changes so `migrate()` can skip a full re-apply.
-const SCHEMA_VERSION = "postgres_007";
+const SCHEMA_VERSION = "postgres_010";
 
 const MIGRATIONS = [
   "001_iam_core", "002_authz", "003_orgs_sites", "004_org_hierarchy",
@@ -552,6 +553,9 @@ export function migrate(db) {
     },
     { timeout: bootstrapTimeout() }
   );
+  // Runs outside the schema transaction so a partial migration never drops the
+  // plaintext column before every row has a canonical hash.
+  migrateLegacySessionTokens(db);
 }
 
 // Serializes the wider startup bootstrap (migration + seed) across processes.

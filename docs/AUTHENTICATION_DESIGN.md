@@ -11,7 +11,7 @@ Central identity service for every future platform module. Identity, RBAC, and o
 | Password policy | `password_policy` singleton | Unchanged; also enforced on self-service reset |
 | Admin password reset | `POST /api/users/:id/reset-password` | Self-service reset added (`/api/authentication/password-reset/*`) |
 | Lockout | `failed_login_attempts` / `locked_until` | Unchanged; fires before MFA |
-| Sessions | opaque `sessions.token` | public id, ip, user-agent, provider, MFA flag, revoke |
+| Sessions | hashed `sessions.token_hash` | public id, ip, user-agent, provider, MFA flag, revoke |
 | Logout | `POST /api/auth/logout` | Plus session list / revoke-all |
 | Audit | `audit_logs` | Auth, MFA, SSO, rate-limit actions |
 | Console login | `POST /api/auth/login` | Same contract; MFA challenge when enrolled |
@@ -41,7 +41,7 @@ MFA required? (platform setting auth.mfa_required OR user has verified TOTP)
   |      POST /api/mfa/challenge/verify { mfaToken, code | recoveryCode }
   |      TOTP window +/- 1; recovery codes are single-use scrypt hashes
   v
-sessions.create (opaque token once; public_id for APIs)
+sessions.create (opaque token returned once; only its hash stored; public_id for APIs)
   | never log token, password, TOTP, recovery, client_secret
   v
 Bearer session -> requireAuth -> RBAC
@@ -88,9 +88,39 @@ Link table `auth_identities(user_id, provider_id, subject)` maps an external sub
 
 ## Sessions
 
-Opaque 32-byte hex token (Bearer). `public_id` is what list/revoke APIs expose. Fields: user, expiry (`identity.session_hours`), ip, user-agent, `provider_code`, `mfa_verified`, `last_seen_at`, `revoked_at`.
+Opaque 32-byte hex token (Bearer), returned once at login. Only
+`sha256:<hex>` is persisted in `sessions.token_hash`; the raw token is never
+stored, logged or returned by list/me APIs. Lookups hash the presented token and
+query the primary key by hash. `public_id` is what list/revoke APIs expose.
+Fields: user, expiry (`identity.session_hours`), ip, user-agent,
+`provider_code`, `mfa_verified`, `last_seen_at`, `revoked_at`.
 
-`GET /api/sessions` is the caller’s sessions. Admin list/revoke uses `iam.sessions`.
+Hashing is sufficient (no per-row salt or slow KDF) because the token is 256
+bits of CSPRNG output; there is no guessable input space.
+
+`GET /api/sessions` is the caller's sessions. Admin list/revoke uses
+`iam.sessions`.
+
+### Migration and rollout
+
+`SCHEMA_VERSION` `postgres_008` adds `token_hash`. At startup, `migrate()`
+backfills every legacy plaintext row, verifies that all hashes are canonical,
+drops the `token` column and restores the primary key on `token_hash`. Empty or
+NULL legacy tokens are discarded because they could never authenticate; expired
+and revoked rows are hashed so their state is preserved. The migration is
+idempotent and cannot hash a value twice (it only derives rows whose hash is
+NULL, then removes the source column).
+
+The migration is one-way and drops plaintext in the same startup pass, so a
+rolling deploy where old replicas keep serving is not safe: an old replica
+would still query `token` after the column is gone. Restart all instances for
+this release (the startup advisory lock serialises concurrent bootstraps).
+Active sessions survive because their plaintext tokens are hashed in place;
+users do not need to re-authenticate. Rollback to the previous release cannot
+recover raw tokens from hashes and requires a pre-migration backup plus user
+re-login, which reintroduces the plaintext risk; prefer a forward fix. Backups
+taken after the migration contain hashes only; purge or rotate pre-migration
+backups according to the retention policy.
 
 ## Rate limiting
 

@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+# Local Prometheus scrape token mounted into the compose stack.
+infrastructure/monitoring/prometheus/local-metrics-token
 
 # Python
 __pycache__/

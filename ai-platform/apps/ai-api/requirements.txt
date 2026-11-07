@@ -1,5 +1,9 @@
 # Runtime dependencies — pinned. Transitive versions resolved by pip.
 fastapi==0.143.0
+# Pinned explicitly: ai_api.main imports starlette.middleware.body_limit, which
+# only exists from 1.6.0. FastAPI only requires starlette>=0.46.0, so an
+# unpinned resolve can install an older Starlette and crash at import time.
+starlette==1.10.0
 uvicorn[standard]==0.54.0
 pydantic==2.14.1
 pydantic-settings==2.15.0

@@ -35,9 +35,12 @@ dependency is missing. DOCX and other formats are rejected until extraction
 and security tests exist for them.
 
 Documents can be supplied as inline `text`, or as `content_base64` with a
-`mime_type`/filename. Chunking is deterministic (character budget +
-overlap, preferring paragraph/sentence boundaries) and each chunk carries a
-checksum for change detection.
+`mime_type`/filename. Callers cannot supply an `object_key`: uploaded files
+are written by the server under a tenant-scoped key
+(`knowledge/{tenant}/{YYYY}/{MM}/{uuid}/{filename}`), and reads/deletes
+resolve that key from the authorized document record. Chunking is
+deterministic (character budget + overlap, preferring paragraph/sentence
+boundaries) and each chunk carries a checksum for change detection.
 
 ## Endpoints
 
@@ -60,10 +63,17 @@ server-side, before any content is used, against:
 - **classification ceiling** (per-tenant governance; default `internal`), and
 - **object ACL** (`deny_all`, `roles`, `permissions`, `users`).
 
-A wrong or partial ACL yields `0` results, never a leak. Superusers (platform
-wildcard or `AI_ADMIN_PERMISSIONS`) bypass ACLs but still respect tenant
-scoping. Retrieved content is treated as untrusted data and wrapped with
-prompt-injection guardrails (`security/prompt_safety.py`).
+The same policy applies to document metadata. `GET
+/api/v1/ai/knowledge/sources/{id}/documents` enforces tenant, source state,
+classification ceiling and both ACL layers; rows the caller cannot discover are
+removed before pagination and counts are computed. A wrong or partial ACL
+yields `0` results, never a leak. Superusers (platform wildcard or
+`AI_ADMIN_PERMISSIONS`) bypass ACLs but still respect tenant scoping and the
+classification ceiling. Retrieved content is treated as untrusted data,
+screened for prompt injection, and wrapped with guardrails
+(`security/prompt_safety.py`). When blocking is enabled (the default),
+suspicious chunks are excluded before prompting; if no usable evidence remains,
+the answer abstains instead of forwarding poisoned context.
 
 ## Evidence and citations
 
@@ -72,7 +82,10 @@ below `AI_RAG_MIN_SCORE` (or nothing is authorized), the service returns the
 fixed `INSUFFICIENT_EVIDENCE_TEXT` message with `insufficient_evidence: true`
 and no citations. Citations are constructed from the actual retrieved chunks
 (rank, source, document, chunk, score, snippet); the platform never invents
-citations.
+citations. Required `[n]` markers are validated against that citation list
+before the answer is reported as grounded: missing or invalid references set
+`answer_status: citation_warning` and `citation_status` to `missing`/`invalid`,
+with opaque `warnings`.
 
 > Note: with the default **mock** provider, embeddings are deterministic
 > hashing-trick vectors, so retrieval quality is illustrative, not semantic.
@@ -112,6 +125,14 @@ Retrieval-quality and safety are covered by tests:
 
 - `tests/test_ingestion.py` - extraction, normalization, deterministic chunking.
 - `tests/test_access_control.py` - ACL and classification-ceiling semantics.
+- `tests/test_document_listing_security.py` - listing ACL/classification
+  filtering, disabled/deleted sources, cross-tenant isolation, malformed labels,
+  authorized totals/pagination and unchanged download authorization.
 - `tests/test_retrieval.py` - ACL filtering, classification ceiling, RAG
   grounding with citations, and the insufficient-evidence path.
 - `tests/test_api_v1.py` - ingest/list/delete/search/RAG over HTTP.
+- `tests/test_object_key_security.py` - server-issued object keys, tenant
+  namespace enforcement, cross-tenant read/overwrite/delete rejection,
+  deduplication isolation and lifecycle cleanup.
+- `tests/test_object_storage_integration.py` - opt-in real S3-compatible
+  object-storage roundtrip (`AI_TEST_OBJECTSTORAGE=1`).

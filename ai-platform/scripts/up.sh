@@ -23,5 +23,21 @@ if [ -n "${PROFILES:-}" ]; then
   done
 fi
 
+# Prometheus reads the scrape token from a git-ignored file. Without it Docker
+# creates an empty directory in its place and every scrape fails with
+# "unable to read authorization credentials", so bootstrap it from .env.
+token_file="$ROOT/infrastructure/monitoring/prometheus/local-metrics-token"
+if [[ ",${PROFILES:-}," == *",observability,"* ]] && [ ! -f "$token_file" ]; then
+  token="$(sed -n 's/^AI_METRICS_AUTH_TOKEN=//p' .env | tail -n 1 | tr -d '\r')"
+  token="${token%\"}"; token="${token#\"}"
+  token="${token%\'}"; token="${token#\'}"
+  if [ -z "$token" ]; then
+    echo "observability profile needs AI_METRICS_AUTH_TOKEN in .env (empty value found)" >&2
+    exit 1
+  fi
+  printf '%s\n' "$token" > "$token_file"
+  chmod 600 "$token_file"
+fi
+
 docker compose --env-file .env "${args[@]}" up -d "$@"
 docker compose --env-file .env ps

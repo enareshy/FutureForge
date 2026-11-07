@@ -140,3 +140,29 @@ citation snapshots and re-validate authorization on every request. The console
 gains upload/reindex/download/delete controls, search-index state, a job
 monitor with retry, and an assistant tab. Do not treat any demo, mock or
 synthetic value as production data.
+
+Stage 5 adds an enterprise copilot on top of the assistant and retrieval
+stack: task planning (`ask`, `explain`, `summarize`, `compare`, `extract`),
+typed server-authorized context references, a bounded history plus derived
+conversation summary, streaming with cancellation, cite-or-abstain validation,
+evidence-backed comparison and typed extraction. Conversation messages record
+their task, prompt version and generation status. Context is always re-resolved
+from the caller's tenant/ACL/classification ceiling; the browser never supplies
+content or permissions. See `docs/STAGE5_COPILOT_DESIGN.md`.
+
+Stage 6 adds the enterprise agent platform on the same services: a versioned
+agent/tool registry with immutable published definitions, allowlist-bounded
+durable execution (`ai.executions` remains the single ledger), leased workers
+with checkpoints, cancellation and bounded retries, and AI-native exact-operation
+approvals. The only controlled mutation is a platform-owned draft artifact;
+enterprise business records are never changed. Copilot-initiated runs use the
+same authorization, policy, idempotency and audit path. The console adds an
+agent platform page for registry, tool, execution and approval administration.
+See `docs/STAGE6_AGENT_PLATFORM_DESIGN.md`.
+
+Stage 12 adds the customer demonstration and controlled pilot: a reproducible
+isolated database (`scripts/setup_demo_db.sh`), an idempotent synthetic seed
+(`scripts/seed_demo.py`), and a connected end-to-end scenario walkthrough
+(`scripts/demo_scenario.py`) that ties an engineering change to manufacturing
+quality intelligence, predictive risk, a governed agent run, and human approval.
+See `docs/DEMO_PILOT.md`.

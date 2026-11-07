@@ -31,6 +31,52 @@ x-logging: &default-logging
 
 x-restart: &restart unless-stopped
 
+# Dedicated reliability workers. They build the same image as the API and run a
+# module command instead of the web server. Start the backing services first:
+#   docker compose --profile workers up -d event-consumer reconciler indexer agent
+# The host PostgreSQL instance is reached through host.docker.internal.
+x-worker-common: &worker-common
+  build:
+    context: ./apps/ai-api
+  image: enterprise-ai-platform/ai-api:0.1.0
+  profiles: ["workers"]
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  environment:
+    AI_ENV: "${AI_ENV:-development}"
+    AI_API_LOG_LEVEL: "${AI_API_LOG_LEVEL:-info}"
+    AI_METRICS_AUTH_TOKEN: "${AI_METRICS_AUTH_TOKEN:-local-dev-metrics-token}"
+    AI_REPOSITORY: "postgres"
+    AI_DB_SCHEMA: "${AI_DB_SCHEMA:-ai}"
+    AI_RLS_VERIFY: "${AI_RLS_VERIFY:-true}"
+    POSTGRES_HOST: "${WORKER_POSTGRES_HOST:-host.docker.internal}"
+    POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+    POSTGRES_DB: "${POSTGRES_DB:-helix}"
+    POSTGRES_USER: "${WORKER_POSTGRES_USER:-ai_worker}"
+    POSTGRES_PASSWORD: "${WORKER_POSTGRES_PASSWORD:-}"
+    AI_DB_ROLE_PROFILE: "${WORKER_DB_ROLE_PROFILE:-worker}"
+    AI_DB_EXPECTED_ROLE: "${WORKER_DB_EXPECTED_ROLE:-ai_worker}"
+    REDIS_URL: "redis://${WORKER_REDIS_HOST:-host.docker.internal}:6379/0"
+    S3_ENDPOINT: "${S3_ENDPOINT:-http://host.docker.internal:8333}"
+    S3_ACCESS_KEY_ID: "${S3_ACCESS_KEY_ID:-}"
+    S3_SECRET_ACCESS_KEY: "${S3_SECRET_ACCESS_KEY:-}"
+    SEARCH_PROVIDER: "${SEARCH_PROVIDER:-postgres}"
+    OPENSEARCH_URL: "${OPENSEARCH_URL:-http://host.docker.internal:9200}"
+    EVENT_BUS_PROVIDER: "${EVENT_BUS_PROVIDER:-database}"
+    KAFKA_BOOTSTRAP_SERVERS: "${KAFKA_BOOTSTRAP_SERVERS:-host.docker.internal:9092}"
+    AI_EVENT_CONSUMER_GROUP: "${AI_EVENT_CONSUMER_GROUP:-ai-api-events}"
+    ENTERPRISE_API_BASE_URL: "http://${WORKER_ENTERPRISE_HOST:-host.docker.internal}:3001"
+    LLM_PROVIDER: "${LLM_PROVIDER:-mock}"
+    LLM_API_KEY: "${LLM_API_KEY:-}"
+    LLM_BASE_URL: "${LLM_BASE_URL:-}"
+    LLM_CHAT_MODEL: "${LLM_CHAT_MODEL:-}"
+    LLM_EMBEDDING_MODEL: "${LLM_EMBEDDING_MODEL:-}"
+    AI_RECONCILE_ENABLED: "true"
+    AI_RECONCILE_DRY_RUN: "false"
+    AI_RECONCILE_PURGE_ORPHANS: "false"
+  restart: *restart
+  logging: *default-logging
+
 services:
   # --- Cache / ephemeral state (never the authoritative store) ----------
   redis:
@@ -55,6 +101,46 @@ services:
       start_period: 5s
     mem_limit: 256m
     restart: *restart
+    logging: *default-logging
+
+  # --- Backup / restore (manual profile; schedule externally) -----------
+  # This is NOT a scheduler. Run it manually or from a host/systemd timer:
+  #   docker compose --profile backup run --rm backup backup
+  # Artifacts persist in the backup-data volume. Set
+  # BACKUP_ENCRYPTION_PASSPHRASE (or BACKUP_ENCRYPTION_PASSPHRASE_FILE) in the
+  # environment; production must also set BACKUP_REQUIRE_ENCRYPTION=true.
+  backup:
+    profiles: ["backup"]
+    build:
+      context: .
+      dockerfile: infrastructure/backup/Dockerfile
+    image: enterprise-ai-platform/ai-backup:0.1.0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      POSTGRES_HOST: "${BACKUP_POSTGRES_HOST:-host.docker.internal}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      POSTGRES_DB: "${POSTGRES_DB:-helix}"
+      POSTGRES_USER: "${BACKUP_POSTGRES_USER:-ai_backup}"
+      POSTGRES_PASSWORD: "${BACKUP_POSTGRES_PASSWORD:-}"
+      AI_DB_ROLE_PROFILE: "backup"
+      AI_DB_EXPECTED_ROLE: "${BACKUP_POSTGRES_USER:-ai_backup}"
+      AI_DB_SCHEMA: "${AI_DB_SCHEMA:-ai}"
+      BACKUP_DATABASE_SCOPE: "${BACKUP_DATABASE_SCOPE:-schema}"
+      S3_ENDPOINT: "${S3_ENDPOINT:-http://host.docker.internal:8333}"
+      S3_REGION: "${S3_REGION:-us-east-1}"
+      S3_BUCKET: "${S3_BUCKET:-ai-knowledge}"
+      S3_ACCESS_KEY_ID: "${S3_ACCESS_KEY_ID:-}"
+      S3_SECRET_ACCESS_KEY: "${S3_SECRET_ACCESS_KEY:-}"
+      S3_FORCE_PATH_STYLE: "true"
+      BACKUP_DIR: "/backup"
+      BACKUP_RETENTION_DAYS: "${BACKUP_RETENTION_DAYS:-14}"
+      BACKUP_RETENTION_MIN_COUNT: "${BACKUP_RETENTION_MIN_COUNT:-3}"
+      BACKUP_REQUIRE_ENCRYPTION: "${BACKUP_REQUIRE_ENCRYPTION:-false}"
+      BACKUP_ENCRYPTION_PASSPHRASE: "${BACKUP_ENCRYPTION_PASSPHRASE:-}"
+    volumes:
+      - backup-data:/backup
+    restart: "no"
     logging: *default-logging
 
   # --- S3-compatible object storage (SeaweedFS, Apache-2.0) -------------
@@ -201,6 +287,8 @@ services:
       - --storage.tsdb.retention.time=15d
     volumes:
       - ./infrastructure/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/monitoring/prometheus/backup-alerts.yml:/etc/prometheus/backup-alerts.yml:ro
+      - ./infrastructure/monitoring/prometheus/local-metrics-token:/etc/prometheus/metrics-token:ro
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
@@ -302,8 +390,66 @@ services:
     restart: *restart
     logging: *default-logging
 
+  # --- Reliability workers ---------------------------------------------
+  event-consumer:
+    <<: *worker-common
+    command:
+      ["python", "-m", "ai_api.workers.event_consumer", "--watch", "--metrics-port", "9100"]
+    ports:
+      - "127.0.0.1:${EVENT_CONSUMER_METRICS_PORT:-9101}:9100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/readyz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 60s
+
+  reconciler:
+    <<: *worker-common
+    command:
+      ["python", "-m", "ai_api.workers.reconciler", "--watch", "--metrics-port", "9100"]
+    ports:
+      - "127.0.0.1:${RECONCILER_METRICS_PORT:-9102}:9100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/readyz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 300s
+
+  indexer:
+    <<: *worker-common
+    command:
+      ["python", "-m", "ai_api.workers.indexer", "--watch", "--metrics-port", "9100"]
+    ports:
+      - "127.0.0.1:${INDEXER_METRICS_PORT:-9103}:9100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/readyz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 300s
+
+  agent:
+    <<: *worker-common
+    command:
+      ["python", "-m", "ai_api.workers.agent", "--watch", "--metrics-port", "9100"]
+    ports:
+      - "127.0.0.1:${AGENT_METRICS_PORT:-9104}:9100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/readyz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 300s
+
 volumes:
   redis-data:
+  backup-data:
   objectstore-data:
   opensearch-data:
   kafka-data:

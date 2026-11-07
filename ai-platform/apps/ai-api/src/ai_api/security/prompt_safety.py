@@ -62,7 +62,7 @@ def scan_untrusted_text(text: str) -> PromptScan:
 class PromptGuard:
     """Applies injection scanning and system-prompt hardening."""
 
-    block: bool = False
+    block: bool = True
     extra: str = field(default=GUARD_INSTRUCTIONS)
 
     def scan(self, *texts: str) -> PromptScan:

@@ -13,6 +13,7 @@ model quality is intentionally out of scope here; the mock provider is labelled
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -286,6 +287,11 @@ def test_prompt_injection_in_documents_is_treated_as_data() -> None:
 
     recorder = _RecordingLLMProvider()
     repository = InMemoryAiRepository()
+    asyncio.run(
+        repository.upsert_governance_policy(
+            TENANT, {"block_prompt_injection": False}
+        )
+    )
     with _client(
         repository, _principal("admin"), gateway=_recording_gateway(recorder)
     ) as client:

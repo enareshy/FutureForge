@@ -192,4 +192,55 @@ describe("event framework end-to-end delivery", () => {
     const finished = queryOne(db, "SELECT * FROM event_deliveries WHERE id = ?", [target.id]);
     assert.equal(finished.status, "delivered");
   });
+
+  test("a second claim on the same worker does not re-return earlier in-flight deliveries", async () => {
+    events.Handlers.registerHandler("test.claim.isolated", async () => ({ ok: true }), { module: "test" });
+    events.Registry.createEventType(db, { code: "WidgetClaimShared" }, actor);
+    events.Subscriptions.createSubscription(
+      db,
+      { code: "widget-claim-shared-sub", event_type_code: "WidgetClaimShared", subscriber: "test", handler: "test.claim.isolated" },
+      actor
+    );
+    events.Subscriptions.setSubscriptionStatus(db, "widget-claim-shared-sub", "active", actor);
+    events.publishEvent(db, { event_type_code: "WidgetClaimShared", payload: {} }, actor, { useOutbox: false });
+    events.publishEvent(db, { event_type_code: "WidgetClaimShared", payload: {} }, actor, { useOutbox: false });
+
+    const first = events.Consumer.claimDeliveries(db, { worker: "shared-worker", limit: 1 });
+    assert.equal(first.length, 1, "the first sweep claims exactly one delivery");
+    const firstId = first[0].id;
+    assert.equal(queryOne(db, "SELECT status FROM event_deliveries WHERE id = ?", [firstId]).status, "processing");
+
+    // A second overlapping sweep on the same worker name must not hand back the
+    // still-processing delivery from the first sweep, or it would be processed
+    // twice by two claims that believe they own it.
+    const second = events.Consumer.claimDeliveries(db, { worker: "shared-worker", limit: 5 });
+    assert.ok(!second.some((d) => d.id === firstId), "the in-flight delivery from the first sweep is not re-claimed");
+    assert.ok(second.length >= 1, "the second sweep still claims the remaining due delivery");
+  });
+
+  test("lease reclamation leaves an already-delivered delivery untouched", async () => {
+    events.Handlers.registerHandler("test.reclaim.race", async () => ({ ok: true }), { module: "test" });
+    events.Registry.createEventType(db, { code: "WidgetReclaimRace" }, actor);
+    events.Subscriptions.createSubscription(
+      db,
+      { code: "widget-reclaim-race-sub", event_type_code: "WidgetReclaimRace", subscriber: "test", handler: "test.reclaim.race" },
+      actor
+    );
+    events.Subscriptions.setSubscriptionStatus(db, "widget-reclaim-race-sub", "active", actor);
+    events.publishEvent(db, { event_type_code: "WidgetReclaimRace", payload: {} }, actor, { useOutbox: false });
+
+    const claimed = events.Consumer.claimDeliveries(db, { worker: "slow-worker", limit: 50 });
+    const target = claimed.find((d) => d.event_type_code === "WidgetReclaimRace");
+    assert.ok(target, "the slow worker claimed the delivery");
+    run(db, "UPDATE event_deliveries SET visibility_expires_at = ? WHERE id = ?", ["2000-01-01 00:00:00", target.id]);
+
+    // Invariant: reclamation must never drag a delivery that already finished
+    // back to `retry`. (The sync bridge cannot interleave a reaper SELECT with a
+    // concurrent completion, so this asserts the post-state invariant rather than
+    // reproducing the mid-statement race; the UPDATE is guarded for that case.)
+    run(db, "UPDATE event_deliveries SET status = 'delivered', locked_by = '', visibility_expires_at = NULL WHERE id = ?", [target.id]);
+    const reclaimed = events.Consumer.releaseStaleDeliveries(db);
+    assert.equal(reclaimed.reclaimed, 0, "a delivery that already finished is not reclaimed");
+    assert.equal(queryOne(db, "SELECT status FROM event_deliveries WHERE id = ?", [target.id]).status, "delivered");
+  });
 });

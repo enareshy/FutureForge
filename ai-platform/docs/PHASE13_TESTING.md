@@ -171,6 +171,10 @@ corrected (`match[4]`/`match[5]`/`match[6]`), and the regression is now covered 
 
 ## Results
 
-- Backend: **153 passed, 14 skipped** (skips are the opt-in integration/live tests).
-- Frontend: **26 passed** (4 files).
-- `ruff check src tests scripts`: clean.
+Revalidated 2026-10-26 (see `docs/audit/evidence/STAGES_1-6_EVIDENCE_2026-10-26.md`):
+
+- Backend (Python): **470 passed, 42 skipped** (skips are the opt-in
+  integration/live and per-role database tests).
+- Enterprise Node suite: **1,932 passed, 0 failed, 0 skipped** across 156 files.
+- Frontend: **30 passed** (6 files).
+- `ruff check apps/ai-api/src apps/ai-api/tests scripts`: clean.

@@ -1,0 +1,274 @@
+{
+  "artifact_size_bytes": 75688,
+  "checksum": "c3e675367a26ce7f69e27d9ca1eadfa1ed8a4b1ddc47023ffe00cb3e77ec6623",
+  "created_at": "2026-10-26T10:31:17.480608Z",
+  "database": {
+    "document_object_keys_count": 2,
+    "document_object_keys_sha256": "82898ab7e0ff37df5974752a58eba8e04652e49c4d4095f839f67c820a35dec2",
+    "extensions": [
+      "citext",
+      "pg_trgm",
+      "plpgsql",
+      "vector"
+    ],
+    "migration_count": 18,
+    "migrations": [
+      {
+        "checksum": "e0837e8e05187425d2bd363797082afb4fc3530665a1e3c4d753781c221f3b2f",
+        "version": "0001_init.sql"
+      },
+      {
+        "checksum": "ef93793aec5b767a1cae8fb75a3a25daffc6a6ecc6b4a1d80fb0f21a78ccdb9f",
+        "version": "0002_ai_config.sql"
+      },
+      {
+        "checksum": "c37ef35b8583c9206ede5c0648ec708aafc169874ee1751c1d708260c98a154a",
+        "version": "0003_ai_knowledge.sql"
+      },
+      {
+        "checksum": "d46d08c1113bc8cb7733a946733b886c0bc922d3990eea70ca14f1bf9daa69f6",
+        "version": "0004_ai_runtime.sql"
+      },
+      {
+        "checksum": "7f2faddbc7a3456eb1bcdced8e973e7dede14aba1593bb772015ce3739963943",
+        "version": "0005_ai_governance.sql"
+      },
+      {
+        "checksum": "7a5d918555a34cf7c789a617216dda10cf8d129ec13e3fc15e7ba1d855540e67",
+        "version": "0006_ai_events.sql"
+      },
+      {
+        "checksum": "83d9328c017c3d122c0eba5e1d8046c75ec04906902fe63a2b5438a0b2bc980b",
+        "version": "0007_ai_ml.sql"
+      },
+      {
+        "checksum": "867f5ff10ceaa6ac8ba9684965551fa70b492257a500465d6d5bc00be69ef74d",
+        "version": "0008_stage3_assistant.sql"
+      },
+      {
+        "checksum": "99442e356e6b77b9b2ecb06d470ade6ebfc601bc008d436a2eeec78110c64ead",
+        "version": "0009_stage4_search.sql"
+      },
+      {
+        "checksum": "7a7bc35e68ed524be619d8398f182230e8f28e4f793a0e58e391201a71a42edf",
+        "version": "0010_stage4_duplicates.sql"
+      },
+      {
+        "checksum": "09e789df480523691af609b921f8591ac7e19b55e60e3e09bda61a647556e381",
+        "version": "0011_stage5_copilot.sql"
+      },
+      {
+        "checksum": "1b30e533a10314ccc1eb06ded1708deb3e8fdb4c9ed057c707938dfa25e9b88b",
+        "version": "0012_stage6_agent_platform.sql"
+      },
+      {
+        "checksum": "a13f5f4f6799e70a587e3987b048ea085abef03541bea312135b78805a217a4c",
+        "version": "0013_stage6_execution_governance.sql"
+      },
+      {
+        "checksum": "e95cc00bd50853db715d67daad9d2cfaa400e68b6d728db0ab5ef78906c3750a",
+        "version": "0014_source_security_version.sql"
+      },
+      {
+        "checksum": "22499ba48cb6dffec88225c6e2b20ff50b10d3c5ff48bb1a2dde4ba3d65a4fa4",
+        "version": "0015_reliability_backoff.sql"
+      },
+      {
+        "checksum": "fd7781f1a1e542808df382450433272258e6d5a8052d34489cf996c13dcac505",
+        "version": "0016_citation_validation.sql"
+      },
+      {
+        "checksum": "297bddb10e2769e03157cc27cb94c12fd9f3ca193846d65f6ac032480c71c97d",
+        "version": "0017_backup_runs.sql"
+      },
+      {
+        "checksum": "f0f56e5c73ed7a50f9a947a7607420e2f372a53cf66ab256a55c0ba6ceecad91",
+        "version": "0018_tenant_row_level_security.sql"
+      }
+    ],
+    "server_version": "15.19 (Debian 15.19-0+deb12u1)",
+    "table_counts": {
+      "agent_approvals": 2,
+      "agent_artifacts": 2,
+      "agent_checkpoints": 5,
+      "agent_execution_steps": 3,
+      "agent_tool_invocations": 5,
+      "agent_tool_versions": 2,
+      "agent_tools": 2,
+      "agent_version_tools": 2,
+      "agent_versions": 3,
+      "agents": 4,
+      "assistant_context_refs": 4,
+      "assistant_conversation_summaries": 0,
+      "assistant_conversations": 11,
+      "assistant_message_sources": 30,
+      "assistant_messages": 24,
+      "audit_events": 330,
+      "backup_runs": 14,
+      "document_chunks": 3,
+      "documents": 3,
+      "embeddings": 3,
+      "evaluation_results": 80,
+      "evaluations": 2,
+      "event_dead_letters": 0,
+      "event_deliveries": 124,
+      "events": 124,
+      "executions": 41,
+      "experiment_runs": 4,
+      "experiments": 2,
+      "feedback": 10,
+      "governance_policies": 0,
+      "jobs": 29,
+      "knowledge_sources": 2,
+      "ml_model_versions": 2,
+      "ml_models": 2,
+      "model_versions": 0,
+      "models": 0,
+      "platform_settings": 0,
+      "prompt_templates": 0,
+      "prompt_versions": 0,
+      "providers": 0,
+      "schema_migrations": 18,
+      "search_duplicate_findings": 0,
+      "search_history": 4,
+      "search_saved": 1,
+      "usage_records": 70
+    },
+    "tables": [
+      "agent_approvals",
+      "agent_artifacts",
+      "agent_checkpoints",
+      "agent_execution_steps",
+      "agent_tool_invocations",
+      "agent_tool_versions",
+      "agent_tools",
+      "agent_version_tools",
+      "agent_versions",
+      "agents",
+      "assistant_context_refs",
+      "assistant_conversation_summaries",
+      "assistant_conversations",
+      "assistant_message_sources",
+      "assistant_messages",
+      "audit_events",
+      "backup_runs",
+      "document_chunks",
+      "documents",
+      "embeddings",
+      "evaluation_results",
+      "evaluations",
+      "event_dead_letters",
+      "event_deliveries",
+      "events",
+      "executions",
+      "experiment_runs",
+      "experiments",
+      "feedback",
+      "governance_policies",
+      "jobs",
+      "knowledge_sources",
+      "ml_model_versions",
+      "ml_models",
+      "model_versions",
+      "models",
+      "platform_settings",
+      "prompt_templates",
+      "prompt_versions",
+      "providers",
+      "schema_migrations",
+      "search_duplicate_findings",
+      "search_history",
+      "search_saved",
+      "usage_records"
+    ],
+    "tenant_counts": {
+      "agent_approvals": 1,
+      "agent_artifacts": 1,
+      "agent_checkpoints": 1,
+      "agent_execution_steps": 1,
+      "agent_tool_invocations": 1,
+      "agent_tool_versions": 1,
+      "agent_tools": 1,
+      "agent_version_tools": 1,
+      "agents": 1,
+      "assistant_context_refs": 1,
+      "assistant_conversation_summaries": 0,
+      "assistant_conversations": 1,
+      "assistant_message_sources": 1,
+      "assistant_messages": 1,
+      "audit_events": 1,
+      "document_chunks": 1,
+      "documents": 1,
+      "embeddings": 1,
+      "evaluations": 1,
+      "events": 1,
+      "executions": 1,
+      "experiment_runs": 1,
+      "experiments": 1,
+      "feedback": 1,
+      "governance_policies": 0,
+      "jobs": 1,
+      "knowledge_sources": 1,
+      "ml_models": 1,
+      "models": 0,
+      "platform_settings": 0,
+      "prompt_templates": 0,
+      "providers": 0,
+      "search_duplicate_findings": 0,
+      "search_history": 1,
+      "search_saved": 1,
+      "usage_records": 1
+    }
+  },
+  "encryption": {
+    "cipher": "AES256",
+    "enabled": true
+  },
+  "files": [
+    {
+      "encrypted": true,
+      "name": "objects.tar.gz.gpg",
+      "sha256": "33a799e774c50d6eb46cc32db5a25c9738d4d07865e03a2eb89915d5e8a05fb9",
+      "size": 1198
+    },
+    {
+      "encrypted": true,
+      "name": "postgres.dump.gpg",
+      "sha256": "768f4c6ba7b5f6b03a3bc2ab7814aad67d4f7f61978f19db9de3dbce9bfccdb5",
+      "size": 74490
+    }
+  ],
+  "finished_at": "2026-10-26T10:31:17.480608Z",
+  "kind": "backup",
+  "manifest_version": 1,
+  "object_storage": {
+    "bucket": "ai-knowledge",
+    "bytes": 1251,
+    "count": 8,
+    "enabled": true,
+    "index_sha256": "80e75892ac6c5a207073d7649cc0763f289a5b4d9516188c3995d9ed8b910792",
+    "prefix": ""
+  },
+  "restore": {
+    "migrations_are_applied": true,
+    "notes": [
+      "Restore into a clean database and pre-create the required extensions.",
+      "Do not run migrations automatically during a recovery."
+    ],
+    "required_extensions": [
+      "vector",
+      "citext",
+      "pg_trgm"
+    ]
+  },
+  "retention": {
+    "days": 365,
+    "min_count": 100
+  },
+  "run_id": "20261026T103104Z-3e8513",
+  "started_at": "2026-10-26T10:31:04.723308Z",
+  "status": "succeeded",
+  "tool": "ai-backup",
+  "tool_version": "1.0.0",
+  "verified_at": "2026-10-26T10:31:18.672134Z"
+}

@@ -20,11 +20,11 @@ export default defineConfig({
       // AI Platform (FastAPI) is a separate service. Route the more specific
       // prefix first so it wins over the catch-all "/api" rule below.
       "/api/v1/ai": {
-        target: "http://127.0.0.1:8000",
+        target: process.env.AI_API_PROXY_TARGET || "http://127.0.0.1:8000",
         changeOrigin: true,
       },
       "/api": {
-        target: "http://127.0.0.1:3001",
+        target: process.env.API_PROXY_TARGET || "http://127.0.0.1:3001",
         changeOrigin: true,
       },
     },

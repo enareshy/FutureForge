@@ -4,6 +4,7 @@ import { HttpError, pagination } from "../validation.js";
 import { writeAudit, writeAuditAsync } from "./audit.js";
 import * as orgs from "./orgs.js";
 import { checkPermission, checkPermissionAsync } from "./authorization.js";
+import { hashSessionToken } from "../session-tokens.js";
 
 export function isPlatformAdmin(db, userId) {
   if (!userId) return false;
@@ -315,11 +316,14 @@ export function selectTenant(db, sessionToken, tenantId, actor, ip) {
   if (!platform && Number(home) !== Number(tenant.id)) {
     throw new HttpError(403, "Cannot switch to another tenant");
   }
-  run(db, "UPDATE sessions SET tenant_id = ?, last_seen_at = ? WHERE token = ?", [
-    tenant.id,
-    nowIso(),
-    sessionToken,
-  ]);
+  const tokenHash = hashSessionToken(sessionToken);
+  if (tokenHash) {
+    run(db, "UPDATE sessions SET tenant_id = ?, last_seen_at = ? WHERE token_hash = ?", [
+      tenant.id,
+      nowIso(),
+      tokenHash,
+    ]);
+  }
   writeAudit(db, {
     actor,
     action: "tenant.context.switch",
@@ -472,11 +476,14 @@ export async function selectTenantAsync(db, sessionToken, tenantId, actor, ip) {
   if (!platform && Number(home) !== Number(tenant.id)) {
     throw new HttpError(403, "Cannot switch to another tenant");
   }
-  await runAsync(db, "UPDATE sessions SET tenant_id = ?, last_seen_at = ? WHERE token = ?", [
-    tenant.id,
-    nowIso(),
-    sessionToken,
-  ]);
+  const tokenHash = hashSessionToken(sessionToken);
+  if (tokenHash) {
+    await runAsync(db, "UPDATE sessions SET tenant_id = ?, last_seen_at = ? WHERE token_hash = ?", [
+      tenant.id,
+      nowIso(),
+      tokenHash,
+    ]);
+  }
   await writeAuditAsync(db, {
     actor,
     action: "tenant.context.switch",

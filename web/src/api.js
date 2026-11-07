@@ -3349,3 +3349,84 @@ export const verificationValidation = {
   requirementTrace: (ref, qs) =>
     api(`/api/v1/verification-validation/requirements/${encodeURIComponent(ref)}/trace${qs || ""}`),
 };
+
+export const manufacturingQuality = {
+  meta: () => api("/api/v1/manufacturing-quality/meta"),
+  health: () => api("/api/v1/manufacturing-quality/health"),
+  config: () => api("/api/v1/manufacturing-quality/config"),
+  setConfig: (key, value) =>
+    api(`/api/v1/manufacturing-quality/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/manufacturing-quality/foundation/ensure", { method: "POST" }),
+
+  issues: (qs) => api(`/api/v1/manufacturing-quality/issues${qs || ""}`),
+  issue: (ref) => api(`/api/v1/manufacturing-quality/issues/${encodeURIComponent(ref)}`),
+  createIssue: (body) => api("/api/v1/manufacturing-quality/issues", { method: "POST", body }),
+  updateIssue: (ref, body) =>
+    api(`/api/v1/manufacturing-quality/issues/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+
+  inspections: (qs) => api(`/api/v1/manufacturing-quality/inspections${qs || ""}`),
+  createInspection: (body) => api("/api/v1/manufacturing-quality/inspections", { method: "POST", body }),
+
+  correctiveActions: (qs) => api(`/api/v1/manufacturing-quality/corrective-actions${qs || ""}`),
+  createCorrectiveAction: (body) =>
+    api("/api/v1/manufacturing-quality/corrective-actions", { method: "POST", body }),
+  updateCorrectiveAction: (ref, body) =>
+    api(`/api/v1/manufacturing-quality/corrective-actions/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+
+  readiness: (qs) => api(`/api/v1/manufacturing-quality/readiness${qs || ""}`),
+  readinessEvaluation: (ref) => api(`/api/v1/manufacturing-quality/readiness/${encodeURIComponent(ref)}`),
+  evaluateReadiness: (body) =>
+    api("/api/v1/manufacturing-quality/readiness/evaluate", { method: "POST", body }),
+  markReadinessStale: (ref, reason) =>
+    api(`/api/v1/manufacturing-quality/readiness/${encodeURIComponent(ref)}/stale`, { method: "POST", body: { reason } }),
+
+  productSummary: (ref, qs) =>
+    api(`/api/v1/manufacturing-quality/summaries/product/${encodeURIComponent(ref)}${qs || ""}`),
+  recurrence: (qs) => api(`/api/v1/manufacturing-quality/summaries/recurrence${qs || ""}`),
+  gaps: (qs) => api(`/api/v1/manufacturing-quality/summaries/gaps${qs || ""}`),
+  metrics: () => api("/api/v1/manufacturing-quality/metrics"),
+};
+
+export const predictiveIntelligence = {
+  meta: () => api("/api/v1/predictive-intelligence/meta"),
+  health: () => api("/api/v1/predictive-intelligence/health"),
+  config: () => api("/api/v1/predictive-intelligence/config"),
+  setConfig: (key, value) =>
+    api(`/api/v1/predictive-intelligence/config/${encodeURIComponent(key)}`, { method: "PUT", body: { value } }),
+  ensureFoundation: () => api("/api/v1/predictive-intelligence/foundation/ensure", { method: "POST" }),
+
+  useCases: (qs) => api(`/api/v1/predictive-intelligence/use-cases${qs || ""}`),
+  useCase: (ref) => api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}`),
+  createUseCase: (body) => api("/api/v1/predictive-intelligence/use-cases", { method: "POST", body }),
+  updateUseCase: (ref, body) =>
+    api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}`, { method: "PUT", body }),
+  seedUseCases: () => api("/api/v1/predictive-intelligence/use-cases/seed", { method: "POST" }),
+  modelStatus: (ref) => api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}/model`),
+  evaluations: (qs) => api(`/api/v1/predictive-intelligence/evaluations${qs || ""}`),
+  useCaseEvaluations: (ref, qs) =>
+    api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}/evaluations${qs || ""}`),
+  createEvaluation: (ref, body) =>
+    api(`/api/v1/predictive-intelligence/use-cases/${encodeURIComponent(ref)}/evaluations`, { method: "POST", body }),
+
+  predictions: (qs) => api(`/api/v1/predictive-intelligence/predictions${qs || ""}`),
+  prediction: (ref) => api(`/api/v1/predictive-intelligence/predictions/${encodeURIComponent(ref)}`),
+  executePrediction: (body) =>
+    api("/api/v1/predictive-intelligence/predictions", { method: "POST", body }),
+  explanation: (ref) =>
+    api(`/api/v1/predictive-intelligence/predictions/${encodeURIComponent(ref)}/explanation`),
+  markPredictionStale: (ref, reason) =>
+    api(`/api/v1/predictive-intelligence/predictions/${encodeURIComponent(ref)}/stale`, { method: "POST", body: { reason } }),
+  recordFeedback: (ref, body) =>
+    api(`/api/v1/predictive-intelligence/predictions/${encodeURIComponent(ref)}/feedback`, { method: "POST", body }),
+
+  recommendations: (qs) => api(`/api/v1/predictive-intelligence/recommendations${qs || ""}`),
+  recommendation: (ref) => api(`/api/v1/predictive-intelligence/recommendations/${encodeURIComponent(ref)}`),
+  createRecommendation: (body) =>
+    api("/api/v1/predictive-intelligence/recommendations", { method: "POST", body }),
+  generateRecommendations: (body) =>
+    api("/api/v1/predictive-intelligence/recommendations/generate", { method: "POST", body }),
+  transitionRecommendation: (ref, body) =>
+    api(`/api/v1/predictive-intelligence/recommendations/${encodeURIComponent(ref)}/transition`, { method: "POST", body }),
+
+  monitoring: () => api("/api/v1/predictive-intelligence/monitoring"),
+};

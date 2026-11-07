@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/part-of: enterprise-ai-platform
+    # The AI platform NetworkPolicies admit metrics scrapes from the namespace
+    # that carries `kubernetes.io/metadata.name: observability`; Kubernetes adds
+    # that label automatically from the namespace name.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

@@ -1,0 +1,101 @@
+# Daily encrypted backup of the AI schema and object storage.
+#
+# The job runs as an unprivileged, token-less service account, writes to a
+# dedicated PVC, and fails closed when encryption is not configured. It uses
+# concurrencyPolicy=Forbid and an advisory lock inside the tool, so overlapping
+# runs cannot replace or confuse the last known good artifact.
+#
+# Kubernetes records CronJob success/failure; the tool also writes an
+# `ai.backup_runs` row, which feeds the API's backup metrics. There is no
+# Alertmanager destination in this repository; see docs/backup-recovery.md.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ai-backup
+  labels:
+    app.kubernetes.io/name: ai-backup
+    app.kubernetes.io/part-of: enterprise-ai-platform
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "15 2 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  suspend: false
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-backup
+        app.kubernetes.io/part-of: enterprise-ai-platform
+        app.kubernetes.io/component: backup
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 7200
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: ai-backup
+            app.kubernetes.io/part-of: enterprise-ai-platform
+            app.kubernetes.io/component: backup
+        spec:
+          serviceAccountName: ai-backup
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: backup
+              image: enterprise-ai-platform/ai-backup:0.1.0
+              imagePullPolicy: IfNotPresent
+              args: ["backup"]
+              envFrom:
+                - configMapRef:
+                    name: ai-api-config
+                - secretRef:
+                    name: ai-api-secrets
+              env:
+                - name: POSTGRES_USER
+                  value: ai_backup
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: ai-api-secrets
+                      key: AI_BACKUP_POSTGRES_PASSWORD
+                - name: AI_DB_ROLE_PROFILE
+                  value: backup
+                - name: AI_DB_EXPECTED_ROLE
+                  value: ai_backup
+                - name: BACKUP_DIR
+                  value: /backup
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: "1"
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: backup-data
+                  mountPath: /backup
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backup-data
+              persistentVolumeClaim:
+                claimName: ai-backup-data
+            - name: tmp
+              emptyDir: {}

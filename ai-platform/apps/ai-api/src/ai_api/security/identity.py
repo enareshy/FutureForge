@@ -42,6 +42,7 @@ class DevelopmentIdentityProvider:
             user_id="dev-user",
             username="dev-user",
             tenant_id=self._settings.ai_dev_tenant_id,
+            actor_id=self._settings.ai_dev_actor_id,
             permissions=permissions,
             auth_source="development",
         )

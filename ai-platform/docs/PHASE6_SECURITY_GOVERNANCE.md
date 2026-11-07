@@ -55,6 +55,7 @@ configurable (`AI_PERMISSION_MAP`, JSON) with these defaults:
 | knowledge read | `ai.knowledge:read` |
 | knowledge create | `ai.knowledge:create` |
 | knowledge index | `ai.knowledge:execute` |
+| knowledge security (source ACL / classification) | `ai.knowledge:update` |
 | usage | `ai.usage:read` |
 | audit | `ai.audit:read` |
 | agents read / execute | `ai.agents:read` / `ai.agents:execute` |
@@ -82,7 +83,7 @@ per-tenant policy:
 | `max_prompt_chars` | maximum request size (default 20000) |
 | `retention_days` | data-retention window (consumed by ingestion/retention jobs) |
 | `data_classification_ceiling` | maximum classification a tenant may process |
-| `block_prompt_injection` | reject requests containing injection signals |
+| `block_prompt_injection` | reject suspicious input and filter poisoned evidence (default `true`) |
 | `features` | per-tenant feature toggles (`{"chat": false}`) |
 
 `application/services/governance_service.py` evaluates policy before an operation
@@ -97,12 +98,21 @@ with `403`/`422`/`429` as appropriate.
   patterns.
 - `PromptGuard.harden_system_prompt` prepends a policy statement instructing the
   model to treat all embedded content as data and to ignore instructions inside
-  it. The guard is always applied to chat/summarize.
-- When a tenant sets `block_prompt_injection`, suspicious requests are rejected
-  and audited (`outcome = denied`).
+  it. The guard is applied to chat, summarize, Copilot, RAG and agent prompts.
+- Blocking is enabled by default in `GovernancePolicy` and in `PromptGuard`.
+  `AI_PROMPT_INJECTION_BLOCKING` is an operator floor and must remain true in
+  staging/production; tenant policy may opt out explicitly in the database.
+- Suspicious user input is rejected with `403`. Suspicious retrieved evidence is
+  excluded before prompting (`safe abstention`); if no evidence remains, RAG and
+  the knowledge assistant return `INSUFFICIENT_EVIDENCE_TEXT` instead of sending
+  poisoned context to the model.
+- Every detection is audited as `ai.security.prompt_injection` with the feature,
+  model, finding count, disposition (`blocked` / `detected` / `abstained`) and
+  the number of filtered chunks. Prompt and document content are never logged.
 
 Detection is heuristic and never the sole control: authorization is enforced
-server-side and the LLM is never trusted to enforce it.
+server-side, tool authorization is independent of injection detection, and the
+LLM is never trusted to enforce policy.
 
 ## Secret management
 
@@ -119,6 +129,7 @@ credentials are only read at the point of use.
 | `IDENTITY_CACHE_TTL_SECONDS` | `30` | Identity cache TTL |
 | `AI_PERMISSION_MAP` | `` | JSON override of the capability->permission map |
 | `AI_ADMIN_PERMISSIONS` | `iam.platform:read` | Permission(s) granting unrestricted AI access |
+| `AI_PROMPT_INJECTION_BLOCKING` | `true` | Operator floor for prompt-injection blocking; must be true in deployed environments |
 
 ## Verification (Phase 6)
 

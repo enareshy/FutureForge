@@ -92,6 +92,7 @@ describe("current-user API (async pipeline)", () => {
     assert.ok(res.body.access.roles.length >= 1);
     assert.ok(res.body.session.public_id);
     assert.equal(res.body.session.token, undefined);
+    assert.equal(res.body.session.token_hash, undefined);
     assert.equal(typeof res.body.mfa.enrolled, "boolean");
     assert.ok(res.body.deployment.edition);
     assert.ok(Array.isArray(res.body.tenants));
